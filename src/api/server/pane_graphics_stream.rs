@@ -642,6 +642,9 @@ mod tests {
             NEXT_LOCAL_STREAM_ID.fetch_add(1, Ordering::Relaxed)
         );
         let path = std::env::temp_dir().join(unique);
+        // A socket file left by an earlier run with the same pid and counter
+        // would make the bind fail with AddrInUse (fork issue 160).
+        let _ = std::fs::remove_file(&path);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
