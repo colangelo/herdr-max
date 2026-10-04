@@ -2707,6 +2707,20 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::AgentHintReported { .. } | AppEvent::AgentHintExpired { .. } => {
+                // A hint raises or releases Blocked ahead of the screen
+                // (fork issue 165): its effective transition is the one that
+                // must ring and toast, like any other state change. In the
+                // default arm below it changed state and told nobody, and the
+                // screen read that followed saw Blocked already and rang
+                // nothing either.
+                self.sync_foreground_client_state();
+                let updates = self.app.handle_internal_event_with_pane_updates(ev);
+                for update in &updates {
+                    self.forward_pane_state_update_notifications_to_clients(update);
+                }
+                true
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }
@@ -12032,6 +12046,184 @@ next_tab = ""
             }
             other => panic!("expected api sound, got {other:?}"),
         }
+    }
+
+    /// A Claude pane that is working, in a workspace behind the active one,
+    /// with a foreground client attached and the notification channel empty.
+    fn claude_pane_with_foreground_client() -> (
+        HeadlessServer,
+        crate::layout::PaneId,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let mut server = test_headless_server();
+        let background = crate::workspace::Workspace::test_new("background");
+        let pane_id = background.tabs[0].root_pane;
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        server.app.state.workspaces = vec![background, foreground];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+        server.app.state.toast_config.delay_seconds = 0;
+        server.app.state.sound.enabled = true;
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.handle_internal_event_with_forwarding(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: crate::detect::Agent::Claude,
+            observed_at: Instant::now(),
+            replaced_process: false,
+        });
+        server.handle_internal_event_with_forwarding(claude_state(
+            pane_id,
+            crate::detect::AgentState::Working,
+            false,
+        ));
+        while client_control_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_ok()
+        {}
+        (server, pane_id, client_control_rx)
+    }
+
+    fn claude_state(
+        pane_id: crate::layout::PaneId,
+        state: crate::detect::AgentState,
+        visible_blocker: bool,
+    ) -> AppEvent {
+        AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::Claude),
+            state,
+            visible_blocker,
+            visible_working: state == crate::detect::AgentState::Working,
+            background_work: false,
+            blocked_reason: visible_blocker.then_some(crate::detect::BlockedReason::Question),
+            process_exited: false,
+            observed_at: Instant::now(),
+        }
+    }
+
+    fn question_hint(
+        pane_id: crate::layout::PaneId,
+        kind: Option<crate::detect::BlockedReason>,
+        seq: u64,
+    ) -> AppEvent {
+        AppEvent::AgentHintReported {
+            pane_id,
+            report: crate::terminal::AgentHintReport {
+                source: "herdr:claude-mod".into(),
+                agent_label: "claude".into(),
+                kind,
+                id: Some("toolu_1".into()),
+                ttl: Duration::from_secs(15),
+                seq: Some(seq),
+            },
+        }
+    }
+
+    /// The sounds the foreground client was told to play since the last drain.
+    fn sounds_sent(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<String> {
+        let mut sounds = Vec::new();
+        while let Ok(message) = rx.recv_timeout(Duration::from_millis(30)) {
+            if let ServerMessage::Notify {
+                kind: protocol::NotifyKind::Sound,
+                message,
+                ..
+            } = read_server_message(message)
+            {
+                sounds.push(message);
+            }
+        }
+        sounds
+    }
+
+    #[test]
+    fn a_question_hint_raising_blocked_sends_exactly_one_request_sound() {
+        // The mod's hint reaches herdr before the screen shows the dialog
+        // (fork issue 165 part 2): the hint-driven transition is the one that
+        // must make the sound, and the screen read that follows must not make a
+        // second.
+        let (mut server, pane_id, rx) = claude_pane_with_foreground_client();
+        server.handle_internal_event_with_forwarding(question_hint(
+            pane_id,
+            Some(crate::detect::BlockedReason::Question),
+            10,
+        ));
+        assert_eq!(
+            sounds_sent(&rx),
+            vec!["agent attention"],
+            "the hint rings once"
+        );
+
+        server.handle_internal_event_with_forwarding(claude_state(
+            pane_id,
+            crate::detect::AgentState::Blocked,
+            true,
+        ));
+        assert!(sounds_sent(&rx).is_empty(), "the screen read adds nothing");
+    }
+
+    #[test]
+    fn a_question_the_screen_shows_first_sends_exactly_one_request_sound() {
+        let (mut server, pane_id, rx) = claude_pane_with_foreground_client();
+        server.handle_internal_event_with_forwarding(claude_state(
+            pane_id,
+            crate::detect::AgentState::Blocked,
+            true,
+        ));
+        assert_eq!(
+            sounds_sent(&rx),
+            vec!["agent attention"],
+            "the screen rings once"
+        );
+
+        server.handle_internal_event_with_forwarding(question_hint(
+            pane_id,
+            Some(crate::detect::BlockedReason::Question),
+            10,
+        ));
+        assert!(sounds_sent(&rx).is_empty(), "the hint adds nothing");
+    }
+
+    #[test]
+    fn a_hint_release_and_its_expiry_make_no_request_sound() {
+        let (mut server, pane_id, rx) = claude_pane_with_foreground_client();
+        server.handle_internal_event_with_forwarding(question_hint(
+            pane_id,
+            Some(crate::detect::BlockedReason::Question),
+            10,
+        ));
+        assert_eq!(sounds_sent(&rx).len(), 1);
+        // The question is answered: the hint clears, the pane is working again.
+        server.handle_internal_event_with_forwarding(question_hint(pane_id, None, 11));
+        assert!(sounds_sent(&rx).is_empty());
+        // A second question rings again.
+        server.handle_internal_event_with_forwarding(question_hint(
+            pane_id,
+            Some(crate::detect::BlockedReason::Question),
+            12,
+        ));
+        assert_eq!(sounds_sent(&rx), vec!["agent attention"]);
+        // Its expiry (the mod died) ends the block without a sound.
+        server.handle_internal_event_with_forwarding(AppEvent::AgentHintExpired {
+            pane_id,
+            now: Instant::now() + Duration::from_secs(60),
+        });
+        assert!(sounds_sent(&rx).is_empty());
     }
 
     #[test]
