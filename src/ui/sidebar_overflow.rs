@@ -24,7 +24,7 @@ pub(crate) const FOG_PERCENT: [u32; 2] = [12, 6];
 
 /// How much of the most urgent hidden state's colour the fog target takes, in
 /// percent. The rest is the text colour.
-const FOG_TINT_PERCENT: u32 = 40;
+const FOG_TINT_PERCENT: u32 = 70;
 
 /// A hidden state only gets named on an edge row, and only tints the fog, when
 /// it is waiting on the user: blocked, or finished and unseen.

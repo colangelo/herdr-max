@@ -23,7 +23,7 @@ pass over the entries' state, colour lookups only.
 **Fog colour.** `lift(base, target, percent)`: the sidebar background (the panel
 background when the sidebar's is the terminal's) toward the text colour, 12%
 then 6%. With a hidden blocked or finished entry the target is the text colour
-mixed 40% toward that state's colour. A colour the terminal names rather than
+mixed 70% toward that state's colour. A colour the terminal names rather than
 gives as RGB cannot be mixed, so it gets no fog.
 
 **Urgency.** Entries are ranked by `attention_priority`; only blocked and
