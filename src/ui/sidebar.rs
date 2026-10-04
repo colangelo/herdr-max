@@ -14,7 +14,7 @@ use super::sidebar_overflow::{
     self as overflow, EdgeItem, EdgeReserve, EdgeRow, OverflowPlan, VisibleItem,
 };
 use super::status::{agent_state_icon, state_icon, state_label, state_label_color};
-use super::text::{display_width, display_width_u16, truncate_end};
+use super::text::{display_width, display_width_u16, truncate_end, truncate_start};
 use crate::agent_priority::{attention_priority, display_priority};
 use crate::app::state::{AgentPanelSort, Palette, WorkspaceSort};
 use crate::app::{AppState, Mode};
@@ -1693,8 +1693,48 @@ fn resolved_token_spans(
             .sum::<usize>();
         content + separators
     };
+    // A kept token (`keep = true`) counts its full width when the row is
+    // fitted, so the other flexible tokens shrink, and drop, before it does.
+    let kept = resolved
+        .iter()
+        .zip(&flexible_widths)
+        .map(|(token, width)| *width > 0 && token.style.keeps_width())
+        .collect::<Vec<_>>();
+    let needed_width = |active: &[bool]| {
+        let kept_extra = active
+            .iter()
+            .enumerate()
+            .filter(|(index, active)| **active && kept[*index])
+            .map(|(index, _)| flexible_widths[index].saturating_sub(1))
+            .sum::<usize>();
+        minimum_width(active) + kept_extra
+    };
     let mut active = resolved.iter().map(|_| true).collect::<Vec<_>>();
-    if minimum_width(&active) > max_width {
+    if kept.iter().any(|kept| *kept) && needed_width(&active) > max_width {
+        for (index, width) in flexible_widths.iter().enumerate() {
+            if *width > 0 {
+                active[index] = false;
+            }
+        }
+        // Kept tokens first, last to first, at full width when that fits and
+        // at their minimum otherwise; then the rest, which must leave the
+        // kept tokens their full width.
+        for index in (0..resolved.len()).rev().filter(|index| kept[*index]) {
+            active[index] = true;
+            if minimum_width(&active) > max_width {
+                active[index] = false;
+            }
+        }
+        for index in (0..resolved.len()).rev() {
+            if flexible_widths[index] == 0 || kept[index] {
+                continue;
+            }
+            active[index] = true;
+            if needed_width(&active) > max_width {
+                active[index] = false;
+            }
+        }
+    } else if minimum_width(&active) > max_width {
         for (index, width) in flexible_widths.iter().enumerate() {
             if *width > 0 {
                 active[index] = false;
@@ -1732,6 +1772,19 @@ fn resolved_token_spans(
     let mut remaining = max_width
         .saturating_sub(separator_width + fixed_width)
         .saturating_sub(minimum);
+    // Kept tokens grow to their full width before anything else grows.
+    for (index, budget) in budgets.iter_mut().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        if kept[index] && *budget > 0 {
+            let grow = flexible_widths[index]
+                .saturating_sub(*budget)
+                .min(remaining);
+            *budget += grow;
+            remaining -= grow;
+        }
+    }
     while remaining > 0 {
         let mut grew = false;
         for (budget, width) in budgets.iter_mut().zip(&flexible_widths) {
@@ -1748,6 +1801,13 @@ fn resolved_token_spans(
             break;
         }
     }
+    let cut = |token: &ResolvedToken, text: &str, budget: usize| {
+        if token.style.truncates_start() {
+            truncate_start(text, budget)
+        } else {
+            truncate_end(text, budget)
+        }
+    };
     let mut spans = Vec::new();
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
@@ -1767,13 +1827,13 @@ fn resolved_token_spans(
             }
             ResolvedTokenKind::StateText(text) => {
                 spans.push(Span::styled(
-                    truncate_end(text, budgets[index]),
+                    cut(token, text, budgets[index]),
                     apply_token_style(state_text_style, token.style),
                 ));
             }
             ResolvedTokenKind::Workspace(text) => {
                 spans.push(Span::styled(
-                    truncate_end(text, budgets[index]),
+                    cut(token, text, budgets[index]),
                     apply_token_style(workspace_style, token.style),
                 ));
             }
@@ -1782,7 +1842,7 @@ fn resolved_token_spans(
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => {
                 spans.push(Span::styled(
-                    truncate_end(text, budgets[index]),
+                    cut(token, text, budgets[index]),
                     apply_token_style(secondary_style, token.style),
                 ));
             }
@@ -1808,7 +1868,7 @@ fn resolved_token_spans(
             }
             ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
                 spans.push(Span::styled(
-                    truncate_end(text, budgets[index]),
+                    cut(token, text, budgets[index]),
                     apply_token_style(custom_style, token.style),
                 ));
             }
@@ -3825,6 +3885,161 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
         assert!(separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
         assert_eq!(separator.bg, Some(app.palette.active_row_bg));
+    }
+
+    // --- keep and truncate (fork issue 164) ---
+
+    /// `[{branch}, git_status, {$asks, keep, truncate = start}]`, the target
+    /// row, with `main`, `↓5` and `asks L:20 A:0`.
+    fn asks_row(
+        keep: Option<bool>,
+        truncate: Option<crate::config::SidebarTokenTruncate>,
+    ) -> Vec<ResolvedToken> {
+        let style = crate::config::SidebarTokenStyle {
+            keep,
+            truncate,
+            ..Default::default()
+        };
+        vec![
+            ResolvedToken {
+                kind: ResolvedTokenKind::Branch("main".into()),
+                style: Default::default(),
+            },
+            ResolvedToken {
+                kind: ResolvedTokenKind::GitStatus {
+                    ahead: 0,
+                    behind: 5,
+                },
+                style: Default::default(),
+            },
+            ResolvedToken {
+                kind: ResolvedTokenKind::Custom("asks L:20 A:0".into()),
+                style,
+            },
+        ]
+    }
+
+    fn fit_text(tokens: &[ResolvedToken], width: usize) -> String {
+        let spans = resolved_token_spans(
+            tokens,
+            ("", Style::default()),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            Style::default(),
+            &crate::app::state::Palette::catppuccin(),
+            width,
+        );
+        let text: String = spans.iter().map(|span| span.content.to_string()).collect();
+        // The fixed `↓5` always draws, so only a row that can hold it is checked.
+        assert!(
+            width < 2 || display_width(&text) <= width,
+            "{text:?} wider than {width}"
+        );
+        text
+    }
+
+    #[test]
+    fn a_kept_token_with_truncate_start_is_eaten_last_and_from_the_left() {
+        use crate::config::SidebarTokenTruncate::Start;
+        let row = asks_row(Some(true), Some(Start));
+        for (width, expected) in [
+            // Everything fits.
+            (23, "main ↓5 · asks L:20 A:0"),
+            // The branch shrinks first; asks stays whole.
+            (22, "ma… ↓5 · asks L:20 A:0"),
+            (20, "… ↓5 · asks L:20 A:0"),
+            // The branch is dropped before asks loses a cell.
+            (19, "↓5 · asks L:20 A:0"),
+            // Then asks is cut from the start, the end stays.
+            (14, "↓5 · …L:20 A:0"),
+            (9, "↓5 · …A:0"),
+            (8, "↓5 · …:0"),
+            (6, "↓5 · …"),
+            // No room for asks at all: the branch, which is not kept, is what
+            // is left beside the fixed `↓5`.
+            (5, "m… ↓5"),
+        ] {
+            assert_eq!(fit_text(&row, width), expected, "width {width}");
+        }
+    }
+
+    #[test]
+    fn keep_alone_keeps_the_token_whole_and_truncate_alone_changes_only_the_cut() {
+        // keep without truncate: asks is whole, cut from the end when it must.
+        let kept = asks_row(Some(true), None);
+        assert_eq!(fit_text(&kept, 19), "↓5 · asks L:20 A:0");
+        assert_eq!(fit_text(&kept, 9), "↓5 · ask…");
+        // truncate = start without keep: the branch and asks share the width
+        // as before, only asks is cut from the other end.
+        let start = asks_row(None, Some(crate::config::SidebarTokenTruncate::Start));
+        let plain = asks_row(None, None);
+        for width in [23, 22, 19, 14, 10, 6] {
+            assert_eq!(
+                display_width(&fit_text(&start, width)),
+                display_width(&fit_text(&plain, width)),
+                "same widths at {width}"
+            );
+        }
+        let narrow = fit_text(&start, 14);
+        assert!(narrow.ends_with("A:0"), "{narrow:?}");
+    }
+
+    #[test]
+    fn a_row_with_no_keep_or_truncate_fits_exactly_as_before() {
+        use crate::config::SidebarTokenTruncate::End;
+        let plain = asks_row(None, None);
+        let explicit = asks_row(Some(false), Some(End));
+        for width in 0..=26 {
+            assert_eq!(
+                fit_text(&plain, width),
+                fit_text(&explicit, width),
+                "width {width}"
+            );
+        }
+        // The round-robin share and the drop order of the old fit.
+        assert_eq!(fit_text(&plain, 23), "main ↓5 · asks L:20 A:0");
+        assert_eq!(fit_text(&plain, 16), "main ↓5 · asks …");
+        assert_eq!(fit_text(&plain, 12), "ma… ↓5 · as…");
+        assert_eq!(fit_text(&plain, 9), "m… ↓5 · …");
+    }
+
+    #[test]
+    fn keep_and_truncate_render_in_the_sidebar_row() {
+        let config: crate::config::Config = toml::from_str(
+            r##"
+[ui.sidebar.spaces]
+rows = [["workspace"], [{ token = "$asks", keep = true, truncate = "start", italic = true }]]
+"##,
+        )
+        .unwrap();
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_spaces = config.ui.sidebar.spaces;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        app.workspaces[0].metadata_tokens.patch(
+            std::collections::HashMap::from([("asks".into(), Some("asks L:20 A:0".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+
+        // 12 cells wide: the metadata cell is cut from the start.
+        let area = Rect::new(0, 0, 12, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let row = app.view.workspace_card_areas[0].rect.y + 1;
+        let mut terminal = Terminal::new(TestBackend::new(12, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let line: String = (0..11)
+            .map(|x| buffer[(x, row)].symbol().to_string())
+            .collect();
+        assert!(
+            line.contains("…") && line.trim_end().ends_with("A:0"),
+            "{line:?}"
+        );
     }
 
     #[test]

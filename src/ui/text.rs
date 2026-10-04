@@ -29,6 +29,23 @@ pub(crate) fn truncate_end(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+/// Like [`truncate_end`], but cuts the beginning: `…text`, so the end of the
+/// text stays visible.
+pub(crate) fn truncate_start(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let suffix = take_suffix_width(text, max_width.saturating_sub(1));
+    format!("…{suffix}")
+}
+
 pub(crate) fn middle_elide(text: &str, max_width: usize) -> String {
     if display_width(text) <= max_width {
         return text.to_string();
@@ -109,6 +126,19 @@ mod tests {
 
         assert_eq!(text, "提交 herdr 的反…");
         assert!(display_width(&text) <= 16);
+    }
+
+    #[test]
+    fn truncate_start_keeps_the_end_and_uses_display_width() {
+        assert_eq!(truncate_start("asks L:20 A:0", 13), "asks L:20 A:0");
+        assert_eq!(truncate_start("asks L:20 A:0", 9), "…L:20 A:0");
+        assert_eq!(truncate_start("asks L:20 A:0", 4), "…A:0");
+        assert_eq!(truncate_start("asks L:20 A:0", 1), "…");
+        assert_eq!(truncate_start("asks L:20 A:0", 0), "");
+        // Measured in cells, not characters.
+        let text = truncate_start("提交 herdr 的反馈", 8);
+        assert_eq!(text, "… 的反馈");
+        assert!(display_width(&text) <= 8);
     }
 
     #[test]

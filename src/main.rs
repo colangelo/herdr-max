@@ -427,6 +427,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.
 # A token occurrence may be styled with { token = "workspace", fg = "#89b4fa", bold = true, dim = false, italic = true }.
+# keep = true gives a token its full width before the row's other tokens shrink or drop;
+# truncate = "start" cuts a long token from its beginning ("…text") instead of its end.
 # Omitted style fields preserve the contextual default.
 # [ui.sidebar.agents]
 # Blank rows between agent entries. Set to 1 to restore the previous spacing.
@@ -438,7 +440,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Expanded space rows. Built-ins are state_icon, state_text, workspace, branch, and git_status.
 # Custom values reported through workspace metadata use a $name token, for example $jj_status.
-# Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold, dim and italic booleans.
+# Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold, dim and italic booleans, keep, and truncate = "start" or "end".
 # [ui.sidebar.spaces]
 # Blank rows between space entries. Set to 1 to restore the previous spacing.
 # row_gap = 0

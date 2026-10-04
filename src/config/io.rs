@@ -1474,6 +1474,35 @@ rows = [
     }
 
     #[test]
+    fn an_unrecognized_truncate_value_is_forgiven_on_startup_and_reload() {
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace"],
+  [{ token = "$asks", keep = true, truncate = "middle" }],
+]
+"##;
+        let startup = startup_load(content, "truncate-unrecognized");
+        let reload = load_live_config_from_str(content).unwrap();
+        assert_eq!(
+            startup.diagnostics,
+            vec![
+                "ui.sidebar.spaces.rows[1][0] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\""
+            ]
+        );
+        // The reload path reports it through the app (`sidebar_style_diagnostics`
+        // in `apply_live_config`); here the config itself carries the value.
+        assert!(!startup.config.ui.mouse_capture && !reload.config.ui.mouse_capture);
+        for loaded in [&startup, &reload] {
+            let (_, style) = loaded.config.ui.sidebar.spaces.rows[1][0].parts();
+            assert_eq!(style.keep, Some(true));
+        }
+    }
+
+    #[test]
     fn an_unknown_tab_bar_right_key_is_forgiven_with_one_diagnostic() {
         let content = r##"
 [ui]

@@ -1715,6 +1715,7 @@ impl App {
                 diagnostics.extend(crate::config::tab_bar_right_diagnostics(
                     &config.ui.tab_bar_right,
                 ));
+                diagnostics.extend(crate::config::sidebar_style_diagnostics(&config.ui.sidebar));
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));

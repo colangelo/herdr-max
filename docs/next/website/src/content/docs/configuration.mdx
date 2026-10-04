@@ -444,11 +444,11 @@ A token entry can also be an inline style table:
 [ui.sidebar.agents]
 rows = [
   ["state_icon", { token = "workspace", bold = false }, "tab"],
-  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false, italic = true }],
+  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false, italic = true, keep = true, truncate = "start" }],
 ]
 ```
 
-`fg` accepts strict `#RGB` or `#RRGGBB`. `bold`, `dim`, and `italic` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
+`fg` accepts strict `#RGB` or `#RRGGBB`. `bold`, `dim`, and `italic` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds. Two options shape the row fit rather than the look. `keep = true` gives the token its full width first: when the row is too narrow the other flexible tokens shrink, and are dropped, before it does, and it is dropped last. `truncate = "start"` cuts a token that must shrink from its beginning, with an ellipsis on the left (`…L:20 A:0`), so the end stays visible; the default `"end"` keeps the beginning. For example `[{ token = "branch", dim = false }, "git_status", { token = "$asks", keep = true, truncate = "start" }]` eats the branch first, then the front of `$asks`. With neither option the row fits as before. An unrecognized `truncate` value is reported and treated as `"end"`.
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
 
