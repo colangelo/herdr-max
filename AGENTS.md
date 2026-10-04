@@ -147,6 +147,11 @@ the native helper tools it builds on the host, which then cannot find
 libSystem. Set `HERDR_WINDOWS_LINT=1` to run it anyway
 (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/83).
 
+Fork: the `justfile` exports `ZIG` as the env `ZIG` if set, else
+`/opt/homebrew/opt/zig@0.16/bin/zig` when it exists (the keg-only `brew install
+zig@0.16`), else `zig`, because the vendored libghostty-vt needs zig 0.16 and the
+global zig can be newer.
+
 Unit tests live next to the code (`#[cfg(test)] mod tests`). New `AppState` or `Workspace` behavior should be testable with `AppState::test_new()` and `Workspace::test_new()` without PTYs.
 
 For broad refactors or release-risk regressions, classify the risk before editing. Treat changes as refactor-risk when they touch two or more core surfaces, persisted state, protocol/API IDs, workspace/tab/pane identity, restore/handoff, agent detection authority, or UI/input state projection. Before moving code, identify the protected behavior and add or name characterization tests. Identity/state refactors should use the test-only invariants `AppState::assert_invariants_for_test()` or `Workspace::assert_invariants_for_test()` with adversarial state from `AppState::test_with_adversarial_identity_state()` or `Workspace::test_adversarial_identity_state()`. Run a roundtable for broad refactors and release-risk regressions, not for routine local fixes.

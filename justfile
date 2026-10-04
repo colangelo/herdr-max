@@ -1,5 +1,10 @@
 # herdr task runner
 
+# The vendored libghostty-vt needs zig 0.16. Use ZIG when set, else the
+# keg-only zig@0.16 when it is installed (the global zig can be newer and then
+# fails the build), else whatever `zig` is on PATH.
+export ZIG := env_var_or_default("ZIG", if path_exists("/opt/homebrew/opt/zig@0.16/bin/zig") == "true" { "/opt/homebrew/opt/zig@0.16/bin/zig" } else { "zig" })
+
 # List available recipes (default)
 default:
     @just --list
