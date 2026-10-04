@@ -336,7 +336,7 @@ sidebar_overflow = "both"   # "both" (default), "rows", "fog", or "off"
 ```
 
 - `rows` puts a dim summary row at each edge that has rows hidden past it: `↑ 2 pinned · 3 more` at the top, with an arrow in the colour of each hidden pin, and `↓ 5 more · ● 1 blocked` at the bottom, with the dot in the colour of the most urgent hidden state (a blocked or finished agent). Click the row to scroll a page toward it. The row takes one row of the list only while rows are hidden on that side, so a list that fits has none.
-- `fog` lifts the background of the two rows next to an edge with hidden rows, the nearest by about 9% and the next by about 4%, from the panel background toward the text colour. The text colour does not change, so contrast drops without dimming the text. When a hidden row is blocked or finished, the lift takes a faint tint of that state. The focused or selected row is never fogged.
+- `fog` lifts the background of the two rows next to an edge with hidden rows, the nearest by about 17% and the next by about 7%, from the sidebar background (the terminal's own background when the sidebar has none of its own) toward the text colour. The text colour does not change, so contrast drops without dimming the text. When a hidden row is blocked or finished, the lift takes a faint tint of that state. The focused or selected row is never fogged.
 - `both` does both and `off` neither. Both lists follow the one setting, and `herdr server reload-config` applies it live.
 
 Configure an ordered tmux-style status area at the right edge of the tab row:

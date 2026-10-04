@@ -1163,15 +1163,26 @@ pub(crate) fn agent_edge_rows(app: &AppState) -> Vec<EdgeRow> {
     agent_overflow_plan(app, &agent_panel_entries(app), detail_area).rows
 }
 
+/// The colour the fog lifts from: what the sidebar really shows. The sidebar's
+/// own background when it is RGB; else the host terminal's background, when
+/// herdr already learned it (the OSC 11 reply kept in `host_terminal_theme`);
+/// else the palette's panel background. Read from state, never queried here.
+fn fog_base(app: &AppState) -> Color {
+    let p = &app.palette;
+    if matches!(p.sidebar_bg, Color::Rgb(..)) {
+        return p.sidebar_bg;
+    }
+    match app.host_terminal_theme.background {
+        Some(bg) => Color::Rgb(bg.r, bg.g, bg.b),
+        None => p.panel_bg,
+    }
+}
+
 /// Paints the plan: the fog first, so row content keeps its own colours, then
 /// the edge rows over the space the list reserved for them.
 fn render_overflow(app: &AppState, frame: &mut Frame, plan: &OverflowPlan) {
     let p = &app.palette;
-    let base = if matches!(p.sidebar_bg, Color::Rgb(..)) {
-        p.sidebar_bg
-    } else {
-        p.panel_bg
-    };
+    let base = fog_base(app);
     {
         let buf = frame.buffer_mut();
         for band in &plan.fog {
@@ -4040,6 +4051,25 @@ rows = [["workspace"], [{ token = "$asks", keep = true, truncate = "start", ital
             line.contains("…") && line.trim_end().ends_with("A:0"),
             "{line:?}"
         );
+    }
+
+    #[test]
+    fn fog_base_is_the_sidebar_then_the_host_terminal_then_the_panel_background() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.palette.panel_bg = Color::Rgb(24, 24, 37);
+        app.palette.sidebar_bg = Color::Reset;
+        // Unknown host background: the palette's panel background.
+        assert_eq!(fog_base(&app), Color::Rgb(24, 24, 37));
+        // Known host background: what the sidebar really shows.
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 10,
+            g: 10,
+            b: 10,
+        });
+        assert_eq!(fog_base(&app), Color::Rgb(10, 10, 10));
+        // An RGB sidebar background wins over both.
+        app.palette.sidebar_bg = Color::Rgb(1, 2, 3);
+        assert_eq!(fog_base(&app), Color::Rgb(1, 2, 3));
     }
 
     #[test]

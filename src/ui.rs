@@ -1082,25 +1082,25 @@ mod tests {
         assert_eq!(cards[0].rect.y, spaces_body(&app).y);
         assert_eq!(
             bg(cards[0].rect),
-            Some(ratatui::style::Color::Rgb(28, 28, 28))
+            Some(ratatui::style::Color::Rgb(44, 44, 44))
         );
         assert_eq!(
             bg(cards[1].rect),
-            Some(ratatui::style::Color::Rgb(18, 18, 18))
+            Some(ratatui::style::Color::Rgb(24, 24, 24))
         );
         let n = cards.len();
         assert_eq!(
             bg(cards[n - 1].rect),
-            Some(ratatui::style::Color::Rgb(28, 28, 28))
+            Some(ratatui::style::Color::Rgb(44, 44, 44))
         );
         assert_eq!(
             bg(cards[n - 2].rect),
-            Some(ratatui::style::Color::Rgb(18, 18, 18))
+            Some(ratatui::style::Color::Rgb(24, 24, 24))
         );
         // The middle is untouched, and the text keeps its own colour.
         assert_ne!(
             bg(cards[n / 2].rect),
-            Some(ratatui::style::Color::Rgb(28, 28, 28))
+            Some(ratatui::style::Color::Rgb(44, 44, 44))
         );
         let name_cell = &buffer[(cards[0].rect.x + 3, cards[0].rect.y)];
         assert_eq!(name_cell.style().fg, Some(app.palette.subtext0));
@@ -1109,6 +1109,41 @@ mod tests {
             .map(|dy| row_string(&buffer, Rect::new(0, spaces_body(&app).y + dy, 30, 1)))
             .collect();
         assert!(!text.contains('↑') && !text.contains('↓'), "{text:?}");
+    }
+
+    #[test]
+    fn fog_lifts_from_the_host_terminal_background_when_the_sidebar_has_none() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        app.palette.sidebar_bg = ratatui::style::Color::Reset;
+        app.palette.panel_bg = ratatui::style::Color::Rgb(0x18, 0x18, 0x25);
+        app.palette.text = ratatui::style::Color::Rgb(0xcd, 0xd6, 0xf4);
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 0x0a,
+            g: 0x0a,
+            b: 0x0a,
+        });
+        let buffer = draw_sidebar(&mut app);
+        let cards = &app.view.workspace_card_areas;
+        let bg = |rect: Rect| buffer[(rect.x + rect.width - 3, rect.y)].style().bg;
+        // ac's preview on #0a0a0a with #cdd6f4 text: #2b2c31 then #17181a.
+        assert_eq!(
+            bg(cards[0].rect),
+            Some(ratatui::style::Color::Rgb(0x2b, 0x2c, 0x31))
+        );
+        assert_eq!(
+            bg(cards[1].rect),
+            Some(ratatui::style::Color::Rgb(0x17, 0x18, 0x1a))
+        );
+        // Host background unknown: the panel background is the base.
+        app.host_terminal_theme.background = None;
+        let buffer = draw_sidebar(&mut app);
+        let cards = &app.view.workspace_card_areas;
+        assert_ne!(
+            buffer[(cards[0].rect.x + cards[0].rect.width - 3, cards[0].rect.y)]
+                .style()
+                .bg,
+            Some(ratatui::style::Color::Rgb(0x2b, 0x2c, 0x31))
+        );
     }
 
     #[test]
@@ -1161,7 +1196,7 @@ mod tests {
         let first = cards[0].rect;
         assert_ne!(
             buffer[(first.x + first.width - 3, first.y)].style().bg,
-            Some(ratatui::style::Color::Rgb(28, 28, 28))
+            Some(ratatui::style::Color::Rgb(44, 44, 44))
         );
         let body = agents_body(&app);
         assert!(!row_string(&buffer, first_row(body)).contains('↑'));
@@ -1180,7 +1215,7 @@ mod tests {
             buffer[(cards[0].rect.x + cards[0].rect.width - 3, cards[0].rect.y)]
                 .style()
                 .bg,
-            Some(ratatui::style::Color::Rgb(28, 28, 28))
+            Some(ratatui::style::Color::Rgb(44, 44, 44))
         );
     }
 
