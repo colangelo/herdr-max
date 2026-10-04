@@ -24,13 +24,13 @@ pub use self::{
         clamp_display_panes_ms, validated_sidebar_bounds, AgentPanelSortConfig, CodexAgentConfig,
         Config, ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig,
         NotificationCenterPositionConfig, PaneBorderActiveStyleConfig, ShellModeConfig,
-        SidebarActiveBorderConfig, SidebarCollapsedModeConfig, SidebarOverflowConfig,
-        SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig, StateColorsConfig,
-        StateSymbolsConfig, StatusIndicatorStyle, StatusSpinnerConfig, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition, ToastHerdrSize,
-        ToastPaneFeedback, UpdateChannelConfig, WorkspaceSortConfig, MAX_DISPLAY_PANES_MS,
-        MAX_STATUS_SPINNER_MS, MAX_TOAST_DELAY_SECONDS, MIN_DISPLAY_PANES_MS,
-        MIN_STATUS_SPINNER_MS,
+        SidebarActiveBorderConfig, SidebarCollapsedModeConfig, SidebarFogStyle,
+        SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig,
+        StateColorsConfig, StateSymbolsConfig, StatusIndicatorStyle, StatusSpinnerConfig,
+        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, ToastHerdrSize, ToastPaneFeedback, UpdateChannelConfig,
+        WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS, MAX_TOAST_DELAY_SECONDS,
+        MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -148,8 +148,20 @@ impl Config {
         )
     }
 
+    /// The fog style in effect; an unknown value is "lift" and
+    /// [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fog_style(&self) -> SidebarFogStyle {
+        SidebarFogStyle::parse(&self.ui.sidebar_fog_style).unwrap_or_default()
+    }
+
     pub(crate) fn sidebar_fog_diagnostics(&self) -> Vec<String> {
         let mut out = Vec::new();
+        if SidebarFogStyle::parse(&self.ui.sidebar_fog_style).is_none() {
+            out.push(format!(
+                "ui.sidebar_fog_style (\"{}\") is not lift, dim or both; using lift",
+                self.ui.sidebar_fog_style
+            ));
+        }
         if self.ui.sidebar_fog.len() > SIDEBAR_FOG_ROWS {
             out.push(format!(
                 "ui.sidebar_fog has {} entries; only the first {SIDEBAR_FOG_ROWS} are used",

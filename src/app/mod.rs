@@ -894,6 +894,7 @@ impl App {
             sidebar_overflow: config.ui.sidebar_overflow,
             sidebar_fog: config.sidebar_fog().0,
             sidebar_fog_tint: config.sidebar_fog().1,
+            sidebar_fog_style: config.sidebar_fog_style(),
             pane_active_bg: config
                 .ui
                 .pane_active_bg
@@ -1847,6 +1848,7 @@ impl App {
                 self.state.sidebar_active_border = config.ui.sidebar_active_border;
                 self.state.sidebar_overflow = config.ui.sidebar_overflow;
                 (self.state.sidebar_fog, self.state.sidebar_fog_tint) = config.sidebar_fog();
+                self.state.sidebar_fog_style = config.sidebar_fog_style();
                 self.state.pane_active_bg = config
                     .ui
                     .pane_active_bg
@@ -3966,6 +3968,34 @@ mod tests {
         config.ui.display_panes_ms = 1;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reload_config_applies_the_fog_style_live_and_reports_an_unknown_one() {
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Lift
+        );
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar_fog_style = "both".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Both
+        );
+        config.ui.sidebar_fog_style = "dim".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Dim
+        );
+        config.ui.sidebar_fog_style = "blur".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Lift
+        );
     }
 
     #[test]

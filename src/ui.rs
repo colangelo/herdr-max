@@ -1197,6 +1197,86 @@ mod tests {
     }
 
     #[test]
+    fn fog_style_picks_lift_dim_or_both_with_exact_cell_colours() {
+        use crate::config::SidebarFogStyle;
+        use ratatui::style::Color::Rgb;
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 0x0a,
+            g: 0x0a,
+            b: 0x0a,
+        });
+        app.palette.text = Rgb(0xcd, 0xd6, 0xf4);
+        // The first letter of each fogged card's name, as (fg, bg).
+        let cell = |app: &mut crate::app::state::AppState| {
+            let buffer = draw_sidebar(app);
+            let cards = app.view.workspace_card_areas.clone();
+            let at = |rect: Rect| {
+                let style = buffer[(rect.x + 3, rect.y)].style();
+                (style.fg, style.bg)
+            };
+            (at(cards[0].rect), at(cards[1].rect))
+        };
+        // Lift only: the text keeps its own colour (#a6adc8).
+        app.sidebar_fog_style = SidebarFogStyle::Lift;
+        let (lift, lift2) = cell(&mut app);
+        assert_eq!(
+            lift,
+            (Some(Rgb(0xa6, 0xad, 0xc8)), Some(Rgb(0x2b, 0x2c, 0x31)))
+        );
+        assert_eq!(
+            lift2,
+            (Some(Rgb(0xa6, 0xad, 0xc8)), Some(Rgb(0x17, 0x18, 0x1a)))
+        );
+        // Dim only: the text fades 51% and 21% of the way to #0a0a0a (three
+        // times the 17 and 7 percent lifts); the background is not lifted.
+        app.sidebar_fog_style = SidebarFogStyle::Dim;
+        let (dim, dim2) = cell(&mut app);
+        assert_eq!(dim.0, Some(Rgb(0x57, 0x5a, 0x68)));
+        assert_eq!(dim2.0, Some(Rgb(0x86, 0x8b, 0xa1)));
+        assert_ne!(dim.1, lift.1);
+        assert_ne!(dim2.1, lift2.1);
+        // Both: the lifted background and the faded text.
+        app.sidebar_fog_style = SidebarFogStyle::Both;
+        let (both, both2) = cell(&mut app);
+        assert_eq!((both.0, both.1), (dim.0, lift.1));
+        assert_eq!((both2.0, both2.1), (dim2.0, lift2.1));
+    }
+
+    #[test]
+    fn dim_fog_never_touches_the_active_row() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        app.sidebar_fog_style = crate::config::SidebarFogStyle::Both;
+        app.active = Some(5);
+        app.selected = 5;
+        let buffer = draw_sidebar(&mut app);
+        let card = app
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 5)
+            .expect("the active space is the first visible one")
+            .rect;
+        let style = buffer[(card.x + card.width - 3, card.y)].style();
+        assert_eq!(style.bg, Some(app.palette.active_row_bg));
+        let mut plain = overflow_app(crate::config::SidebarOverflowConfig::Off);
+        plain.active = Some(5);
+        plain.selected = 5;
+        let plain_buffer = draw_sidebar(&mut plain);
+        let plain_card = plain
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 5)
+            .expect("the active space")
+            .rect;
+        assert_eq!(
+            buffer[(card.x + 1, card.y)].style().fg,
+            plain_buffer[(plain_card.x + 1, plain_card.y)].style().fg
+        );
+    }
+
+    #[test]
     fn fog_never_covers_the_active_row() {
         let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
         app.active = Some(5);

@@ -1189,18 +1189,31 @@ fn render_overflow(app: &AppState, frame: &mut Frame, plan: &OverflowPlan) {
             let tint = band
                 .tint
                 .map(|(state, seen)| state_label_color(state, seen, &app.state_icon_colors()));
-            let Some(bg) = overflow::fog_color(
-                base,
-                p.text,
-                tint,
-                app.sidebar_fog.get(band.level).copied().unwrap_or(0),
-                app.sidebar_fog_tint,
-            ) else {
-                continue;
-            };
+            let percent = app.sidebar_fog.get(band.level).copied().unwrap_or(0);
+            let bg = app
+                .sidebar_fog_style
+                .lifts()
+                .then(|| overflow::fog_color(base, p.text, tint, percent, app.sidebar_fog_tint))
+                .flatten();
+            let dim_percent = app
+                .sidebar_fog_style
+                .dims()
+                .then(|| overflow::dim_percent(percent));
             for y in band.rect.y..band.rect.y + band.rect.height {
                 for x in band.rect.x..band.rect.x + band.rect.width {
-                    buf[(x, y)].set_style(Style::default().bg(bg));
+                    let cell = &mut buf[(x, y)];
+                    if let Some(bg) = bg {
+                        cell.set_style(Style::default().bg(bg));
+                    }
+                    if let Some(dim) = dim_percent {
+                        let fg = match cell.style().fg {
+                            None | Some(Color::Reset) => p.text,
+                            Some(fg) => fg,
+                        };
+                        if let Some(faded) = overflow::lift(fg, base, dim) {
+                            cell.set_style(Style::default().fg(faded));
+                        }
+                    }
                 }
             }
         }

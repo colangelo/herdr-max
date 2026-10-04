@@ -1513,6 +1513,12 @@
           "description": "How much of the most urgent hidden state's colour (blocked, or finished and unseen) the fog takes, 0..=100, clamped with a diagnostic. 0 keeps the fog neutral. Reloads live."
         },
         {
+          "key": "ui.sidebar_fog_style",
+          "type": "string",
+          "default": "\"lift\"",
+          "description": "What the `sidebar_overflow` fog does: `lift` (a lighter background), `dim` (the text of the fogged rows fades toward the background, three times the row's `sidebar_fog` percent, at most 90, by recolouring rather than the terminal dim attribute) or `both`. An unknown value is reported and uses `lift`. Reloads live."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

@@ -348,6 +348,37 @@ impl SidebarOverflowConfig {
     }
 }
 
+/// How the fog next to a hidden sidebar edge shows (fork issue 166): a lighter
+/// background, text faded toward the background, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarFogStyle {
+    #[default]
+    Lift,
+    Dim,
+    Both,
+}
+
+impl SidebarFogStyle {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lift" => Some(Self::Lift),
+            "dim" => Some(Self::Dim),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// The background of the fogged rows is lifted.
+    pub fn lifts(self) -> bool {
+        matches!(self, Self::Lift | Self::Both)
+    }
+
+    /// The text of the fogged rows is faded toward the background.
+    pub fn dims(self) -> bool {
+        matches!(self, Self::Dim | Self::Both)
+    }
+}
+
 /// Highlight pattern for the active space/agent in the sidebar. Accepts a
 /// string mode or, for backward compatibility, a bool (true = both).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1467,6 +1498,9 @@ pub struct UiConfig {
     /// How much of the most urgent hidden state's colour the fog takes,
     /// 0..=100 (0: a neutral lift). Default: 70.
     pub sidebar_fog_tint: i64,
+    /// What the fog does: "lift" (a lighter background, default), "dim" (the
+    /// text fades toward the background) or "both". Unknown values use "lift".
+    pub sidebar_fog_style: String,
     /// Default background for the focused pane's cells (tmux
     /// `window-active-style` bg). Same syntax as `accent`. Only cells without
     /// an explicit app-painted background are tinted. Unset keeps the
@@ -1790,6 +1824,7 @@ impl Default for UiConfig {
             sidebar_overflow: SidebarOverflowConfig::default(),
             sidebar_fog: vec![17, 7],
             sidebar_fog_tint: 70,
+            sidebar_fog_style: "lift".to_string(),
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
@@ -3053,6 +3088,30 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn sidebar_fog_style_parses_and_an_unknown_value_falls_back_to_lift() {
+        let config = Config::default();
+        assert_eq!(config.sidebar_fog_style(), SidebarFogStyle::Lift);
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+        for (value, style) in [
+            ("lift", SidebarFogStyle::Lift),
+            ("dim", SidebarFogStyle::Dim),
+            ("both", SidebarFogStyle::Both),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nsidebar_fog_style = \"{value}\"")).unwrap();
+            assert_eq!(config.sidebar_fog_style(), style);
+            assert!(config.sidebar_fog_diagnostics().is_empty());
+        }
+        let config: Config = toml::from_str("[ui]\nsidebar_fog_style = \"blur\"").unwrap();
+        assert_eq!(config.sidebar_fog_style(), SidebarFogStyle::Lift);
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec!["ui.sidebar_fog_style (\"blur\") is not lift, dim or both; using lift"]
+        );
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fog_style = 3").is_err());
     }
 
     #[test]
