@@ -55,6 +55,7 @@ pub(crate) const SIDEBAR_FOG_ROWS: usize = 2;
 pub(crate) const SIDEBAR_FOG_MAX_PERCENT: i64 = 60;
 pub(crate) const SIDEBAR_FOG_TINT_MAX: i64 = 100;
 pub(crate) const SIDEBAR_FADE_MAX_PERCENT: i64 = 95;
+pub(crate) const INACTIVE_PANE_DIM_MAX_PERCENT: i64 = 90;
 pub(crate) use self::{
     io::upsert_top_level_bool,
     sidebar::sidebar_style_diagnostics,
@@ -115,6 +116,7 @@ impl Config {
             .chain(self.invalid_headless_size_diagnostic())
             .chain(self.display_panes_diagnostic())
             .chain(self.sidebar_fog_diagnostics())
+            .chain(self.inactive_pane_dim_diagnostics())
             .collect()
     }
 
@@ -158,6 +160,24 @@ impl Config {
             *slot = (*value).clamp(0, SIDEBAR_FADE_MAX_PERCENT) as u32;
         }
         percent
+    }
+
+    /// The unfocused-pane text fade in percent, clamped; see
+    /// [`Self::inactive_pane_dim_diagnostics`].
+    pub(crate) fn inactive_pane_dim(&self) -> u32 {
+        self.ui
+            .inactive_pane_dim
+            .clamp(0, INACTIVE_PANE_DIM_MAX_PERCENT) as u32
+    }
+
+    pub(crate) fn inactive_pane_dim_diagnostics(&self) -> Option<String> {
+        let value = self.ui.inactive_pane_dim;
+        (!(0..=INACTIVE_PANE_DIM_MAX_PERCENT).contains(&value)).then(|| {
+            format!(
+                "ui.inactive_pane_dim ({value}) is outside 0..={INACTIVE_PANE_DIM_MAX_PERCENT}; using {}",
+                value.clamp(0, INACTIVE_PANE_DIM_MAX_PERCENT)
+            )
+        })
     }
 
     /// The fog style in effect; an unknown value is "lift" and

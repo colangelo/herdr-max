@@ -907,6 +907,7 @@ impl App {
                 .as_deref()
                 .map(crate::config::parse_color),
             dim_inactive_panes: config.ui.dim_inactive_panes,
+            inactive_pane_dim: config.inactive_pane_dim(),
             sound: config.ui.sound.clone(),
             local_sound_playback: true,
             toast_config: config.ui.toast.clone(),
@@ -1721,6 +1722,7 @@ impl App {
                 ));
                 diagnostics.extend(crate::config::sidebar_style_diagnostics(&config.ui.sidebar));
                 diagnostics.extend(config.sidebar_fog_diagnostics());
+                diagnostics.extend(config.inactive_pane_dim_diagnostics());
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));
@@ -1862,6 +1864,7 @@ impl App {
                     .as_deref()
                     .map(crate::config::parse_color);
                 self.state.dim_inactive_panes = config.ui.dim_inactive_panes;
+                self.state.inactive_pane_dim = config.inactive_pane_dim();
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {
                     self.state.request_client_config_reload = true;
                 }
@@ -3970,6 +3973,22 @@ mod tests {
         config.ui.display_panes_ms = 1;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reload_config_applies_inactive_pane_dim_live_and_clamps() {
+        let mut app = test_app();
+        assert_eq!(app.state.inactive_pane_dim, 0);
+        let mut config = crate::config::Config::default();
+        config.ui.inactive_pane_dim = 20;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 20);
+        config.ui.inactive_pane_dim = 500;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 90);
+        config.ui.inactive_pane_dim = 0;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 0);
     }
 
     #[test]

@@ -546,6 +546,24 @@ mod render_scale_benchmark {
         app_with(vec![workspace])
     }
 
+    /// Active panes with the lighter unfocused dim on (fork issue 168): every
+    /// unfocused pane pays the per-cell fade.
+    fn app_with_active_panes_dimmed(pane_count: usize) -> AppState {
+        let mut app = app_with_active_panes(pane_count);
+        app.inactive_pane_dim = 20;
+        app.host_terminal_theme.foreground = Some(crate::terminal_theme::RgbColor {
+            r: 0xcd,
+            g: 0xd6,
+            b: 0xf4,
+        });
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 0x0a,
+            g: 0x0a,
+            b: 0x0a,
+        });
+        app
+    }
+
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
         app.mode = Mode::Terminal;
@@ -644,6 +662,10 @@ mod render_scale_benchmark {
         print_profiles(
             "active panes (one workspace)",
             profile_cardinalities(app_with_active_panes),
+        );
+        print_profiles(
+            "active panes (one workspace), inactive_pane_dim = 20",
+            profile_cardinalities(app_with_active_panes_dimmed),
         );
     }
 }

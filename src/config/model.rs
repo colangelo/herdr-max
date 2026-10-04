@@ -1519,6 +1519,11 @@ pub struct UiConfig {
     /// Dim unfocused pane content in all modes, not only while a herdr mode
     /// (prefix/navigate) is active. Default: false.
     pub dim_inactive_panes: bool,
+    /// How far an unfocused pane's text colour moves toward the colour behind
+    /// it, in percent (0..=90, clamped with a diagnostic). A real colour change
+    /// that stays lighter than the SGR faint `dim_inactive_panes` and prefix
+    /// mode use. 0 is off. Default: 0.
+    pub inactive_pane_dim: i64,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -1834,6 +1839,7 @@ impl Default for UiConfig {
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
+            inactive_pane_dim: 0,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
@@ -3118,6 +3124,36 @@ scrollback_lines = 12345
             vec!["ui.sidebar_fog_style (\"blur\") is not lift, dim or both; using lift"]
         );
         assert!(toml::from_str::<Config>("[ui]\nsidebar_fog_style = 3").is_err());
+    }
+
+    #[test]
+    fn inactive_pane_dim_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.inactive_pane_dim, 0);
+        assert_eq!(config.inactive_pane_dim(), 0);
+        assert!(config.collect_diagnostics().is_empty());
+
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = 20").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 20);
+        assert_eq!(config.inactive_pane_dim_diagnostics(), None);
+
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = 250").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 90);
+        assert_eq!(
+            config.inactive_pane_dim_diagnostics().as_deref(),
+            Some("ui.inactive_pane_dim (250) is outside 0..=90; using 90")
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|line| line.contains("ui.inactive_pane_dim (250)")));
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = -3").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 0);
+        assert!(toml::from_str::<Config>("[ui]\ninactive_pane_dim = \"light\"").is_err());
+        // dim_inactive_panes keeps working next to it.
+        let config: Config =
+            toml::from_str("[ui]\ndim_inactive_panes = true\ninactive_pane_dim = 20").unwrap();
+        assert!(config.ui.dim_inactive_panes);
     }
 
     #[test]

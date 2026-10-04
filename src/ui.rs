@@ -7,6 +7,7 @@ use ratatui::{
 
 mod dialogs;
 mod display_panes;
+mod inactive_dim;
 mod keybind_help;
 pub(crate) mod list_motion;
 mod menus;
@@ -1302,6 +1303,154 @@ mod tests {
             buffer[(card.x + 1, card.y)].style().fg,
             plain_buffer[(plain_card.x + 1, plain_card.y)].style().fg
         );
+    }
+
+    /// Two panes of coloured text under a #0a0a0a host with #cdd6f4 text; the
+    /// right one is unfocused. Returns the app after one `compute_view`.
+    fn two_panes_with_text() -> crate::app::state::AppState {
+        use crate::terminal::TerminalRuntime;
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("t");
+        let root = ws.tabs[0].root_pane;
+        let right = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let bytes = b"hello \x1b[38;2;200;100;50mred\x1b[0m\r\n\x1b[48;2;40;40;40mx\x1b[0m\r\n";
+        for pane in [root, right] {
+            ws.tabs[0].runtimes.insert(
+                pane,
+                TerminalRuntime::test_with_scrollback_bytes(40, 8, 1024, bytes),
+            );
+        }
+        ws.tabs[0].layout.focus_pane(root);
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.host_terminal_theme.foreground = Some(crate::terminal_theme::RgbColor {
+            r: 0xcd,
+            g: 0xd6,
+            b: 0xf4,
+        });
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 0x0a,
+            g: 0x0a,
+            b: 0x0a,
+        });
+        app
+    }
+
+    /// (focused, unfocused) cells at the text column `col` of row `row`.
+    fn pane_cells(
+        app: &mut crate::app::state::AppState,
+        col: u16,
+        row: u16,
+    ) -> (ratatui::buffer::Cell, ratatui::buffer::Cell) {
+        compute_view(app, Rect::new(0, 0, 100, 20));
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let at = |focused: bool| {
+            let info = app
+                .view
+                .pane_infos
+                .iter()
+                .find(|info| info.is_focused == focused)
+                .expect("pane");
+            buffer[(info.inner_rect.x + col, info.inner_rect.y + row)].clone()
+        };
+        (at(true), at(false))
+    }
+
+    #[tokio::test]
+    async fn inactive_pane_dim_fades_the_text_of_unfocused_panes_only() {
+        use ratatui::style::Color::Rgb;
+        let mut app = two_panes_with_text();
+        app.inactive_pane_dim = 20;
+        let (focused, unfocused) = pane_cells(&mut app, 0, 0);
+        // Default text #cdd6f4 20% toward the host #0a0a0a.
+        assert_eq!(unfocused.symbol(), "h");
+        assert_eq!(unfocused.style().fg, Some(Rgb(0xa6, 0xae, 0xc6)));
+        assert!(!unfocused.style().add_modifier.contains(Modifier::DIM));
+        assert_ne!(focused.style().fg, Some(Rgb(0xa6, 0xae, 0xc6)));
+        // An RGB cell fades from its own colour: (200,100,50) -> (162,82,42).
+        let (focused_red, unfocused_red) = pane_cells(&mut app, 6, 0);
+        assert_eq!(unfocused_red.symbol(), "r");
+        assert_eq!(unfocused_red.style().fg, Some(Rgb(162, 82, 42)));
+        assert_eq!(focused_red.style().fg, Some(Rgb(200, 100, 50)));
+        // A cell with its own background keeps it and fades toward it:
+        // #cdd6f4 20% toward (40,40,40).
+        let (focused_x, unfocused_x) = pane_cells(&mut app, 0, 1);
+        assert_eq!(unfocused_x.style().bg, Some(Rgb(40, 40, 40)));
+        assert_eq!(unfocused_x.style().fg, Some(Rgb(172, 180, 204)));
+        assert_eq!(focused_x.style().bg, Some(Rgb(40, 40, 40)));
+    }
+
+    #[tokio::test]
+    async fn inactive_pane_dim_is_off_at_zero_and_in_a_single_pane() {
+        let mut app = two_panes_with_text();
+        let (_, off) = pane_cells(&mut app, 0, 0);
+        app.inactive_pane_dim = 0;
+        assert_eq!(off.style().fg, pane_cells(&mut app, 0, 0).1.style().fg);
+        assert!(!matches!(
+            off.style().fg,
+            Some(ratatui::style::Color::Rgb(0xa6, 0xae, 0xc6))
+        ));
+        // One pane: nothing is unfocused, so nothing fades.
+        let mut single = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("t");
+        let root = ws.tabs[0].root_pane;
+        ws.tabs[0].runtimes.insert(
+            root,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(40, 8, 1024, b"hello\n"),
+        );
+        single.workspaces = vec![ws];
+        single.active = Some(0);
+        single.mode = Mode::Terminal;
+        single.inactive_pane_dim = 50;
+        single.host_terminal_theme.background =
+            Some(crate::terminal_theme::RgbColor { r: 0, g: 0, b: 0 });
+        compute_view(&mut single, Rect::new(0, 0, 100, 20));
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| render(&single, frame)).unwrap();
+        let info = &single.view.pane_infos[0];
+        let cell = &terminal.backend().buffer()[(info.inner_rect.x, info.inner_rect.y)];
+        assert!(!matches!(
+            cell.style().fg,
+            Some(ratatui::style::Color::Rgb(..))
+        ));
+    }
+
+    #[tokio::test]
+    async fn prefix_mode_keeps_its_faint_on_top_of_the_inactive_fade() {
+        use ratatui::style::Color::Rgb;
+        let mut app = two_panes_with_text();
+        app.inactive_pane_dim = 20;
+        let (_, terminal_mode) = pane_cells(&mut app, 0, 0);
+        assert!(!terminal_mode.style().add_modifier.contains(Modifier::DIM));
+        app.mode = Mode::Prefix;
+        let (_, prefix_mode) = pane_cells(&mut app, 0, 0);
+        // Same recoloured text, plus the SGR faint: the two states differ.
+        assert_eq!(prefix_mode.style().fg, Some(Rgb(0xa6, 0xae, 0xc6)));
+        assert!(prefix_mode.style().add_modifier.contains(Modifier::DIM));
+        // dim_inactive_panes still adds the faint in terminal mode.
+        app.mode = Mode::Terminal;
+        app.dim_inactive_panes = true;
+        let (_, always) = pane_cells(&mut app, 0, 0);
+        assert_eq!(always.style().fg, Some(Rgb(0xa6, 0xae, 0xc6)));
+        assert!(always.style().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[tokio::test]
+    async fn inactive_pane_dim_fades_toward_the_pane_inactive_bg_when_set() {
+        use ratatui::style::Color::Rgb;
+        let mut app = two_panes_with_text();
+        app.inactive_pane_dim = 50;
+        app.pane_inactive_bg = Some(Rgb(0x30, 0x30, 0x30));
+        let (_, unfocused) = pane_cells(&mut app, 0, 0);
+        // The tint paints the default-background cells; the text fades 50%
+        // toward it: #cdd6f4 -> (127,131,146).
+        assert_eq!(unfocused.style().bg, Some(Rgb(0x30, 0x30, 0x30)));
+        assert_eq!(unfocused.style().fg, Some(Rgb(127, 131, 146)));
     }
 
     #[test]

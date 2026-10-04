@@ -374,7 +374,21 @@ pub(super) fn render_panes(
             } else {
                 app.pane_inactive_bg
             };
-            if should_dim || bg_tint.is_some() {
+            // The lighter dim: recolour the text of an unfocused pane toward
+            // what is behind it. Prefix and navigate mode still add the SGR
+            // faint on top, so the two states stay different.
+            let mut fade = (!info.is_focused && multi_pane)
+                .then(|| {
+                    super::inactive_dim::InactiveDim::new(
+                        app.inactive_pane_dim,
+                        app.pane_inactive_bg,
+                        app.palette.panel_bg,
+                        app.palette.text,
+                        &app.host_terminal_theme,
+                    )
+                })
+                .flatten();
+            if should_dim || bg_tint.is_some() || fade.is_some() {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();
                 for y in inner.y..inner.y + inner.height {
@@ -386,6 +400,16 @@ pub(super) fn render_panes(
                         if let Some(bg) = bg_tint {
                             if cell.style().bg.is_none_or(|c| c == Color::Reset) {
                                 cell.set_style(cell.style().bg(bg));
+                            }
+                        }
+                        if let Some(fade) = fade.as_mut() {
+                            let style = cell.style();
+                            let (fg, bg) = (
+                                style.fg.unwrap_or(Color::Reset),
+                                style.bg.unwrap_or(Color::Reset),
+                            );
+                            if let Some(faded) = fade.faded_fg(fg, bg, style.add_modifier) {
+                                cell.set_style(Style::default().fg(faded));
                             }
                         }
                     }

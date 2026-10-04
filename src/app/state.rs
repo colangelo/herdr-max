@@ -2968,6 +2968,7 @@ pub struct AppState {
     pub pane_inactive_bg: Option<Color>,
     /// Dim unfocused pane content in all modes, not only in prefix/navigate.
     pub dim_inactive_panes: bool,
+    pub inactive_pane_dim: u32,
     pub sound: SoundConfig,
     pub local_sound_playback: bool,
     pub toast_config: ToastConfig,
@@ -4064,6 +4065,7 @@ impl AppState {
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
+            inactive_pane_dim: 0,
             sound: SoundConfig {
                 enabled: false,
                 ..SoundConfig::default()

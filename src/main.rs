@@ -593,6 +593,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # (prefix/navigate) is active.
 # dim_inactive_panes = false
 
+# A lighter, always-on dim for unfocused panes: how far their text colour
+# moves toward the colour behind it, in percent (0..=90; 0 is off). It
+# recolours the text, so it stays weaker than the terminal's faint (which
+# dim_inactive_panes and prefix mode use) and the two stay different. 20 is
+# a good start.
+# inactive_pane_dim = 0
+
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications

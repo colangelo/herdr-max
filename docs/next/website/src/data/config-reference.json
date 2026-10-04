@@ -1174,6 +1174,12 @@
           "description": "Dim unfocused pane content in all modes, not only while a herdr mode (prefix/navigate) is active."
         },
         {
+          "key": "ui.inactive_pane_dim",
+          "type": "integer",
+          "default": "0",
+          "description": "How far the text colour of an unfocused pane moves toward the colour behind it, in percent, 0..=90 (clamped with a diagnostic; 0 is off). A real colour change that stays lighter than the faint `dim_inactive_panes` and prefix mode use, so the two states stay different. The colour behind is the cell's own background, else `pane_inactive_bg`, else the terminal's. Reloads live."
+        },
+        {
           "key": "ui.show_agent_labels_on_pane_borders",
           "type": "boolean",
           "default": "false",
