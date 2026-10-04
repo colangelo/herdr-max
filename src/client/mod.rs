@@ -980,27 +980,29 @@ fn reexec_onto_server_build() {
     };
     let client_version = crate::build_info::version();
     let already = std::env::var_os(reexec::REEXEC_ENV_VAR).is_some();
-    let build = match reexec::decide(&client_version, status.version.as_deref(), already) {
-        reexec::ReexecDecision::Stay => return,
-        reexec::ReexecDecision::Reexec(build) => build,
-    };
+    let decision = reexec::decide(&client_version, status.version.as_deref(), already);
+    if decision == reexec::ReexecDecision::Stay {
+        return;
+    }
     let server_version = status.version.clone().unwrap_or_default();
-    let target = std::env::current_exe()
-        .ok()
-        .and_then(|own| reexec::target_binary(status.exe.as_deref(), &own, |path| path.exists()));
     #[cfg(unix)]
-    if let Some(target) = target {
-        let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
-        let plan = reexec::plan(target, &argv);
-        eprintln!(
-            "herdr: the client ({client_version}) is {} than the server ({server_version}); restarting it onto {}",
-            if build == reexec::ClientBuild::Newer { "newer" } else { "older" },
-            plan.program.display()
-        );
-        use std::os::unix::process::CommandExt as _;
-        // `exec` returns only when it failed.
-        let err = plan.command(&server_version).exec();
-        warn!(error = %err, program = %plan.program.display(), "client re-exec onto the server build failed");
+    if let reexec::ReexecDecision::Reexec(build) = decision {
+        let target = std::env::current_exe().ok().and_then(|own| {
+            reexec::target_binary(status.exe.as_deref(), &own, |path| path.exists())
+        });
+        if let Some(target) = target {
+            let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+            let plan = reexec::plan(target, &argv);
+            eprintln!(
+                "herdr: the client ({client_version}) is {} than the server ({server_version}); restarting it onto {}",
+                if build == reexec::ClientBuild::Newer { "newer" } else { "older" },
+                plan.program.display()
+            );
+            use std::os::unix::process::CommandExt as _;
+            // `exec` returns only when it failed.
+            let err = plan.command(&server_version).exec();
+            warn!(error = %err, program = %plan.program.display(), "client re-exec onto the server build failed");
+        }
     }
     if !WARNED.swap(true, Ordering::AcqRel) {
         warn!(

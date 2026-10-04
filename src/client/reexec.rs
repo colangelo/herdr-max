@@ -9,9 +9,13 @@
 //! binary, same arguments, environment and terminal.
 //!
 //! The decision and the command are assembled here without executing anything,
-//! so the unit tests never exec.
+//! so the unit tests never exec. Exec exists only on Unix: the target and the
+//! command are `cfg(unix)`, and on other platforms a mismatched client keeps
+//! running and shows the "detach and reattach" toast.
 
+#[cfg(unix)]
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 /// Set on the re-exec'd client, so a binary that still disagrees with the
@@ -76,6 +80,7 @@ pub(crate) fn decide(client: &str, server: Option<&str>, already_reexeced: bool)
 /// (`<prefix>/Cellar/<formula>/<version>/bin/<name>` becomes
 /// `<prefix>/opt/<formula>/bin/<name>`), which survives `brew cleanup` where a
 /// versioned Cellar path does not. `None` when neither exists.
+#[cfg(unix)]
 pub(crate) fn target_binary(
     server_exe: Option<&str>,
     own_exe: &Path,
@@ -88,6 +93,7 @@ pub(crate) fn target_binary(
     exists(&opt).then_some(opt)
 }
 
+#[cfg(unix)]
 fn brew_opt_path(exe: &Path) -> Option<PathBuf> {
     let parts: Vec<_> = exe.components().collect();
     let cellar = parts.iter().position(|part| part.as_os_str() == "Cellar")?;
@@ -105,6 +111,7 @@ fn brew_opt_path(exe: &Path) -> Option<PathBuf> {
 }
 
 /// What to exec: the program and the original argument vector.
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReexecPlan {
     pub program: PathBuf,
@@ -114,6 +121,7 @@ pub(crate) struct ReexecPlan {
 
 /// The plan from the running process's own argv. Environment and terminal are
 /// inherited by `exec`; only the guard variable is added, by [`ReexecPlan::command`].
+#[cfg(unix)]
 pub(crate) fn plan(program: PathBuf, argv: &[OsString]) -> ReexecPlan {
     ReexecPlan {
         program: program.clone(),
@@ -125,13 +133,13 @@ pub(crate) fn plan(program: PathBuf, argv: &[OsString]) -> ReexecPlan {
     }
 }
 
+#[cfg(unix)]
 impl ReexecPlan {
     /// The command to `exec`. Nothing runs until `exec` is called on it.
     pub(crate) fn command(&self, server_version: &str) -> std::process::Command {
         let mut command = std::process::Command::new(&self.program);
         command.args(&self.args);
         command.env(REEXEC_ENV_VAR, server_version);
-        #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
             command.arg0(&self.argv0);
@@ -170,6 +178,7 @@ mod tests {
         assert_eq!(decide(OLD, Some(NEW), true), ReexecDecision::Stay);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_target_is_the_servers_binary_when_it_exists() {
         let server = "/opt/homebrew/Cellar/herdr-beta/0.8.2-ac-beta.137-bonucci/bin/herdr-beta";
@@ -182,6 +191,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_deleted_cellar_path_falls_back_to_the_brew_opt_link() {
         let own = Path::new(
@@ -207,6 +217,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_plan_keeps_argv_and_the_command_adds_only_the_guard_variable() {
         let argv: Vec<OsString> = ["herdr-beta", "--session", "work"]
