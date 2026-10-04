@@ -1835,6 +1835,13 @@ fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) 
             style.remove_modifier(Modifier::DIM)
         };
     }
+    if let Some(italic) = patch.italic {
+        style = if italic {
+            style.add_modifier(Modifier::ITALIC)
+        } else {
+            style.remove_modifier(Modifier::ITALIC)
+        };
+    }
     style
 }
 
@@ -3818,6 +3825,58 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
         assert!(separator.add_modifier.contains(Modifier::DIM));
         assert!(!separator.add_modifier.contains(Modifier::BOLD));
         assert_eq!(separator.bg, Some(app.palette.active_row_bg));
+    }
+
+    #[test]
+    fn space_occurrence_italic_is_on_the_token_and_not_the_separator() {
+        let config: crate::config::Config = toml::from_str(
+            r##"
+[ui.sidebar.spaces]
+rows = [["workspace", { token = "$asks", italic = true }]]
+"##,
+        )
+        .unwrap();
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_spaces = config.ui.sidebar.spaces;
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.mode = Mode::Terminal;
+        app.workspaces[0].metadata_tokens.patch(
+            std::collections::HashMap::from([("asks".into(), Some("QQ".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+
+        let area = Rect::new(0, 0, 26, 20);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        let row = app.view.workspace_card_areas[0].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let q = buffer[(find_symbol_x(buffer, row, 25, "Q"), row)].style();
+        let separator = buffer[(find_symbol_x(buffer, row, 25, "·"), row)].style();
+        let name = buffer[(find_symbol_x(buffer, row, 25, "o"), row)].style();
+
+        assert!(q.add_modifier.contains(Modifier::ITALIC));
+        assert!(!separator.add_modifier.contains(Modifier::ITALIC));
+        assert!(!name.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn explicit_italic_false_removes_italic() {
+        let patch = crate::config::SidebarTokenStyle {
+            italic: Some(false),
+            ..Default::default()
+        };
+        let style = apply_token_style(Style::default().add_modifier(Modifier::ITALIC), patch);
+        assert!(!style.add_modifier.contains(Modifier::ITALIC));
+        let untouched = apply_token_style(
+            Style::default().add_modifier(Modifier::ITALIC),
+            crate::config::SidebarTokenStyle::default(),
+        );
+        assert!(untouched.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

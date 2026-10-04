@@ -98,6 +98,7 @@ pub struct SidebarTokenStyle {
     pub fg: Option<SidebarTokenColor>,
     pub bold: Option<bool>,
     pub dim: Option<bool>,
+    pub italic: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +160,8 @@ struct RawStyledSidebarToken {
     bold: Option<bool>,
     #[serde(default)]
     dim: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +181,7 @@ impl RawSidebarToken {
                     fg: token.fg,
                     bold: token.bold,
                     dim: token.dim,
+                    italic: token.italic,
                 }),
             ),
         }
@@ -226,6 +230,9 @@ where
     }
     if let Some(dim) = style.dim {
         map.serialize_entry("dim", &dim)?;
+    }
+    if let Some(italic) = style.italic {
+        map.serialize_entry("italic", &italic)?;
     }
     map.end()
 }
@@ -521,10 +528,10 @@ row_gap = 3
 rows = [[{ token = "workspace", fg = "#abc", bold = false }, "workspace"], [{ token = "$summary", dim = false }]]
 
 [ui.sidebar.agents.rows_by_agent]
-claude = [[{ token = "agent", fg = "#112233", bold = true, dim = false }]]
+claude = [[{ token = "agent", fg = "#112233", bold = true, dim = false, italic = true }]]
 
 [ui.sidebar.spaces]
-rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = true }]]
+rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = true, italic = false }]]
 "##,
         )
         .unwrap();
@@ -545,6 +552,9 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
         assert_eq!(token, &AgentSidebarToken::Agent);
         assert_eq!(style.bold, Some(true));
         assert_eq!(style.dim, Some(false));
+        assert_eq!(style.italic, Some(true));
+        // Omitted stays omitted: contextual.
+        assert_eq!(config.ui.sidebar.agents.rows[0][0].parts().1.italic, None);
 
         let (token, style) = config.ui.sidebar.spaces.rows[0][0].parts();
         assert_eq!(token, &SpaceSidebarToken::GitStatus);
@@ -555,6 +565,23 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
         let (token, style) = config.ui.sidebar.spaces.rows[1][0].parts();
         assert_eq!(token, &SpaceSidebarToken::Custom("jj".into()));
         assert_eq!(style.bold, Some(true));
+        assert_eq!(style.italic, Some(false));
+    }
+
+    #[test]
+    fn italic_round_trips_through_serialization() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [[{ token = "$asks", fg = "#ffd60a", bold = true, italic = true }, { token = "branch", italic = false }, "workspace"]]
+"##,
+        )
+        .unwrap();
+        let text = toml::to_string(&config.ui.sidebar.spaces).unwrap();
+        let again: crate::config::SpacesSidebarConfig = toml::from_str(&text).unwrap();
+        assert_eq!(again.rows, config.ui.sidebar.spaces.rows);
+        assert_eq!(again.rows[0][0].parts().1.italic, Some(true));
+        assert_eq!(again.rows[0][1].parts().1.italic, Some(false));
+        assert_eq!(again.rows[0][2].parts().1.italic, None);
     }
 
     #[test]
