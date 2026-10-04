@@ -32,6 +32,8 @@ fn passthrough_send(key: &TerminalKey) -> Option<AppScrollSend> {
         KeyCode::PageDown if !ctrl => Some(KeyCode::PageDown),
         KeyCode::Char('g') if !ctrl => Some(KeyCode::Home),
         KeyCode::Char('G') if !ctrl => Some(KeyCode::End),
+        // Same as `G`, like ctrl+g in copy mode (fork issue 167).
+        KeyCode::Char('g') if ctrl => Some(KeyCode::End),
         KeyCode::Home if !ctrl => Some(KeyCode::Home),
         KeyCode::End if !ctrl => Some(KeyCode::End),
         _ => None,
@@ -356,6 +358,18 @@ mod tests {
         expected.extend(encoded(&app, pane_id, KeyCode::PageDown));
         expected.extend(encoded(&app, pane_id, KeyCode::PageUp));
         assert_eq!(drain(&mut rx), expected);
+        assert_eq!(app.state.mode, Mode::AppScroll);
+    }
+
+    #[tokio::test]
+    async fn passthrough_ctrl_g_jumps_to_the_bottom_like_capital_g() {
+        let (mut app, pane_id, mut rx) = app_with_alt_screen_pane();
+        prefix_gesture(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
+        drain(&mut rx);
+
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL).await;
+
+        assert_eq!(drain(&mut rx), encoded(&app, pane_id, KeyCode::End));
         assert_eq!(app.state.mode, Mode::AppScroll);
     }
 

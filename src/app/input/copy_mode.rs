@@ -1347,6 +1347,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_mode_ctrl_keys_work_in_a_pane_that_asked_for_the_kitty_protocol() {
+        // The same keys, as raw client bytes, in a pane that pushed kitty
+        // keyboard flags: the legacy C0 byte and the CSI u form behave alike
+        // (fork issue 167).
+        for bytes in [b"\x07".as_slice(), b"\x1b[103;5u"] {
+            let mut data = numbered_lines_bytes(64);
+            data.extend_from_slice(b"\x1b[>1u");
+            let (mut app, pane_id) = app_with_copy_scrollback(&data);
+            app.state.enter_copy_mode(&app.terminal_runtimes);
+            app.route_client_input(b"g".to_vec());
+            assert!(copy_mode_offset_from_bottom(&app, pane_id) > 0);
+
+            app.route_client_input(bytes.to_vec());
+
+            assert_eq!(app.state.mode, Mode::Copy, "{bytes:?}");
+            assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0, "{bytes:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn copy_mode_prefix_takes_priority_over_ctrl_b_page_up() {
         let bytes = numbered_lines_bytes(64);
         let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
