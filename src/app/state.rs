@@ -2955,6 +2955,9 @@ pub struct AppState {
     /// styled like the active pane border.
     pub sidebar_active_border: crate::config::SidebarActiveBorderConfig,
     pub sidebar_overflow: crate::config::SidebarOverflowConfig,
+    /// Fog percent per row, nearest first (0: none), and the tint share.
+    pub sidebar_fog: [u32; crate::config::SIDEBAR_FOG_ROWS],
+    pub sidebar_fog_tint: u32,
     /// Default background for the focused pane's cells; None keeps the
     /// terminal default. Only default-background cells are tinted.
     pub pane_active_bg: Option<Color>,
@@ -4052,6 +4055,8 @@ impl AppState {
             pane_todo_color: None,
             sidebar_active_border: crate::config::SidebarActiveBorderConfig::Off,
             sidebar_overflow: crate::config::SidebarOverflowConfig::default(),
+            sidebar_fog: crate::config::Config::default().sidebar_fog().0,
+            sidebar_fog_tint: crate::config::Config::default().sidebar_fog().1,
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,

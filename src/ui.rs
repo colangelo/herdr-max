@@ -1147,6 +1147,34 @@ mod tests {
     }
 
     #[test]
+    fn fog_strengths_follow_the_config_and_zero_is_no_fog() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        let lift = |app: &mut crate::app::state::AppState| {
+            let buffer = draw_sidebar(app);
+            let cards = app.view.workspace_card_areas.clone();
+            let bg = |rect: Rect| buffer[(rect.x + rect.width - 3, rect.y)].style().bg;
+            (bg(cards[0].rect), bg(cards[1].rect))
+        };
+        let c = |v: u8| Some(ratatui::style::Color::Rgb(v, v, v));
+        // Base 10, text 210: 25% lifts to 60, 3% to 16.
+        app.sidebar_fog = [25, 3];
+        assert_eq!(lift(&mut app), (c(60), c(16)));
+        // 0 on the nearest row: no fog there, the next still lifts.
+        app.sidebar_fog = [0, 3];
+        let (first, second) = lift(&mut app);
+        assert_ne!(first, c(44));
+        assert_ne!(first, c(60));
+        assert_eq!(second, c(16));
+        // Tint 0: a blocked agent hidden below does not colour the fog.
+        app.sidebar_fog = [17, 7];
+        app.sidebar_fog_tint = 0;
+        set_agent_state(&mut app, 29, crate::detect::AgentState::Blocked);
+        let buffer = draw_sidebar(&mut app);
+        let last = app.view.workspace_card_areas.last().expect("card").rect;
+        assert_eq!(buffer[(last.x + last.width - 3, last.y)].style().bg, c(44));
+    }
+
+    #[test]
     fn fog_takes_a_faint_tint_of_the_urgent_hidden_state() {
         let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
         let plain = {

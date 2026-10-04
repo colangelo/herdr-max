@@ -892,6 +892,8 @@ impl App {
                 .map(crate::config::parse_color),
             sidebar_active_border: config.ui.sidebar_active_border,
             sidebar_overflow: config.ui.sidebar_overflow,
+            sidebar_fog: config.sidebar_fog().0,
+            sidebar_fog_tint: config.sidebar_fog().1,
             pane_active_bg: config
                 .ui
                 .pane_active_bg
@@ -1716,6 +1718,7 @@ impl App {
                     &config.ui.tab_bar_right,
                 ));
                 diagnostics.extend(crate::config::sidebar_style_diagnostics(&config.ui.sidebar));
+                diagnostics.extend(config.sidebar_fog_diagnostics());
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));
@@ -1843,6 +1846,7 @@ impl App {
                     .map(crate::config::parse_color);
                 self.state.sidebar_active_border = config.ui.sidebar_active_border;
                 self.state.sidebar_overflow = config.ui.sidebar_overflow;
+                (self.state.sidebar_fog, self.state.sidebar_fog_tint) = config.sidebar_fog();
                 self.state.pane_active_bg = config
                     .ui
                     .pane_active_bg
@@ -3962,6 +3966,33 @@ mod tests {
         config.ui.display_panes_ms = 1;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reload_config_applies_sidebar_fog_live_and_clamps_with_diagnostics() {
+        let mut app = test_app();
+        assert_eq!(app.state.sidebar_fog, [17, 7]);
+        assert_eq!(app.state.sidebar_fog_tint, 70);
+
+        let mut config = Config::default();
+        config.ui.sidebar_fog = vec![30, 0];
+        config.ui.sidebar_fog_tint = 20;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(app.state.sidebar_fog, [30, 0]);
+        assert_eq!(app.state.sidebar_fog_tint, 20);
+
+        // Out of range: clamped, one diagnostic each; a short list means no
+        // fog on the missing row.
+        config.ui.sidebar_fog = vec![99];
+        config.ui.sidebar_fog_tint = -5;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fog, [60, 0]);
+        assert_eq!(app.state.sidebar_fog_tint, 0);
+        let text = report.diagnostics.join("\n");
+        assert!(text.contains("ui.sidebar_fog[0] (99)"), "{text}");
+        assert!(text.contains("ui.sidebar_fog_tint (-5)"), "{text}");
     }
 
     #[test]

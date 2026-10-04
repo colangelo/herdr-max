@@ -1501,6 +1501,18 @@
           ]
         },
         {
+          "key": "ui.sidebar_fog",
+          "type": "array",
+          "default": "[17, 7]",
+          "description": "How far the `sidebar_overflow` fog lifts the two rows next to a hidden edge, in percent of the way from the background to the text colour, nearest row first. 0 to 2 entries, each clamped to 0..=60 with a diagnostic; 0 (or a missing entry) means no fog on that row. Reloads live."
+        },
+        {
+          "key": "ui.sidebar_fog_tint",
+          "type": "integer",
+          "default": "70",
+          "description": "How much of the most urgent hidden state's colour (blocked, or finished and unseen) the fog takes, 0..=100, clamped with a diagnostic. 0 keeps the fog neutral. Reloads live."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

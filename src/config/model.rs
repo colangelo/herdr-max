@@ -1459,6 +1459,14 @@ pub struct UiConfig {
     /// "both" (default), "rows" (summary rows at the edge), "fog" (a lighter
     /// background on the rows next to the edge) or "off".
     pub sidebar_overflow: SidebarOverflowConfig,
+    /// How far the fog lifts the rows next to a hidden edge, in percent of the
+    /// way from the background to the text colour, nearest row first. 0 to 2
+    /// entries, each clamped to 0..=60; 0 (or no entry) means no fog on that
+    /// row. Default: [17, 7].
+    pub sidebar_fog: Vec<i64>,
+    /// How much of the most urgent hidden state's colour the fog takes,
+    /// 0..=100 (0: a neutral lift). Default: 70.
+    pub sidebar_fog_tint: i64,
     /// Default background for the focused pane's cells (tmux
     /// `window-active-style` bg). Same syntax as `accent`. Only cells without
     /// an explicit app-painted background are tinted. Unset keeps the
@@ -1780,6 +1788,8 @@ impl Default for UiConfig {
             pane_todo_color: None,
             sidebar_active_border: SidebarActiveBorderConfig::Off,
             sidebar_overflow: SidebarOverflowConfig::default(),
+            sidebar_fog: vec![17, 7],
+            sidebar_fog_tint: 70,
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
@@ -3043,6 +3053,41 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn sidebar_fog_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.sidebar_fog, vec![17, 7]);
+        assert_eq!(config.sidebar_fog(), ([17, 7], 70));
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+
+        let config: Config =
+            toml::from_str("[ui]\nsidebar_fog = [25, 3]\nsidebar_fog_tint = 40").unwrap();
+        assert_eq!(config.sidebar_fog(), ([25, 3], 40));
+
+        // 0 entries, 1 entry: the missing rows are 0, no fog.
+        let config: Config = toml::from_str("[ui]\nsidebar_fog = []").unwrap();
+        assert_eq!(config.sidebar_fog().0, [0, 0]);
+        let config: Config = toml::from_str("[ui]\nsidebar_fog = [9]").unwrap();
+        assert_eq!(config.sidebar_fog().0, [9, 0]);
+
+        // Out of range is clamped and reported; extras are ignored and reported.
+        let config: Config =
+            toml::from_str("[ui]\nsidebar_fog = [99, -4, 5]\nsidebar_fog_tint = 400").unwrap();
+        assert_eq!(config.sidebar_fog(), ([60, 0], 100));
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec![
+                "ui.sidebar_fog has 3 entries; only the first 2 are used",
+                "ui.sidebar_fog[0] (99) is outside 0..=60; using 60",
+                "ui.sidebar_fog[1] (-4) is outside 0..=60; using 0",
+                "ui.sidebar_fog_tint (400) is outside 0..=100; using 100",
+            ]
+        );
+
+        // A wrong type is still an error.
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fog = \"strong\"").is_err());
     }
 
     #[test]

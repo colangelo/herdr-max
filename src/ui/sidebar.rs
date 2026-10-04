@@ -1189,7 +1189,13 @@ fn render_overflow(app: &AppState, frame: &mut Frame, plan: &OverflowPlan) {
             let tint = band
                 .tint
                 .map(|(state, seen)| state_label_color(state, seen, &app.state_icon_colors()));
-            let Some(bg) = overflow::fog_color(base, p.text, tint, band.level) else {
+            let Some(bg) = overflow::fog_color(
+                base,
+                p.text,
+                tint,
+                app.sidebar_fog.get(band.level).copied().unwrap_or(0),
+                app.sidebar_fog_tint,
+            ) else {
                 continue;
             };
             for y in band.rect.y..band.rect.y + band.rect.height {

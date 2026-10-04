@@ -566,6 +566,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # edge get a lighter background. "both" does both, "off" neither.
 # sidebar_overflow = "both"
 
+# How far the fog lifts the two rows next to a hidden edge, in percent of the
+# way from the background to the text colour, nearest row first. 0 to 2
+# entries, each 0..=60; 0 means no fog on that row.
+# sidebar_fog = [17, 7]
+# How much of the most urgent hidden state's colour the fog takes, 0..=100.
+# sidebar_fog_tint = 70
+
 # Background of the active space and agent rows in the sidebar (same syntax
 # as accent). Unset uses the theme's subtle highlight.
 

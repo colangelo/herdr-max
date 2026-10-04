@@ -18,14 +18,6 @@ use super::text::{display_width, truncate_end};
 use crate::agent_priority::attention_priority;
 use crate::detect::AgentState;
 
-/// The two fog levels: how far the nearest row, and the one after it, is lifted
-/// from the panel background toward the text colour.
-pub(crate) const FOG_PERCENT: [u32; 2] = [17, 7];
-
-/// How much of the most urgent hidden state's colour the fog target takes, in
-/// percent. The rest is the text colour.
-const FOG_TINT_PERCENT: u32 = 70;
-
 /// A hidden state only gets named on an edge row, and only tints the fog, when
 /// it is waiting on the user: blocked, or finished and unseen.
 const ATTENTION_FLOOR: u8 = 3;
@@ -146,7 +138,7 @@ pub(crate) struct EdgeRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OverflowPlan {
     pub rows: Vec<EdgeRow>,
-    /// Rects to lighten, each with its level into [`FOG_PERCENT`] and the
+    /// Rects to lighten, each with its row (0 is the nearest) and the
     /// state to tint it with.
     pub fog: Vec<FogBand>,
 }
@@ -209,7 +201,7 @@ pub(crate) fn plan(
                 return;
             }
             let tint = summary.urgent.map(|(state, seen, _)| (state, seen));
-            for (level, item) in near.take(FOG_PERCENT.len()).enumerate() {
+            for (level, item) in near.take(crate::config::SIDEBAR_FOG_ROWS).enumerate() {
                 if !item.exempt {
                     plan.fog.push(FogBand {
                         rect: item.rect,
@@ -241,15 +233,22 @@ pub(crate) fn lift(base: Color, target: Color, percent: u32) -> Option<Color> {
 /// The background of a fogged row: the panel background lifted toward the text
 /// colour, with a faint share of `tint` in the target when a hidden entry is
 /// waiting on the user.
+///
+/// `percent` is the row's lift and `tint_percent` the share of `tint` in the
+/// target (both from `[ui] sidebar_fog` and `sidebar_fog_tint`). A row with a
+/// `percent` of 0 gets no fog.
 pub(crate) fn fog_color(
     base: Color,
     text: Color,
     tint: Option<Color>,
-    level: usize,
+    percent: u32,
+    tint_percent: u32,
 ) -> Option<Color> {
-    let percent = *FOG_PERCENT.get(level)?;
+    if percent == 0 {
+        return None;
+    }
     let target = match tint {
-        Some(tint) => lift(text, tint, FOG_TINT_PERCENT)?,
+        Some(tint) => lift(text, tint, tint_percent)?,
         None => text,
     };
     lift(base, target, percent)
@@ -423,9 +422,15 @@ mod tests {
     fn fog_lifts_the_background_toward_the_text_colour() {
         let base = Color::Rgb(10, 10, 10);
         let text = Color::Rgb(210, 210, 210);
-        assert_eq!(fog_color(base, text, None, 0), Some(Color::Rgb(44, 44, 44)));
-        assert_eq!(fog_color(base, text, None, 1), Some(Color::Rgb(24, 24, 24)));
-        assert_eq!(fog_color(base, text, None, 2), None);
+        assert_eq!(
+            fog_color(base, text, None, 17, 70),
+            Some(Color::Rgb(44, 44, 44))
+        );
+        assert_eq!(
+            fog_color(base, text, None, 7, 70),
+            Some(Color::Rgb(24, 24, 24))
+        );
+        assert_eq!(fog_color(base, text, None, 0, 70), None, "0 is no fog");
     }
 
     #[test]
@@ -433,7 +438,7 @@ mod tests {
         let base = Color::Rgb(10, 10, 10);
         let text = Color::Rgb(200, 200, 200);
         let red = Color::Rgb(240, 100, 100);
-        let Some(Color::Rgb(r, g, b)) = fog_color(base, text, Some(red), 0) else {
+        let Some(Color::Rgb(r, g, b)) = fog_color(base, text, Some(red), 17, 70) else {
             panic!("expected an rgb fog");
         };
         assert!(r > g && r > b, "tinted toward red: {r} {g} {b}");
@@ -441,7 +446,10 @@ mod tests {
 
     #[test]
     fn fog_needs_rgb_colours() {
-        assert_eq!(fog_color(Color::Reset, Color::Rgb(1, 2, 3), None, 0), None);
+        assert_eq!(
+            fog_color(Color::Reset, Color::Rgb(1, 2, 3), None, 17, 70),
+            None
+        );
     }
 
     fn vis(index: usize, y: u16, exempt: bool) -> VisibleItem {

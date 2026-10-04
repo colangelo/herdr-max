@@ -49,6 +49,11 @@ pub(crate) use self::keybinds::parse_key_combo;
 pub use self::model::{DEFAULT_DISPLAY_PANES_MS, DEFAULT_STATUS_SPINNER_MS};
 #[cfg(test)]
 pub(crate) use self::sidebar::SidebarTokenTruncate;
+
+/// The fog colours this many rows next to a hidden edge.
+pub(crate) const SIDEBAR_FOG_ROWS: usize = 2;
+pub(crate) const SIDEBAR_FOG_MAX_PERCENT: i64 = 60;
+pub(crate) const SIDEBAR_FOG_TINT_MAX: i64 = 100;
 pub(crate) use self::{
     io::upsert_top_level_bool,
     sidebar::sidebar_style_diagnostics,
@@ -108,6 +113,7 @@ impl Config {
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
             .chain(self.display_panes_diagnostic())
+            .chain(self.sidebar_fog_diagnostics())
             .collect()
     }
 
@@ -126,6 +132,52 @@ impl Config {
                 self.server.headless_cols, self.server.headless_rows
             )
         })
+    }
+
+    /// The fog strengths in effect: the percent for the nearest and the next
+    /// row (a missing entry is 0, no fog), and the tint share. Out-of-range
+    /// values are clamped; [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fog(&self) -> ([u32; SIDEBAR_FOG_ROWS], u32) {
+        let mut percent = [0u32; SIDEBAR_FOG_ROWS];
+        for (slot, value) in percent.iter_mut().zip(&self.ui.sidebar_fog) {
+            *slot = (*value).clamp(0, SIDEBAR_FOG_MAX_PERCENT) as u32;
+        }
+        (
+            percent,
+            self.ui.sidebar_fog_tint.clamp(0, SIDEBAR_FOG_TINT_MAX) as u32,
+        )
+    }
+
+    pub(crate) fn sidebar_fog_diagnostics(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.ui.sidebar_fog.len() > SIDEBAR_FOG_ROWS {
+            out.push(format!(
+                "ui.sidebar_fog has {} entries; only the first {SIDEBAR_FOG_ROWS} are used",
+                self.ui.sidebar_fog.len()
+            ));
+        }
+        for (index, value) in self
+            .ui
+            .sidebar_fog
+            .iter()
+            .enumerate()
+            .take(SIDEBAR_FOG_ROWS)
+        {
+            if !(0..=SIDEBAR_FOG_MAX_PERCENT).contains(value) {
+                out.push(format!(
+                    "ui.sidebar_fog[{index}] ({value}) is outside 0..={SIDEBAR_FOG_MAX_PERCENT}; using {}",
+                    (*value).clamp(0, SIDEBAR_FOG_MAX_PERCENT)
+                ));
+            }
+        }
+        let tint = self.ui.sidebar_fog_tint;
+        if !(0..=SIDEBAR_FOG_TINT_MAX).contains(&tint) {
+            out.push(format!(
+                "ui.sidebar_fog_tint ({tint}) is outside 0..={SIDEBAR_FOG_TINT_MAX}; using {}",
+                tint.clamp(0, SIDEBAR_FOG_TINT_MAX)
+            ));
+        }
+        out
     }
 
     fn display_panes_diagnostic(&self) -> Option<String> {
