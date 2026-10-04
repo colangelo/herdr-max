@@ -150,25 +150,74 @@ impl SpaceSidebarToken {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawStyledSidebarToken {
     token: String,
-    #[serde(default)]
     fg: Option<SidebarTokenColor>,
-    #[serde(default)]
     bold: Option<bool>,
-    #[serde(default)]
     dim: Option<bool>,
-    #[serde(default)]
     italic: Option<bool>,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum RawSidebarToken {
     Plain(String),
     Styled(RawStyledSidebarToken),
+}
+
+/// A token is a name or a style table. Written by hand, not as an untagged
+/// enum: an untagged enum buffers the table, so one unknown key fails every
+/// variant and the error loses the key's name (fork issue 162). Here an
+/// unknown key is skipped through `IgnoredAny`, which the config loader
+/// reports by path ("unknown config key ...rows.1.2.wobble"), while a wrong
+/// value for a known key is still a hard error.
+impl<'de> Deserialize<'de> for RawSidebarToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TokenVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TokenVisitor {
+            type Value = RawSidebarToken;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a token name or a { token, fg, bold, dim, italic } table")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(RawSidebarToken::Plain(value.to_string()))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut token = None;
+                let mut style = RawStyledSidebarToken {
+                    token: String::new(),
+                    fg: None,
+                    bold: None,
+                    dim: None,
+                    italic: None,
+                };
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "token" => token = Some(map.next_value::<String>()?),
+                        "fg" => style.fg = map.next_value()?,
+                        "bold" => style.bold = map.next_value()?,
+                        "dim" => style.dim = map.next_value()?,
+                        "italic" => style.italic = map.next_value()?,
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                style.token = token.ok_or_else(|| serde::de::Error::missing_field("token"))?;
+                Ok(RawSidebarToken::Styled(style))
+            }
+        }
+
+        deserializer.deserialize_any(TokenVisitor)
+    }
 }
 
 impl RawSidebarToken {
@@ -569,6 +618,19 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
     }
 
     #[test]
+    fn an_unknown_style_key_is_skipped_and_the_known_fields_stay() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [[{ token = "workspace", underline = true, bold = true }]]
+"##,
+        )
+        .unwrap();
+        let (token, style) = config.ui.sidebar.spaces.rows[0][0].parts();
+        assert_eq!(token, &SpaceSidebarToken::Workspace);
+        assert_eq!(style.bold, Some(true));
+    }
+
+    #[test]
     fn italic_round_trips_through_serialization() {
         let config: crate::config::Config = toml::from_str(
             r##"[ui.sidebar.spaces]
@@ -589,7 +651,9 @@ rows = [[{ token = "$asks", fg = "#ffd60a", bold = true, italic = true }, { toke
         for entry in [
             r##"{ token = "workspace", fg = "red" }"##,
             r##"{ token = "workspace", fg = "#abcd" }"##,
-            r##"{ token = "workspace", underline = true }"##,
+            r##"{ token = "workspace", bold = "yes" }"##,
+            r##"{ token = "workspace", italic = 1 }"##,
+            r##"{ fg = "#abc" }"##,
         ] {
             let input = format!("[ui.sidebar.agents]\nrows = [[{entry}]]\n");
             assert!(

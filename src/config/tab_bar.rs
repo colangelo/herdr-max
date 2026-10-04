@@ -18,8 +18,8 @@ fn default_command_timeout_seconds() -> u64 {
     DEFAULT_TAB_BAR_COMMAND_TIMEOUT_SECONDS
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TabBarRightEntryConfig {
     Zoom,
     Hostname,
@@ -37,6 +37,112 @@ pub enum TabBarRightEntryConfig {
         #[serde(default = "default_command_timeout_seconds")]
         timeout_seconds: u64,
     },
+}
+
+/// Written by hand rather than as an internally tagged enum with
+/// `deny_unknown_fields` (fork issue 162): that buffers the table, so a key
+/// from a newer build fails the entry and the error loses its name. An unknown
+/// key is skipped through `IgnoredAny`, which the config loader reports by
+/// path; a key that belongs to another entry type, or a wrong value type, is
+/// still an error.
+impl<'de> Deserialize<'de> for TabBarRightEntryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EntryVisitor {
+            type Value = TabBarRightEntryConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a tab_bar_right entry table with a `type`")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                use serde::de::Error;
+                let mut kind: Option<String> = None;
+                let mut format: Option<String> = None;
+                let mut text: Option<String> = None;
+                let mut command: Option<String> = None;
+                let mut interval_seconds: Option<u64> = None;
+                let mut timeout_seconds: Option<u64> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => kind = Some(map.next_value()?),
+                        "format" => format = Some(map.next_value()?),
+                        "text" => text = Some(map.next_value()?),
+                        "command" => command = Some(map.next_value()?),
+                        "interval_seconds" => interval_seconds = Some(map.next_value()?),
+                        "timeout_seconds" => timeout_seconds = Some(map.next_value()?),
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let kind = kind.ok_or_else(|| A::Error::missing_field("type"))?;
+                let stray = |allowed: &[&str]| -> Result<(), A::Error> {
+                    let given = [
+                        ("format", format.is_some()),
+                        ("text", text.is_some()),
+                        ("command", command.is_some()),
+                        ("interval_seconds", interval_seconds.is_some()),
+                        ("timeout_seconds", timeout_seconds.is_some()),
+                    ];
+                    match given
+                        .iter()
+                        .find(|(name, present)| *present && !allowed.contains(name))
+                    {
+                        Some((name, _)) => Err(A::Error::custom(format!(
+                            "unknown field `{name}` for tab_bar_right type `{kind}`"
+                        ))),
+                        None => Ok(()),
+                    }
+                };
+                match kind.as_str() {
+                    "zoom" => {
+                        stray(&[])?;
+                        Ok(TabBarRightEntryConfig::Zoom)
+                    }
+                    "hostname" => {
+                        stray(&[])?;
+                        Ok(TabBarRightEntryConfig::Hostname)
+                    }
+                    "datetime" => {
+                        stray(&["format"])?;
+                        Ok(TabBarRightEntryConfig::Datetime {
+                            format: format.unwrap_or_else(default_datetime_format),
+                        })
+                    }
+                    "text" => {
+                        stray(&["text"])?;
+                        Ok(TabBarRightEntryConfig::Text {
+                            text: text.ok_or_else(|| A::Error::missing_field("text"))?,
+                        })
+                    }
+                    "command" => {
+                        stray(&["command", "interval_seconds", "timeout_seconds"])?;
+                        Ok(TabBarRightEntryConfig::Command {
+                            command: command.ok_or_else(|| A::Error::missing_field("command"))?,
+                            interval_seconds: interval_seconds
+                                .unwrap_or_else(default_command_interval_seconds),
+                            timeout_seconds: timeout_seconds
+                                .unwrap_or_else(default_command_timeout_seconds),
+                        })
+                    }
+                    other => Err(A::Error::unknown_variant(
+                        other,
+                        &["zoom", "hostname", "datetime", "text", "command"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(EntryVisitor)
+    }
 }
 
 pub(crate) fn parse_tab_bar_datetime_format(

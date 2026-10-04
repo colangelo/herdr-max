@@ -1375,4 +1375,138 @@ mouse_capture = false
         assert!(!removed);
         assert_eq!(updated, content);
     }
+
+    /// The beta-133 italic case (fork issue 162): a sidebar token style with a
+    /// key this build does not know. It used to fail the whole parse, because
+    /// `RawSidebarToken` is untagged and the error lost the key.
+    const UNKNOWN_STYLE_KEY_CONFIG: &str = r##"
+[theme.custom]
+accent = "#112233"
+
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "branch", dim = false }, "git_status", { token = "$asks", fg = "#FFD60A", bold = true, wobble = true }],
+]
+"##;
+
+    fn startup_load(content: &str, tag: &str) -> LoadedConfig {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("herdr-config-{tag}-{}.toml", std::process::id()));
+        std::fs::write(&path, content).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+        let loaded = Config::load();
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+        loaded
+    }
+
+    fn assert_unknown_style_key_is_forgiven(loaded: &LoadedConfig) {
+        assert_eq!(
+            loaded.diagnostics.len(),
+            1,
+            "exactly one diagnostic: {:?}",
+            loaded.diagnostics
+        );
+        let diagnostic = &loaded.diagnostics[0];
+        assert!(diagnostic.contains("wobble"), "names the key: {diagnostic}");
+        assert!(
+            diagnostic.contains("ui.sidebar.spaces.rows"),
+            "names the row: {diagnostic}"
+        );
+        // The rest of the config applies.
+        assert!(!loaded.config.ui.mouse_capture);
+        assert!(loaded.config.theme.custom.is_some());
+        // Both rows survive, and the token keeps its known fields.
+        let rows = &loaded.config.ui.sidebar.spaces.rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let (token, style) = rows[1][2].parts();
+        assert_eq!(
+            token,
+            &crate::config::SpaceSidebarToken::Custom("asks".into())
+        );
+        assert_eq!(style.bold, Some(true));
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn startup_forgives_an_unknown_sidebar_token_style_key() {
+        let loaded = startup_load(UNKNOWN_STYLE_KEY_CONFIG, "unknown-style-key");
+        assert_unknown_style_key_is_forgiven(&loaded);
+    }
+
+    #[test]
+    fn reload_forgives_an_unknown_sidebar_token_style_key() {
+        let loaded = load_live_config_from_str(UNKNOWN_STYLE_KEY_CONFIG).unwrap();
+        assert_unknown_style_key_is_forgiven(&loaded);
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_value_type_in_a_known_style_key_is_still_reported() {
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace"],
+  [{ token = "$asks", bold = "yes" }],
+]
+"##;
+        for loaded in [
+            startup_load(content, "bad-style-type"),
+            load_live_config_from_str(content).unwrap(),
+        ] {
+            assert!(
+                loaded
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("bold") || diagnostic.contains("invalid")),
+                "reported, not silently dropped: {:?}",
+                loaded.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_tab_bar_right_key_is_forgiven_with_one_diagnostic() {
+        let content = r##"
+[ui]
+mouse_capture = false
+tab_bar_right = [
+  { type = "text", text = "hi", wobble = 1 },
+  { type = "zoom" },
+]
+"##;
+        for loaded in [
+            startup_load(content, "tab-bar-unknown"),
+            load_live_config_from_str(content).unwrap(),
+        ] {
+            assert_eq!(
+                loaded.diagnostics,
+                vec!["unknown config key ui.tab_bar_right.0.wobble; ignoring key"]
+            );
+            assert!(!loaded.config.ui.mouse_capture);
+            assert_eq!(loaded.config.ui.tab_bar_right.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_key_for_another_tab_bar_right_type_is_still_an_error() {
+        let content = "[ui]\ntab_bar_right = [{ type = \"zoom\", text = \"x\" }]\n";
+        let loaded = startup_load(content, "tab-bar-stray");
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("unknown field `text`")),
+            "{:?}",
+            loaded.diagnostics
+        );
+    }
 }
