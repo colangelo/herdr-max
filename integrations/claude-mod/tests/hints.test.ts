@@ -134,6 +134,22 @@ test('an open question is repeated every five seconds with a rising seq, and the
   expect(runs.every((run) => call(run).kind === 'question' && call(run).id === 'toolu_h1')).toBe(true)
 })
 
+test('a second session.start does not stack a second heartbeat timer', async ($, on) => {
+  const { runs, clock, engine } = harness(on)
+  await startSession($)
+  await startSession($)
+  await startSession($)
+  openQuestion($, engine, 'toolu_h2')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+
+  // One timer: one repeat per five seconds, not one per session.start.
+  await clock.advance(5000)
+  expect(runs.length).toBe(2)
+  await clock.advance(5000)
+  expect(runs.length).toBe(3)
+})
+
 test('the heartbeat sends nothing while nothing is open', async ($, on) => {
   const { runs, clock } = harness(on)
   await startSession($)

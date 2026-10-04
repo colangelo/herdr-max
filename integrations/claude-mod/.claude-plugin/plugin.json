@@ -1,6 +1,6 @@
 {
   "name": "herdr-attention",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Tells herdr when Claude Code waits on an AskUserQuestion dialog or a permission prompt, and when it stopped waiting (fork issues 137 and 157)",
   "author": {
     "name": "AC-forks/herdr-max"

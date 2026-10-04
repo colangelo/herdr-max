@@ -128,8 +128,16 @@ async function beat($) {
   queue = queue.then(() => send($, oldest[1].kind, oldest[0]))
 }
 
+// One heartbeat timer for the whole module load. `session.start` fires again
+// on /clear and /resume, and a timer per start would stack: every open
+// question would be sent N times every five seconds.
+let heartbeatStarted = false
+
 async function onSessionStart($, e, next) {
-  $.clock.every(HEARTBEAT_MS, () => beat($))
+  if (!heartbeatStarted) {
+    heartbeatStarted = true
+    $.clock.every(HEARTBEAT_MS, () => beat($))
+  }
   return next(e)
 }
 
