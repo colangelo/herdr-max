@@ -240,6 +240,11 @@ impl AppState {
             (KeyCode::Char('j'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 self.scroll_copy_mode_viewport_line(terminal_runtimes, 1)
             }
+            (KeyCode::Char('g'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                // Same as `G`; returns so the plain `g` arm below cannot also run.
+                self.copy_mode_history_bottom(terminal_runtimes);
+                return;
+            }
             _ => {}
         }
 
@@ -1316,6 +1321,29 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::Copy);
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), expected_lines);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_ctrl_g_jumps_to_the_bottom_like_capital_g() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert!(copy_mode_offset_from_bottom(&app, pane_id) > 0);
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+        let after_ctrl_g = app.state.copy_mode.as_ref().expect("copy mode").cursor_row;
+
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
+        assert_eq!(
+            app.state.copy_mode.as_ref().expect("copy mode").cursor_row,
+            after_ctrl_g
+        );
     }
 
     #[tokio::test]
