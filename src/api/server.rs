@@ -441,6 +441,9 @@ fn handle_request(
                 protocol: crate::protocol::PROTOCOL_VERSION,
                 capabilities,
                 hostname: crate::platform::short_hostname(),
+                exe: std::env::current_exe()
+                    .ok()
+                    .map(|path| path.display().to_string()),
             },
         })
         .unwrap_or_else(|_| {

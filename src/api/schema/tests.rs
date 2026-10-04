@@ -849,6 +849,7 @@ fn success_response_round_trips() {
                 detached_server_daemon: true,
             }),
             hostname: Some("mbm5".into()),
+            exe: Some("/opt/homebrew/Cellar/herdr-beta/0.1.2/bin/herdr-beta".into()),
         },
     };
 

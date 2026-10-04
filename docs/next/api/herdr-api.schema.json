@@ -9831,6 +9831,13 @@
                   ],
                   "default": null
                 },
+                "exe": {
+                  "description": "Path of the binary the server runs, so an attached client left on\nan older build can re-exec onto it after a live update. Absent when\nthe OS lookup fails or on an older server.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "hostname": {
                   "description": "Short host name of the machine running the server. Absent when the\nOS lookup fails.",
                   "type": [

@@ -51,6 +51,11 @@ pub enum ResponseResult {
         /// OS lookup fails.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hostname: Option<String>,
+        /// Path of the binary the server runs, so an attached client left on
+        /// an older build can re-exec onto it after a live update. Absent when
+        /// the OS lookup fails or on an older server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exe: Option<String>,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,

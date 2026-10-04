@@ -15,6 +15,7 @@
 #[cfg(unix)]
 mod direct_graphics;
 mod input;
+mod reexec;
 
 use std::collections::HashSet;
 #[cfg(unix)]
@@ -960,8 +961,83 @@ pub fn run_client() -> io::Result<()> {
                     );
                     std::process::exit(1);
                 }
+                reexec_onto_server_build();
             }
         }
+    }
+}
+
+/// After a live update, replace this client with the server's binary when the
+/// builds differ (fork issue 165): a client left on an old build parses
+/// `config.toml` with an old schema and runs on default client-side settings.
+/// The terminal is already restored (the session ended), argv, environment and
+/// tty carry over through `exec`. When that is not possible the client keeps
+/// running, says so once, and tells the user how to update it.
+fn reexec_onto_server_build() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let Some(status) = read_server_status_after_handoff() else {
+        return;
+    };
+    let client_version = crate::build_info::version();
+    let already = std::env::var_os(reexec::REEXEC_ENV_VAR).is_some();
+    let build = match reexec::decide(&client_version, status.version.as_deref(), already) {
+        reexec::ReexecDecision::Stay => return,
+        reexec::ReexecDecision::Reexec(build) => build,
+    };
+    let server_version = status.version.clone().unwrap_or_default();
+    let target = std::env::current_exe()
+        .ok()
+        .and_then(|own| reexec::target_binary(status.exe.as_deref(), &own, |path| path.exists()));
+    #[cfg(unix)]
+    if let Some(target) = target {
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        let plan = reexec::plan(target, &argv);
+        eprintln!(
+            "herdr: the client ({client_version}) is {} than the server ({server_version}); restarting it onto {}",
+            if build == reexec::ClientBuild::Newer { "newer" } else { "older" },
+            plan.program.display()
+        );
+        use std::os::unix::process::CommandExt as _;
+        // `exec` returns only when it failed.
+        let err = plan.command(&server_version).exec();
+        warn!(error = %err, program = %plan.program.display(), "client re-exec onto the server build failed");
+    }
+    if !WARNED.swap(true, Ordering::AcqRel) {
+        warn!(
+            client = %client_version,
+            server = %server_version,
+            "client is older than the server and could not re-exec"
+        );
+        eprintln!(
+            "herdr: the client ({client_version}) is older than the server ({server_version}); detach and reattach to update"
+        );
+        let toast = crate::api::schema::NotificationShowParams {
+            title: "client is older than the server".into(),
+            body: Some("detach and reattach to update".into()),
+            position: None,
+            sound: crate::api::schema::NotificationShowSound::None,
+        };
+        let _ = crate::api::client::ApiClient::local().request(crate::api::schema::Request {
+            id: "client:reexec-toast".into(),
+            method: crate::api::schema::Method::NotificationShow(toast),
+        });
+    }
+}
+
+/// The new server's version and binary, once its API socket answers (it can
+/// lag the client socket by a moment after a handoff).
+fn read_server_status_after_handoff() -> Option<crate::api::RuntimeStatus> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(Some(status)) =
+            crate::api::read_runtime_status_at(&crate::api::socket_path(), Duration::from_secs(1))
+        {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 
