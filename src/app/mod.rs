@@ -775,6 +775,7 @@ impl App {
             outer_terminal_focus: None,
             prefix_code,
             prefix_mods,
+            extra_prefixes: config.extra_prefix_keys(),
             headless_size: config.headless_size(),
             detached_pane_size: None,
             last_client_size: restored_last_client_size,
@@ -1694,6 +1695,7 @@ impl App {
                 Ok((live, keybind_diagnostics)) => {
                     self.state.prefix_code = live.prefix.0;
                     self.state.prefix_mods = live.prefix.1;
+                    self.state.extra_prefixes = live.extra_prefixes;
                     self.state.keybinds = live.keybinds;
                     diagnostics.extend(keybind_diagnostics);
                 }
@@ -3973,6 +3975,77 @@ mod tests {
         config.ui.display_panes_ms = 1;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn every_listed_prefix_enters_prefix_mode_in_every_mode() {
+        // ctrl+a primary, ctrl+; extra: the kitty CSI u form of ctrl+; and the
+        // legacy byte of ctrl+a both open prefix mode, and a prefix+X binding
+        // works after either (fork issue 169).
+        let semicolon: &[u8] = b"\x1b[59;5u";
+        let primary: &[u8] = b"\x01";
+        for (name, first) in [("primary", primary), ("extra", semicolon)] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("test")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.prefix_code = KeyCode::Char('a');
+            app.state.prefix_mods = KeyModifiers::CONTROL;
+            app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+            app.state.mode = Mode::Terminal;
+
+            app.route_client_input(first.to_vec());
+            assert_eq!(app.state.mode, Mode::Prefix, "{name}: terminal mode");
+            // prefix+? is the default help binding.
+            app.route_client_input(b"?".to_vec());
+            assert_eq!(app.state.mode, Mode::KeybindHelp, "{name}: a binding");
+        }
+        // Copy mode: a listed prefix opens prefix mode too.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Copy;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Prefix, "copy mode");
+        // In navigate mode a listed prefix leaves it, like the primary.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Navigate;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        // Pressing the extra prefix inside prefix mode sends it on to the pane
+        // and leaves prefix mode, like pressing the primary twice.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Prefix;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn reload_config_applies_a_prefix_list_live_and_drops_it_on_a_plain_string() {
+        let mut app = test_app();
+        assert!(app.state.extra_prefixes.is_empty());
+        let mut config = crate::config::Config::default();
+        config.keys.prefix =
+            crate::config::BindingConfig::Many(vec!["ctrl+s".to_string(), "ctrl+;".to_string()]);
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.prefix_code, KeyCode::Char('s'));
+        assert_eq!(
+            app.state.extra_prefixes,
+            vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)]
+        );
+        assert_eq!(app.state.prefix_label(), "ctrl+s / ctrl+;");
+        config.keys.prefix = crate::config::BindingConfig::one("ctrl+a");
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
+        assert!(app.state.extra_prefixes.is_empty());
+        assert_eq!(app.state.prefix_label(), "ctrl+a");
     }
 
     #[test]

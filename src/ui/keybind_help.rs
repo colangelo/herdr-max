@@ -162,10 +162,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
 
-    let mut global = vec![help_entry(
-        crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
-        "prefix mode",
-    )];
+    let mut global = vec![help_entry(app.prefix_label(), "prefix mode")];
     global.extend(overlay_entries(OverlayKind::KeybindHelp, kb));
     global.extend(overlay_entries(OverlayKind::Settings, kb));
     global.extend([

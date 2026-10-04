@@ -144,6 +144,17 @@ Every binding is configurable, including the prefix itself:
 prefix = "ctrl+a"
 ```
 
+### A second prefix
+
+`prefix` also takes a list, so each hand can have a prefix. Any listed key enters prefix mode, and every `prefix+X` binding works after any of them. The first entry is the primary one, shown in the help panel and the prefix bar; the help panel lists them all.
+
+```toml
+[keys]
+prefix = ["ctrl+s", "ctrl+;"]
+```
+
+`ctrl+;` only reaches Herdr through the kitty keyboard protocol, which Ghostty, kitty, WezTerm and recent iTerm2 speak. In a legacy terminal it is a no-op, so keep a letter prefix first. Avoid `ctrl+/`: a legacy terminal sends it as `ctrl+_`, which a shell uses for undo. Either spelling works for punctuation, `ctrl+;` or `ctrl+semicolon`. Binding `prefix+X` to one of the listed prefix keys is rejected, since pressing a prefix inside prefix mode sends it on to the pane. `herdr server reload-config` applies a changed list live.
+
 ## Going prefix-free
 
 You can bind Herdr actions to direct chords that need no prefix at all. The hard part is knowing which chords are safe, because terminals, shells, and desktop environments already own most of the keyboard.

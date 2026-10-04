@@ -136,6 +136,8 @@ For a guided introduction to the prefix and a vetted prefix-free setup, see [Key
 
 Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
 
+`prefix` may also be a list of keys, such as `prefix = ["ctrl+b", "ctrl+;"]`: any of them enters prefix mode, and every `prefix+X` binding works after any of them. See [Keyboard](/docs/keyboard/) for the details and the terminals that can send `ctrl+;`.
+
 A small keybinding override looks like this:
 
 ```toml

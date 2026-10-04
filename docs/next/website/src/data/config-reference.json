@@ -477,9 +477,9 @@
       "keys": [
         {
           "key": "keys.prefix",
-          "type": "string",
+          "type": "keybinding",
           "default": "\"ctrl+b\"",
-          "description": "Prefix key to enter prefix mode (e.g. \"ctrl+b\", \"f12\", \"esc\")."
+          "description": "Prefix key to enter prefix mode (e.g. \"ctrl+b\", \"f12\", \"esc\"), or a list of them (e.g. [\"ctrl+s\", \"ctrl+;\"]): any listed key enters prefix mode and every `prefix+X` binding works after any of them. The first is the primary one shown in the prefix bar. `ctrl+;` needs the kitty keyboard protocol. Reloads live."
         },
         {
           "key": "keys.help",

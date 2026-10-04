@@ -678,8 +678,11 @@ pub struct LoadedConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KeysConfig {
-    /// Prefix key to enter prefix mode (e.g. "ctrl+b", "f12", "esc").
-    pub prefix: String,
+    /// Prefix key to enter prefix mode (e.g. "ctrl+b", "f12", "esc"), or a
+    /// list of them (`["ctrl+s", "ctrl+;"]`): any listed key enters prefix
+    /// mode and every `prefix+X` binding works after any of them. The first
+    /// is the primary prefix (help, the prefix bar).
+    pub prefix: BindingConfig,
     /// Open keybinding help. Default: "prefix+?"
     pub help: BindingConfig,
     /// Open settings. Default: "prefix+s"
@@ -857,7 +860,7 @@ pub struct KeysConfig {
 #[serde(default)]
 pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
-    prefix: Option<String>,
+    prefix: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     help: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1675,7 +1678,7 @@ pub struct ExperimentalConfig {
 impl Default for KeysConfig {
     fn default() -> Self {
         Self {
-            prefix: "ctrl+b".into(),
+            prefix: BindingConfig::one("ctrl+b"),
             help: BindingConfig::one("prefix+?"),
             settings: BindingConfig::one("prefix+s"),
             new_workspace: BindingConfig::one("prefix+shift+n"),

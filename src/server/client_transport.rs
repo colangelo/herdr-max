@@ -420,6 +420,7 @@ fn parse_client_keybindings(
             config.keys.command.clear();
             Ok(Some(Box::new(crate::config::LiveKeybindConfig {
                 prefix: config.prefix_key(),
+                extra_prefixes: config.extra_prefix_keys(),
                 keybinds: config.keybinds(),
             })))
         }

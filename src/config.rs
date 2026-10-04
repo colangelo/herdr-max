@@ -95,6 +95,12 @@ impl Config {
         self.validated_keybinds().1
     }
 
+    /// The keys after the primary one that also enter prefix mode
+    /// (`keys.prefix` given as a list).
+    pub fn extra_prefix_keys(&self) -> Vec<(KeyCode, KeyModifiers)> {
+        self.parsed_prefixes().0.into_iter().skip(1).collect()
+    }
+
     /// Parsed keybinds for Herdr actions.
     pub fn keybinds(&self) -> Keybinds {
         self.validated_keybinds().3
@@ -288,7 +294,14 @@ impl Config {
         if let Some(prefix_diag) = prefix_diag {
             Err(std::iter::once(prefix_diag).chain(keybind_diags).collect())
         } else {
-            Ok((LiveKeybindConfig { prefix, keybinds }, keybind_diags))
+            Ok((
+                LiveKeybindConfig {
+                    prefix,
+                    extra_prefixes: self.extra_prefix_keys(),
+                    keybinds,
+                },
+                keybind_diags,
+            ))
         }
     }
 

@@ -2813,6 +2813,8 @@ pub struct AppState {
     // Config
     pub prefix_code: KeyCode,
     pub prefix_mods: KeyModifiers,
+    /// Further keys that also enter prefix mode (`keys.prefix` as a list).
+    pub extra_prefixes: Vec<(KeyCode, KeyModifiers)>,
     /// Virtual terminal size (columns, rows) used when no client is attached.
     pub(crate) headless_size: (u16, u16),
     /// The size, (cols, rows), a server with no client attached lays new
@@ -3737,8 +3739,22 @@ impl AppState {
             || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
     }
 
+    /// Any configured prefix key: the primary one or one listed after it.
     pub fn is_prefix_key(&self, key: &crate::input::TerminalKey) -> bool {
         crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
+            || self
+                .extra_prefixes
+                .iter()
+                .any(|combo| crate::config::terminal_key_matches_combo(key, *combo))
+    }
+
+    /// Every prefix key as help text, primary first ("ctrl+s / ctrl+;").
+    pub fn prefix_label(&self) -> String {
+        std::iter::once((self.prefix_code, self.prefix_mods))
+            .chain(self.extra_prefixes.iter().copied())
+            .map(crate::config::format_key_combo)
+            .collect::<Vec<_>>()
+            .join(" / ")
     }
 
     /// The size, (cols, rows), panes are laid out at while no client is
@@ -3966,6 +3982,7 @@ impl AppState {
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
             prefix_mods: KeyModifiers::CONTROL,
+            extra_prefixes: Vec::new(),
             headless_size: (
                 crate::config::DEFAULT_HEADLESS_COLS,
                 crate::config::DEFAULT_HEADLESS_ROWS,

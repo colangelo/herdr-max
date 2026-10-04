@@ -362,6 +362,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_extra_listed_prefix_leaves_the_passthrough_mode_for_prefix_mode() {
+        let (mut app, _pane_id, mut rx) = app_with_alt_screen_pane();
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        prefix_gesture(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
+        drain(&mut rx);
+        assert_eq!(app.state.mode, Mode::AppScroll);
+
+        press(&mut app, KeyCode::Char(';'), KeyModifiers::CONTROL).await;
+
+        assert_eq!(app.state.mode, Mode::Prefix);
+        assert!(drain(&mut rx).is_empty(), "the prefix key stays in herdr");
+    }
+
+    #[tokio::test]
     async fn passthrough_ctrl_g_jumps_to_the_bottom_like_capital_g() {
         let (mut app, pane_id, mut rx) = app_with_alt_screen_pane();
         prefix_gesture(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;

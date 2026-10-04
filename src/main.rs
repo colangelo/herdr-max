@@ -184,6 +184,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Most reliable direct bindings are ctrl+letter, function keys, and explicit modified chords.
 # alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
+# A list gives more than one prefix, for example one for each hand: any listed
+# key enters prefix mode and every "prefix+X" binding works after any of them.
+# The first is the primary one shown in help. "ctrl+;" only arrives through the
+# kitty keyboard protocol (Ghostty, kitty, WezTerm, recent iTerm2); avoid
+# "ctrl+/", which a legacy terminal sends as ctrl+_ (the shell's undo).
+# prefix = ["ctrl+b", "ctrl+;"]
 
 # Prefix-mode actions
 # help = "prefix+?"
