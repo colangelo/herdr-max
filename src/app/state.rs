@@ -2954,6 +2954,7 @@ pub struct AppState {
     /// Highlight pattern for the active space and agent in the sidebar,
     /// styled like the active pane border.
     pub sidebar_active_border: crate::config::SidebarActiveBorderConfig,
+    pub sidebar_overflow: crate::config::SidebarOverflowConfig,
     /// Default background for the focused pane's cells; None keeps the
     /// terminal default. Only default-background cells are tinted.
     pub pane_active_bg: Option<Color>,
@@ -4050,6 +4051,7 @@ impl AppState {
             pane_title_inactive_color: None,
             pane_todo_color: None,
             sidebar_active_border: crate::config::SidebarActiveBorderConfig::Off,
+            sidebar_overflow: crate::config::SidebarOverflowConfig::default(),
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,

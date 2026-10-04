@@ -558,6 +558,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # (a vertical bar on that edge). Booleans still work: true = "both".
 # sidebar_active_border = "off"
 
+# Show what is scrolled out of view in the spaces list and the agent panel.
+# "rows": a summary row at the edge ("↑ 2 pinned · 3 more", "↓ 5 more ·
+# ● 1 blocked"); click it to scroll a page. "fog": the two rows next to the
+# edge get a lighter background. "both" does both, "off" neither.
+# sidebar_overflow = "both"
+
 # Background of the active space and agent rows in the sidebar (same syntax
 # as accent). Unset uses the theme's subtle highlight.
 
@@ -1214,6 +1220,22 @@ mod tests {
     /// disjoint from `KeysConfig`, so it drifts every time a keybinding action
     /// is added. Guard against that: every `pub <field>: BindingConfig` action
     /// in the struct must be documented as a `[keys]` entry in DEFAULT_CONFIG.
+    #[test]
+    fn default_config_documents_sidebar_overflow() {
+        assert!(DEFAULT_CONFIG.contains("# sidebar_overflow = \"both\""));
+        // Uncommented, the documented line parses to the default.
+        let toml = DEFAULT_CONFIG
+            .lines()
+            .find_map(|line| line.strip_prefix("# sidebar_overflow = "))
+            .expect("template line");
+        let config: crate::config::Config =
+            toml::from_str(&format!("[ui]\nsidebar_overflow = {toml}")).unwrap();
+        assert_eq!(
+            config.ui.sidebar_overflow,
+            crate::config::SidebarOverflowConfig::Both
+        );
+    }
+
     #[test]
     fn default_config_documents_every_binding_action() {
         // Compile-time copy of the struct source so the check tracks the real fields.

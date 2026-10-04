@@ -891,6 +891,7 @@ impl App {
                 .as_deref()
                 .map(crate::config::parse_color),
             sidebar_active_border: config.ui.sidebar_active_border,
+            sidebar_overflow: config.ui.sidebar_overflow,
             pane_active_bg: config
                 .ui
                 .pane_active_bg
@@ -1840,6 +1841,7 @@ impl App {
                     .as_deref()
                     .map(crate::config::parse_color);
                 self.state.sidebar_active_border = config.ui.sidebar_active_border;
+                self.state.sidebar_overflow = config.ui.sidebar_overflow;
                 self.state.pane_active_bg = config
                     .ui
                     .pane_active_bg

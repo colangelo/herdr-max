@@ -20,6 +20,8 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+mod sidebar_overflow;
+pub(crate) use sidebar_overflow::Edge as SidebarEdge;
 mod status;
 mod tab_surface;
 mod tabs;
@@ -115,12 +117,13 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
-        agent_panel_motion_active, agent_panel_scroll_for_target, agent_panel_scroll_metrics,
-        agent_panel_scrollbar_rect, agent_panel_target_keys, agent_panel_toggle_rect,
-        all_agent_panel_entries, collapsed_sidebar_sections, collapsed_sidebar_toggle_rect,
-        compute_workspace_card_areas, expanded_sidebar_sections, expanded_sidebar_toggle_rect,
-        normalized_workspace_scroll, sidebar_section_divider_rect, workspace_drop_slots,
+        agent_edge_rows, agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect,
+        agent_panel_entries, agent_panel_motion_active, agent_panel_scroll_for_target,
+        agent_panel_scroll_metrics, agent_panel_scrollbar_rect, agent_panel_target_keys,
+        agent_panel_toggle_rect, agent_panel_window, all_agent_panel_entries,
+        collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_workspace_card_areas,
+        expanded_sidebar_sections, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
+        sidebar_section_divider_rect, workspace_drop_slots, workspace_edge_rows,
         workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
         workspace_motion_active, workspace_parent_group_state, workspace_unit_target_keys,
@@ -913,6 +916,272 @@ mod tests {
         assert!(app.agent_panel_follow_active);
         assert!(app.workspace_scroll > 0);
         assert!(app.agent_panel_scroll > 0);
+    }
+
+    // --- sidebar overflow hints (fork issue 159) ---
+
+    fn overflow_app(mode: crate::config::SidebarOverflowConfig) -> crate::app::state::AppState {
+        let mut app = sidebar_focus_test_app(30);
+        app.sidebar_overflow = mode;
+        app.palette.sidebar_bg = ratatui::style::Color::Rgb(10, 10, 10);
+        app.palette.text = ratatui::style::Color::Rgb(210, 210, 210);
+        // Scrolled to the middle of both lists, the follow off, so the active
+        // space (0) is out of view. One pass first lets the follow settle on
+        // the active space, so it does not re-engage on the next one.
+        compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        app.workspace_list_follow_active = false;
+        app.agent_panel_follow_active = false;
+        app.workspace_scroll = 5;
+        app.agent_panel_scroll = 5;
+        app
+    }
+
+    fn draw_sidebar(app: &mut crate::app::state::AppState) -> ratatui::buffer::Buffer {
+        let area = Rect::new(0, 0, 80, 24);
+        compute_view(app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_string(buffer: &ratatui::buffer::Buffer, rect: Rect) -> String {
+        (rect.x..rect.x + rect.width)
+            .map(|x| buffer[(x, rect.y)].symbol().to_string())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn spaces_body(app: &crate::app::state::AppState) -> Rect {
+        let area = workspace_list_rect(app.view.sidebar_rect, app.sidebar_section_split);
+        super::sidebar::workspace_list_body_rect(area, true)
+    }
+
+    fn agents_body(app: &crate::app::state::AppState) -> Rect {
+        let (_, area) = expanded_sidebar_sections(app.view.sidebar_rect, app.sidebar_section_split);
+        agent_panel_body_rect(area, true)
+    }
+
+    fn first_row(body: Rect) -> Rect {
+        Rect::new(body.x, body.y, body.width, 1)
+    }
+
+    fn last_row(body: Rect) -> Rect {
+        Rect::new(body.x, body.y + body.height - 1, body.width, 1)
+    }
+
+    #[test]
+    fn edge_rows_summarise_what_is_hidden_in_both_panels() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Rows);
+        for ws_idx in [0usize, 1] {
+            app.workspaces[ws_idx].pin_order = Some(ws_idx as u64 + 1);
+        }
+        set_agent_state(&mut app, 28, crate::detect::AgentState::Blocked);
+        let buffer = draw_sidebar(&mut app);
+
+        let body = spaces_body(&app);
+        assert_eq!(
+            row_string(&buffer, first_row(body)),
+            " ↑↑ 2 pinned · 3 more"
+        );
+        // The pin arrows keep their own colours.
+        assert_eq!(
+            buffer[(1, body.y)].style().fg,
+            Some(super::sidebar::pin_marker_color(0))
+        );
+        assert_eq!(
+            buffer[(2, body.y)].style().fg,
+            Some(super::sidebar::pin_marker_color(1))
+        );
+        let below = row_string(&buffer, last_row(body));
+        assert!(below.starts_with(" ↓ "), "{below:?}");
+        assert!(below.ends_with("1 blocked"), "{below:?}");
+        let dot_x = below.chars().position(|c| c == '●').expect("a dot") as u16;
+        assert_eq!(
+            buffer[(body.x + dot_x, body.y + body.height - 1)]
+                .style()
+                .fg,
+            Some(app.palette.red)
+        );
+
+        let agents = agents_body(&app);
+        let above = row_string(&buffer, first_row(agents));
+        assert!(above.starts_with(" ↑ "), "{above:?}");
+        assert!(above.ends_with("more"), "{above:?}");
+        let below = row_string(&buffer, last_row(agents));
+        assert!(below.starts_with(" ↓ "), "{below:?}");
+        assert!(below.ends_with("1 blocked"), "{below:?}");
+    }
+
+    #[test]
+    fn edge_rows_are_absent_at_the_ends_and_when_everything_fits() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Rows);
+        app.workspace_scroll = 0;
+        app.agent_panel_scroll = 0;
+        let buffer = draw_sidebar(&mut app);
+        let body = spaces_body(&app);
+        // At the top: no top row, the first card is where it always was.
+        assert_eq!(app.view.workspace_card_areas[0].rect.y, body.y);
+        assert!(row_string(&buffer, last_row(body)).starts_with(" ↓ "));
+
+        app.workspace_scroll = usize::MAX;
+        let buffer = draw_sidebar(&mut app);
+        let body = spaces_body(&app);
+        assert!(row_string(&buffer, first_row(body)).starts_with(" ↑ "));
+        let last_card = app.view.workspace_card_areas.last().expect("a card");
+        assert_eq!(last_card.ws_idx, 29);
+        assert!(!row_string(&buffer, last_row(body)).contains('↓'));
+
+        // Few spaces: nothing is hidden, so no edge row and no reserved row.
+        let mut app = sidebar_focus_test_app(2);
+        app.sidebar_overflow = crate::config::SidebarOverflowConfig::Both;
+        let buffer = draw_sidebar(&mut app);
+        let body = spaces_body(&app);
+        assert_eq!(app.view.workspace_card_areas[0].rect.y, body.y);
+        let text: String = (0..body.height)
+            .map(|dy| row_string(&buffer, Rect::new(body.x, body.y + dy, body.width, 1)))
+            .collect();
+        assert!(!text.contains('↑') && !text.contains('↓'), "{text:?}");
+    }
+
+    #[test]
+    fn edge_rows_take_a_row_from_the_window_and_the_active_space_is_never_covered() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Off);
+        let plain = {
+            draw_sidebar(&mut app);
+            app.view.workspace_card_areas.len()
+        };
+        app.sidebar_overflow = crate::config::SidebarOverflowConfig::Rows;
+        draw_sidebar(&mut app);
+        assert!(app.view.workspace_card_areas.len() < plain);
+        let body = spaces_body(&app);
+        assert_eq!(app.view.workspace_card_areas[0].rect.y, body.y + 1);
+
+        // The active space, followed into view, is a card, not an edge row.
+        app.workspace_scroll = 0;
+        app.workspace_list_follow_active = true;
+        app.active = Some(29);
+        app.selected = 29;
+        draw_sidebar(&mut app);
+        assert!(app
+            .view
+            .workspace_card_areas
+            .iter()
+            .any(|card| card.ws_idx == 29));
+        assert!(app.workspace_scroll > 0);
+    }
+
+    #[test]
+    fn fog_lifts_the_two_rows_next_to_each_hidden_edge() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        let buffer = draw_sidebar(&mut app);
+        let bg = |rect: Rect| buffer[(rect.x + rect.width - 3, rect.y)].style().bg;
+        let cards = &app.view.workspace_card_areas;
+        // Without edge rows the window is the plain one: the first card is at
+        // the top of the body.
+        assert_eq!(cards[0].rect.y, spaces_body(&app).y);
+        assert_eq!(
+            bg(cards[0].rect),
+            Some(ratatui::style::Color::Rgb(34, 34, 34))
+        );
+        assert_eq!(
+            bg(cards[1].rect),
+            Some(ratatui::style::Color::Rgb(22, 22, 22))
+        );
+        let n = cards.len();
+        assert_eq!(
+            bg(cards[n - 1].rect),
+            Some(ratatui::style::Color::Rgb(34, 34, 34))
+        );
+        assert_eq!(
+            bg(cards[n - 2].rect),
+            Some(ratatui::style::Color::Rgb(22, 22, 22))
+        );
+        // The middle is untouched, and the text keeps its own colour.
+        assert_ne!(
+            bg(cards[n / 2].rect),
+            Some(ratatui::style::Color::Rgb(34, 34, 34))
+        );
+        let name_cell = &buffer[(cards[0].rect.x + 3, cards[0].rect.y)];
+        assert_eq!(name_cell.style().fg, Some(app.palette.subtext0));
+        // No summary text in fog mode.
+        let text: String = (0..spaces_body(&app).height)
+            .map(|dy| row_string(&buffer, Rect::new(0, spaces_body(&app).y + dy, 30, 1)))
+            .collect();
+        assert!(!text.contains('↑') && !text.contains('↓'), "{text:?}");
+    }
+
+    #[test]
+    fn fog_takes_a_faint_tint_of_the_urgent_hidden_state() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        let plain = {
+            let buffer = draw_sidebar(&mut app);
+            let last = app.view.workspace_card_areas.last().expect("card").rect;
+            buffer[(last.x + last.width - 3, last.y)].style().bg
+        };
+        set_agent_state(&mut app, 29, crate::detect::AgentState::Blocked);
+        let buffer = draw_sidebar(&mut app);
+        let last = app.view.workspace_card_areas.last().expect("card").rect;
+        let tinted = buffer[(last.x + last.width - 3, last.y)].style().bg;
+        assert_ne!(plain, tinted);
+        let Some(ratatui::style::Color::Rgb(r, g, b)) = tinted else {
+            panic!("expected an rgb fog, got {tinted:?}");
+        };
+        assert!(
+            r > g && r > b,
+            "tinted toward the blocked colour: {r} {g} {b}"
+        );
+    }
+
+    #[test]
+    fn fog_never_covers_the_active_row() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        app.active = Some(5);
+        app.selected = 5;
+        let buffer = draw_sidebar(&mut app);
+        let card = app
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == 5)
+            .expect("the active space is the first visible one")
+            .rect;
+        assert_eq!(
+            buffer[(card.x + card.width - 3, card.y)].style().bg,
+            Some(app.palette.active_row_bg)
+        );
+    }
+
+    #[test]
+    fn fog_and_edge_rows_are_off_when_off() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Off);
+        let buffer = draw_sidebar(&mut app);
+        let cards = &app.view.workspace_card_areas;
+        assert_eq!(cards[0].rect.y, spaces_body(&app).y);
+        let first = cards[0].rect;
+        assert_ne!(
+            buffer[(first.x + first.width - 3, first.y)].style().bg,
+            Some(ratatui::style::Color::Rgb(34, 34, 34))
+        );
+        let body = agents_body(&app);
+        assert!(!row_string(&buffer, first_row(body)).contains('↑'));
+        assert!(!row_string(&buffer, last_row(body)).contains('↓'));
+    }
+
+    #[test]
+    fn both_draws_edge_rows_and_fog_together() {
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Both);
+        let buffer = draw_sidebar(&mut app);
+        let body = agents_body(&app);
+        assert!(row_string(&buffer, first_row(body)).starts_with(" ↑ "));
+        assert!(row_string(&buffer, last_row(body)).starts_with(" ↓ "));
+        let cards = &app.view.workspace_card_areas;
+        assert_eq!(
+            buffer[(cards[0].rect.x + cards[0].rect.width - 3, cards[0].rect.y)]
+                .style()
+                .bg,
+            Some(ratatui::style::Color::Rgb(34, 34, 34))
+        );
     }
 
     fn set_agent_state(

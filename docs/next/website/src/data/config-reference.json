@@ -1489,6 +1489,18 @@
           ]
         },
         {
+          "key": "ui.sidebar_overflow",
+          "type": "enum",
+          "default": "\"both\"",
+          "description": "How the spaces list and the agent panel show rows scrolled out of view. \"rows\" puts a dim summary row at an edge with rows hidden past it (`\u2191 2 pinned \u00b7 3 more` above, `\u2193 5 more \u00b7 \u25cf 1 blocked` below; click it to scroll a page toward it). \"fog\" lifts the background of the two rows next to that edge, the nearest the most, toward the text colour, with a faint tint of the most urgent hidden state; the focused and selected rows never fog. \"both\" does both, \"off\" neither. Reloads live.",
+          "values": [
+            "both",
+            "rows",
+            "fog",
+            "off"
+          ]
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

@@ -323,6 +323,31 @@ pub enum PaneBorderActiveStyleConfig {
     Double,
 }
 
+/// How the spaces list and the agent panel show what is scrolled out of view
+/// (fork issue 159): summary rows at the edge, a lighter background on the
+/// rows next to it, both, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarOverflowConfig {
+    #[default]
+    Both,
+    Rows,
+    Fog,
+    Off,
+}
+
+impl SidebarOverflowConfig {
+    /// Summary rows at the edge of a list with rows hidden past it.
+    pub fn edge_rows(self) -> bool {
+        matches!(self, Self::Both | Self::Rows)
+    }
+
+    /// A lighter background on the rows next to a hidden edge.
+    pub fn fog(self) -> bool {
+        matches!(self, Self::Both | Self::Fog)
+    }
+}
+
 /// Highlight pattern for the active space/agent in the sidebar. Accepts a
 /// string mode or, for backward compatibility, a bool (true = both).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1430,6 +1455,10 @@ pub struct UiConfig {
     /// "off", "above", "below", "both", "left", "right" — or a bool for
     /// backward compatibility (true = "both"). Default: off.
     pub sidebar_active_border: SidebarActiveBorderConfig,
+    /// How the spaces list and agent panel show rows scrolled out of view:
+    /// "both" (default), "rows" (summary rows at the edge), "fog" (a lighter
+    /// background on the rows next to the edge) or "off".
+    pub sidebar_overflow: SidebarOverflowConfig,
     /// Default background for the focused pane's cells (tmux
     /// `window-active-style` bg). Same syntax as `accent`. Only cells without
     /// an explicit app-painted background are tinted. Unset keeps the
@@ -1750,6 +1779,7 @@ impl Default for UiConfig {
             pane_title_inactive_color: None,
             pane_todo_color: None,
             sidebar_active_border: SidebarActiveBorderConfig::Off,
+            sidebar_overflow: SidebarOverflowConfig::default(),
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
@@ -3013,5 +3043,28 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn sidebar_overflow_defaults_to_both_and_parses_every_mode() {
+        assert_eq!(
+            Config::default().ui.sidebar_overflow,
+            SidebarOverflowConfig::Both
+        );
+        for (value, expected) in [
+            ("both", SidebarOverflowConfig::Both),
+            ("rows", SidebarOverflowConfig::Rows),
+            ("fog", SidebarOverflowConfig::Fog),
+            ("off", SidebarOverflowConfig::Off),
+        ] {
+            let toml = format!("[ui]\nsidebar_overflow = \"{value}\"");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.ui.sidebar_overflow, expected, "{value}");
+        }
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_overflow = \"edges\"").is_err());
+        assert!(SidebarOverflowConfig::Both.edge_rows() && SidebarOverflowConfig::Both.fog());
+        assert!(SidebarOverflowConfig::Rows.edge_rows() && !SidebarOverflowConfig::Rows.fog());
+        assert!(!SidebarOverflowConfig::Fog.edge_rows() && SidebarOverflowConfig::Fog.fog());
+        assert!(!SidebarOverflowConfig::Off.edge_rows() && !SidebarOverflowConfig::Off.fog());
     }
 }

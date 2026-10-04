@@ -10,6 +10,9 @@ use ratatui::{
 
 use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
+use super::sidebar_overflow::{
+    self as overflow, EdgeItem, EdgeReserve, EdgeRow, OverflowPlan, VisibleItem,
+};
 use super::status::{agent_state_icon, state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::agent_priority::{attention_priority, display_priority};
@@ -740,15 +743,16 @@ pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect 
     Rect::new(area.x, body_y, body_width, body_height)
 }
 
-fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = workspace_list_body_rect(area, false);
-    if body.width == 0 || body.height == 0 {
-        return 0;
-    }
-
+/// How many entries from `scroll` fit in `avail` rows of the spaces list.
+fn workspace_fit_count(
+    app: &AppState,
+    entries: &[WorkspaceListEntry],
+    scroll: usize,
+    avail: u16,
+    body_height: u16,
+) -> usize {
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         let (row_height, gap) = match entry {
             WorkspaceListEntry::Workspace { ws_idx, indented } => {
@@ -756,24 +760,48 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                     continue;
                 };
                 (
-                    workspace_row_height_in_body(app, ws, *indented, body.height),
-                    workspace_entry_gap(app, &entries, entry_idx),
+                    workspace_row_height_in_body(app, ws, *indented, body_height),
+                    workspace_entry_gap(app, entries, entry_idx),
                 )
             }
         };
-        if used_rows.saturating_add(row_height) > body.height {
+        if used_rows.saturating_add(row_height) > avail {
             break;
         }
         used_rows = used_rows.saturating_add(row_height);
         visible += 1;
-        used_rows = used_rows.saturating_add(gap).min(body.height);
+        used_rows = used_rows.saturating_add(gap).min(avail);
     }
     visible
 }
 
-fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
+/// The edge rows of the spaces list at `scroll` and how many entries it shows.
+fn workspace_list_window(app: &AppState, area: Rect, scroll: usize) -> (EdgeReserve, usize) {
     let body = workspace_list_body_rect(area, false);
+    if body.width == 0 || body.height == 0 {
+        return (EdgeReserve::default(), 0);
+    }
     let entries = workspace_list_entries(app);
+    overflow::window(
+        app.sidebar_overflow.edge_rows(),
+        body.height,
+        entries.len(),
+        scroll,
+        |avail| workspace_fit_count(app, &entries, scroll, avail, body.height),
+    )
+}
+
+fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
+    workspace_list_window(app, area, scroll).1
+}
+
+/// The first entry of the last full window of `entries` in `avail` rows.
+fn workspace_start_in(
+    app: &AppState,
+    entries: &[WorkspaceListEntry],
+    avail: u16,
+    body_height: u16,
+) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
@@ -781,16 +809,24 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
         let Some(workspace) = app.workspaces.get(*ws_idx) else {
             continue;
         };
-        let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
+        let gap = workspace_entry_gap(app, entries, entry_idx);
+        let needed = workspace_row_height_in_body(app, workspace, *indented, body_height)
             .saturating_add(gap);
-        if used_rows.saturating_add(needed) > body.height {
+        if used_rows.saturating_add(needed) > avail {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = entry_idx;
     }
     start.min(entries.len().saturating_sub(1))
+}
+
+fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
+    let body = workspace_list_body_rect(area, false);
+    let entries = workspace_list_entries(app);
+    overflow::last_window_start(app.sidebar_overflow.edge_rows(), body.height, |avail| {
+        workspace_start_in(app, &entries, avail, body.height)
+    })
 }
 
 pub(crate) fn workspace_list_scroll_metrics(
@@ -859,44 +895,80 @@ pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usi
     }
 }
 
-fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = agent_panel_body_rect(area, false);
-    if body.width == 0 || body.height == 0 {
-        return 0;
-    }
-
+/// How many entries from `scroll` fit in `avail` rows of the agent panel.
+fn agent_fit_count(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    scroll: usize,
+    avail: u16,
+    body_height: u16,
+) -> usize {
     let mut used_rows = 0u16;
     let mut visible = 0usize;
-    let entries = agent_panel_entries(app);
     for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
-        if used_rows.saturating_add(height) > body.height {
+        let height = agent_entry_height_in_body(app, entry, body_height);
+        if used_rows.saturating_add(height) > avail {
             break;
         }
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
             .saturating_add(agent_entry_gap(app, index, entries.len()))
-            .min(body.height);
+            .min(avail);
     }
     visible
 }
 
-fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
+/// The edge rows of the agent panel at `scroll` and how many entries it shows.
+pub(crate) fn agent_panel_window(
+    app: &AppState,
+    area: Rect,
+    scroll: usize,
+) -> (EdgeReserve, usize) {
     let body = agent_panel_body_rect(area, false);
+    if body.width == 0 || body.height == 0 {
+        return (EdgeReserve::default(), 0);
+    }
     let entries = agent_panel_entries(app);
+    overflow::window(
+        app.sidebar_overflow.edge_rows(),
+        body.height,
+        entries.len(),
+        scroll,
+        |avail| agent_fit_count(app, &entries, scroll, avail, body.height),
+    )
+}
+
+fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
+    agent_panel_window(app, area, scroll).1
+}
+
+fn agent_start_in(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    avail: u16,
+    body_height: u16,
+) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (index, entry) in entries.iter().enumerate().rev() {
         let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
-        if used_rows.saturating_add(needed) > body.height {
+        let needed = agent_entry_height_in_body(app, entry, body_height).saturating_add(gap);
+        if used_rows.saturating_add(needed) > avail {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = index;
     }
     start.min(entries.len().saturating_sub(1))
+}
+
+fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
+    let body = agent_panel_body_rect(area, false);
+    let entries = agent_panel_entries(app);
+    overflow::last_window_start(app.sidebar_overflow.edge_rows(), body.height, |avail| {
+        agent_start_in(app, &entries, avail, body.height)
+    })
 }
 
 pub(crate) fn agent_panel_scroll_for_target(
@@ -943,6 +1015,204 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
     ))
 }
 
+/// The state a space wants the user for, as its list entry shows it.
+fn workspace_edge_state(app: &AppState, ws_idx: usize) -> (AgentState, bool) {
+    match workspace_parent_group_state(app, ws_idx) {
+        Some((key, true)) => space_attention_state(app, &key),
+        _ => app
+            .workspaces
+            .get(ws_idx)
+            .map_or((AgentState::Unknown, true), |ws| {
+                ws.attention_state(&app.terminals)
+            }),
+    }
+}
+
+/// What the edge rows and fog of the spaces list draw, for the list in `area`
+/// (the whole spaces section, header and footer included).
+pub(crate) fn workspace_overflow_plan(
+    app: &AppState,
+    area: Rect,
+    cards: &[crate::app::state::WorkspaceCardArea],
+) -> OverflowPlan {
+    let metrics = workspace_list_scroll_metrics(app, area);
+    let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return OverflowPlan::default();
+    }
+    let entries = workspace_list_entries(app);
+    let items: Vec<EdgeItem> = entries
+        .iter()
+        .map(|entry| {
+            let WorkspaceListEntry::Workspace { ws_idx, .. } = entry;
+            let (state, seen) = workspace_edge_state(app, *ws_idx);
+            EdgeItem {
+                pin_rank: app
+                    .workspaces
+                    .get(*ws_idx)
+                    .filter(|ws| ws.pin_order.is_some())
+                    .map(|ws| workspace_pin_rank(app, ws)),
+                state,
+                seen,
+            }
+        })
+        .collect();
+    let is_navigating = matches!(app.mode, Mode::Navigate);
+    let dragged = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::WorkspaceReorder { source_ws_idx, .. }) => {
+            Some(*source_ws_idx)
+        }
+        _ => None,
+    };
+    let scroll = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    let (reserve, _) = workspace_list_window(app, area, scroll);
+    let visible: Vec<VisibleItem> = cards
+        .iter()
+        .filter_map(|card| {
+            let index = entries.iter().position(|entry| {
+                matches!(entry, WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == card.ws_idx)
+            })?;
+            Some(VisibleItem {
+                index,
+                rect: card.rect,
+                exempt: Some(card.ws_idx) == app.active
+                    || (is_navigating && card.ws_idx == app.selected)
+                    || dragged == Some(card.ws_idx),
+            })
+        })
+        .collect();
+    overflow::plan(
+        app.sidebar_overflow.fog(),
+        &items,
+        scroll,
+        &visible,
+        body,
+        reserve,
+    )
+}
+
+/// The edge rows of the spaces list, for hit-testing a click on one.
+pub(crate) fn workspace_edge_rows(app: &AppState) -> Vec<EdgeRow> {
+    if app.sidebar_collapsed || !app.sidebar_overflow.edge_rows() {
+        return Vec::new();
+    }
+    let area = workspace_list_rect(app.view.sidebar_rect, app.sidebar_section_split);
+    let cards = if app.view.workspace_card_areas.is_empty() {
+        compute_workspace_card_areas(app, app.view.sidebar_rect)
+    } else {
+        app.view.workspace_card_areas.clone()
+    };
+    workspace_overflow_plan(app, area, &cards).rows
+}
+
+/// What the edge rows and fog of the agent panel draw, for the panel in `area`.
+pub(crate) fn agent_overflow_plan(
+    app: &AppState,
+    details: &[AgentPanelEntry],
+    area: Rect,
+) -> OverflowPlan {
+    let metrics = agent_panel_scroll_metrics(app, area);
+    let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return OverflowPlan::default();
+    }
+    let items: Vec<EdgeItem> = details
+        .iter()
+        .map(|detail| EdgeItem {
+            pin_rank: detail
+                .pin_order
+                .is_some()
+                .then(|| agent_pin_rank(details, detail)),
+            state: detail.state,
+            seen: detail.seen,
+        })
+        .collect();
+    let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+    let (reserve, count) = agent_panel_window(app, area, scroll);
+    let mut row_y = body.y + reserve.top;
+    let mut visible = Vec::new();
+    for (index, detail) in details.iter().enumerate().skip(scroll).take(count) {
+        let height = agent_entry_height_in_body(app, detail, body.height);
+        visible.push(VisibleItem {
+            index,
+            rect: Rect::new(body.x, row_y, body.width, height),
+            exempt: app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id),
+        });
+        row_y =
+            row_y
+                .saturating_add(height)
+                .saturating_add(agent_entry_gap(app, index, details.len()));
+    }
+    overflow::plan(
+        app.sidebar_overflow.fog(),
+        &items,
+        scroll,
+        &visible,
+        body,
+        reserve,
+    )
+}
+
+/// The edge rows of the agent panel, for hit-testing a click on one.
+pub(crate) fn agent_edge_rows(app: &AppState) -> Vec<EdgeRow> {
+    if app.sidebar_collapsed || !app.sidebar_overflow.edge_rows() {
+        return Vec::new();
+    }
+    let (_, detail_area) =
+        expanded_sidebar_sections(app.view.sidebar_rect, app.sidebar_section_split);
+    agent_overflow_plan(app, &agent_panel_entries(app), detail_area).rows
+}
+
+/// Paints the plan: the fog first, so row content keeps its own colours, then
+/// the edge rows over the space the list reserved for them.
+fn render_overflow(app: &AppState, frame: &mut Frame, plan: &OverflowPlan) {
+    let p = &app.palette;
+    let base = if matches!(p.sidebar_bg, Color::Rgb(..)) {
+        p.sidebar_bg
+    } else {
+        p.panel_bg
+    };
+    {
+        let buf = frame.buffer_mut();
+        for band in &plan.fog {
+            let tint = band
+                .tint
+                .map(|(state, seen)| state_label_color(state, seen, &app.state_icon_colors()));
+            let Some(bg) = overflow::fog_color(base, p.text, tint, band.level) else {
+                continue;
+            };
+            for y in band.rect.y..band.rect.y + band.rect.height {
+                for x in band.rect.x..band.rect.x + band.rect.width {
+                    buf[(x, y)].set_style(Style::default().bg(bg));
+                }
+            }
+        }
+    }
+    for row in &plan.rows {
+        let urgent_color = row
+            .summary
+            .urgent
+            .map(|(state, seen, _)| state_label_color(state, seen, &app.state_icon_colors()));
+        let line = overflow::edge_row_line(
+            row,
+            row.rect.width,
+            overflow::dim_style(p.overlay0),
+            urgent_color,
+        );
+        // The row sits over space the list reserved, but a border line may
+        // have been drawn there as "blank": start from an empty row.
+        {
+            let buf = frame.buffer_mut();
+            for x in row.rect.x..row.rect.x + row.rect.width {
+                let cell = &mut buf[(x, row.rect.y)];
+                cell.set_symbol(" ");
+                cell.set_style(Style::reset().bg(p.sidebar_bg));
+            }
+        }
+        frame.render_widget(Paragraph::new(line), row.rect);
+    }
+}
+
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
@@ -959,8 +1229,9 @@ pub(crate) fn compute_workspace_list_areas(
     }
 
     let scroll = app.workspace_scroll;
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
+    let (reserve, _) = workspace_list_window(app, ws_area, scroll);
+    let mut row_y = body.y + reserve.top;
+    let body_bottom = (body.y + body.height).saturating_sub(reserve.bottom);
     let mut cards = Vec::new();
     let headers = Vec::new();
 
@@ -2051,6 +2322,8 @@ fn render_workspace_list(
         }
     }
 
+    render_overflow(app, frame, &workspace_overflow_plan(app, area, cards));
+
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
@@ -2146,8 +2419,9 @@ fn render_agent_detail(
     }
 
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
+    let (reserve, _) = agent_panel_window(app, area, scroll);
+    let mut row_y = body.y + reserve.top;
+    let body_bottom = (body.y + body.height).saturating_sub(reserve.bottom);
     // `left` reserves a dedicated leftmost column for the active bar so it never
     // overwrites the dot/number/name; all rows shift right by one cell.
     let bar_reserve: u16 =
@@ -2341,6 +2615,8 @@ fn render_agent_detail(
             .min(body_bottom);
         prev_gap = gap;
     }
+
+    render_overflow(app, frame, &agent_overflow_plan(app, &details, area));
 
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
@@ -4826,6 +5102,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         app.sidebar_spaces.row_gap = 2;
+        // Plain row geometry: edge rows would take a row of the window.
+        app.sidebar_overflow = crate::config::SidebarOverflowConfig::Off;
 
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
         assert_eq!(

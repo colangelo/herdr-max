@@ -63,6 +63,48 @@ impl AppState {
         ))
     }
 
+    /// A click on an edge row of the spaces list or the agent panel scrolls
+    /// that list one page toward the edge. Returns whether the click landed on
+    /// one.
+    pub(super) fn click_sidebar_edge_row(&mut self, col: u16, row: u16) -> bool {
+        use crate::ui::SidebarEdge;
+        let hit = |rect: Rect| {
+            col >= rect.x
+                && col < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
+        };
+        if let Some(edge_row) = crate::ui::workspace_edge_rows(self)
+            .into_iter()
+            .find(|edge_row| hit(edge_row.rect))
+        {
+            let area = self.workspace_list_rect();
+            let page = crate::ui::workspace_list_scroll_metrics(self, area)
+                .viewport_rows
+                .clamp(1, i16::MAX as usize) as i16;
+            self.scroll_workspace_list(match edge_row.edge {
+                SidebarEdge::Above => -page,
+                SidebarEdge::Below => page,
+            });
+            return true;
+        }
+        if let Some(edge_row) = crate::ui::agent_edge_rows(self)
+            .into_iter()
+            .find(|edge_row| hit(edge_row.rect))
+        {
+            let area = self.agent_panel_rect();
+            let page = crate::ui::agent_panel_scroll_metrics(self, area)
+                .viewport_rows
+                .clamp(1, i16::MAX as usize) as i16;
+            self.scroll_agent_panel(match edge_row.edge {
+                SidebarEdge::Above => -page,
+                SidebarEdge::Below => page,
+            });
+            return true;
+        }
+        false
+    }
+
     pub(super) fn set_workspace_list_offset_from_bottom(&mut self, offset_from_bottom: usize) {
         self.workspace_list_follow_active = false;
         let area = self.workspace_list_rect();
@@ -573,10 +615,11 @@ impl AppState {
             return None;
         }
 
-        let mut row_y = body.y;
-        let body_bottom = body.y + body.height;
         let entries = crate::ui::agent_panel_entries(self);
         let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+        let (reserve, _) = crate::ui::agent_panel_window(self, detail_area, scroll);
+        let mut row_y = body.y + reserve.top;
+        let body_bottom = (body.y + body.height).saturating_sub(reserve.bottom);
         for (index, detail) in entries.iter().enumerate().skip(scroll) {
             let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
             if row_y.saturating_add(height) > body_bottom {
@@ -2043,5 +2086,114 @@ mod tests {
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(26));
+    }
+
+    fn app_with_overflowing_lists() -> super::super::App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = (0..30)
+            .map(|i| Workspace::test_new(&format!("ws-{i}")))
+            .collect();
+        app.state.ensure_test_terminals();
+        for ws in &app.state.workspaces {
+            let pane_id = ws.tabs[0].root_pane;
+            let terminal_id = ws.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Pi);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.workspace_list_follow_active = false;
+        app.state.agent_panel_follow_active = false;
+        app.state.workspace_scroll = 8;
+        app.state.agent_panel_scroll = 8;
+        app
+    }
+
+    #[test]
+    fn clicking_a_spaces_edge_row_scrolls_one_page_toward_it() {
+        use crate::ui::SidebarEdge;
+        let mut app = app_with_overflowing_lists();
+        let rows = crate::ui::workspace_edge_rows(&app.state);
+        let above = rows
+            .iter()
+            .find(|row| row.edge == SidebarEdge::Above)
+            .expect("rows are hidden above")
+            .rect;
+        let below = rows
+            .iter()
+            .find(|row| row.edge == SidebarEdge::Below)
+            .expect("rows are hidden below")
+            .rect;
+        let area = app.state.workspace_list_rect();
+        let page = crate::ui::workspace_list_scroll_metrics(&app.state, area).viewport_rows;
+        assert!(page > 1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            below.x + 2,
+            below.y,
+        ));
+        assert_eq!(app.state.workspace_scroll, 8 + page);
+        assert_eq!(app.state.active, Some(0), "the click focused nothing");
+
+        let rows = crate::ui::workspace_edge_rows(&app.state);
+        let above = rows
+            .iter()
+            .find(|row| row.edge == SidebarEdge::Above)
+            .map_or(above, |row| row.rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            above.x + 2,
+            above.y,
+        ));
+        assert_eq!(app.state.workspace_scroll, 8);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn clicking_an_agent_panel_edge_row_scrolls_one_page_toward_it() {
+        use crate::ui::SidebarEdge;
+        let mut app = app_with_overflowing_lists();
+        let rows = crate::ui::agent_edge_rows(&app.state);
+        let below = rows
+            .iter()
+            .find(|row| row.edge == SidebarEdge::Below)
+            .expect("rows are hidden below")
+            .rect;
+        let area = app.state.agent_panel_rect();
+        let page = crate::ui::agent_panel_scroll_metrics(&app.state, area).viewport_rows;
+        assert!(page > 1);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            below.x + 2,
+            below.y,
+        ));
+        assert_eq!(app.state.agent_panel_scroll, 8 + page);
+
+        let above = crate::ui::agent_edge_rows(&app.state)
+            .into_iter()
+            .find(|row| row.edge == SidebarEdge::Above)
+            .expect("rows are hidden above")
+            .rect;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            above.x + 2,
+            above.y,
+        ));
+        assert_eq!(app.state.agent_panel_scroll, 8);
+        assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn edge_rows_are_not_clickable_when_the_mode_has_none() {
+        let mut app = app_with_overflowing_lists();
+        app.state.sidebar_overflow = crate::config::SidebarOverflowConfig::Fog;
+        assert!(crate::ui::workspace_edge_rows(&app.state).is_empty());
+        assert!(crate::ui::agent_edge_rows(&app.state).is_empty());
     }
 }

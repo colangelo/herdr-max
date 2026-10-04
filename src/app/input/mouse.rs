@@ -986,6 +986,10 @@ impl AppState {
                         return None;
                     }
 
+                    if self.click_sidebar_edge_row(mouse.column, mouse.row) {
+                        return None;
+                    }
+
                     let cards = if self.view.workspace_card_areas.is_empty() {
                         crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect)
                     } else {
