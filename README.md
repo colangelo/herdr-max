@@ -52,6 +52,7 @@ Herdr Max is built on [herdrdev/herdr](https://github.com/herdrdev/herdr) and ke
 
 - **`prefix+i` shows everything** — every pane's number, address, name and size, the sidebar sections' sizes, the window size and the server's version, in red.
 - **The same view pops up while you resize** — the herdr window, a pane split, or the sidebar edges — and stays for `ui.display_panes_ms`.
+- **Hidden rows say so** — when the spaces list or the agent panel scrolls, an edge row tells what is out of view (`↑ 2 pinned · 3 more`, `↓ 5 more · ● 1 blocked`; a click scrolls a page) and the rows next to the edge get a lighter background, tinted toward a hidden blocked agent. `ui.sidebar_overflow` = `both`/`rows`/`fog`/`off`.
 
 ### config that forgives
 

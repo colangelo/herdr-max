@@ -53,6 +53,7 @@ A durable list of next steps attached to each pane — the fork's largest additi
 - **Bubble motion** — reordered rows hold their place for `ui.sort_motion_settle_ms`, then travel one slot per `ui.sort_motion_step_ms` instead of teleporting, so the list stops reshuffling under the cursor. `ui.sort_motion_easing = "bubble"` eases the cadence; `ui.sort_motion = "instant"` restores immediate re-sorting.
 - **Editorial style** — `ui.sidebar_style = "editorial"` moves jump numbers to the right edge, renders thin uppercase section headers, and dims inactive meta lines. `[ui.state_colors]` overrides the working/idle/done/blocked/unknown glyph and text colors everywhere they appear.
 - **Active-row emphasis** — `ui.sidebar_active_border` (`above`/`below`/`both`/`left`/`right`).
+- **Hidden rows say so** — `ui.sidebar_overflow` (`both`/`rows`/`fog`/`off`): edge rows summarise what the spaces list and agent panel have scrolled out of view, and the rows next to the edge get a lighter background.
 - **Follow focus** — the spaces and agents lists scroll just enough to keep the focused entry visible across any focus change or reorder; manual scrolling disengages, the next focus change re-engages.
 - **Collapsed parity** — the collapsed rail highlights the active agent, uses real jump letters past the 9th, and honors the number colors and the left/right active border.
 - **`ui.show_host`** — the server's short host name, right-aligned on the `SPACES` header, so you can tell which machine a session is on. Also on the API `ping` response.
