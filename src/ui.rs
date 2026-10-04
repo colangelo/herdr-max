@@ -1082,25 +1082,25 @@ mod tests {
         assert_eq!(cards[0].rect.y, spaces_body(&app).y);
         assert_eq!(
             bg(cards[0].rect),
-            Some(ratatui::style::Color::Rgb(34, 34, 34))
+            Some(ratatui::style::Color::Rgb(28, 28, 28))
         );
         assert_eq!(
             bg(cards[1].rect),
-            Some(ratatui::style::Color::Rgb(22, 22, 22))
+            Some(ratatui::style::Color::Rgb(18, 18, 18))
         );
         let n = cards.len();
         assert_eq!(
             bg(cards[n - 1].rect),
-            Some(ratatui::style::Color::Rgb(34, 34, 34))
+            Some(ratatui::style::Color::Rgb(28, 28, 28))
         );
         assert_eq!(
             bg(cards[n - 2].rect),
-            Some(ratatui::style::Color::Rgb(22, 22, 22))
+            Some(ratatui::style::Color::Rgb(18, 18, 18))
         );
         // The middle is untouched, and the text keeps its own colour.
         assert_ne!(
             bg(cards[n / 2].rect),
-            Some(ratatui::style::Color::Rgb(34, 34, 34))
+            Some(ratatui::style::Color::Rgb(28, 28, 28))
         );
         let name_cell = &buffer[(cards[0].rect.x + 3, cards[0].rect.y)];
         assert_eq!(name_cell.style().fg, Some(app.palette.subtext0));
@@ -1161,7 +1161,7 @@ mod tests {
         let first = cards[0].rect;
         assert_ne!(
             buffer[(first.x + first.width - 3, first.y)].style().bg,
-            Some(ratatui::style::Color::Rgb(34, 34, 34))
+            Some(ratatui::style::Color::Rgb(28, 28, 28))
         );
         let body = agents_body(&app);
         assert!(!row_string(&buffer, first_row(body)).contains('↑'));
@@ -1180,7 +1180,7 @@ mod tests {
             buffer[(cards[0].rect.x + cards[0].rect.width - 3, cards[0].rect.y)]
                 .style()
                 .bg,
-            Some(ratatui::style::Color::Rgb(34, 34, 34))
+            Some(ratatui::style::Color::Rgb(28, 28, 28))
         );
     }
 

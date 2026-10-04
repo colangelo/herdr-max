@@ -15,7 +15,7 @@ that a hidden agent below is blocked.
   colour of the most urgent hidden state. A click on an edge row scrolls a page
   toward it. A side with nothing hidden has no row and loses no space.
 - **Fog.** The two visible entries next to an edge with hidden rows get a
-  progressively lighter background (about 12% and 6% toward the text colour,
+  progressively lighter background (about 9% and 4% toward the text colour,
   nearest first). The text colour is unchanged: contrast drops by lifting the
   background, never by dimming the text.
 - **Two touches.** The fog takes a faint tint of the most urgent hidden state, so

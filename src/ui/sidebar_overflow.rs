@@ -20,7 +20,7 @@ use crate::detect::AgentState;
 
 /// The two fog levels: how far the nearest row, and the one after it, is lifted
 /// from the panel background toward the text colour.
-pub(crate) const FOG_PERCENT: [u32; 2] = [12, 6];
+pub(crate) const FOG_PERCENT: [u32; 2] = [9, 4];
 
 /// How much of the most urgent hidden state's colour the fog target takes, in
 /// percent. The rest is the text colour.
@@ -423,8 +423,8 @@ mod tests {
     fn fog_lifts_the_background_toward_the_text_colour() {
         let base = Color::Rgb(10, 10, 10);
         let text = Color::Rgb(210, 210, 210);
-        assert_eq!(fog_color(base, text, None, 0), Some(Color::Rgb(34, 34, 34)));
-        assert_eq!(fog_color(base, text, None, 1), Some(Color::Rgb(22, 22, 22)));
+        assert_eq!(fog_color(base, text, None, 0), Some(Color::Rgb(28, 28, 28)));
+        assert_eq!(fog_color(base, text, None, 1), Some(Color::Rgb(18, 18, 18)));
         assert_eq!(fog_color(base, text, None, 2), None);
     }
 
