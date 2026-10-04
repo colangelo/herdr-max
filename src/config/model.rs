@@ -1501,6 +1501,11 @@ pub struct UiConfig {
     /// What the fog does: "lift" (a lighter background, default), "dim" (the
     /// text fades toward the background) or "both". Unknown values use "lift".
     pub sidebar_fog_style: String,
+    /// How far the "dim" and "both" fog styles move the text of the fogged
+    /// rows toward the fog base, in percent, nearest row first. 0 to 2
+    /// entries, each clamped to 0..=95; 0 (or no entry) means no fade on that
+    /// row. Default: [85, 55].
+    pub sidebar_fade: Vec<i64>,
     /// Default background for the focused pane's cells (tmux
     /// `window-active-style` bg). Same syntax as `accent`. Only cells without
     /// an explicit app-painted background are tinted. Unset keeps the
@@ -1825,6 +1830,7 @@ impl Default for UiConfig {
             sidebar_fog: vec![17, 7],
             sidebar_fog_tint: 70,
             sidebar_fog_style: "lift".to_string(),
+            sidebar_fade: vec![85, 55],
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,
@@ -3112,6 +3118,31 @@ scrollback_lines = 12345
             vec!["ui.sidebar_fog_style (\"blur\") is not lift, dim or both; using lift"]
         );
         assert!(toml::from_str::<Config>("[ui]\nsidebar_fog_style = 3").is_err());
+    }
+
+    #[test]
+    fn sidebar_fade_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.sidebar_fade, vec![85, 55]);
+        assert_eq!(config.sidebar_fade(), [85, 55]);
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = [70]").unwrap();
+        assert_eq!(config.sidebar_fade(), [70, 0]);
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = []").unwrap();
+        assert_eq!(config.sidebar_fade(), [0, 0]);
+
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = [99, -4, 5]").unwrap();
+        assert_eq!(config.sidebar_fade(), [95, 0]);
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec![
+                "ui.sidebar_fade has 3 entries; only the first 2 are used",
+                "ui.sidebar_fade[0] (99) is outside 0..=95; using 95",
+                "ui.sidebar_fade[1] (-4) is outside 0..=95; using 0",
+            ]
+        );
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fade = \"strong\"").is_err());
     }
 
     #[test]

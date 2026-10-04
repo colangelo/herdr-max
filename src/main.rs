@@ -573,9 +573,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # How much of the most urgent hidden state's colour the fog takes, 0..=100.
 # sidebar_fog_tint = 70
 # What the fog does: "lift" (a lighter background), "dim" (the text of those
-# rows fades toward the background, about 3x the sidebar_fog percent) or
-# "both".
+# rows fades toward the background) or "both".
 # sidebar_fog_style = "lift"
+# How far "dim" and "both" fade the text of the two fog rows toward the
+# background, in percent, nearest row first. 0 to 2 entries, each 0..=95; 0
+# means no fade on that row.
+# sidebar_fade = [85, 55]
 
 # Background of the active space and agent rows in the sidebar (same syntax
 # as accent). Unset uses the theme's subtle highlight.

@@ -230,16 +230,6 @@ pub(crate) fn lift(base: Color, target: Color, percent: u32) -> Option<Color> {
     Some(Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb)))
 }
 
-/// How far the "dim" fog style fades the text of a row toward the background:
-/// the row's lift percent times [`DIM_FACTOR`], capped at [`DIM_MAX_PERCENT`].
-/// A lift of 0 stays 0.
-pub(crate) fn dim_percent(lift_percent: u32) -> u32 {
-    lift_percent.saturating_mul(DIM_FACTOR).min(DIM_MAX_PERCENT)
-}
-
-const DIM_FACTOR: u32 = 3;
-const DIM_MAX_PERCENT: u32 = 90;
-
 /// The background of a fogged row: the panel background lifted toward the text
 /// colour, with a faint share of `tint` in the target when a hidden entry is
 /// waiting on the user.

@@ -1198,7 +1198,8 @@ fn render_overflow(app: &AppState, frame: &mut Frame, plan: &OverflowPlan) {
             let dim_percent = app
                 .sidebar_fog_style
                 .dims()
-                .then(|| overflow::dim_percent(percent));
+                .then(|| app.sidebar_fade.get(band.level).copied().unwrap_or(0))
+                .filter(|dim| *dim > 0);
             for y in band.rect.y..band.rect.y + band.rect.height {
                 for x in band.rect.x..band.rect.x + band.rect.width {
                     let cell = &mut buf[(x, y)];

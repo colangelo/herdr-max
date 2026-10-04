@@ -1516,7 +1516,13 @@
           "key": "ui.sidebar_fog_style",
           "type": "string",
           "default": "\"lift\"",
-          "description": "What the `sidebar_overflow` fog does: `lift` (a lighter background), `dim` (the text of the fogged rows fades toward the background, three times the row's `sidebar_fog` percent, at most 90, by recolouring rather than the terminal dim attribute) or `both`. An unknown value is reported and uses `lift`. Reloads live."
+          "description": "What the `sidebar_overflow` fog does: `lift` (a lighter background), `dim` (the text of the fogged rows fades toward the background, by `sidebar_fade`, by recolouring rather than the terminal dim attribute) or `both`. An unknown value is reported and uses `lift`. Reloads live."
+        },
+        {
+          "key": "ui.sidebar_fade",
+          "type": "array",
+          "default": "[85, 55]",
+          "description": "How far the `dim` and `both` fog styles move the text of the two fogged rows toward the fog base, in percent, nearest row first. 0 to 2 entries, each clamped to 0..=95 with a diagnostic; 0 (or a missing entry) means no fade on that row. Reloads live."
         },
         {
           "key": "ui.accent",

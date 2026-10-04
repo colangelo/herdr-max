@@ -54,6 +54,7 @@ pub(crate) use self::sidebar::SidebarTokenTruncate;
 pub(crate) const SIDEBAR_FOG_ROWS: usize = 2;
 pub(crate) const SIDEBAR_FOG_MAX_PERCENT: i64 = 60;
 pub(crate) const SIDEBAR_FOG_TINT_MAX: i64 = 100;
+pub(crate) const SIDEBAR_FADE_MAX_PERCENT: i64 = 95;
 pub(crate) use self::{
     io::upsert_top_level_bool,
     sidebar::sidebar_style_diagnostics,
@@ -148,6 +149,17 @@ impl Config {
         )
     }
 
+    /// The text fade per fogged row, in percent toward the fog base (a missing
+    /// entry is 0, no fade). Out-of-range values are clamped;
+    /// [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fade(&self) -> [u32; SIDEBAR_FOG_ROWS] {
+        let mut percent = [0u32; SIDEBAR_FOG_ROWS];
+        for (slot, value) in percent.iter_mut().zip(&self.ui.sidebar_fade) {
+            *slot = (*value).clamp(0, SIDEBAR_FADE_MAX_PERCENT) as u32;
+        }
+        percent
+    }
+
     /// The fog style in effect; an unknown value is "lift" and
     /// [`Self::sidebar_fog_diagnostics`] says so.
     pub(crate) fn sidebar_fog_style(&self) -> SidebarFogStyle {
@@ -179,6 +191,26 @@ impl Config {
                 out.push(format!(
                     "ui.sidebar_fog[{index}] ({value}) is outside 0..={SIDEBAR_FOG_MAX_PERCENT}; using {}",
                     (*value).clamp(0, SIDEBAR_FOG_MAX_PERCENT)
+                ));
+            }
+        }
+        if self.ui.sidebar_fade.len() > SIDEBAR_FOG_ROWS {
+            out.push(format!(
+                "ui.sidebar_fade has {} entries; only the first {SIDEBAR_FOG_ROWS} are used",
+                self.ui.sidebar_fade.len()
+            ));
+        }
+        for (index, value) in self
+            .ui
+            .sidebar_fade
+            .iter()
+            .enumerate()
+            .take(SIDEBAR_FOG_ROWS)
+        {
+            if !(0..=SIDEBAR_FADE_MAX_PERCENT).contains(value) {
+                out.push(format!(
+                    "ui.sidebar_fade[{index}] ({value}) is outside 0..={SIDEBAR_FADE_MAX_PERCENT}; using {}",
+                    (*value).clamp(0, SIDEBAR_FADE_MAX_PERCENT)
                 ));
             }
         }

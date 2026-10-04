@@ -2959,6 +2959,7 @@ pub struct AppState {
     pub sidebar_fog: [u32; crate::config::SIDEBAR_FOG_ROWS],
     pub sidebar_fog_tint: u32,
     pub sidebar_fog_style: crate::config::SidebarFogStyle,
+    pub sidebar_fade: [u32; crate::config::SIDEBAR_FOG_ROWS],
     /// Default background for the focused pane's cells; None keeps the
     /// terminal default. Only default-background cells are tinted.
     pub pane_active_bg: Option<Color>,
@@ -4059,6 +4060,7 @@ impl AppState {
             sidebar_fog: crate::config::Config::default().sidebar_fog().0,
             sidebar_fog_tint: crate::config::Config::default().sidebar_fog().1,
             sidebar_fog_style: crate::config::SidebarFogStyle::default(),
+            sidebar_fade: crate::config::Config::default().sidebar_fade(),
             pane_active_bg: None,
             pane_inactive_bg: None,
             dim_inactive_panes: false,

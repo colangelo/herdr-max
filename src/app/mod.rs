@@ -895,6 +895,7 @@ impl App {
             sidebar_fog: config.sidebar_fog().0,
             sidebar_fog_tint: config.sidebar_fog().1,
             sidebar_fog_style: config.sidebar_fog_style(),
+            sidebar_fade: config.sidebar_fade(),
             pane_active_bg: config
                 .ui
                 .pane_active_bg
@@ -1849,6 +1850,7 @@ impl App {
                 self.state.sidebar_overflow = config.ui.sidebar_overflow;
                 (self.state.sidebar_fog, self.state.sidebar_fog_tint) = config.sidebar_fog();
                 self.state.sidebar_fog_style = config.sidebar_fog_style();
+                self.state.sidebar_fade = config.sidebar_fade();
                 self.state.pane_active_bg = config
                     .ui
                     .pane_active_bg
@@ -3968,6 +3970,19 @@ mod tests {
         config.ui.display_panes_ms = 1;
         app.apply_live_config(&config, &[], &[], false);
         assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reload_config_applies_sidebar_fade_live_and_clamps_with_diagnostics() {
+        let mut app = test_app();
+        assert_eq!(app.state.sidebar_fade, [85, 55]);
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar_fade = vec![60, 20];
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fade, [60, 20]);
+        config.ui.sidebar_fade = vec![200];
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fade, [95, 0]);
     }
 
     #[test]

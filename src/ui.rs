@@ -1228,12 +1228,12 @@ mod tests {
             lift2,
             (Some(Rgb(0xa6, 0xad, 0xc8)), Some(Rgb(0x17, 0x18, 0x1a)))
         );
-        // Dim only: the text fades 51% and 21% of the way to #0a0a0a (three
-        // times the 17 and 7 percent lifts); the background is not lifted.
+        // Dim only: the text fades 85% and 55% of the way to #0a0a0a
+        // (sidebar_fade); the background is not lifted.
         app.sidebar_fog_style = SidebarFogStyle::Dim;
         let (dim, dim2) = cell(&mut app);
-        assert_eq!(dim.0, Some(Rgb(0x57, 0x5a, 0x68)));
-        assert_eq!(dim2.0, Some(Rgb(0x86, 0x8b, 0xa1)));
+        assert_eq!(dim.0, Some(Rgb(0x22, 0x23, 0x27)));
+        assert_eq!(dim2.0, Some(Rgb(0x51, 0x54, 0x60)));
         assert_ne!(dim.1, lift.1);
         assert_ne!(dim2.1, lift2.1);
         // Both: the lifted background and the faded text.
@@ -1241,6 +1241,34 @@ mod tests {
         let (both, both2) = cell(&mut app);
         assert_eq!((both.0, both.1), (dim.0, lift.1));
         assert_eq!((both2.0, both2.1), (dim2.0, lift2.1));
+    }
+
+    #[test]
+    fn fade_percent_follows_the_config_and_zero_is_no_fade() {
+        use crate::config::SidebarFogStyle;
+        use ratatui::style::Color::Rgb;
+        let mut app = overflow_app(crate::config::SidebarOverflowConfig::Fog);
+        app.sidebar_fog_style = SidebarFogStyle::Dim;
+        app.host_terminal_theme.background = Some(crate::terminal_theme::RgbColor {
+            r: 0x0a,
+            g: 0x0a,
+            b: 0x0a,
+        });
+        let fg = |app: &mut crate::app::state::AppState| {
+            let buffer = draw_sidebar(app);
+            let cards = app.view.workspace_card_areas.clone();
+            let at = |rect: Rect| buffer[(rect.x + 3, rect.y)].style().fg;
+            (at(cards[0].rect), at(cards[1].rect))
+        };
+        // Text #a6adc8 on a #0a0a0a base; 0 leaves a row's text alone.
+        app.sidebar_fade = [0, 55];
+        let (first, second) = fg(&mut app);
+        assert_eq!(first, Some(Rgb(0xa6, 0xad, 0xc8)));
+        assert_eq!(second, Some(Rgb(0x51, 0x54, 0x60)));
+        app.sidebar_fade = [85, 0];
+        let (first, second) = fg(&mut app);
+        assert_eq!(first, Some(Rgb(0x22, 0x23, 0x27)));
+        assert_eq!(second, Some(Rgb(0xa6, 0xad, 0xc8)));
     }
 
     #[test]
