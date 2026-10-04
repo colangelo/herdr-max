@@ -18,8 +18,9 @@ use std::ffi::OsString;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 
-/// Set on the re-exec'd client, so a binary that still disagrees with the
-/// server is not exec'd again in a loop.
+/// Set on the re-exec'd client to the server build it exec'd for, so a binary
+/// that still disagrees with that same server build is not exec'd again in a
+/// loop. A later handoff to a different build is a new decision.
 pub(crate) const REEXEC_ENV_VAR: &str = "HERDR_CLIENT_REEXEC";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,9 +65,11 @@ pub(crate) enum ReexecDecision {
 }
 
 /// Re-exec when the builds differ (older or newer: the client should run what
-/// the server runs), never when the server did not say, and never twice.
-pub(crate) fn decide(client: &str, server: Option<&str>, already_reexeced: bool) -> ReexecDecision {
-    if already_reexeced {
+/// the server runs), never when the server did not say, and never twice toward
+/// the same server build: `guard` is the server build a previous exec was for
+/// ([`REEXEC_ENV_VAR`]), and only a match with the current server blocks.
+pub(crate) fn decide(client: &str, server: Option<&str>, guard: Option<&str>) -> ReexecDecision {
+    if guard.is_some() && guard == server {
         return ReexecDecision::Stay;
     }
     match compare_builds(client, server) {
@@ -164,18 +167,28 @@ mod tests {
         // Not comparable (a stable build): differing is "older".
         assert_eq!(compare_builds("0.8.1", Some(NEW)), ClientBuild::Older);
 
-        assert_eq!(decide(NEW, Some(NEW), false), ReexecDecision::Stay);
+        // Guard absent: decide on the builds alone.
+        assert_eq!(decide(NEW, Some(NEW), None), ReexecDecision::Stay);
         assert_eq!(
-            decide(OLD, Some(NEW), false),
+            decide(OLD, Some(NEW), None),
             ReexecDecision::Reexec(ClientBuild::Older)
         );
         assert_eq!(
-            decide(NEW, Some(OLD), false),
+            decide(NEW, Some(OLD), None),
             ReexecDecision::Reexec(ClientBuild::Newer)
         );
-        assert_eq!(decide(OLD, None, false), ReexecDecision::Stay);
-        // Already re-exec'd once: never again, whatever the server says.
-        assert_eq!(decide(OLD, Some(NEW), true), ReexecDecision::Stay);
+        assert_eq!(decide(OLD, None, None), ReexecDecision::Stay);
+        // Guard equals the server build: already exec'd for it, never again.
+        assert_eq!(decide(OLD, Some(NEW), Some(NEW)), ReexecDecision::Stay);
+        // Guard names an older build (left over from the last handoff): a new
+        // server build is a new decision, and the client execs again.
+        assert_eq!(
+            decide(OLD, Some(NEW), Some(OLD)),
+            ReexecDecision::Reexec(ClientBuild::Older)
+        );
+        // No server build to match, so a guard alone blocks nothing, and the
+        // unknown server still stays.
+        assert_eq!(decide(OLD, None, Some(OLD)), ReexecDecision::Stay);
     }
 
     #[cfg(unix)]

@@ -979,8 +979,8 @@ fn reexec_onto_server_build() {
         return;
     };
     let client_version = crate::build_info::version();
-    let already = std::env::var_os(reexec::REEXEC_ENV_VAR).is_some();
-    let decision = reexec::decide(&client_version, status.version.as_deref(), already);
+    let guard = std::env::var(reexec::REEXEC_ENV_VAR).ok();
+    let decision = reexec::decide(&client_version, status.version.as_deref(), guard.as_deref());
     if decision == reexec::ReexecDecision::Stay {
         return;
     }
