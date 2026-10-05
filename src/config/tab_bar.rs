@@ -37,6 +37,14 @@ pub enum TabBarRightEntryConfig {
         #[serde(default = "default_command_timeout_seconds")]
         timeout_seconds: u64,
     },
+    /// An entry that could not be read (a wrong value type, a missing or
+    /// unknown `type`, a key of another entry type). It shows nothing and
+    /// `tab_bar_right_diagnostics` names it by position, so one bad entry
+    /// does not cost the file (fork issue 163).
+    #[serde(skip_serializing)]
+    Invalid {
+        reason: String,
+    },
 }
 
 /// Written by hand rather than as an internally tagged enum with
@@ -63,28 +71,76 @@ impl<'de> Deserialize<'de> for TabBarRightEntryConfig {
             where
                 A: serde::de::MapAccess<'de>,
             {
-                use serde::de::Error;
                 let mut kind: Option<String> = None;
                 let mut format: Option<String> = None;
                 let mut text: Option<String> = None;
                 let mut command: Option<String> = None;
                 let mut interval_seconds: Option<u64> = None;
                 let mut timeout_seconds: Option<u64> = None;
+                // What is wrong with this entry, if anything. A wrong-typed
+                // value is read through `toml::Value` so the entry survives
+                // as `Invalid` instead of failing the whole file.
+                let mut problems: Vec<String> = Vec::new();
+                fn lenient<'de, A, T>(
+                    map: &mut A,
+                    key: &str,
+                    expected: &str,
+                    problems: &mut Vec<String>,
+                ) -> Result<Option<T>, A::Error>
+                where
+                    A: serde::de::MapAccess<'de>,
+                    T: serde::de::DeserializeOwned,
+                {
+                    let value = map.next_value::<toml::Value>()?;
+                    match T::deserialize(value) {
+                        Ok(value) => Ok(Some(value)),
+                        Err(_) => {
+                            problems.push(format!(
+                                "has a wrong value type for `{key}` (expected {expected})"
+                            ));
+                            Ok(None)
+                        }
+                    }
+                }
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "type" => kind = Some(map.next_value()?),
-                        "format" => format = Some(map.next_value()?),
-                        "text" => text = Some(map.next_value()?),
-                        "command" => command = Some(map.next_value()?),
-                        "interval_seconds" => interval_seconds = Some(map.next_value()?),
-                        "timeout_seconds" => timeout_seconds = Some(map.next_value()?),
+                        "type" => kind = lenient(&mut map, "type", "a string", &mut problems)?,
+                        "format" => {
+                            format = lenient(&mut map, "format", "a string", &mut problems)?
+                        }
+                        "text" => text = lenient(&mut map, "text", "a string", &mut problems)?,
+                        "command" => {
+                            command = lenient(&mut map, "command", "a string", &mut problems)?
+                        }
+                        "interval_seconds" => {
+                            interval_seconds = lenient(
+                                &mut map,
+                                "interval_seconds",
+                                "a whole number",
+                                &mut problems,
+                            )?
+                        }
+                        "timeout_seconds" => {
+                            timeout_seconds = lenient(
+                                &mut map,
+                                "timeout_seconds",
+                                "a whole number",
+                                &mut problems,
+                            )?
+                        }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
                     }
                 }
-                let kind = kind.ok_or_else(|| A::Error::missing_field("type"))?;
-                let stray = |allowed: &[&str]| -> Result<(), A::Error> {
+                let invalid = |reason: String| Ok(TabBarRightEntryConfig::Invalid { reason });
+                if !problems.is_empty() {
+                    return invalid(problems.join(", "));
+                }
+                let Some(kind) = kind else {
+                    return invalid("is missing `type`".to_string());
+                };
+                let stray = |allowed: &[&str]| -> Option<String> {
                     let given = [
                         ("format", format.is_some()),
                         ("text", text.is_some()),
@@ -92,51 +148,47 @@ impl<'de> Deserialize<'de> for TabBarRightEntryConfig {
                         ("interval_seconds", interval_seconds.is_some()),
                         ("timeout_seconds", timeout_seconds.is_some()),
                     ];
-                    match given
+                    given
                         .iter()
                         .find(|(name, present)| *present && !allowed.contains(name))
-                    {
-                        Some((name, _)) => Err(A::Error::custom(format!(
-                            "unknown field `{name}` for tab_bar_right type `{kind}`"
-                        ))),
-                        None => Ok(()),
+                        .map(|(name, _)| {
+                            format!("has `{name}`, which does not belong to type `{kind}`")
+                        })
+                };
+                let allowed: &[&str] = match kind.as_str() {
+                    "zoom" | "hostname" => &[],
+                    "datetime" => &["format"],
+                    "text" => &["text"],
+                    "command" => &["command", "interval_seconds", "timeout_seconds"],
+                    other => {
+                        return invalid(format!(
+                            "has an unknown type `{other}` (expected zoom, hostname, datetime, text or command)"
+                        ))
                     }
                 };
+                if let Some(reason) = stray(allowed) {
+                    return invalid(reason);
+                }
                 match kind.as_str() {
-                    "zoom" => {
-                        stray(&[])?;
-                        Ok(TabBarRightEntryConfig::Zoom)
-                    }
-                    "hostname" => {
-                        stray(&[])?;
-                        Ok(TabBarRightEntryConfig::Hostname)
-                    }
-                    "datetime" => {
-                        stray(&["format"])?;
-                        Ok(TabBarRightEntryConfig::Datetime {
-                            format: format.unwrap_or_else(default_datetime_format),
-                        })
-                    }
-                    "text" => {
-                        stray(&["text"])?;
-                        Ok(TabBarRightEntryConfig::Text {
-                            text: text.ok_or_else(|| A::Error::missing_field("text"))?,
-                        })
-                    }
-                    "command" => {
-                        stray(&["command", "interval_seconds", "timeout_seconds"])?;
-                        Ok(TabBarRightEntryConfig::Command {
-                            command: command.ok_or_else(|| A::Error::missing_field("command"))?,
+                    "zoom" => Ok(TabBarRightEntryConfig::Zoom),
+                    "hostname" => Ok(TabBarRightEntryConfig::Hostname),
+                    "datetime" => Ok(TabBarRightEntryConfig::Datetime {
+                        format: format.unwrap_or_else(default_datetime_format),
+                    }),
+                    "text" => match text {
+                        Some(text) => Ok(TabBarRightEntryConfig::Text { text }),
+                        None => invalid("is missing `text`".to_string()),
+                    },
+                    _ => match command {
+                        Some(command) => Ok(TabBarRightEntryConfig::Command {
+                            command,
                             interval_seconds: interval_seconds
                                 .unwrap_or_else(default_command_interval_seconds),
                             timeout_seconds: timeout_seconds
                                 .unwrap_or_else(default_command_timeout_seconds),
-                        })
-                    }
-                    other => Err(A::Error::unknown_variant(
-                        other,
-                        &["zoom", "hostname", "datetime", "text", "command"],
-                    )),
+                        }),
+                        None => invalid("is missing `command`".to_string()),
+                    },
                 }
             }
         }
@@ -208,6 +260,9 @@ pub(crate) fn tab_bar_right_diagnostics(entries: &[TabBarRightEntryConfig]) -> V
                         "ui.tab_bar_right[{index}] timeout_seconds may be at most {MAX_TAB_BAR_COMMAND_TIMEOUT_SECONDS}; hiding entry"
                     ));
                 }
+            }
+            TabBarRightEntryConfig::Invalid { reason } => {
+                diagnostics.push(format!("ui.tab_bar_right[{index}] {reason}; hiding entry"));
             }
             TabBarRightEntryConfig::Zoom
             | TabBarRightEntryConfig::Hostname

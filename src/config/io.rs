@@ -1447,7 +1447,10 @@ rows = [
     }
 
     #[test]
-    fn a_wrong_value_type_in_a_known_style_key_is_still_reported() {
+    fn a_wrong_value_type_in_a_style_key_drops_only_that_value_with_a_diagnostic() {
+        // A multi-line rows array, so a one-line value repair could not blank
+        // it: the bad `bold` is dropped and the rest of the file applies, at
+        // startup as on reload (fork issue 163).
         let content = r##"
 [ui]
 mouse_capture = false
@@ -1455,22 +1458,76 @@ mouse_capture = false
 [ui.sidebar.spaces]
 rows = [
   ["workspace"],
-  [{ token = "$asks", bold = "yes" }],
+  [
+    { token = "$asks", bold = "yes", italic = true, fg = 5, keep = 1, dim = [1] },
+    { token = "branch", truncate = 7 },
+  ],
+]
+
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "agent", bold = "nope", keep = true }],
 ]
 "##;
-        for loaded in [
-            startup_load(content, "bad-style-type"),
-            load_live_config_from_str(content).unwrap(),
-        ] {
+        let startup = startup_load(content, "bad-style-type");
+        let reload = load_live_config_from_str(content).unwrap();
+        for loaded in [&startup, &reload] {
+            assert!(!loaded.config.ui.mouse_capture, "the rest of [ui] applied");
+            // The other rows survive.
+            assert_eq!(loaded.config.ui.sidebar.spaces.rows.len(), 2);
+            assert_eq!(loaded.config.ui.sidebar.spaces.rows[0].len(), 1);
+            // The valid keys of the bad token survive; the bad ones are unset.
+            let (_, style) = loaded.config.ui.sidebar.spaces.rows[1][0].parts();
+            assert_eq!(style.italic, Some(true));
+            assert_eq!(
+                (style.bold, style.fg, style.keep, style.dim),
+                (None, None, None, None)
+            );
+            let (_, agent) = loaded.config.ui.sidebar.agents.rows[0][1].parts();
+            assert_eq!((agent.bold, agent.keep), (None, Some(true)));
+        }
+        // `Config::load` reports through `collect_diagnostics`; the reload path
+        // reports through the same `sidebar_style_diagnostics` in the app.
+        let diagnostics = crate::config::sidebar_style_diagnostics(&startup.config.ui.sidebar);
+        assert_eq!(
+            diagnostics,
+            vec![
+                "ui.sidebar.agents.rows[0][1] has a wrong value type for `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `fg` (expected a #RGB or #RRGGBB colour); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `dim` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `keep` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][1] has a wrong value type for `truncate` (expected \"start\" or \"end\"); ignoring it",
+            ]
+        );
+        for diagnostic in &diagnostics {
             assert!(
-                loaded
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.contains("bold") || diagnostic.contains("invalid")),
-                "reported, not silently dropped: {:?}",
-                loaded.diagnostics
+                startup.diagnostics.contains(diagnostic),
+                "startup reports it: {diagnostic}"
             );
         }
+    }
+
+    #[test]
+    fn a_valid_style_file_has_no_diagnostics_and_no_invalid_keys() {
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace", { token = "$asks", fg = "#ff0000", bold = true, dim = false, italic = true, keep = true, truncate = "start" }],
+]
+"##;
+        let startup = startup_load(content, "valid-style");
+        assert!(startup.diagnostics.is_empty(), "{:?}", startup.diagnostics);
+        let (_, style) = startup.config.ui.sidebar.spaces.rows[0][1].parts();
+        assert_eq!(style.invalid, 0);
+        assert_eq!(style.bold, Some(true));
+        assert_eq!(
+            style.truncate,
+            Some(crate::config::SidebarTokenTruncate::Start)
+        );
     }
 
     #[test]
@@ -1526,16 +1583,59 @@ tab_bar_right = [
     }
 
     #[test]
-    fn a_key_for_another_tab_bar_right_type_is_still_an_error() {
-        let content = "[ui]\ntab_bar_right = [{ type = \"zoom\", text = \"x\" }]\n";
-        let loaded = startup_load(content, "tab-bar-stray");
-        assert!(
-            loaded
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("unknown field `text`")),
-            "{:?}",
-            loaded.diagnostics
-        );
+    fn a_bad_tab_bar_right_entry_is_hidden_with_a_diagnostic_and_the_rest_applies() {
+        // Multi-line, with every kind of bad entry between good ones.
+        let content = r##"
+[ui]
+mouse_capture = false
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "zoom", text = "x" },
+  { type = "datetime", format = 5 },
+  { type = "command", command = "status.sh", interval_seconds = "often" },
+  { type = "text" },
+  { type = "wobble" },
+  { type = 3 },
+  { text = "no type" },
+  { type = "hostname" },
+]
+"##;
+        for loaded in [
+            startup_load(content, "tab-bar-bad-entries"),
+            load_live_config_from_str(content).unwrap(),
+        ] {
+            assert!(!loaded.config.ui.mouse_capture, "the rest of [ui] applied");
+            let entries = &loaded.config.ui.tab_bar_right;
+            assert_eq!(entries.len(), 9);
+            assert!(matches!(
+                entries[0],
+                crate::config::TabBarRightEntryConfig::Zoom
+            ));
+            assert!(matches!(
+                entries[8],
+                crate::config::TabBarRightEntryConfig::Hostname
+            ));
+            assert!(entries[1..8].iter().all(|entry| matches!(
+                entry,
+                crate::config::TabBarRightEntryConfig::Invalid { .. }
+            )));
+            assert_eq!(
+                crate::config::tab_bar_right_diagnostics(entries),
+                vec![
+                    "ui.tab_bar_right[1] has `text`, which does not belong to type `zoom`; hiding entry",
+                    "ui.tab_bar_right[2] has a wrong value type for `format` (expected a string); hiding entry",
+                    "ui.tab_bar_right[3] has a wrong value type for `interval_seconds` (expected a whole number); hiding entry",
+                    "ui.tab_bar_right[4] is missing `text`; hiding entry",
+                    "ui.tab_bar_right[5] has an unknown type `wobble` (expected zoom, hostname, datetime, text or command); hiding entry",
+                    "ui.tab_bar_right[6] has a wrong value type for `type` (expected a string); hiding entry",
+                    "ui.tab_bar_right[7] is missing `type`; hiding entry",
+                ]
+            );
+        }
+        let startup = startup_load(content, "tab-bar-bad-entries-diag");
+        assert!(startup
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("ui.tab_bar_right[2] has a wrong value type for `format`")));
     }
 }

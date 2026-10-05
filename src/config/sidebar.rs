@@ -115,9 +115,37 @@ pub struct SidebarTokenStyle {
     /// shrink, and is dropped last.
     pub keep: Option<bool>,
     pub truncate: Option<SidebarTokenTruncate>,
+    /// Style keys whose value had the wrong type, as `STYLE_KEY_*` bits: the
+    /// value is ignored and `sidebar_style_diagnostics` names it by position
+    /// (fork issue 163).
+    pub invalid: u8,
 }
 
+const STYLE_KEY_FG: u8 = 1;
+const STYLE_KEY_BOLD: u8 = 2;
+const STYLE_KEY_DIM: u8 = 4;
+const STYLE_KEY_ITALIC: u8 = 8;
+const STYLE_KEY_KEEP: u8 = 16;
+const STYLE_KEY_TRUNCATE: u8 = 32;
+
 impl SidebarTokenStyle {
+    /// The style keys whose value was ignored for having the wrong type, with
+    /// what each expects.
+    pub(crate) fn invalid_keys(&self) -> Vec<(&'static str, &'static str)> {
+        [
+            (STYLE_KEY_FG, "fg", "a #RGB or #RRGGBB colour"),
+            (STYLE_KEY_BOLD, "bold", "true or false"),
+            (STYLE_KEY_DIM, "dim", "true or false"),
+            (STYLE_KEY_ITALIC, "italic", "true or false"),
+            (STYLE_KEY_KEEP, "keep", "true or false"),
+            (STYLE_KEY_TRUNCATE, "truncate", "\"start\" or \"end\""),
+        ]
+        .into_iter()
+        .filter(|(bit, ..)| self.invalid & bit != 0)
+        .map(|(_, key, expected)| (key, expected))
+        .collect()
+    }
+
     pub(crate) fn keeps_width(&self) -> bool {
         self.keep == Some(true)
     }
@@ -184,6 +212,7 @@ struct RawStyledSidebarToken {
     italic: Option<bool>,
     keep: Option<bool>,
     truncate: Option<SidebarTokenTruncate>,
+    invalid: u8,
 }
 
 enum RawSidebarToken {
@@ -195,8 +224,10 @@ enum RawSidebarToken {
 /// enum: an untagged enum buffers the table, so one unknown key fails every
 /// variant and the error loses the key's name (fork issue 162). Here an
 /// unknown key is skipped through `IgnoredAny`, which the config loader
-/// reports by path ("unknown config key ...rows.1.2.wobble"), while a wrong
-/// value for a known key is still a hard error.
+/// reports by path ("unknown config key ...rows.1.2.wobble"). A wrong value
+/// type for a style key is dropped too, and reported by position through
+/// `sidebar_style_diagnostics` (fork issue 163), so one typo does not cost the
+/// file; only `token` itself, which names what the cell shows, must be right.
 impl<'de> Deserialize<'de> for RawSidebarToken {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -230,17 +261,48 @@ impl<'de> Deserialize<'de> for RawSidebarToken {
                     italic: None,
                     keep: None,
                     truncate: None,
+                    invalid: 0,
                 };
+                // A wrong-typed value reads as unset and sets the key's bit.
+                fn lenient<'de, A, T>(
+                    map: &mut A,
+                    bit: u8,
+                    invalid: &mut u8,
+                ) -> Result<Option<T>, A::Error>
+                where
+                    A: serde::de::MapAccess<'de>,
+                    T: serde::de::DeserializeOwned,
+                {
+                    let value = map.next_value::<toml::Value>()?;
+                    match T::deserialize(value) {
+                        Ok(value) => Ok(Some(value)),
+                        Err(_) => {
+                            *invalid |= bit;
+                            Ok(None)
+                        }
+                    }
+                }
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "token" => token = Some(map.next_value::<String>()?),
-                        "fg" => style.fg = map.next_value()?,
-                        "bold" => style.bold = map.next_value()?,
-                        "dim" => style.dim = map.next_value()?,
-                        "italic" => style.italic = map.next_value()?,
-                        "keep" => style.keep = map.next_value()?,
+                        "fg" => style.fg = lenient(&mut map, STYLE_KEY_FG, &mut style.invalid)?,
+                        "bold" => {
+                            style.bold = lenient(&mut map, STYLE_KEY_BOLD, &mut style.invalid)?
+                        }
+                        "dim" => style.dim = lenient(&mut map, STYLE_KEY_DIM, &mut style.invalid)?,
+                        "italic" => {
+                            style.italic = lenient(&mut map, STYLE_KEY_ITALIC, &mut style.invalid)?
+                        }
+                        "keep" => {
+                            style.keep = lenient(&mut map, STYLE_KEY_KEEP, &mut style.invalid)?
+                        }
                         "truncate" => {
-                            style.truncate = Some(match map.next_value::<String>()?.as_str() {
+                            style.truncate = lenient::<_, String>(
+                                &mut map,
+                                STYLE_KEY_TRUNCATE,
+                                &mut style.invalid,
+                            )?
+                            .map(|value| match value.as_str() {
                                 "start" => SidebarTokenTruncate::Start,
                                 "end" => SidebarTokenTruncate::End,
                                 _ => SidebarTokenTruncate::Unrecognized,
@@ -273,6 +335,7 @@ impl RawSidebarToken {
                     italic: token.italic,
                     keep: token.keep,
                     truncate: token.truncate,
+                    invalid: token.invalid,
                 }),
             ),
         }
@@ -549,9 +612,15 @@ pub(crate) fn sidebar_style_diagnostics(sidebar: &SidebarConfig) -> Vec<String> 
         let mut out = Vec::new();
         for (row, tokens) in rows.iter().enumerate() {
             for (column, token) in tokens.iter().enumerate() {
-                if parts(token).truncate == Some(SidebarTokenTruncate::Unrecognized) {
+                let style = parts(token);
+                if style.truncate == Some(SidebarTokenTruncate::Unrecognized) {
                     out.push(format!(
                         "{label}[{row}][{column}] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\""
+                    ));
+                }
+                for (key, expected) in style.invalid_keys() {
+                    out.push(format!(
+                        "{label}[{row}][{column}] has a wrong value type for `{key}` (expected {expected}); ignoring it"
                     ));
                 }
             }
