@@ -620,7 +620,7 @@ pub(crate) fn sidebar_style_diagnostics(sidebar: &SidebarConfig) -> Vec<String> 
                 }
                 for (key, expected) in style.invalid_keys() {
                     out.push(format!(
-                        "{label}[{row}][{column}] has a wrong value type for `{key}` (expected {expected}); ignoring it"
+                        "{label}[{row}][{column}] has an invalid `{key}` (expected {expected}); ignoring it"
                     ));
                 }
             }
@@ -801,16 +801,23 @@ rows = [[{ token = "$asks", keep = true, truncate = "start" }, { token = "branch
     }
 
     #[test]
-    fn a_wrong_type_for_keep_or_truncate_is_an_error() {
-        for entry in [
-            r##"{ token = "workspace", keep = "yes" }"##,
-            r##"{ token = "workspace", truncate = 1 }"##,
-            r##"{ token = "workspace", truncate = true }"##,
+    fn a_wrong_type_for_keep_or_truncate_is_dropped_and_reported() {
+        for (entry, key) in [
+            (r##"{ token = "workspace", keep = "yes" }"##, "keep"),
+            (r##"{ token = "workspace", truncate = 1 }"##, "truncate"),
+            (r##"{ token = "workspace", truncate = true }"##, "truncate"),
         ] {
             let input = format!("[ui.sidebar.agents]\nrows = [[{entry}]]\n");
+            let config: crate::config::Config =
+                toml::from_str(&input).unwrap_or_else(|err| panic!("rejected {entry}: {err}"));
+            let (_, style) = config.ui.sidebar.agents.rows[0][0].parts();
+            assert_eq!((style.keep, style.truncate), (None, None), "{entry}");
+            let diagnostics = sidebar_style_diagnostics(&config.ui.sidebar);
+            assert_eq!(diagnostics.len(), 1, "{entry}: {diagnostics:?}");
             assert!(
-                toml::from_str::<crate::config::Config>(&input).is_err(),
-                "accepted {entry}"
+                diagnostics[0].starts_with("ui.sidebar.agents.rows[0][0] has an invalid")
+                    && diagnostics[0].contains(&format!("`{key}`")),
+                "{entry}: {diagnostics:?}"
             );
         }
     }
@@ -869,20 +876,23 @@ rows = [[{ token = "$asks", fg = "#ffd60a", bold = true, italic = true }, { toke
     }
 
     #[test]
-    fn rejects_invalid_occurrence_styles() {
-        for entry in [
-            r##"{ token = "workspace", fg = "red" }"##,
-            r##"{ token = "workspace", fg = "#abcd" }"##,
-            r##"{ token = "workspace", bold = "yes" }"##,
-            r##"{ token = "workspace", italic = 1 }"##,
-            r##"{ fg = "#abc" }"##,
+    fn invalid_occurrence_styles_are_dropped_with_a_diagnostic() {
+        for (entry, key) in [
+            (r##"{ token = "workspace", fg = "red" }"##, "fg"),
+            (r##"{ token = "workspace", fg = "#abcd" }"##, "fg"),
+            (r##"{ token = "workspace", bold = "yes" }"##, "bold"),
+            (r##"{ token = "workspace", italic = 1 }"##, "italic"),
         ] {
             let input = format!("[ui.sidebar.agents]\nrows = [[{entry}]]\n");
-            assert!(
-                toml::from_str::<crate::config::Config>(&input).is_err(),
-                "accepted {entry}"
-            );
+            let config: crate::config::Config =
+                toml::from_str(&input).unwrap_or_else(|err| panic!("rejected {entry}: {err}"));
+            let diagnostics = sidebar_style_diagnostics(&config.ui.sidebar);
+            assert_eq!(diagnostics.len(), 1, "{entry}: {diagnostics:?}");
+            assert!(diagnostics[0].contains(&format!("`{key}`")), "{entry}");
         }
+        // A token with no `token` name has nothing to show: still an error.
+        let input = "[ui.sidebar.agents]\nrows = [[{ fg = \"#abc\" }]]\n";
+        assert!(toml::from_str::<crate::config::Config>(input).is_err());
     }
 
     #[test]

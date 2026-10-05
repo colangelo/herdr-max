@@ -185,6 +185,7 @@ def parse_enum_body(
     variants: list[str] = []
     index = start
     depth = 0
+    skip_next_variant = False
 
     while index < len(lines):
         stripped = lines[index].strip()
@@ -192,9 +193,15 @@ def parse_enum_body(
             index += 1
             break
 
-        if depth == 0 and not stripped.startswith(("#[", "///")):
+        if depth == 0 and stripped.startswith("#[serde") and "skip_serializing" in stripped:
+            # A load-time marker such as TabBarRightEntryConfig::Invalid: the
+            # parser makes it from a bad entry, so it is not a value to document.
+            skip_next_variant = True
+        elif depth == 0 and not stripped.startswith(("#[", "///")):
             match = VARIANT_RE.match(stripped)
-            if match:
+            if match and skip_next_variant:
+                skip_next_variant = False
+            elif match:
                 variants.append(apply_rename_all(match.group(1), rename_all or "lowercase"))
         depth += stripped.count("{") - stripped.count("}")
         index += 1

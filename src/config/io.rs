@@ -1492,12 +1492,12 @@ rows = [
         assert_eq!(
             diagnostics,
             vec![
-                "ui.sidebar.agents.rows[0][1] has a wrong value type for `bold` (expected true or false); ignoring it",
-                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `fg` (expected a #RGB or #RRGGBB colour); ignoring it",
-                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `bold` (expected true or false); ignoring it",
-                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `dim` (expected true or false); ignoring it",
-                "ui.sidebar.spaces.rows[1][0] has a wrong value type for `keep` (expected true or false); ignoring it",
-                "ui.sidebar.spaces.rows[1][1] has a wrong value type for `truncate` (expected \"start\" or \"end\"); ignoring it",
+                "ui.sidebar.agents.rows[0][1] has an invalid `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `fg` (expected a #RGB or #RRGGBB colour); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `dim` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `keep` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][1] has an invalid `truncate` (expected \"start\" or \"end\"); ignoring it",
             ]
         );
         for diagnostic in &diagnostics {
