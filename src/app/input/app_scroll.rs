@@ -10,6 +10,7 @@ use crate::{
         state::{AppScrollSend, AppScrollState},
         App, AppState, Mode,
     },
+    detect::Agent,
     input::TerminalKey,
     terminal::TerminalRuntimeRegistry,
 };
@@ -19,7 +20,13 @@ use super::copy_mode::{CopyModeEntryDirection, CopyModeEntryScroll};
 /// The send forwarded to the application for a scroll intent, or `None` for
 /// keys the mode swallows. The vocabulary is the pager one; line granularity
 /// rides on wheel ticks (see `AppScrollSend`).
-fn passthrough_send(key: &TerminalKey) -> Option<AppScrollSend> {
+///
+/// `agent` is the agent detected in the pane. Jumping to the top or bottom is
+/// the one place applications disagree: pagers and editors take plain
+/// Home/End, but Claude Code's fullscreen view takes ctrl+Home/ctrl+End (its
+/// plain Home/End move the prompt cursor), so those panes get the ctrl forms
+/// (fork issue 167).
+fn passthrough_send(key: &TerminalKey, agent: Option<Agent>) -> Option<AppScrollSend> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     if alt {
@@ -39,10 +46,13 @@ fn passthrough_send(key: &TerminalKey) -> Option<AppScrollSend> {
         _ => None,
     };
     if let Some(code) = forwarded_key {
-        return Some(AppScrollSend::Key(TerminalKey::new(
-            code,
-            KeyModifiers::empty(),
-        )));
+        let modifiers =
+            if matches!(code, KeyCode::Home | KeyCode::End) && agent == Some(Agent::Claude) {
+                KeyModifiers::CONTROL
+            } else {
+                KeyModifiers::empty()
+            };
+        return Some(AppScrollSend::Key(TerminalKey::new(code, modifiers)));
     }
     match key.code {
         KeyCode::Char('k' | 'K') if ctrl => Some(AppScrollSend::WheelUp),
@@ -143,7 +153,11 @@ impl AppState {
             self.leave_app_scroll_mode();
             return;
         }
-        if let Some(send) = passthrough_send(&key) {
+        let agent = pinned.and_then(|pane_id| {
+            let terminal = self.pane_terminal(pane_id)?;
+            terminal.effective_known_agent().or(terminal.detected_agent)
+        });
+        if let Some(send) = passthrough_send(&key, agent) {
             self.pending_app_scroll_sends.push(send);
         }
     }
@@ -373,6 +387,106 @@ mod tests {
 
         assert_eq!(app.state.mode, Mode::Prefix);
         assert!(drain(&mut rx).is_empty(), "the prefix key stays in herdr");
+    }
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> TerminalKey {
+        TerminalKey::new(code, mods)
+    }
+
+    fn sent_key(send: Option<AppScrollSend>) -> Option<(KeyCode, KeyModifiers)> {
+        match send {
+            Some(AppScrollSend::Key(key)) => Some((key.code, key.modifiers)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_keys_are_ctrl_home_end_for_claude_and_plain_elsewhere() {
+        let none = KeyModifiers::empty();
+        let ctrl = KeyModifiers::CONTROL;
+        let top = [key(KeyCode::Char('g'), none), key(KeyCode::Home, none)];
+        let bottom = [
+            key(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            key(KeyCode::Char('G'), none),
+            key(KeyCode::Char('g'), ctrl),
+            key(KeyCode::End, none),
+        ];
+        for agent in [None, Some(Agent::Pi), Some(Agent::Codex)] {
+            for k in &top {
+                assert_eq!(
+                    sent_key(passthrough_send(k, agent)),
+                    Some((KeyCode::Home, none)),
+                    "{k:?} {agent:?}"
+                );
+            }
+            for k in &bottom {
+                assert_eq!(
+                    sent_key(passthrough_send(k, agent)),
+                    Some((KeyCode::End, none)),
+                    "{k:?} {agent:?}"
+                );
+            }
+        }
+        for k in &top {
+            assert_eq!(
+                sent_key(passthrough_send(k, Some(Agent::Claude))),
+                Some((KeyCode::Home, ctrl)),
+                "{k:?}"
+            );
+        }
+        for k in &bottom {
+            assert_eq!(
+                sent_key(passthrough_send(k, Some(Agent::Claude))),
+                Some((KeyCode::End, ctrl)),
+                "{k:?}"
+            );
+        }
+        // Paging is the same for everyone.
+        assert_eq!(
+            sent_key(passthrough_send(
+                &key(KeyCode::Char('u'), ctrl),
+                Some(Agent::Claude)
+            )),
+            Some((KeyCode::PageUp, none))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claude_pane_gets_ctrl_end_and_ctrl_home_from_the_scroll_mode() {
+        let (mut app, pane_id, mut rx) = app_with_alt_screen_pane();
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .detected_agent = Some(Agent::Claude);
+        prefix_gesture(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL).await;
+        drain(&mut rx);
+
+        press(&mut app, KeyCode::Char('G'), KeyModifiers::SHIFT).await;
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL).await;
+        press(&mut app, KeyCode::Char('g'), KeyModifiers::empty()).await;
+
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        let end =
+            runtime.encode_terminal_key(TerminalKey::new(KeyCode::End, KeyModifiers::CONTROL));
+        let home =
+            runtime.encode_terminal_key(TerminalKey::new(KeyCode::Home, KeyModifiers::CONTROL));
+        let mut expected = end.clone();
+        expected.extend(&end);
+        expected.extend(&home);
+        assert_eq!(drain(&mut rx), expected);
+        assert_ne!(
+            end,
+            encoded(&app, pane_id, KeyCode::End),
+            "ctrl+End is its own sequence"
+        );
     }
 
     #[tokio::test]
