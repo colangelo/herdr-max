@@ -2136,9 +2136,8 @@ impl App {
     /// Close a pane; `Ok` carries the open todos it dropped, `Err` the encoded
     /// error response.
     ///
-    /// The TUI's own close asks with a modal and treats its retry as the
-    /// answer. Any other caller is answered instead: `confirmation_required`
-    /// without `force`, and nothing changes on any client's screen.
+    /// A pane with open todos is refused with `confirmation_required` unless
+    /// `force` is set; the client shell asks and resends with `force`.
     pub(super) fn close_pane(
         &mut self,
         id: String,
@@ -2164,6 +2163,12 @@ impl App {
                     "confirmation_required",
                     "closing this pane would close a worktree group",
                 ));
+            }
+        }
+        if !force {
+            let open = self.open_todos_in([(ws_idx, pane_id)]);
+            if !open.is_empty() {
+                return Err(open_todos_refusal(id, "this pane", &open));
             }
         }
         let dropped = self.open_todos_in([(ws_idx, pane_id)]);
@@ -2256,16 +2261,14 @@ impl App {
             .is_some()
     }
 
-    /// Respawn a pane's process. The TUI's own request asks with a modal and
-    /// treats its retry as the answer; any other caller is answered instead:
-    /// `confirmation_required` naming the live work without `force`, and
+    /// Respawn a pane's process. Without `force`, a respawn that would stop
+    /// live work is refused with `confirmation_required` naming it, and
     /// nothing changes on any client's screen (fork issue 125).
     pub(super) fn handle_pane_respawn(&mut self, id: String, params: PaneRespawnParams) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let has_live_child = self.pane_has_live_child(ws_idx, pane_id);
-        let mut report = None;
         let stopped_process = has_live_child
             .then(|| self.pane_live_process(ws_idx, pane_id))
             .flatten();
@@ -2277,7 +2280,7 @@ impl App {
         if !params.force && (stopped_process.is_some() || !open_todos.is_empty()) {
             return respawn_refusal(id, &params.pane_id, stopped_process.as_ref(), &open_todos);
         }
-        report = params.force.then_some((stopped_process, open_todos));
+        let report = params.force.then_some((stopped_process, open_todos));
         if !self.respawn_pane_runtime(pane_id, crate::app::api::RespawnTarget::LaunchArgv) {
             return encode_error(id, "respawn_failed", "failed to respawn the pane process");
         }

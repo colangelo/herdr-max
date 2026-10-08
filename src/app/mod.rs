@@ -960,6 +960,7 @@ impl App {
                 self.configure_window_title(&config.ui.window_title);
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.workspace_sort = workspace_sort_from_config(config.ui.workspace_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();
@@ -991,15 +992,6 @@ impl App {
         if !invalid_section("agents") {
             self.codex_app_server =
                 crate::codex_app_server::CodexAppServer::from_config(&config.agents.codex);
-        }
-        if !invalid_section("session")
-            && Duration::from_millis(config.session.startup_per_agent_delay_ms.into())
-                != self.startup_per_agent_delay
-        {
-            diagnostics.push(
-                "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
-                    .into(),
-            );
         }
 
         if !invalid_section("experimental") {
@@ -2248,13 +2240,23 @@ mod tests {
                 .bold,
             Some(true)
         );
-        let previous = app.state.sidebar_agents.clone();
+        // A bad value costs that key, not the section (fork issue 133): the
+        // rejected `rows` falls back to its default and the reload reports it.
         std::fs::write(&path, conditional.replace("gt = 80", "gt = 'invalid'")).unwrap();
-        assert_eq!(
-            app.reload_config().status,
-            crate::config::ConfigReloadStatus::Partial
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("ui.sidebar.agents.rows") && d.contains("default")),
+            "{:?}",
+            report.diagnostics
         );
-        assert_eq!(app.state.sidebar_agents, previous);
+        assert_eq!(
+            app.state.sidebar_agents,
+            crate::config::AgentsSidebarConfig::default()
+        );
 
         let previous_agents = app.state.sidebar_agents.clone();
         std::fs::write(
@@ -3341,6 +3343,7 @@ mod tests {
                 "agent": "codex",
                 "kind": "id",
                 "value": "codex-session",
+                "restore_argv": ["codex", "resume", "codex-session"],
             })
         );
         assert_eq!(

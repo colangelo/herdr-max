@@ -707,7 +707,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReportHint(_) => "pane.report_hint",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
-        Method::PaneClearScrollback(_) => "pane.clear",
+        Method::PaneClearScrollback(_) => "pane.clear_scrollback",
         Method::PaneClose(_) => "pane.close",
         Method::PaneRespawn(_) => "pane.respawn",
         Method::PopupClose(_) => "popup.close",

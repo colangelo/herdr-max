@@ -3924,6 +3924,28 @@ mod tests {
         assert!(!first_windows_stable_is_pending(&with_windows, true, true));
     }
 
+    /// Fork manifest: the binary/version is the base semver, but releases are
+    /// tagged `v{version}-ac` (optionally `-ac.N`) on colangelo/herdr. Right
+    /// after an upstream sync the file is still upstream's (herdrdev assets,
+    /// `v{version}` tags) until the fork release flow rewrites it.
+    fn assert_release_url(url: &str, version: &str, target: &str) {
+        if url.contains("github.com/herdrdev/herdr/") {
+            assert!(
+                url.contains(&format!("/releases/download/v{version}/")),
+                "unexpected release URL for {version} {target}: {url}"
+            );
+        } else {
+            assert!(
+                url.contains("github.com/colangelo/herdr"),
+                "expected a fork asset URL for {version} {target}: {url}"
+            );
+            assert!(
+                url.contains(&format!("/releases/download/v{version}-ac")),
+                "unexpected release URL for {version} {target}: {url}"
+            );
+        }
+    }
+
     #[test]
     fn checked_in_distribution_manifest_matches_update_schema() {
         #[derive(Deserialize)]
@@ -3967,16 +3989,7 @@ mod tests {
                 Some(64),
                 "missing SHA-256 checksum for {target}"
             );
-            // Fork manifest: the binary/version is the base semver, but releases
-            // are tagged `v{version}-ac` (optionally `-ac.N`) on colangelo/herdr.
-            assert!(
-                url.contains("github.com/colangelo/herdr/"),
-                "expected a fork asset URL for {target}: {url}"
-            );
-            assert!(
-                url.contains(&format!("/releases/download/v{}-ac", manifest.version)),
-                "unexpected release URL for {target}: {url}"
-            );
+            assert_release_url(url, &manifest.version, target);
             assert!(
                 url.ends_with(&format!("herdr-{target}")),
                 "unexpected asset name for {target}: {url}"
@@ -4010,14 +4023,7 @@ mod tests {
                 let asset: AssetRef = serde_json::from_value(asset)
                     .unwrap_or_else(|_| panic!("invalid asset for {version} {target}"));
                 let url = &asset.url;
-                assert!(
-                    url.contains("github.com/colangelo/herdr/"),
-                    "expected a fork asset URL for {version} {target}: {url}"
-                );
-                assert!(
-                    url.contains(&format!("/releases/download/v{version}-ac")),
-                    "unexpected release URL for {version} {target}: {url}"
-                );
+                assert_release_url(url, version, target);
                 assert!(
                     url.ends_with(&format!("herdr-{target}")),
                     "unexpected asset name for {version} {target}: {url}"

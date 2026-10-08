@@ -249,7 +249,7 @@ pub enum Method {
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
     PaneReleaseAgent(PaneReleaseAgentParams),
-    #[serde(rename = "pane.clear")]
+    #[serde(rename = "pane.clear_scrollback")]
     PaneClearScrollback(PaneTarget),
     #[serde(rename = "pane.close")]
     PaneClose(PaneCloseParams),

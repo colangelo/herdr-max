@@ -6211,12 +6211,14 @@ mod tests {
     #[test]
     fn grok_new_session_does_not_replace_a_different_owner() {
         let mut terminal = test_terminal();
+        // Detecting a different agent drops the session of the one that left
+        // (fork issue 127), so the other owner's session is recorded after.
+        terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
         });
-        terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
 
         let mutation = terminal.set_agent_session_ref_for_session_start(
             "herdr:grok".into(),

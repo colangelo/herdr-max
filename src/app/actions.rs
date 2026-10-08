@@ -1597,28 +1597,6 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
-            AppEvent::AgentResumeReported {
-                pane_id,
-                source,
-                agent_label,
-                seq,
-                argv,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.record_reported_resume(&source, &agent_label, seq, argv);
-                    None
-                })
-                .into_iter()
-                .collect(),
-            AppEvent::ReportedAgentShellReturned {
-                pane_id,
-                observed_at,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.clear_self_reported_agent(observed_at)
-                })
-                .into_iter()
-                .collect(),
             AppEvent::AgentSessionReported {
                 pane_id,
                 source,

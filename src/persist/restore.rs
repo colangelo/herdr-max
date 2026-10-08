@@ -585,7 +585,7 @@ fn restore_workspace(
             cached_auto_label: crate::workspace::fallback_label_from_cwd(&snap.identity_cwd),
             cached_git_status_key: snap.identity_cwd.clone(),
             cached_git_branch: None,
-            cached_git_detached_head: crate::workspace::git_detached_head(&snap.identity_cwd),
+            cached_git_detached_head: None,
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: snap.worktree_space.clone(),
