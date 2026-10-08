@@ -182,7 +182,7 @@ fn project_aggregate_status(snapshot: &mut ClientShellSnapshot) {
             .iter()
             .filter(|agent| agent.tab_id == tab.tab_id)
             .map(|agent| agent.agent_status)
-            .max_by_key(|status| super::status_priority(*status))
+            .max_by_key(|status| super::display_status_priority(*status))
         {
             tab.agent_status = status;
         }
@@ -193,7 +193,7 @@ fn project_aggregate_status(snapshot: &mut ClientShellSnapshot) {
             .iter()
             .filter(|agent| agent.workspace_id == workspace.workspace_id)
             .map(|agent| agent.agent_status)
-            .max_by_key(|status| super::status_priority(*status))
+            .max_by_key(|status| super::display_status_priority(*status))
         {
             workspace.agent_status = status;
         }
@@ -474,5 +474,49 @@ mod tests {
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(1), Some(true)));
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(2), Some(false)));
         assert_eq!(completed.agents[0].agent_status, AgentStatus::Done);
+    }
+    #[test]
+    fn display_state_working_beats_done_unseen_without_changing_attention_order() {
+        let mut state = snapshot(AgentStatus::Done, 5, 2);
+        state.workspaces[0].workspace_id = "workspace".into();
+        state.tabs[0].tab_id = "tab".into();
+        state.tabs[0].workspace_id = "workspace".into();
+        let mut working = agent(AgentStatus::Working, 4);
+        working.pane_id = "working-pane".into();
+        state.agents.push(working);
+        project_aggregate_status(&mut state);
+        assert_eq!(state.workspaces[0].agent_status, AgentStatus::Working);
+        assert_eq!(state.tabs[0].agent_status, AgentStatus::Working);
+        assert!(
+            super::super::status_priority(AgentStatus::Done)
+                > super::super::status_priority(AgentStatus::Working)
+        );
+        state.agents[0].agent_status = AgentStatus::Blocked;
+        project_aggregate_status(&mut state);
+        assert_eq!(state.workspaces[0].agent_status, AgentStatus::Blocked);
+        assert_eq!(state.tabs[0].agent_status, AgentStatus::Blocked);
+    }
+
+    #[test]
+    fn display_state_is_unchanged_by_acknowledging_a_done_sibling() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut state = snapshot(AgentStatus::Working, 4, 1);
+        state.workspaces[0].workspace_id = "workspace".into();
+        state.tabs[0].tab_id = "tab".into();
+        state.tabs[0].workspace_id = "workspace".into();
+        let mut sibling = agent(AgentStatus::Working, 1);
+        sibling.pane_id = "working-pane".into();
+        state.agents.push(sibling);
+        presentation.project_snapshot(&mut state);
+        state.revision = 2;
+        state.agents[0].agent_status = AgentStatus::Idle;
+        state.agents[0].state_change_seq = 5;
+        presentation.project_snapshot(&mut state);
+        assert_eq!(state.agents[0].agent_status, AgentStatus::Done);
+        assert_eq!(state.workspaces[0].agent_status, AgentStatus::Working);
+        assert!(presentation.acknowledge_surface(&mut state, &surface(2), Some(true)));
+        assert_eq!(state.agents[0].agent_status, AgentStatus::Idle);
+        assert_eq!(state.workspaces[0].agent_status, AgentStatus::Working);
+        assert_eq!(state.tabs[0].agent_status, AgentStatus::Working);
     }
 }

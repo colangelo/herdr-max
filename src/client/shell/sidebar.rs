@@ -656,7 +656,7 @@ pub(in crate::client::shell) fn displayed_workspace_status(
             })
         })
         .map(|candidate| candidate.agent_status)
-        .max_by_key(|status| status_priority(*status))
+        .max_by_key(|status| display_status_priority(*status))
         .unwrap_or(workspace.agent_status)
 }
 

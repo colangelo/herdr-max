@@ -211,6 +211,18 @@ fn status_priority(status: crate::api::schema::AgentStatus) -> u8 {
     }
 }
 
+// Display answers what is running; attention sorting still puts unseen Done first.
+fn display_status_priority(status: crate::api::schema::AgentStatus) -> u8 {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => 4,
+        AgentStatus::Working => 3,
+        AgentStatus::Done => 2,
+        AgentStatus::Idle => 1,
+        AgentStatus::Unknown => 0,
+    }
+}
+
 fn status_text(status: crate::api::schema::AgentStatus) -> &'static str {
     use crate::api::schema::AgentStatus;
     match status {
