@@ -18,6 +18,10 @@ Restore daily-use input first, matching fork chords, defaults, mouse precedence,
 6. Layout mutation remains server-owned; the preset-cycle cursor is client-local, preserving fork semantics. Reuse existing runtime APIs for respawn and pane.move, respecting source identity and current client geometry reconciliation. No shared mutation relies on `ClientShellAction::Keybind`'s logging fallback.
 7. Common overlay text mechanics use upstream `TextEditor`; only fork deltas (undo, modified word arrows, multiline todo behavior) extend it. Focused searchable lists prioritize Ctrl+j/k movement, while ordinary fields retain kill-to-end. Actual notification/todo/move picker overlays wait for their owner.
 
+### Read-only roundtable findings
+
+Protocol reviewer and lifecycle reviewer checked the merged source before new runtime/input work. Apply four refinements: application-scroll dispatch must enforce client pane-view/popup/handoff ownership and validate alternate screen inside atomic terminal encoding; repeated endpoint intents must be serialized/bounded; typed input must be routed event-by-event with complete original recipient sets; each recipient retains actual TerminalId so aliases or respawn cannot redirect releases. Shared sync pair/menu APIs take captured source/tab IDs rather than global active state. Optional projections include initial connection and revision comparison, not only ordinary snapshot refresh. Characterization anchors include hidden-pane presses versus releases, release cleanup/disconnect, popup release scrolling, surface-interest isolation and pane-move tests. These are constraints on implementation, not replacements for its tests.
+
 ## Risks / Trade-offs
 
 - Protocol/identity/input projection changes are refactor-risk → name existing lease, copy, endpoint codec/method, geometry and headless input characterization tests before editing; request a read-only roundtable before new protocol/fanout work.
