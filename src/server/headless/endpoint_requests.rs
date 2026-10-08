@@ -80,13 +80,25 @@ impl HeadlessServer {
             let viewed = self
                 .app
                 .parse_pane_id(&params.pane_id)
-                .is_some_and(|(ws, pane)| self.shell_client_views_pane(client_id, ws, pane));
+                .is_some_and(|(ws, pane)| {
+                    self.shell_client_views_pane(client_id, ws, pane)
+                        && self
+                            .shell_target_for_client(client_id)
+                            .and_then(|target| {
+                                self.app
+                                    .state
+                                    .workspaces
+                                    .get(target.workspace_index)
+                                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                            })
+                            .is_some_and(|tab| tab.layout.focused() == pane)
+                });
             let popup_blocks = self.app.state.popup_pane.is_some()
                 && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
             if self.handoff_in_progress || !viewed || popup_blocks {
                 self.send_to_client(client_id, crate::server::client_commands::error_message(
                     boot_id, request_id, "input_target_unavailable",
-                    "application scroll requires a visible pane without a blocking popup or handoff",
+                    "application scroll requires the focused visible pane without a blocking popup or handoff",
                 ));
                 return false;
             }

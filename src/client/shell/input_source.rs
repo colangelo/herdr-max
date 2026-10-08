@@ -22,6 +22,7 @@ impl ClientShellState {
                 | ClientShellMode::Navigate
                 | ClientShellMode::Resize
                 | ClientShellMode::Copy
+                | ClientShellMode::Scroll
         )
     }
 

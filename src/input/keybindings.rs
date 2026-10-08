@@ -60,6 +60,8 @@ pub(crate) enum KeybindAction {
     AddPaneTodo,
     EditScrollback,
     ClearPane,
+    BalancePanes,
+    NextLayout,
     CopyMode,
     CopyModePageUp,
     CopyModeHalfPageUp,
@@ -140,6 +142,8 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.move_pane_prev_tab, KeybindAction::MovePanePrevTab),
         (&keybinds.edit_scrollback, KeybindAction::EditScrollback),
         (&keybinds.clear_pane, KeybindAction::ClearPane),
+        (&keybinds.balance_panes, KeybindAction::BalancePanes),
+        (&keybinds.next_layout, KeybindAction::NextLayout),
         (&keybinds.copy_mode, KeybindAction::CopyMode),
         (&keybinds.copy_mode_page_up, KeybindAction::CopyModePageUp),
         (

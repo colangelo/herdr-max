@@ -12,14 +12,14 @@
 - [x] 2.2 Wire six directional/granularity entry actions with help and held-entry repeat handoff; test exact movement, no-scrollback entry and downward no-op.
 - [x] 2.3 Complete protocol/input roundtable against frozen codecs and original fork tests before adding application scroll API; record findings in tracked plan.
 - [x] 2.4 Implement/advertise single-target alternate-screen scroll intent; test wheel/no-support/lost-screen cases and legacy/kitty generated key bytes.
-- [ ] 2.5 Implement client SCROLL state, keys, repeat target guards, Claude agent precedence, exits and fork instruction bar; test focus/boot loss and no sync fanout.
+- [x] 2.5 Implement client SCROLL state, keys, repeat target guards, Claude agent precedence, exits and fork instruction bar; test focus/boot loss and no sync fanout.
 
 ## 3. Runtime controls
 
 - [ ] 3.1 Wire retained layout balance/preset APIs into client actions/help; test config overrides, per-axis balance and cycle order.
 - [ ] 3.2 Rename fork history-purge advertisement to `pane.clear_scrollback`, preserving `pane.clear`; test full visible screen preservation and client default/binding.
 - [ ] 3.3 Wire pane respawn with client confirmation and external response semantics; test key dispatch, unavailable method and lifecycle identity.
-- [ ] 3.4 Advertise existing pane.move and wire break/adjacent-tab actions/help; test stable target IDs, bounds/no-op and existing move reconciliation.
+- Pane-to-tab/move controls transferred to overlays seat by lead; reuse its pane.move/action/help integration after sync-merge/9. No input-seat implementation task.
 
 ## 4. Sync and pin input
 

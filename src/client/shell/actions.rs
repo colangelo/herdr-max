@@ -208,6 +208,10 @@ impl ClientShellState {
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }
+                if action == crate::input::KeybindAction::NextLayout {
+                    self.cycle_layout(outcome);
+                    return;
+                }
                 if let Some(method) = self.endpoint_method_for_action(action) {
                     self.push_endpoint_method(method, outcome);
                     return;
@@ -612,6 +616,11 @@ impl ClientShellState {
             }
         }
         match pending.kind {
+            PendingEndpointKind::ApplicationScroll { generation } => {
+                let mut outcome = ClientShellInput::default();
+                self.complete_application_scroll(generation, result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
+            }
             PendingEndpointKind::Generic => {}
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
@@ -1211,6 +1220,12 @@ impl ClientShellState {
             KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
                 pane_id: focused_pane?,
             })),
+            KeybindAction::BalancePanes => Some(Method::LayoutBalance(
+                crate::api::schema::LayoutBalanceParams {
+                    tab_id: Some(focused_tab?),
+                    pane_id: None,
+                },
+            )),
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),

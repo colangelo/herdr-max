@@ -69,6 +69,15 @@ pub(super) struct EndpointCommands {
 }
 
 impl EndpointCommands {
+    /// Cancel only work that has not reached the server. A complete in-flight
+    /// tap keeps its lane until its ordinary response arrives.
+    pub(super) fn cancel_queued(&mut self, endpoint_id: &ClientEndpointId, request_id: &str) {
+        if let Some(lane) = self.lanes.get_mut(endpoint_id) {
+            lane.queued
+                .retain(|command| command.request.id != request_id);
+        }
+    }
+
     pub(super) fn enqueue(
         &mut self,
         endpoint_id: ClientEndpointId,
@@ -328,6 +337,40 @@ mod tests {
             .lanes
             .get(&endpoint())
             .is_some_and(|lane| lane.in_flight.is_some())
+    }
+
+    #[test]
+    fn cancelled_application_scroll_does_not_release_an_in_flight_lane() {
+        let mut commands = commands_with_in_flight();
+        commands.enqueue(
+            endpoint(),
+            1,
+            "boot-a".into(),
+            Box::new(crate::api::schema::Request {
+                id: "queued-scroll".into(),
+                method: crate::api::schema::Method::PaneScrollApplication(
+                    crate::api::schema::PaneScrollApplicationParams {
+                        pane_id: "pane".into(),
+                        intent: crate::api::schema::PaneApplicationScrollIntent::PageUp,
+                        count: 1,
+                    },
+                ),
+            }),
+        );
+        commands.cancel_queued(&endpoint(), "queued-scroll");
+        commands.cancel_queued(&endpoint(), "request-a");
+        assert!(has_in_flight(&commands));
+        assert!(commands.lanes[&endpoint()].queued.is_empty());
+        let response = serde_json::to_vec(&SuccessResponse {
+            id: "request-a".into(),
+            result: ResponseResult::Ok {},
+        })
+        .unwrap();
+        let result = commands
+            .receive_chunk(&endpoint(), 1, "boot-a", "request-a", true, response)
+            .unwrap();
+        assert!(result.is_some());
+        assert!(!has_in_flight(&commands));
     }
 
     #[test]

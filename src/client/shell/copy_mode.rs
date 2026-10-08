@@ -30,6 +30,9 @@ impl ClientShellState {
         amount: CopyScrollAmount,
         outcome: &mut ClientShellInput,
     ) {
+        if self.try_enter_application_scroll(direction, amount, outcome) {
+            return;
+        }
         // A down gesture resumes a scrolled viewport, but must not open copy
         // mode on an ordinary pane already displaying its live bottom.
         if direction > 0 && self.copy_or_terminal_mode() != ClientShellMode::Copy {

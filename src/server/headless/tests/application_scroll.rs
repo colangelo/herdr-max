@@ -18,13 +18,23 @@ fn public_scroll(server: &mut HeadlessServer, params: PaneScrollApplicationParam
 
 #[tokio::test]
 async fn application_scroll_rejects_hidden_stale_inactive_and_handoff_targets() {
-    for reason in ["hidden", "stale", "inactive", "handoff", "popup"] {
+    for reason in [
+        "hidden",
+        "unfocused",
+        "stale",
+        "inactive",
+        "handoff",
+        "popup",
+    ] {
         let mut server = test_headless_server();
         let mut input = install_focused_test_runtime(&mut server, b"\x1b[?1049h\x1b[>3u");
         let focused = server.app.state.workspaces[0].tabs[0].root_pane;
         let hidden_tab = server.app.state.workspaces[0].test_add_tab(Some("hidden"));
         let hidden = server.app.state.workspaces[0].tabs[hidden_tab].root_pane;
         server.app.state.workspaces[0].switch_tab(0);
+        if reason == "unfocused" {
+            server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        }
         server.clients.insert(
             41,
             ClientConnection::new(

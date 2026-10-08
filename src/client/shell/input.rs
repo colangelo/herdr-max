@@ -321,6 +321,7 @@ impl ClientShellState {
                     outcome.repaint |= self.clear_link_hover();
                     self.outer_focused = Some(false);
                     self.release_input_leases(&mut outcome);
+                    self.leave_application_scroll(&mut outcome);
                     outcome
                         .requests
                         .push(ClientMessage::ClientShellFocus { focused: false });
@@ -362,6 +363,8 @@ impl ClientShellState {
                 | RawInputEvent::HostCellSizeReport { .. }
                 | RawInputEvent::Unsupported => {}
             }
+            self.reconcile_application_scroll_focus(&mut outcome);
+            self.reconcile_application_scroll(&mut outcome);
             self.reconcile_input_source();
         }
         outcome.repaint |= self.resume_mobile_switcher_if_ready();
@@ -385,8 +388,22 @@ impl ClientShellState {
         };
         let lease_key = crate::input::InputLeaseKey::new(LOCAL_INPUT_SOURCE, &key);
         let key = self.input_leases.normalize_press(&lease_key, key);
+        if self.reconcile_application_scroll(outcome) && key.kind != KeyEventKind::Release {
+            // The key that discovers a moved/lost target ends the reading
+            // workflow; it must not become text (or a held repeat) in a new pane.
+            self.scroll_entry_repeats.remove(&lease_key);
+            self.suppress_application_scroll_key(lease_key);
+            return;
+        }
         match key.kind {
             KeyEventKind::Press => {
+                if self.retired_scroll_keys.contains(&lease_key) {
+                    self.input_leases.remove(&lease_key);
+                }
+                self.forget_application_scroll_key(&lease_key);
+                if key.generated_text.is_none() || key.has_physical_identity() {
+                    self.remember_application_scroll_key(lease_key);
+                }
                 self.scroll_entry_repeats.remove(&lease_key);
                 let initial_context = self.input_context();
                 let target = self.route_key_press(&key, outcome);
@@ -394,14 +411,20 @@ impl ClientShellState {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
                 let resulting_context = self.input_context();
+                if resulting_context.mode == ClientShellMode::Scroll
+                    && (key.generated_text.is_none() || key.has_physical_identity())
+                {
+                    self.remember_application_scroll_key(lease_key);
+                }
                 // A held scroll-entry chord continues in its destination
                 // mode. Other Prefix -> mode transitions stay suppressed.
-                let entry_action = if resulting_context.mode == ClientShellMode::Copy
-                    && matches!(
-                        initial_context.mode,
-                        ClientShellMode::Terminal | ClientShellMode::Prefix
-                    )
-                    && initial_context.overlay.is_none()
+                let entry_action = if matches!(
+                    resulting_context.mode,
+                    ClientShellMode::Copy | ClientShellMode::Scroll
+                ) && matches!(
+                    initial_context.mode,
+                    ClientShellMode::Terminal | ClientShellMode::Prefix
+                ) && initial_context.overlay.is_none()
                 {
                     let binding = if initial_context.mode == ClientShellMode::Prefix {
                         crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, &key)
@@ -446,6 +469,7 @@ impl ClientShellState {
                 self.execute_repeat_plan(lease_key, key, plan, outcome);
             }
             KeyEventKind::Release => {
+                self.forget_application_scroll_key(&lease_key);
                 self.scroll_entry_repeats.remove(&lease_key);
                 let Some(lease) = self.take_release_lease(&lease_key, &key) else {
                     return;
@@ -531,6 +555,7 @@ impl ClientShellState {
         }
         self.copy_input_queue.clear();
         self.scroll_entry_repeats.clear();
+        self.restore_retired_scroll_leases();
     }
 
     fn execute_repeat_plan(
@@ -768,6 +793,10 @@ impl ClientShellState {
                 } else {
                     self.route_copy_mode_key(key, outcome);
                 }
+                None
+            }
+            ClientShellMode::Scroll => {
+                self.route_application_scroll_key(key, outcome);
                 None
             }
         }
@@ -1108,6 +1137,10 @@ impl ClientShellState {
         ClientInputContext {
             mode: self.mode,
             copy_pane_id: self.copy_mode.as_ref().map(|copy| copy.pane_id.clone()),
+            application_scroll_generation: self
+                .application_scroll
+                .as_ref()
+                .map(|scroll| scroll.generation),
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),
@@ -1169,6 +1202,7 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
     ) -> Option<crate::input::InputLease<ClientInputContext, ClientInputTarget>> {
         if let Some(lease) = self.input_leases.remove(lease_key) {
+            self.forget_application_scroll_key(lease_key);
             return Some(lease);
         }
         let KeyCode::Char(c) = key.code else {
@@ -1194,10 +1228,13 @@ impl ClientShellState {
             // its release names the layout character if Ctrl was let go first.
             .chain(key.base_layout_key())
             .find_map(|candidate| {
-                self.input_leases.remove(&crate::input::InputLeaseKey::new(
+                let candidate_key = crate::input::InputLeaseKey::new(
                     LOCAL_INPUT_SOURCE,
                     &crate::input::TerminalKey::new(KeyCode::Char(candidate), key.modifiers),
-                ))
+                );
+                let lease = self.input_leases.remove(&candidate_key)?;
+                self.forget_application_scroll_key(&candidate_key);
+                Some(lease)
             })
             // Shifted punctuation ("?") released after Shift: the report names
             // only the unshifted key ("/"), which depends on the layout.

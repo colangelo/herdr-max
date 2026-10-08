@@ -157,6 +157,7 @@ impl ClientShellState {
         {
             endpoint.status = status;
         }
+        self.reconcile_application_scroll_projection();
     }
 
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
