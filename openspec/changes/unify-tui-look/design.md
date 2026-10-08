@@ -111,6 +111,12 @@ question tool use the same ones. Done items may be struck through and dim (todos
 - **Modals that end a task use a button row instead:** centred chips, `↵ label` primary in
   `accent` with dark bold text, the rest in `surface0` with bold `text`, two spaces apart. A view
   never has both a key bar and a button row.
+- **A mode bar takes its mode's own colour.** The bottom bar of a mode (NAVIGATE, PREFIX, PANES,
+  RESIZE) shows one filled chip, the mode name, with dark bold text. Its keys are bold in the same
+  colour. NAVIGATE and PREFIX use `accent`, PANES uses `red` (`#f38ba8`, the soft red
+  `display_panes.rs` uses today), and RESIZE uses `mauve`, as upstream draws it. Everything else
+  in the bar stays dim, with no second chip. Outside mode bars, keys are always `accent`. ac chose
+  this on 2026-10-08 so that an alternate mode is easy to tell apart at a glance.
 
 ### Text, numbers, truncation
 
@@ -153,9 +159,13 @@ question tool use the same ones. Done items may be struck through and dim (todos
 8. **The asks pane keeps the terminal's own background.** The nearest 256 grey to `panel_bg` (234)
    is neutral grey, not catppuccin's blue-black, so painting it would look like a patch. Herdr's
    popup frame already marks the edge.
-9. **Herdr's PANES bar uses one chip.** Today it has a red `PANES` chip, red keys and a second red
-   `VERSION` chip, next to a blue `NAVIGATE` chip. After: an `accent` chip, `accent` keys, and
-   `version` as a dim label. (The `RESIZE` chip stays mauve, as upstream draws it.)
+9. **Herdr's PANES bar uses one chip, in its own red.** Today it has a red `PANES` chip, red keys,
+   and a second red `VERSION` chip. After: one red `PANES` chip with dark bold text, bold red keys,
+   and `version` as a dim label with no chip. The red is the current soft red, `palette.red`
+   `#f38ba8` (256: 211). ac, 2026-10-08: *"for an alt-modality like the one in D i prefer it in red.
+   keep your design but in that modality use the current red (that's not intese) where it's
+   blue"*. So the clash this fixes is the second chip, not the colour: each mode keeps its own
+   colour (see Footer, mode bars).
 10. **The todos/notes panel loses its inner frame.** The count moves to the title row, search
     moves to the subtitle row, and the preview moves under the list, after a rule. `↵ open pane`
     becomes the accent primary button, the same as `↵ apply` in settings. The bullet glyphs
@@ -172,7 +182,7 @@ Paint codes, AFTER: `B` bold text · `.` text · `d` dim (`overlay0`) · `k` key
 `A` selection bar or primary chip (`accent` background, dark bold text) · `U` secondary chip
 (`surface0` background) · `S` text field (`surface0` background) · `c` choice 147 · `g` green ·
 `y` yellow · `r` red · `m` mauve · `x` struck-through dim · `s` rule (`surface1`) · `f` herdr's
-frame.
+frame · `P` mode chip in red (`red` background, dark bold text) · `p` key in red (bold `red`).
 
 Paint codes, BEFORE: `b` terminal bold (white) · `.` terminal default · `D` curses dim · `R`
 reverse video · `C` choice 147 · `G` green · `Y` yellow bold · `E` red bold · `P` red chip ·
@@ -577,7 +587,7 @@ ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 ### D. Herdr: the PANES bar next to the NAVIGATE bar (`src/ui/display_panes.rs`)
 
-BEFORE (two red chips and red keys; the NAVIGATE bar below it is blue):
+BEFORE (two red chips, `PANES` and `VERSION`, and red keys; the NAVIGATE bar below it is blue):
 
 ```text
  PANES   window 316x55 · panes 284x54  1-3 focus  any key close   VERSION  0.8.2-ac-beta.145-dybala 
@@ -585,12 +595,12 @@ BEFORE (two red chips and red keys; the NAVIGATE bar below it is blue):
 ```
 
 ```text
- PPPPP   dddddd ...... d ddddd ......  ppp ddddd  ppp ppp ddddd   PPPPPPP  ........................ 
+PPPPPPP  dddddd ...... d ddddd ......  ppp ddddd  ppp ppp ddddd  PPPPPPPPP ........................ 
 AAAAAAAAAA ddd dddd  kkk ddddddddd  kkk dddd  k dddddddd                                            
 ```
 
 
-AFTER (one accent chip, accent keys, `version` as a dim label, the same family as NAVIGATE):
+AFTER (one red chip, bold red keys, `version` as a dim label; NAVIGATE below keeps its blue):
 
 ```text
  PANES   window 316x55 · panes 284x54  1-3 focus  any key close  version 0.8.2-ac-beta.145-dybala   
@@ -598,7 +608,7 @@ AFTER (one accent chip, accent keys, `version` as a dim label, the same family a
 ```
 
 ```text
-AAAAAAA  dddddd ...... d ddddd ......  kkk ddddd  kkk kkk ddddd  ddddddd ........................   
+PPPPPPP  dddddd ...... d ddddd ......  ppp ddddd  ppp ppp ddddd  ddddddd ........................   
 AAAAAAAAAA ddd dddd  kkk ddddddddd  kkk dddd  k dddddddd                                            
 ```
 
@@ -643,7 +653,7 @@ f  k ........ ... .. .. ......... ............ ............... ...... .. f
 f  r .... ..... ... ... ...... ..... . ............ .        d dddddd dd f
 f  d xxxxx xxxxxxxxxx xxxxxxx xxxxxxx xxx xxxxxx xxxxxx xxxxxxxx xxxx dd f
 f                                                                        f
-f             U UUUU UUUU    UUU UUUUUU    U UUUUU UUUU    UUU UUUUU     f
+f            UUUUUUUUUUUUU  UUUUUUUUUUUU  UUUUUUUUUUUUUU  UUUUUUUUUUU    f
 ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ```
 
@@ -685,7 +695,7 @@ f ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss f
 f dddd ddddddd ddddddddddd ddddd ddddddd ddddd ddd dddddd ddddddddddd    f
 f dd ddddddd dddd ddddddddddddddddddddddddddddddd d                      f
 f                                                                        f
-f            AAAAAAAAAAAAA   UUU UUUUUU    U UUUUU UUUU    UUU UUUUU     f
+f            AAAAAAAAAAAAA  UUUUUUUUUUUU  UUUUUUUUUUUUUU  UUUUUUUUUUU    f
 ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 ```
 

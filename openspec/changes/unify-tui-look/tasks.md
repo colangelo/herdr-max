@@ -5,7 +5,8 @@ Planned 2026-10-08. Issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/
 - [x] 1.1 read the 9 screenshots in `~/Pictures/Screenshots/herdr-tui - 2026-10-06`, the fork's `src/ui`, upstream 0.9.3 `src/client/shell/{overlays,render}.rs`, `asks_tui.py`, and upstream issues
 - [x] 1.2 write the style spec and the BEFORE/AFTER mockups in `design.md` (asks list, answering, typing, bus down, PANES bar, todos/notes)
 - [x] 1.3 `openspec validate unify-tui-look --strict`
-- [ ] 1.4 ac approves the mockups, through herdr-helper and the coordinator `herdr`; record his answer on #174
+- [x] 1.4 ac approves the mockups, through the coordinator `herdr`, on 2026-10-08: *"i like the new look, but for an alt-modality like the one in D i prefer it in red."* and *"keep your design but in that modality use the current red (that's not intese) where it's blue"*
+- [x] 1.5 apply ac's change: mode bars take their mode's colour (PANES = soft red `#f38ba8`/211); decision 9, the Footer rule, mockup D and the spec updated
 
 ## 2. Phase 2: asks pane (CONTEXT repo, branch `feat/asks-tui-herdr-style`, `context` reviews and merges)
 
@@ -22,7 +23,7 @@ Planned 2026-10-08. Issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/
 ## 3. Phase 3: herdr clashes (after the 0.9.3 cutover, and only with ac's OK)
 
 - [ ] 3.1 open a `[fork]` issue for each item below before starting it
-- [ ] 3.2 PANES bar (`display_panes.rs`, or its `src/client/shell` successor after #171): `PANES` chip in `accent`, keys in `accent`, `version` as a dim label (no second chip); update its tests, including the one that says the `VERSION` chip is styled like `PANES`
+- [ ] 3.2 PANES bar (`display_panes.rs`, or its `src/client/shell` successor after #171): one `PANES` chip in the current soft red (`palette.red`) with dark bold text, keys in bold red, `version` as a dim label (no second chip); update its tests, including the one that says the `VERSION` chip is styled like `PANES`
 - [ ] 3.3 todos/notes panel (`todo_board.rs` or its successor): count on the title row, search as the subtitle, no inner frame, preview under the list after a rule, `↵ open pane` as the accent primary chip
 - [ ] 3.4 optional: bring the 0.9.3 help and navigator footers to the key bar rule (keys first, bold accent) and drop hints that do nothing (upstream #2880); shape it so it can go upstream
 - [ ] 3.5 dogfood each fix with `herdr-dogfood`, then close its issue with how it was checked

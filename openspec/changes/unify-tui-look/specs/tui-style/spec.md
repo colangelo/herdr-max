@@ -78,16 +78,23 @@ end with a button row instead: centred chips, the `↵` primary chip in `accent`
 - **THEN** `↵ open pane` is the accent primary chip and `spc toggle`, `c clear done`, `esc close`
   are `surface0` chips
 
-### Requirement: One chip family per bar
+### Requirement: A mode bar has one chip in its mode's colour
 
-A status or mode bar SHALL show at most one filled chip, the mode, in `accent` (`mauve` for
-RESIZE). The other labels in the bar SHALL be dim text, and its keys SHALL be bold `accent`.
+A mode bar SHALL show exactly one filled chip, the mode name, with dark bold text on the mode's own
+colour: `accent` for NAVIGATE and PREFIX, `red` (`#f38ba8`, 256-colour 211) for PANES, and `mauve`
+for RESIZE. Its keys SHALL be bold in the same colour. Every other label in the bar SHALL be dim
+text, with no second chip. Outside a mode bar, keys SHALL be bold `accent`.
 
 #### Scenario: PANES bar
 
 - **WHEN** the display-panes bar is shown
-- **THEN** `PANES` is an accent chip, `1-3` and `any key` are bold accent, and the build reads
-  `version 0.8.2-…` with `version` dim and no second chip
+- **THEN** `PANES` is a red chip with dark bold text, `1-3` and `any key` are bold red, and the
+  build reads `version 0.8.2-…` with `version` dim and no second chip
+
+#### Scenario: NAVIGATE bar
+
+- **WHEN** navigate mode is on
+- **THEN** `NAVIGATE` is an accent chip and its keys are bold accent
 
 ### Requirement: Lost connection is shown in place
 
