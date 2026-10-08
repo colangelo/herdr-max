@@ -334,6 +334,7 @@ fn resource_facts(
                     crate::terminal::todo::TodoPriority::Normal => "normal".to_owned(),
                     crate::terminal::todo::TodoPriority::Low => "low".to_owned(),
                 }),
+                revision: terminal.todo_revision(),
             },
         );
         background_activity.insert(public.pane_id.clone(), terminal.background_work());

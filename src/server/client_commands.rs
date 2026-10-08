@@ -44,6 +44,11 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "todo.add",
+    "todo.clear",
+    "todo.list",
+    "todo.remove",
+    "todo.update",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -328,6 +333,36 @@ mod tests {
             actual.remove("pane.respawn").as_deref(),
             Some("b261b69cb75bc97794320ac121948b1c8d8740ce4996d2bfce9f6b1c184b6897")
         );
+        // Fork (herdr-max): the pane todo methods are additive, advertised so
+        // the client shell's todo panel and editor can read and change todos.
+        for (method, digest) in [
+            (
+                "todo.add",
+                "4caa6b279cfe03aa4713ae1ee5798c979715d1f55fc12aa9c570151108171237",
+            ),
+            (
+                "todo.clear",
+                "dbb05704d7a588c3573d42ca86ce2f9adc30eeb314aeaf079328e4b632c05a2d",
+            ),
+            (
+                "todo.list",
+                "bdf5b96a796d079fe509d4b5dc8630e741991dabba0bed0f2b32b00c21753e5b",
+            ),
+            (
+                "todo.remove",
+                "5a2821bf16a78f3639a644f2e3eede43eff7417bd13b1e65fbfb961de2cce103",
+            ),
+            (
+                "todo.update",
+                "288f2ad9d26077dc346d8588e8e0b7d06a9af12357318d34e3a3fe3c5a88f1d6",
+            ),
+        ] {
+            assert_eq!(
+                actual.remove(method).as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
         let mut expected = expected;
         for method in ["pane.close", "tab.close", "workspace.close"] {
             expected.remove(method);

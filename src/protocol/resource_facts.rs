@@ -39,6 +39,10 @@ pub struct ClientPaneTodoSummary {
     /// An open set of priority names; unknown values retain the count.
     #[serde(default)]
     pub highest_priority: Option<String>,
+    /// Changes whenever any todo of the pane changes, so a client holding the
+    /// full list knows to fetch it again. Older endpoints send none (0).
+    #[serde(default)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
