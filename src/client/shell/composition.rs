@@ -414,7 +414,15 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
-        if layout.mobile_header.is_empty() {
+        if layout.mobile_header.is_empty()
+            && self.config.notification_center_position
+                == crate::config::NotificationCenterPositionConfig::BottomRight
+            && snapshot
+                .resource_facts
+                .as_ref()
+                .and_then(|facts| facts.notifications.as_ref())
+                .is_some()
+        {
             let mut composed = frame.to_ratatui_buffer()?;
             if let Some(rect) = super::tab_indicators::paint_floating(
                 &mut composed,
@@ -426,7 +434,16 @@ impl ClientShellState {
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
         }
-        if self.mode == ClientShellMode::Terminal && !self.pane_labels_visible() {
+        if self.mode == ClientShellMode::Terminal
+            && !self.pane_labels_visible()
+            && snapshot.focused_tab_id.as_ref().is_some_and(|tab_id| {
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|facts| facts.tab_sync.as_ref())
+                    .is_some_and(|tabs| tabs.contains_key(tab_id))
+            })
+        {
             let mut composed = frame.to_ratatui_buffer()?;
             if let Some(rect) = super::sync_chrome::paint(
                 &mut composed,
