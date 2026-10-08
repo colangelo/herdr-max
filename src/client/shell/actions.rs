@@ -20,6 +20,13 @@ impl ClientShellState {
                 self.persist_chrome_preferences(outcome);
             }
             crate::input::KeybindMatch::Action(action) => {
+                if matches!(action, crate::input::KeybindAction::FocusAgent(_))
+                    && !self.indexed_navigation_target_exists(&crate::input::KeybindMatch::Action(
+                        action,
+                    ))
+                {
+                    return;
+                }
                 if self.workspace_preview_action_blocked()
                     && matches!(
                         action,
