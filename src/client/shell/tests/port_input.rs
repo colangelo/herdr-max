@@ -133,7 +133,7 @@ fn prefix_ctrl_d_scrolls_an_open_copy_mode_back_down_without_losing_anchor() {
     entry_prefix(&mut state);
     press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
     press(&mut state, KeyCode::Char('v'), KeyModifiers::empty());
-    let anchor = state.copy_mode.as_ref().unwrap().selection.clone();
+    let anchor = state.copy_mode.as_ref().unwrap().selection;
     entry_prefix(&mut state);
     press(&mut state, KeyCode::Char('d'), KeyModifiers::CONTROL);
     assert_eq!(state.mode, ClientShellMode::Copy);

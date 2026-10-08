@@ -3,15 +3,15 @@
 ## 1. Setup and existing key support
 
 - [x] 1.1 Verify worktree writes and `cargo check --bin herdr` with assigned Zig; record outcome in progress.
-- [ ] 1.2 Verify ac's two prefixes and retained letter range dispatch/help; cover client target selection past index nine and prefix consumption.
+- [x] 1.2 Verify ac's two prefixes and retained letter range dispatch/help; cover client target selection past index nine and prefix consumption.
 - [ ] 1.3 Connect retained keybind warnings to non-fatal startup/reload client diagnostics; test warning text, intentional unbind and command preservation.
 
 ## 2. Copy and application scrolling
 
-- [ ] 2.1 Port Ctrl+g and viewport-only Ctrl+k/j with fork behavior tests, selection clamp/offset coalescing and mode-bar help.
-- [ ] 2.2 Wire six directional/granularity entry actions with help and held-entry repeat handoff; test exact movement, no-scrollback entry and downward no-op.
+- [x] 2.1 Port Ctrl+g and viewport-only Ctrl+k/j with fork behavior tests, selection clamp/offset coalescing and mode-bar help.
+- [x] 2.2 Wire six directional/granularity entry actions with help and held-entry repeat handoff; test exact movement, no-scrollback entry and downward no-op.
 - [x] 2.3 Complete protocol/input roundtable against frozen codecs and original fork tests before adding application scroll API; record findings in tracked plan.
-- [ ] 2.4 Implement/advertise single-target alternate-screen scroll intent; test wheel/no-support/lost-screen cases and legacy/kitty generated key bytes.
+- [x] 2.4 Implement/advertise single-target alternate-screen scroll intent; test wheel/no-support/lost-screen cases and legacy/kitty generated key bytes.
 - [ ] 2.5 Implement client SCROLL state, keys, repeat target guards, Claude agent precedence, exits and fork instruction bar; test focus/boot loss and no sync fanout.
 
 ## 3. Runtime controls

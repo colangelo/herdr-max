@@ -3881,13 +3881,13 @@ mod tests {
     fn application_scroll_ticks_use_current_wheel_modes_and_drop_after_screen_loss() {
         use crate::api::schema::PaneApplicationScrollIntent as Intent;
         use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
-        for modes in ["", "\x1b[?1007h", "\x1b[?1000h\x1b[?1006h"] {
+        for modes in ["\x1b[?1007l", "\x1b[?1007h", "\x1b[?1000h\x1b[?1006h"] {
             let (tx, _rx) = tokio::sync::mpsc::channel(4);
             let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
             terminal.write(format!("\x1b[?1049h{modes}").as_bytes());
             let pane = super::GhosttyPaneTerminal::new(terminal, tx).unwrap();
             let expected = match modes {
-                "" => Vec::new(),
+                "\x1b[?1007l" => Vec::new(),
                 "\x1b[?1007h" => pane.encode_terminal_key(crate::input::TerminalKey::new(
                     KeyCode::Up,
                     KeyModifiers::empty(),

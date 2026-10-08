@@ -101,7 +101,6 @@ fn copy_viewport_chords_edit_search_instead_of_scrolling_it() {
     assert!(outcome.requests.is_empty());
 }
 
-
 #[test]
 fn pasted_help_and_copy_queries_normalize_single_line_text() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
