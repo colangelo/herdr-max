@@ -73,6 +73,25 @@ impl ClientShellState {
                     self.open_notification_center(outcome);
                     return;
                 }
+                match action {
+                    crate::input::KeybindAction::MovePaneToTab => {
+                        self.open_move_picker(outcome);
+                        return;
+                    }
+                    crate::input::KeybindAction::BreakPane => {
+                        self.break_pane(outcome);
+                        return;
+                    }
+                    crate::input::KeybindAction::MovePaneNextTab => {
+                        self.move_pane_to_adjacent_tab(1, outcome);
+                        return;
+                    }
+                    crate::input::KeybindAction::MovePanePrevTab => {
+                        self.move_pane_to_adjacent_tab(-1, outcome);
+                        return;
+                    }
+                    _ => {}
+                }
                 if action == crate::input::KeybindAction::OpenNotificationTarget {
                     self.focus_visible_notification(outcome);
                     return;
@@ -394,6 +413,7 @@ impl ClientShellState {
             crate::api::schema::Method::WorkspaceCreate(params) => params.focus,
             crate::api::schema::Method::TabCreate(params) => params.focus,
             crate::api::schema::Method::PaneSplit(params) => params.focus,
+            crate::api::schema::Method::PaneMove(params) => params.focus,
             _ => false,
         };
         if changes_focus {
@@ -591,6 +611,8 @@ impl ClientShellState {
                         format!("{}:{code}", pending.method_name),
                         if matches!(pending.kind, PendingEndpointKind::TodoSave { .. }) {
                             "todo save failed"
+                        } else if matches!(pending.kind, PendingEndpointKind::PaneMove) {
+                            "pane move failed"
                         } else {
                             "Action rejected"
                         },
@@ -879,6 +901,11 @@ impl ClientShellState {
                     self.handle_notification_list_result(summary, result),
                     Vec::new(),
                 );
+            }
+            PendingEndpointKind::PaneMove => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_pane_move_result(&result, &mut outcome);
+                return (true, outcome.actions);
             }
             PendingEndpointKind::NotificationMutation => {
                 let mut outcome = ClientShellInput::default();

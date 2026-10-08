@@ -27,6 +27,7 @@ mod input_source;
 mod link_hover;
 mod mobile;
 mod mouse;
+mod move_picker;
 mod notification_center;
 mod notification_policy;
 mod notifications;

@@ -85,7 +85,8 @@ pub(crate) fn render_client_overlay(
         | ClientShellOverlay::GlobalMenu(_)
         | ClientShellOverlay::NotificationCenter(_)
         | ClientShellOverlay::TodoPanel(_)
-        | ClientShellOverlay::TodoEdit(_) => None,
+        | ClientShellOverlay::TodoEdit(_)
+        | ClientShellOverlay::MovePicker(_) => None,
     }
 }
 
