@@ -76,6 +76,22 @@ impl HeadlessServer {
             return false;
         }
 
+        if let api::schema::Method::PaneScrollApplication(params) = &request.method {
+            let viewed = self
+                .app
+                .parse_pane_id(&params.pane_id)
+                .is_some_and(|(ws, pane)| self.shell_client_views_pane(client_id, ws, pane));
+            let popup_blocks = self.app.state.popup_pane.is_some()
+                && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
+            if self.handoff_in_progress || !viewed || popup_blocks {
+                self.send_to_client(client_id, crate::server::client_commands::error_message(
+                    boot_id, request_id, "input_target_unavailable",
+                    "application scroll requires a visible pane without a blocking popup or handoff",
+                ));
+                return false;
+            }
+        }
+
         let api_request_id = format!(
             "endpoint:{}:{client_id}:{request_id}",
             self.client_shell_boot_id

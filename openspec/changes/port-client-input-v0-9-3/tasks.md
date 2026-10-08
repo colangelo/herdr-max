@@ -10,7 +10,7 @@
 
 - [ ] 2.1 Port Ctrl+g and viewport-only Ctrl+k/j with fork behavior tests, selection clamp/offset coalescing and mode-bar help.
 - [ ] 2.2 Wire six directional/granularity entry actions with help and held-entry repeat handoff; test exact movement, no-scrollback entry and downward no-op.
-- [ ] 2.3 Complete protocol/input roundtable against frozen codecs and original fork tests before adding application scroll API; record findings in tracked plan.
+- [x] 2.3 Complete protocol/input roundtable against frozen codecs and original fork tests before adding application scroll API; record findings in tracked plan.
 - [ ] 2.4 Implement/advertise single-target alternate-screen scroll intent; test wheel/no-support/lost-screen cases and legacy/kitty generated key bytes.
 - [ ] 2.5 Implement client SCROLL state, keys, repeat target guards, Claude agent precedence, exits and fork instruction bar; test focus/boot loss and no sync fanout.
 

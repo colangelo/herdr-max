@@ -493,6 +493,14 @@ impl TerminalRuntime {
         self.0.encode_terminal_key(key)
     }
 
+    pub(crate) fn encode_application_scroll(
+        &self,
+        intent: crate::api::schema::PaneApplicationScrollIntent,
+        count: u16,
+    ) -> Option<Vec<u8>> {
+        self.0.encode_application_scroll(intent, count)
+    }
+
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.0.try_send_bytes(bytes)
     }

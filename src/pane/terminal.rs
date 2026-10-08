@@ -545,8 +545,6 @@ impl PaneTerminal {
         self.ghostty.detection_ansi()
     }
 
-
-
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_text_snapshot(lines)
     }
@@ -672,6 +670,14 @@ impl PaneTerminal {
 
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
         self.ghostty.encode_terminal_key(key)
+    }
+
+    pub(crate) fn encode_application_scroll(
+        &self,
+        intent: crate::api::schema::PaneApplicationScrollIntent,
+        count: u16,
+    ) -> Option<Vec<u8>> {
+        self.ghostty.encode_application_scroll(intent, count)
     }
 
     pub(crate) fn encode_mouse_button(
@@ -2128,6 +2134,98 @@ impl GhosttyPaneTerminal {
         bytes
     }
 
+    /// Validate the alternate screen and encode complete application scroll
+    /// taps atomically. PTY mode changes cannot split a press from its release.
+    pub(crate) fn encode_application_scroll(
+        &self,
+        intent: crate::api::schema::PaneApplicationScrollIntent,
+        count: u16,
+    ) -> Option<Vec<u8>> {
+        use crate::api::schema::PaneApplicationScrollIntent as Intent;
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+        if !(1..=64).contains(&count) {
+            return None;
+        }
+        let core = self.core.lock().ok()?;
+        if core.terminal.active_screen().ok()? != crate::ghostty::ActiveScreen::Alternate {
+            return Some(Vec::new());
+        }
+        let wheel = match intent {
+            Intent::WheelUp => Some(MouseEventKind::ScrollUp),
+            Intent::WheelDown => Some(MouseEventKind::ScrollDown),
+            _ => None,
+        };
+        let mut bytes = Vec::new();
+        let (code, modifiers) = if let Some(kind) = wheel {
+            let reporting = core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()?
+                || core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()?
+                || core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()?
+                || core.terminal.mode_get(MODE_MOUSE_X10).ok()?;
+            if reporting {
+                let position = crate::input::mouse::Position::Cell {
+                    column: core.terminal.cols().ok()? / 2,
+                    row: core.terminal.rows().ok()? / 2,
+                };
+                let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
+                let (x, y) = ghostty_mouse_position_for_terminal(position)?;
+                let mut event =
+                    ghostty_mouse_event_from_wheel_kind(kind, 0, 0, KeyModifiers::empty())?;
+                event.set_position(x, y);
+                for _ in 0..count {
+                    bytes.extend(encoder.encode(&event).ok()?);
+                }
+                return Some(bytes);
+            }
+            if !core
+                .terminal
+                .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
+                .ok()?
+            {
+                return Some(bytes);
+            }
+            (
+                if kind == MouseEventKind::ScrollUp {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                },
+                KeyModifiers::empty(),
+            )
+        } else {
+            match intent {
+                Intent::PageUp => (KeyCode::PageUp, KeyModifiers::empty()),
+                Intent::PageDown => (KeyCode::PageDown, KeyModifiers::empty()),
+                Intent::Home => (KeyCode::Home, KeyModifiers::empty()),
+                Intent::End => (KeyCode::End, KeyModifiers::empty()),
+                Intent::CtrlHome => (KeyCode::Home, KeyModifiers::CONTROL),
+                Intent::CtrlEnd => (KeyCode::End, KeyModifiers::CONTROL),
+                Intent::WheelUp | Intent::WheelDown => return Some(bytes),
+            }
+        };
+        let report_release = crate::input::KeyboardProtocol::from_kitty_flags(
+            core.terminal.kitty_keyboard_flags().ok()? as u16,
+        )
+        .reports_event_types();
+        let negotiated_nothing = keyboard_negotiated_nothing(&core.terminal);
+        let mut encoder = self.key_encoder.lock().ok()?;
+        let press = crate::input::TerminalKey::new(code, modifiers);
+        for _ in 0..count {
+            bytes.extend(encode_key_with(
+                &mut encoder,
+                negotiated_nothing,
+                press.clone(),
+            ));
+            if report_release {
+                bytes.extend(encode_key_with(
+                    &mut encoder,
+                    negotiated_nothing,
+                    press.clone().with_kind(KeyEventKind::Release),
+                ));
+            }
+        }
+        Some(bytes)
+    }
+
     #[cfg(test)]
     fn encode_terminal_key_once(&self, key: crate::input::TerminalKey) -> Vec<u8> {
         let Ok(core) = self.core.lock() else {
@@ -2283,9 +2381,6 @@ impl GhosttyPaneTerminal {
             })
             .unwrap_or_default()
     }
-
-
-
 
     #[cfg(test)]
     pub fn recent_text(&self, lines: usize) -> String {
@@ -3751,6 +3846,83 @@ pub(crate) fn test_encode_key_for_app(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_scroll_completes_generated_taps_for_event_reporting() {
+        use crate::api::schema::PaneApplicationScrollIntent as Intent;
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        for flags in [0, 1, 2, 3, 31] {
+            let (tx, _rx) = tokio::sync::mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            terminal.write(format!("\x1b[?1049h\x1b[>{flags}u").as_bytes());
+            let pane = super::GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            for (intent, code, modifiers) in [
+                (Intent::PageUp, KeyCode::PageUp, KeyModifiers::empty()),
+                (Intent::PageDown, KeyCode::PageDown, KeyModifiers::empty()),
+                (Intent::Home, KeyCode::Home, KeyModifiers::empty()),
+                (Intent::End, KeyCode::End, KeyModifiers::empty()),
+                (Intent::CtrlHome, KeyCode::Home, KeyModifiers::CONTROL),
+                (Intent::CtrlEnd, KeyCode::End, KeyModifiers::CONTROL),
+            ] {
+                let key = crate::input::TerminalKey::new(code, modifiers);
+                let mut tap = pane.encode_terminal_key(key.clone());
+                if flags & 2 != 0 {
+                    tap.extend(pane.encode_terminal_key(key.with_kind(KeyEventKind::Release)));
+                }
+                assert_eq!(
+                    pane.encode_application_scroll(intent, 2).unwrap(),
+                    tap.repeat(2),
+                    "{flags}: {intent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn application_scroll_ticks_use_current_wheel_modes_and_drop_after_screen_loss() {
+        use crate::api::schema::PaneApplicationScrollIntent as Intent;
+        use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
+        for modes in ["", "\x1b[?1007h", "\x1b[?1000h\x1b[?1006h"] {
+            let (tx, _rx) = tokio::sync::mpsc::channel(4);
+            let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+            terminal.write(format!("\x1b[?1049h{modes}").as_bytes());
+            let pane = super::GhosttyPaneTerminal::new(terminal, tx).unwrap();
+            let expected = match modes {
+                "" => Vec::new(),
+                "\x1b[?1007h" => pane.encode_terminal_key(crate::input::TerminalKey::new(
+                    KeyCode::Up,
+                    KeyModifiers::empty(),
+                )),
+                _ => pane
+                    .encode_mouse_wheel(
+                        MouseEventKind::ScrollUp,
+                        crate::input::mouse::Position::Cell {
+                            column: 40,
+                            row: 12,
+                        },
+                        KeyModifiers::empty(),
+                    )
+                    .unwrap(),
+            };
+            assert_eq!(
+                pane.encode_application_scroll(Intent::WheelUp, 1).unwrap(),
+                expected
+            );
+            pane.core.lock().unwrap().terminal.write(b"\x1b[?1049l");
+            for intent in [
+                Intent::WheelUp,
+                Intent::WheelDown,
+                Intent::PageUp,
+                Intent::CtrlEnd,
+            ] {
+                assert!(pane
+                    .encode_application_scroll(intent, 1)
+                    .unwrap()
+                    .is_empty());
+            }
+            assert!(pane.encode_application_scroll(Intent::PageUp, 0).is_none());
+            assert!(pane.encode_application_scroll(Intent::PageUp, 65).is_none());
+        }
+    }
     use super::*;
     use ratatui::{layout::Rect, style::Color};
     use tokio::sync::mpsc;

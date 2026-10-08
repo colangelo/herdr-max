@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod application_scroll;
 mod env;
 mod integrations;
 mod layouts;
@@ -1389,6 +1390,9 @@ impl App {
             }
             Method::PaneResize(params) => return self.handle_pane_resize(request.id, params),
             Method::PaneScroll(params) => return self.handle_pane_scroll(request.id, params),
+            Method::PaneScrollApplication(params) => {
+                return self.handle_pane_scroll_application(request.id, params);
+            }
             Method::PaneClear(target) => return self.handle_pane_clear(request.id, target),
             Method::PaneEditScrollback(target) => {
                 return self.handle_pane_edit_scrollback(request.id, target);

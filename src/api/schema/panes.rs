@@ -284,6 +284,34 @@ pub struct PaneScrollParams {
     pub offset_from_bottom: u64,
 }
 
+/// Application-owned alternate-screen scroll input, distinct from host history
+/// offsets and ordinary typed input that may fan out to a sync group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneApplicationScrollIntent {
+    WheelUp,
+    WheelDown,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    CtrlHome,
+    CtrlEnd,
+}
+
+fn one_application_scroll() -> u16 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneScrollApplicationParams {
+    pub pane_id: String,
+    pub intent: PaneApplicationScrollIntent,
+    #[serde(default = "one_application_scroll")]
+    #[schemars(range(min = 1, max = 64))]
+    pub count: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneTextPoint {
     pub row: u32,
