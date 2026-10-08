@@ -20,7 +20,7 @@ fn out_of_range_agent_jump_logs_the_displayed_count_and_sends_no_input() {
         ClientShellMode::Navigate,
     ] {
         let config: Config = toml::from_str(
-            "[keys]\nswitch_tab = []\nswitch_workspace = []\nfocus_agent = [\"alt+1..9\", \"prefix+1..9\"]\n",
+            "[keys]\nswitch_tab = []\nswitch_workspace = []\nfocus_agent = [\"alt+1..9\", \"prefix+alt+1..9\"]\n",
         ).unwrap();
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
         state.set_snapshot(Box::new(snapshot()));
@@ -43,11 +43,7 @@ fn out_of_range_agent_jump_logs_the_displayed_count_and_sends_no_input() {
         let outcome = tracing::subscriber::with_default(subscriber, || {
             state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
                 KeyCode::Char('8'),
-                if mode == ClientShellMode::Terminal {
-                    KeyModifiers::ALT
-                } else {
-                    KeyModifiers::empty()
-                },
+                KeyModifiers::ALT,
             ))])
         });
         assert!(outcome.requests.is_empty());
@@ -63,7 +59,7 @@ fn out_of_range_agent_jump_logs_the_displayed_count_and_sends_no_input() {
         let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         assert!(
             text.contains("focus_agent: no agent panel entry at index"),
-            "{text}"
+            "{mode:?}: {text}"
         );
         assert!(text.contains("idx=7"), "{text}");
         assert!(text.contains("jump_symbol="), "{text}");
