@@ -189,11 +189,15 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
+        // Keep panes at the size they had rather than shrinking them to the
+        // headless default on the first frame, until a client reattaches.
+        server.handoff_client_size = received.manifest.client_size;
+        server.effective_size = server.detached_size();
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
-        server.pending_handoff_repaint_nudge = true;
+        server.begin_handoff_detection_sweep();
         if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
             warn!(err = %err, "failed to report handoff ownership; continuing as owner");
         }

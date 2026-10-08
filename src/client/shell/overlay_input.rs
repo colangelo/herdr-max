@@ -1009,6 +1009,7 @@ impl ClientShellState {
             crate::api::schema::Method::WorkspaceClose(crate::api::schema::WorkspaceCloseParams {
                 workspace_id,
                 close_group,
+                force: false,
             }),
             outcome,
         );
@@ -1031,7 +1032,10 @@ impl ClientShellState {
             }
         }
         self.push_endpoint_method(
-            crate::api::schema::Method::TabClose(crate::api::schema::TabTarget { tab_id }),
+            crate::api::schema::Method::TabClose(crate::api::schema::TabCloseParams {
+                tab_id,
+                force: false,
+            }),
             outcome,
         );
     }
@@ -1056,13 +1060,15 @@ impl ClientShellState {
                 );
                 return;
             }
-            crate::api::schema::Method::TabClose(crate::api::schema::TabTarget {
+            crate::api::schema::Method::TabClose(crate::api::schema::TabCloseParams {
                 tab_id: target.tab_id,
+                force: false,
             })
         } else {
             crate::api::schema::Method::WorkspaceClose(crate::api::schema::WorkspaceCloseParams {
                 workspace_id: confirm.workspace_id,
                 close_group: confirm.close_group,
+                force: false,
             })
         };
         self.push_endpoint_method(method, outcome);

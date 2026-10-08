@@ -17,18 +17,21 @@ pub use self::{
         upsert_section_value,
     },
     keybinds::{
-        format_prefix_combos, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
-        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
-        IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
-        jump_symbol,
+        format_prefix_combos, jump_symbol, normalize_key_combo, terminal_key_matches_combo,
+        ActionKeybinds, BindingConfig, CommandKeybindConfig, CustomCommandAction,
+        CustomCommandKeybind, IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
     },
     model::{
-        validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
-        clamp_display_panes_ms, CodexAgentConfig, NotificationCenterPositionConfig, PaneBorderActiveStyleConfig, SidebarActiveBorderConfig, SidebarFogStyle, SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig, StateColorsConfig, StateSymbolsConfig, StatusSpinnerConfig, ToastHerdrSize, ToastPaneFeedback, WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS, MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
+        clamp_display_panes_ms, validated_sidebar_bounds, AgentPanelSortConfig, CodexAgentConfig,
+        Config, ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig,
+        NotificationCenterPositionConfig, PaneBorderActiveStyleConfig, PaneBordersConfig,
+        ShellModeConfig, SidebarActiveBorderConfig, SidebarCollapsedModeConfig, SidebarFogStyle,
+        SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig,
+        StateColorsConfig, StateSymbolsConfig, StatusIndicatorStyle, StatusSpinnerConfig,
+        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, ToastHerdrSize, ToastPaneFeedback, UpdateChannelConfig,
+        WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS, MAX_TOAST_DELAY_SECONDS,
+        MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -120,12 +123,6 @@ impl Config {
 
     pub fn prefix_keys(&self) -> Vec<(KeyCode, KeyModifiers)> {
         self.validated_keybinds().1
-    }
-
-    /// The keys after the primary one that also enter prefix mode
-    /// (`keys.prefix` given as a list).
-    pub fn extra_prefix_keys(&self) -> Vec<(KeyCode, KeyModifiers)> {
-        self.parsed_prefixes().0.into_iter().skip(1).collect()
     }
 
     /// Parsed keybinds for Herdr actions.
@@ -315,14 +312,7 @@ impl Config {
         if let Some(prefix_diag) = prefix_diag {
             Err(std::iter::once(prefix_diag).chain(keybind_diags).collect())
         } else {
-            Ok((
-                LiveKeybindConfig {
-                    prefix,
-                    extra_prefixes: self.extra_prefix_keys(),
-                    keybinds,
-                },
-                keybind_diags,
-            ))
+            Ok((LiveKeybindConfig { prefix, keybinds }, keybind_diags))
         }
     }
 

@@ -84,7 +84,7 @@ pub(super) fn snapshot_with_completions(
                 number: workspace.number,
                 label: workspace.label,
                 custom_label: state.custom_name.is_some(),
-                branch: state.branch(),
+                branch: state.head_label(),
                 git_ahead_behind: state.git_ahead_behind(),
                 tokens,
                 worktree: workspace

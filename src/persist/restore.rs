@@ -712,7 +712,6 @@ fn restore_tab(
         let saved_next_todo_id = saved_pane.map(|p| p.next_todo_id).unwrap_or(1);
         let saved_last_input_at_ms = saved_pane.and_then(|p| p.last_input_at_ms);
         let saved_pin_order = saved_pane.and_then(|p| p.pin_order);
-        let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -762,10 +761,6 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
-        #[cfg(unix)]
-        let handoff_agent_state = imported_runtime
-            .as_ref()
-            .and_then(|imported| imported.state.agent_state.clone());
         #[cfg(unix)]
         let imported_agent_seed = imported_runtime
             .as_ref()
@@ -937,10 +932,6 @@ fn restore_tab(
                         false,
                         std::time::Instant::now(),
                     );
-                }
-                #[cfg(unix)]
-                if let Some(agent_state) = handoff_agent_state {
-                    terminal.restore_handoff_agent_state(agent_state);
                 }
                 restore_pane_todos(&mut terminal, saved_todos, saved_next_todo_id, todo_links);
                 terminal.restored_last_input_at_ms = saved_last_input_at_ms;

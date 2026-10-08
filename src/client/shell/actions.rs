@@ -854,7 +854,7 @@ impl ClientShellState {
     ) -> Option<crate::api::schema::Method> {
         use crate::api::schema::{
             Method, PaneDirection, PaneFocusDirectionParams, PaneResizeParams, PaneSplitParams,
-            PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
+            PaneCloseParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
             TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
         };
         use crate::input::KeybindAction;
@@ -1051,8 +1051,9 @@ impl ClientShellState {
                     env: Default::default(),
                 }))
             }
-            KeybindAction::ClosePane => Some(Method::PaneClose(PaneTarget {
+            KeybindAction::ClosePane => Some(Method::PaneClose(PaneCloseParams {
                 pane_id: focused_pane.clone()?,
+                force: false,
             })),
             KeybindAction::CyclePaneNext | KeybindAction::CyclePanePrevious => {
                 let focused_tab = focused_tab?;

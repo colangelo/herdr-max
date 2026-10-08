@@ -509,10 +509,9 @@ impl RemoteHerdr {
         metadata.is_valid().then_some(metadata)
     }
 
-    /// Managed install under the canonical name. Production resolves the name
-    /// from the invoked binary instead (see `prepare_remote_herdr`), so this
-    /// stays a test convenience.
-    #[cfg(test)]
+    /// Managed install under the canonical name. `prepare_remote_herdr`
+    /// resolves the name from the invoked binary instead; lookups of an
+    /// already-installed binary use this and probe every name separately.
     fn for_platform(platform: RemotePlatform) -> Self {
         Self::for_platform_named(platform, DEFAULT_REMOTE_BINARY_NAME)
     }
@@ -2734,7 +2733,7 @@ for candidate in $candidates; do
 done
 printf '%s\n' 'remote Herdr does not support machine API forwarding; update Herdr on this machine' >&2
 exit 2"#,
-        discovery = known_remote_binary_candidate_script(platform),
+        discovery = known_remote_binary_candidate_script(platform, &remote_binary_names()),
         session = shell_quote(session),
     );
     format!(

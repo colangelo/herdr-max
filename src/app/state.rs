@@ -706,8 +706,6 @@ impl Palette {
 
 /// Geometry for the server-rendered active-tab pane surface.
 pub struct ViewState {
-    pub todo_hit_area: Rect,
-    pub notification_hit_area: Rect,
     pub terminal_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
 }
@@ -984,8 +982,6 @@ pub struct AppState {
     pub outer_terminal_focus: Option<bool>,
     // Config
     pub prefix_keys: Vec<(KeyCode, KeyModifiers)>,
-    /// Further keys that also enter prefix mode (`keys.prefix` as a list).
-    pub extra_prefixes: Vec<(KeyCode, KeyModifiers)>,
     /// Virtual terminal size (columns, rows) used when no client is attached.
     pub(crate) headless_size: (u16, u16),
     /// The size, (cols, rows), of the last foreground client that was at least
@@ -1234,8 +1230,6 @@ impl AppState {
             latest_release_notes: None,
             product_announcement: None,
             view: ViewState {
-                todo_hit_area: Rect::default(),
-                notification_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 pane_infos: Vec::new(),
             },
@@ -1249,7 +1243,6 @@ impl AppState {
             pending_agent_notifications: std::collections::HashMap::new(),
             outer_terminal_focus: None,
             prefix_keys: vec![(KeyCode::Char('b'), KeyModifiers::CONTROL)],
-            extra_prefixes: Vec::new(),
             headless_size: (
                 crate::config::DEFAULT_HEADLESS_COLS,
                 crate::config::DEFAULT_HEADLESS_ROWS,

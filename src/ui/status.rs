@@ -27,7 +27,9 @@ pub(crate) fn copy_feedback_rect(
     let height = 3u16.min(area.height);
     let x = match position {
         ToastClipboardPosition::TopLeft | ToastClipboardPosition::BottomLeft => area.x,
-        ToastClipboardPosition::TopCenter | ToastClipboardPosition::BottomCenter => {
+        ToastClipboardPosition::TopCenter
+        | ToastClipboardPosition::BottomCenter
+        | ToastClipboardPosition::Pane => {
             area.x + area.width.saturating_sub(width) / 2
         }
         ToastClipboardPosition::TopRight | ToastClipboardPosition::BottomRight => {
@@ -40,7 +42,8 @@ pub(crate) fn copy_feedback_rect(
         | ToastClipboardPosition::TopRight => area.y + offset_rows.min(area.height),
         ToastClipboardPosition::BottomLeft
         | ToastClipboardPosition::BottomCenter
-        | ToastClipboardPosition::BottomRight => {
+        | ToastClipboardPosition::BottomRight
+        | ToastClipboardPosition::Pane => {
             area.y + area.height.saturating_sub(height + offset_rows)
         }
     };

@@ -129,6 +129,9 @@ pub(super) fn render_notification_card(
         | crate::config::ToastHerdrPosition::BottomLeft => area.x,
         crate::config::ToastHerdrPosition::TopRight
         | crate::config::ToastHerdrPosition::BottomRight => area.right().saturating_sub(width),
+        crate::config::ToastHerdrPosition::Center => {
+            area.x.saturating_add(area.width.saturating_sub(width) / 2)
+        }
     };
     let max_y = area.bottom().saturating_sub(height).max(area.y);
     let y = match position {
@@ -138,6 +141,9 @@ pub(super) fn render_notification_card(
         | crate::config::ToastHerdrPosition::BottomRight => area
             .bottom()
             .saturating_sub(height.saturating_add(top_offset)),
+        crate::config::ToastHerdrPosition::Center => {
+            area.y.saturating_add(area.height.saturating_sub(height) / 2)
+        }
     }
     .clamp(area.y, max_y);
     let rect = Rect::new(x, y, width, height);

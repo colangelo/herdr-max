@@ -18,9 +18,6 @@ pub struct LiveKeybindConfig {
     /// Every configured prefix key. The first entry is the primary prefix used
     /// for compact display; all entries enter prefix mode.
     pub prefix: Vec<KeyCombo>,
-    /// Further keys that also enter prefix mode (`keys.prefix` given as a
-    /// list), after the primary one.
-    pub extra_prefixes: Vec<KeyCombo>,
     pub keybinds: Keybinds,
 }
 
@@ -582,6 +579,22 @@ impl Config {
     pub(super) fn validated_keybinds(
         &self,
     ) -> (Option<String>, Vec<KeyCombo>, Vec<String>, Keybinds) {
+        let (prefix_diag, prefix, diagnostics, keybinds, _warnings) =
+            self.validated_keybinds_and_warnings();
+        (prefix_diag, prefix, diagnostics, keybinds)
+    }
+
+    /// `validated_keybinds` plus the unbound-key warnings: actions left with no
+    /// key because user bindings took all their default keys.
+    pub(super) fn validated_keybinds_and_warnings(
+        &self,
+    ) -> (
+        Option<String>,
+        Vec<KeyCombo>,
+        Vec<String>,
+        Keybinds,
+        Vec<String>,
+    ) {
         let (prefix_keys, prefix_diag, mut diagnostics) = parse_prefix_keys(&self.keys.prefix);
         if let Some(diag) = &prefix_diag {
             warn!(message = %diag, "config diagnostic");
@@ -589,7 +602,6 @@ impl Config {
         for diag in &diagnostics {
             warn!(message = %diag, "config diagnostic");
         }
-        diagnostics.extend(prefix_extra_diags);
 
         let prefix_source = if self.keys.key_field_is_user_configured("prefix") {
             BindingSource::User
@@ -1851,86 +1863,6 @@ prefix = "ö"
     }
 
     #[test]
-    fn a_prefix_list_gives_a_primary_and_extra_prefixes() {
-        // A plain string still parses as before.
-        let config: Config = toml::from_str("[keys]\nprefix = \"ctrl+a\"").unwrap();
-        assert_eq!(
-            config.prefix_key(),
-            (KeyCode::Char('a'), KeyModifiers::CONTROL)
-        );
-        assert!(config.extra_prefix_keys().is_empty());
-
-        let config: Config = toml::from_str(
-            "[keys]\nprefix = [\"ctrl+s\", \"ctrl+;\", \"ctrl+semicolon\", \"f12\"]",
-        )
-        .unwrap();
-        assert_eq!(
-            config.prefix_key(),
-            (KeyCode::Char('s'), KeyModifiers::CONTROL)
-        );
-        // ";" and "semicolon" are the same key, so the repeat is dropped.
-        assert_eq!(
-            config.extra_prefix_keys(),
-            vec![
-                (KeyCode::Char(';'), KeyModifiers::CONTROL),
-                (KeyCode::F(12), KeyModifiers::empty()),
-            ]
-        );
-        assert_eq!(
-            config.collect_diagnostics(),
-            vec!["keys.prefix lists \"ctrl+semicolon\" twice; ignoring the repeat"]
-        );
-        let (live, _) = config.live_keybinds_with_diagnostics().expect("valid");
-        assert_eq!(live.prefix, (KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(live.extra_prefixes.len(), 2);
-
-        // An invalid extra entry is dropped with a diagnostic, not an error.
-        let config: Config =
-            toml::from_str("[keys]\nprefix = [\"ctrl+s\", \"hyper-nope\"]").unwrap();
-        assert!(config.extra_prefix_keys().is_empty());
-        assert!(config
-            .collect_diagnostics()
-            .iter()
-            .any(|diag| diag.contains("keys.prefix") && diag.contains("hyper-nope")));
-        assert!(config.live_keybinds_with_diagnostics().is_ok());
-
-        // An invalid primary is an error, as it always was.
-        let config: Config = toml::from_str("[keys]\nprefix = [\"nope\", \"ctrl+s\"]").unwrap();
-        assert!(config.live_keybinds_with_diagnostics().is_err());
-        let config: Config = toml::from_str("[keys]\nprefix = []").unwrap();
-        assert!(config.live_keybinds_with_diagnostics().is_err());
-        assert!(toml::from_str::<Config>("[keys]\nprefix = 5").is_err());
-    }
-
-    #[test]
-    fn prefix_rhs_equal_to_any_listed_prefix_is_rejected() {
-        let config: Config = toml::from_str(
-            r#"
-[keys]
-prefix = ["ctrl+a", "ctrl+;"]
-help = "prefix+ctrl+;"
-settings = "prefix+ctrl+b"
-"#,
-        )
-        .unwrap();
-        let diagnostics = config.collect_diagnostics();
-        assert!(config.keybinds().help.bindings.is_empty());
-        assert!(diagnostics
-            .iter()
-            .any(|diag| diag.contains("reserved keybinding") && diag.contains("keys.help")));
-        assert!(!config.keybinds().settings.bindings.is_empty());
-    }
-
-    #[test]
-    fn a_prefix_list_round_trips_through_the_local_keybindings_profile() {
-        let config: Config = toml::from_str("[keys]\nprefix = [\"ctrl+s\", \"ctrl+;\"]").unwrap();
-        let toml = config.local_keybindings_profile_toml().expect("profile");
-        let round: Config = toml::from_str(&toml).unwrap();
-        assert_eq!(round.prefix_key(), config.prefix_key());
-        assert_eq!(round.extra_prefix_keys(), config.extra_prefix_keys());
-    }
-
-    #[test]
     fn parse_shift_tab_as_backtab() {
         assert_eq!(
             parse_key_combo("shift+tab"),
@@ -3084,8 +3016,7 @@ width = "80%"
         // A client profile arrives with no custom commands: the transport
         // clears whatever it sent, because the text runs on the server host.
         let client = LiveKeybindConfig {
-            prefix: (KeyCode::Char('a'), KeyModifiers::CONTROL),
-            extra_prefixes: Vec::new(),
+            prefix: vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)],
             keybinds: Keybinds::default(),
         };
         assert!(client.keybinds.custom_commands.is_empty());
@@ -3105,6 +3036,6 @@ width = "80%"
         assert_eq!(merged.keybinds.custom_commands.len(), 1);
         assert_eq!(merged.keybinds.custom_commands[0].command, "lazygit");
         // The client still owns its prefix and every other binding.
-        assert_eq!(merged.prefix.0, KeyCode::Char('a'));
+        assert_eq!(merged.prefix[0].0, KeyCode::Char('a'));
     }
 }

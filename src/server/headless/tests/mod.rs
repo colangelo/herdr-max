@@ -96,7 +96,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())
         .expect("spawn client accept thread");
     let server_keybindings = app_keybindings(&app);
-    let headless_size = app.state.headless_size;
+    let no_client_size = app.state.no_client_size(None);
 
     HeadlessServer {
         app,
@@ -124,14 +124,14 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         pending_alt_screen_reads: Vec::new(),
         deferred_alt_screen_reads: Vec::new(),
         next_activity_stamp: 1,
-        headless_size,
-        effective_size: headless_size,
+        handoff_client_size: None,
+        effective_size: no_client_size,
         shutting_down: false,
         host_shutdown_requested: Arc::new(AtomicBool::new(false)),
         host_shutdown_probe: crate::platform::host_shutdown_in_progress,
         handoff_in_progress: false,
         #[cfg(unix)]
-        pending_handoff_repaint_nudge: false,
+        handoff_detection_sweep: None,
         should_quit,
         server_stop,
         server_event_rx,
@@ -188,13 +188,13 @@ fn default_headless_size_is_effective_without_clients() {
     let server = test_headless_server();
 
     assert_eq!(
-        server.headless_size,
+        server.app.state.headless_size,
         (
             crate::config::DEFAULT_HEADLESS_COLS,
             crate::config::DEFAULT_HEADLESS_ROWS
         )
     );
-    assert_eq!(server.effective_size, server.headless_size);
+    assert_eq!(server.effective_size, server.app.state.headless_size);
 }
 
 #[tokio::test]
@@ -784,6 +784,8 @@ async fn completion_guard_endpoint_pairs_runtime_completions_with_snapshots() {
                 state,
                 visible_blocker: false,
                 visible_working: state == crate::detect::AgentState::Working,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: false,
                 observed_at: Instant::now(),
             });
@@ -2125,7 +2127,7 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
 
 #[tokio::test]
 async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves() {
-    use api::schema::{EventData, Method, PaneTarget, TabTarget};
+    use api::schema::{EventData, Method, PaneTarget, TabCloseParams, TabTarget};
 
     let event_hub = api::EventHub::default();
     let mut server = test_headless_server_with_event_hub(event_hub.clone());
@@ -2189,7 +2191,14 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
             Method::TabFocus(second_tab.clone()),
             Some(&second_pane_id),
         ),
-        (61, Method::TabClose(second_tab), Some(&first_pane_id)),
+        (
+            61,
+            Method::TabClose(TabCloseParams {
+                tab_id: second_tab.tab_id,
+                force: false,
+            }),
+            Some(&first_pane_id),
+        ),
     ];
     for (client_id, method, expected_pane) in cases {
         let other_client = if client_id == 61 { 62 } else { 61 };
@@ -2374,8 +2383,9 @@ async fn public_close_reapplies_controller_geometry() {
         server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
             request: crate::api::schema::Request {
                 id: "public-close-geometry".into(),
-                method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+                method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
                     pane_id: second_pane_id,
+                    force: false,
                 }),
             },
             respond_to,
@@ -2698,6 +2708,7 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
             pane_id: first_pane,
             agent: crate::detect::Agent::Claude,
             observed_at: Instant::now(),
+            replaced_process: false,
         })
         .unwrap();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
@@ -4086,6 +4097,7 @@ fn explicit_agent_history_read_requires_idle_on_alternate_screen() {
                     lines: Some(200),
                     format: api::schema::ReadFormat::Text,
                     strip_ansi: true,
+                    strip_dim: false,
                 }),
             };
 
@@ -4652,6 +4664,7 @@ fn unchanged_git_refresh_does_not_request_headless_render() {
             demand: crate::workspace::GitStatusRefreshDemand::ALL,
             auto_label: "cached".into(),
             branch: None,
+            detached_head: None,
             ahead_behind: None,
             space: None,
         }],
@@ -4710,6 +4723,7 @@ fn changed_git_refresh_requests_headless_render() {
             demand: crate::workspace::GitStatusRefreshDemand::ALL,
             auto_label: "one".into(),
             branch: Some("changed".into()),
+            detached_head: None,
             ahead_behind: None,
             space: None,
         }],
@@ -4848,6 +4862,8 @@ fn windows_shutdown_probe_preserves_panes_and_agent_sessions() {
             state: crate::detect::AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: true,
             observed_at: Instant::now(),
         };
@@ -6935,6 +6951,7 @@ fn clipboard_write_targets_foreground_client_only() {
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
         content: b"test".to_vec(),
+        source_pane: None,
     });
 
     assert!(!changed);
@@ -6961,6 +6978,7 @@ fn clipboard_write_without_foreground_client_does_not_change_visual_state() {
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
         content: b"test".to_vec(),
+        source_pane: None,
     });
 
     assert!(!changed);
@@ -6987,6 +7005,7 @@ fn clipboard_write_failed_foreground_send_removes_client_without_visual_change()
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::ClipboardWrite {
         content: b"test".to_vec(),
+        source_pane: None,
     });
 
     assert!(!changed);
@@ -7728,6 +7747,7 @@ fn api_resume_argv_is_ignored_when_its_session_report_is_refused() {
         pane_id,
         agent: crate::detect::Agent::Claude,
         observed_at: Instant::now(),
+        replaced_process: false,
     });
     let report = |session: &str| {
         api::schema::Method::PaneReportAgentSession(api::schema::PaneReportAgentSessionParams {
@@ -7792,6 +7812,7 @@ fn completion_guard_api_startup_blocker_respects_suppression() {
         pane_id,
         agent: crate::detect::Agent::Pi,
         observed_at: Instant::now(),
+        replaced_process: false,
     });
     let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
     for (seq, state) in [
@@ -7954,6 +7975,7 @@ fn startup_idle_does_not_forward_completion() {
             pane_id,
             agent: crate::detect::Agent::Pi,
             observed_at: Instant::now(),
+            replaced_process: false,
         })
     );
 
@@ -7982,6 +8004,8 @@ fn startup_idle_does_not_forward_completion() {
             state: crate::detect::AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: Instant::now(),
         })

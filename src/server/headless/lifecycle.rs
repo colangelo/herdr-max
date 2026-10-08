@@ -55,6 +55,9 @@ impl HeadlessServer {
         }
 
         self.handoff_in_progress = true;
+        // Taken before the clients go: the importing server keeps panes at this
+        // size until one reattaches.
+        let export_size = self.effective_size;
         self.disconnect_all_clients_for_handoff();
         let _ = reject_pending_client_connections(&self.client_listener);
 
@@ -75,6 +78,7 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
             self.app.state.active,
             self.app.state.selected,
+            self.app.state.last_client_size,
         );
 
         let mut handoff_entries = Vec::new();
@@ -83,21 +87,25 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
-            handoff_runtime.agent_state = self
-                .app
-                .state
-                .terminals
-                .get(terminal_id)
-                .and_then(|terminal| terminal.handoff_agent_state());
-            let has_agent_session = self
-                .app
-                .state
-                .terminals
-                .get(terminal_id)
-                .is_some_and(|terminal| terminal.persisted_agent_session.is_some());
+            let terminal = self.app.state.terminals.get(terminal_id);
+            let has_agent_session =
+                terminal.is_some_and(|terminal| terminal.persisted_agent_session.is_some());
             if !has_agent_session {
                 handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
             }
+            if let Some(terminal) = terminal {
+                if let Some(agent) = terminal.effective_known_agent() {
+                    handoff_runtime.agent = Some(crate::detect::agent_label(agent).to_string());
+                    handoff_runtime.agent_state =
+                        crate::handoff_runtime::handoff_agent_state_label(terminal.state)
+                            .map(str::to_string);
+                }
+                handoff_runtime.hook_agent_state = terminal.handoff_agent_state();
+            }
+            handoff_runtime.unseen = self
+                .app
+                .state
+                .pane_is_unseen(crate::layout::PaneId::from_raw(pane_id));
             handoff_entries.push((terminal_id.clone(), handoff_runtime));
         }
 
@@ -111,6 +119,7 @@ impl HeadlessServer {
             params.expected_protocol,
             params.expected_version,
             self.api_window_title.clone(),
+            Some(export_size),
         );
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
@@ -286,19 +295,6 @@ impl HeadlessServer {
         let _ = std::fs::remove_file(socket_path);
     }
 
-    #[cfg(unix)]
-    pub(super) fn nudge_handoff_panes_on_first_client_attach(&mut self) {
-        if !self.pending_handoff_repaint_nudge {
-            return;
-        }
-        self.pending_handoff_repaint_nudge = false;
-        self.app
-            .terminal_runtimes
-            .nudge_child_redraw_after_handoff();
-    }
-
-    #[cfg(not(unix))]
-    pub(super) fn nudge_handoff_panes_on_first_client_attach(&mut self) {}
     /// Initiates graceful shutdown.
     pub(super) fn initiate_shutdown(&mut self) {
         if self.shutting_down {

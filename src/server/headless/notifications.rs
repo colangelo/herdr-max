@@ -331,7 +331,7 @@ impl HeadlessServer {
                 }
                 false
             }
-            AppEvent::ClipboardWrite { content } => {
+            AppEvent::ClipboardWrite { content, .. } => {
                 // Clipboard writes are client-local side effects. Forward them only to
                 // the foreground client instead of broadcasting to every attached client.
                 let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());

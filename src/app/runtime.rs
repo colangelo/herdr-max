@@ -178,6 +178,7 @@ impl App {
         .min()
     }
 
+    #[cfg(test)]
     pub(crate) fn drain_internal_events(&mut self) -> bool {
         self.drain_internal_events_up_to(super::APP_EVENT_DRAIN_LIMIT)
             .1
@@ -214,17 +215,19 @@ impl App {
 
 // Restored fork items (v0.9.3 sync): re-home next to their kin later.
 impl App {
-    fn drain_internal_events_up_to(&mut self, limit: usize) -> (bool, bool) {
-        let mut had_event = false;
-        let mut changed = false;
-        for _ in 0..limit {
-            let Ok(ev) = self.event_rx.try_recv() else {
-                break;
-            };
-            had_event = true;
-            changed |= self.handle_internal_event_with_prefix_sync(ev);
+    /// Clears temporary copied-token highlights, such as after double-click copy.
+    /// Drop the hints whose time is up, through the same path a report takes so
+    /// the pane's state change reaches notifications and events. `true` when
+    /// something was due.
+    pub(crate) fn expire_agent_hints(&mut self, now: Instant) -> bool {
+        let due = self.state.due_agent_hint_panes(now);
+        for pane_id in &due {
+            self.handle_internal_event(crate::events::AppEvent::AgentHintExpired {
+                pane_id: *pane_id,
+                now,
+            });
         }
-        (had_event, changed)
+        !due.is_empty()
     }
 }
 

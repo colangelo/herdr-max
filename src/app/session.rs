@@ -23,7 +23,7 @@ impl App {
     /// a forced shutdown loses the change shrinks from the debounce to the
     /// write itself.
     fn schedule_session_save_now(&mut self) {
-        if !self.no_session {
+        if self.policy.persist_session {
             self.session_save_deadline = Some(Instant::now());
         }
     }

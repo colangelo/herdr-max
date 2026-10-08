@@ -1824,6 +1824,7 @@ impl ClientShellState {
         }
         self.copy_feedback = Some(crate::app::state::CopyFeedback {
             message: "copied to clipboard".to_owned(),
+            source_pane: None,
         });
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true

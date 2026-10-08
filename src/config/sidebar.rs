@@ -230,7 +230,6 @@ struct RawStyledSidebarToken {
     fg: Option<SidebarTokenColor>,
     bold: Option<bool>,
     dim: Option<bool>,
-    #[serde(default)]
     rules: Vec<SidebarTokenRule>,
     italic: Option<bool>,
     keep: Option<bool>,
@@ -263,7 +262,7 @@ impl<'de> Deserialize<'de> for RawSidebarToken {
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str(
-                    "a token name or a { token, fg, bold, dim, italic, keep, truncate } table",
+                    "a token name or a { token, fg, bold, dim, italic, keep, truncate, rules } table",
                 )
             }
 
@@ -281,6 +280,7 @@ impl<'de> Deserialize<'de> for RawSidebarToken {
                     fg: None,
                     bold: None,
                     dim: None,
+                    rules: Vec::new(),
                     italic: None,
                     keep: None,
                     truncate: None,
@@ -313,6 +313,10 @@ impl<'de> Deserialize<'de> for RawSidebarToken {
                             style.bold = lenient(&mut map, STYLE_KEY_BOLD, &mut style.invalid)?
                         }
                         "dim" => style.dim = lenient(&mut map, STYLE_KEY_DIM, &mut style.invalid)?,
+                        // A malformed rule fails the whole file with serde's
+                        // message, as upstream does: rules carry conditions
+                        // that have no sensible fallback.
+                        "rules" => style.rules = map.next_value::<Vec<SidebarTokenRule>>()?,
                         "italic" => {
                             style.italic = lenient(&mut map, STYLE_KEY_ITALIC, &mut style.invalid)?
                         }
@@ -364,6 +368,10 @@ impl RawSidebarToken {
                         fg: token.fg,
                         bold: token.bold,
                         dim: token.dim,
+                        italic: token.italic,
+                        keep: token.keep,
+                        truncate: token.truncate,
+                        invalid: token.invalid,
                     }),
                     token.rules,
                 ))

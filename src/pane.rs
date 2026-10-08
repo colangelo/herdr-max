@@ -648,20 +648,6 @@ enum ForegroundShellAgentAction {
     ClearAgent,
 }
 
-/// Whether two probes a poll apart saw the same agent in different process
-/// groups: a new process of that agent replaced the old one between them, with
-/// the shell's turn in the foreground too short for a probe to catch.
-fn agent_process_group_replaced(
-    previous: Option<(Agent, u32)>,
-    current: Option<(Agent, u32)>,
-) -> bool {
-    matches!(
-        (previous, current),
-        (Some((previous_agent, previous_group)), Some((agent, group)))
-            if previous_agent == agent && previous_group != group
-    )
-}
-
 fn foreground_shell_agent_action(
     previous_agent: Option<Agent>,
     new_agent: Option<Agent>,
@@ -1327,7 +1313,6 @@ fn spawn_basic_detection_task(
         let mut last_visible_signal_refresh = None;
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
-        let mut last_agent_process_group: Option<(Agent, u32)> = None;
         let mut launch_read_for: Option<(Agent, Option<(Agent, u32)>)> = None;
         let mut wrapped_shell_watch = WrappedShellWatch::default();
         let mut has_process_probe = false;
@@ -1369,7 +1354,6 @@ fn spawn_basic_detection_task(
                     last_visible_signal_refresh = None;
                     last_process_check = std::time::Instant::now();
                     last_foreground_pgid = None;
-                    last_agent_process_group = None;
                     wrapped_shell_watch.clear();
                     has_process_probe = false;
                     acquisition_started_at = None;
@@ -3362,7 +3346,6 @@ impl PaneRuntime {
                 #[cfg(windows)]
                 let mut last_observation = (Instant::now(), Some(0));
                 let mut last_foreground_pgid = None;
-                let mut last_agent_process_group: Option<(Agent, u32)> = None;
                 let mut launch_read_for: Option<(Agent, Option<(Agent, u32)>)> = None;
                 #[cfg(unix)]
                 let mut wrapped_shell_watch = WrappedShellWatch::default();
@@ -3414,7 +3397,6 @@ impl PaneRuntime {
                             state = AgentState::Unknown;
                             last_visible_idle = false;
                             last_foreground_pgid = None;
-                            last_agent_process_group = None;
                             #[cfg(unix)]
                             wrapped_shell_watch.clear();
                             has_process_probe = false;
@@ -6221,32 +6203,6 @@ mod tests {
             ),
             ForegroundShellAgentAction::ReportReplacementProcess
         );
-    }
-
-    // #112: a Claude restarted between two polls never shows the shell, only
-    // the agent's process group changing. That is a replacement process too.
-    #[test]
-    fn a_new_process_group_for_the_same_agent_is_a_replacement() {
-        assert!(agent_process_group_replaced(
-            Some((Agent::Claude, 10)),
-            Some((Agent::Claude, 11))
-        ));
-        assert!(!agent_process_group_replaced(
-            Some((Agent::Claude, 10)),
-            Some((Agent::Claude, 10))
-        ));
-        assert!(!agent_process_group_replaced(
-            Some((Agent::Claude, 10)),
-            Some((Agent::Codex, 11))
-        ));
-        assert!(!agent_process_group_replaced(
-            None,
-            Some((Agent::Claude, 11))
-        ));
-        assert!(!agent_process_group_replaced(
-            Some((Agent::Claude, 10)),
-            None
-        ));
     }
 
     #[cfg(unix)]
