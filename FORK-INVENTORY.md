@@ -6,7 +6,7 @@ grouped by topic, with where each topic stands. Fork-only file; it never goes up
 ## How the history is laid out (decided 2026-10-08, #171)
 
 `master` is merge-based: the fork's own history, then one merge of upstream v0.9.3
-(`9fa78ab2`'s ancestor merge on `sync/merge`: parent 1 = fork `26537d32`, parent 2 = upstream
+(the merge commit on `sync/merge`: parent 1 = fork `26537d32`, parent 2 = upstream
 `4f896118`), then fix commits, then the port branches merged in. It is not rewritten into a
 topic-ordered linear series: the v0.9.3 sync had to be a whole-tree merge (a commit-by-commit
 replay spliced code, and upstream moved the whole TUI into `src/client/shell/`), and re-deriving
@@ -51,7 +51,7 @@ deliberate difference from upstream's contract or names).
 | input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input` |
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels | `port/chrome` |
 | overlays | port | todo panel/editor, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays` |
-| sync-frame-hold | port | hold client frames while a shown pane is mid DEC 2026 synchronized update | fork 839473d8 (issue 126), in progress |
+| sync-frame-hold | port | upstream holds mid-sync surfaces; the fork adds the 200 ms cap so a stuck app cannot freeze a pane | fork 839473d8 (issue 126) |
 | prefix-list | superseded | `keys.prefix` as a list | upstream 7f89b11a (fork 73a00623) |
 | detached-split-size | superseded | split sizes while detached | upstream new_pane_size (fork b943d332) |
 | agent-restart-group | superseded | a restarted agent in another process group is a replacement | upstream AgentJobTracker::replaced_in_front (fork 9d6ba1f8, issue 112) |
