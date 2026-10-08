@@ -17,6 +17,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "command.invoke",
     "integration.install",
     "integration.list",
+    "layout.balance",
     "layout.set_split_ratio",
     "notification.clear",
     "notification.list",
@@ -298,6 +299,10 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
+        assert_eq!(
+            actual.remove("layout.balance").as_deref(),
+            Some("2612679bd673608105f286c9b53ecd56333fbebe2c4cd4c52a4c47e2861c6246")
+        );
         // Freeze additive methods separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.clear").as_deref(),
