@@ -374,12 +374,6 @@ impl ClientShellState {
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
-        if self.label_key(&key, outcome) {
-            return;
-        }
-        if self.mode != ClientShellMode::Resize {
-            self.close_pane_labels();
-        }
         outcome.repaint |= self.clear_link_hover();
         if self.copy_operation_in_flight {
             self.copy_input_queue.push_back(key);
@@ -395,7 +389,16 @@ impl ClientShellState {
         match key.kind {
             KeyEventKind::Press => {
                 let initial_context = self.input_context();
-                let target = self.route_key_press(&key, outcome);
+                let target = if self.label_key(&key, outcome) {
+                    None
+                } else {
+                    if self.mode != ClientShellMode::Resize {
+                        let visible = self.pane_labels_until.is_some();
+                        self.close_pane_labels();
+                        outcome.repaint |= visible;
+                    }
+                    self.route_key_press(&key, outcome)
+                };
                 if let Some(target) = target.as_ref() {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
