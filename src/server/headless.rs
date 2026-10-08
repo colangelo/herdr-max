@@ -494,16 +494,6 @@ impl HeadlessServer {
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.metadata_expiry");
             }
-            if self.app.advance_sort_motion(Instant::now()) {
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.sort_motion");
-            }
-            if self.app.advance_spinner(Instant::now()) {
-                needs_render = true;
-                needs_full_render = true;
-                crate::render_prof::event("full_render_cause.spinner");
-            }
 
             // 3. Drain API requests.
             if self.drain_api_requests_with_shutdown_check() {

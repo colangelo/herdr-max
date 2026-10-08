@@ -372,7 +372,7 @@ impl App {
             .collect::<Vec<_>>();
         let dropped = self.open_todos_in(panes);
         // Only the TUI's own close skips this; it never asked about todos.
-        if !self.tui_request_in_flight && !params.force && !dropped.is_empty() {
+        if !params.force && !dropped.is_empty() {
             return super::panes::open_todos_refusal(id, "this workspace", &dropped);
         }
         let closed_workspaces = close_indices
@@ -397,7 +397,6 @@ impl App {
             });
         }
 
-        self.state.drop_stale_close_confirmation();
         super::panes::closed_response(id, params.force, dropped)
     }
 

@@ -113,7 +113,6 @@ impl App {
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
-        self.resize_split_target(ws_idx, target_pane_id, kept_size);
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
             pane.right_click_passthrough = matches!(
                 params.right_click,
@@ -2178,7 +2177,6 @@ impl App {
             };
             ws.close_pane(pane_id)
         };
-        self.state.forget_pane_todo_ui(pane_id);
         self.state.remove_plugin_pane_records([pane_id]);
         self.respawn_replaced_runtimes.remove(&pane_id);
         if should_close_workspace {
@@ -2214,7 +2212,6 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
-        self.state.drop_stale_close_confirmation();
 
         Ok(dropped)
     }
@@ -2271,39 +2268,20 @@ impl App {
         };
         let has_live_child = self.pane_has_live_child(ws_idx, pane_id);
         let mut report = None;
-        if self.tui_request_in_flight {
-            if self
-                .state
-                .confirm_pane_respawn(ws_idx, pane_id, has_live_child)
-            {
-                return encode_error(
-                    id,
-                    "confirmation_required",
-                    "this pane still has live work; repeat the request to confirm",
-                );
-            }
-        } else {
-            let stopped_process = has_live_child
-                .then(|| self.pane_live_process(ws_idx, pane_id))
-                .flatten();
-            let open_todos = self
-                .open_todos_in([(ws_idx, pane_id)])
-                .into_iter()
-                .flat_map(|pane| pane.todos)
-                .collect::<Vec<_>>();
-            if !params.force && (stopped_process.is_some() || !open_todos.is_empty()) {
-                return respawn_refusal(id, &params.pane_id, stopped_process.as_ref(), &open_todos);
-            }
-            report = params.force.then_some((stopped_process, open_todos));
+        let stopped_process = has_live_child
+            .then(|| self.pane_live_process(ws_idx, pane_id))
+            .flatten();
+        let open_todos = self
+            .open_todos_in([(ws_idx, pane_id)])
+            .into_iter()
+            .flat_map(|pane| pane.todos)
+            .collect::<Vec<_>>();
+        if !params.force && (stopped_process.is_some() || !open_todos.is_empty()) {
+            return respawn_refusal(id, &params.pane_id, stopped_process.as_ref(), &open_todos);
         }
+        report = params.force.then_some((stopped_process, open_todos));
         if !self.respawn_pane_runtime(pane_id, crate::app::api::RespawnTarget::LaunchArgv) {
             return encode_error(id, "respawn_failed", "failed to respawn the pane process");
-        }
-        // A forced respawn answers the question a modal may be asking about
-        // this pane, so that modal leaves.
-        if !self.tui_request_in_flight && self.state.confirm_respawn_pane == Some(pane_id) {
-            self.state.confirm_respawn_pane = None;
-            self.state.drop_stale_close_confirmation();
         }
         self.emit_pane_updated(ws_idx, pane_id);
         match report {

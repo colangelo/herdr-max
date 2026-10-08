@@ -7,6 +7,7 @@ pub(crate) mod actions;
 mod agent_hints;
 mod agent_names;
 mod agent_resume;
+mod pins;
 #[cfg(test)]
 mod agent_suspend_tests;
 pub(crate) mod agent_view;
@@ -176,10 +177,6 @@ pub struct App {
     /// is already running its replacement. Each entry absorbs exactly one
     /// event, because a runtime reports its death exactly once.
     pub(crate) respawn_replaced_runtimes: std::collections::HashSet<crate::layout::PaneId>,
-    /// True while the TUI's own request runs (`dispatch_runtime_mutation`).
-    /// Only those may open a confirmation modal; a request from a script or
-    /// another client is answered instead (fork issue 120).
-    pub(crate) tui_request_in_flight: bool,
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
@@ -242,66 +239,6 @@ fn workspace_sort_from_config(sort: crate::config::WorkspaceSortConfig) -> state
 
 fn sort_motion_bubble_from_config(motion: crate::config::SortMotionConfig) -> bool {
     matches!(motion, crate::config::SortMotionConfig::Bubble)
-}
-
-fn display_panes_duration_from_config(ms: u64) -> Duration {
-    Duration::from_millis(crate::config::clamp_display_panes_ms(ms))
-}
-
-fn status_spinner_interval_from_config(ms: u64) -> Duration {
-    Duration::from_millis(ms.clamp(
-        crate::config::MIN_STATUS_SPINNER_MS,
-        crate::config::MAX_STATUS_SPINNER_MS,
-    ))
-}
-
-fn state_symbol_overrides_from_config(
-    symbols: &crate::config::StateSymbolsConfig,
-) -> state::StateSymbolOverrides {
-    let valid =
-        |value: &Option<String>| crate::config::StateSymbolsConfig::valid(value).map(str::to_owned);
-    state::StateSymbolOverrides {
-        working: valid(&symbols.working),
-        idle: valid(&symbols.idle),
-        done: valid(&symbols.done),
-        blocked: valid(&symbols.blocked),
-        unknown: valid(&symbols.unknown),
-        background: valid(&symbols.background),
-        background_alt: valid(&symbols.background_alt),
-    }
-}
-
-fn state_color_overrides_from_config(
-    colors: &crate::config::StateColorsConfig,
-) -> state::StateColorOverrides {
-    let parse = |value: &Option<String>| value.as_deref().map(crate::config::parse_color);
-    state::StateColorOverrides {
-        working: parse(&colors.working),
-        idle: parse(&colors.idle),
-        done: parse(&colors.done),
-        blocked: parse(&colors.blocked),
-        unknown: parse(&colors.unknown),
-        background: parse(&colors.background),
-    }
-}
-
-fn sort_motion_timing_from_config(
-    settle_ms: u64,
-    step_ms: u64,
-    easing: crate::config::SortMotionEasingConfig,
-) -> crate::ui::list_motion::ListMotionTiming {
-    crate::ui::list_motion::ListMotionTiming {
-        settle: std::time::Duration::from_millis(settle_ms),
-        step: std::time::Duration::from_millis(step_ms.max(1)),
-        easing: match easing {
-            crate::config::SortMotionEasingConfig::Linear => {
-                crate::ui::list_motion::ListMotionEasing::Linear
-            }
-            crate::config::SortMotionEasingConfig::Bubble => {
-                crate::ui::list_motion::ListMotionEasing::Bubble
-            }
-        },
-    }
 }
 
 /// Parse the configured agent name list into a deduplicated set of `Agent`
@@ -585,18 +522,6 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
-        // The announcement is the one overlay that can be open before the
-        // first frame, so it is built with the state rather than opened later.
-        let overlay = startup_product_announcement.map(|announcement| {
-            state::Overlay::ProductAnnouncement(state::ProductAnnouncementState {
-                version: announcement.version,
-                id: announcement.id,
-                title: announcement.title,
-                body: announcement.body,
-                scroll: 0,
-                preview: announcement.preview,
-            })
-        });
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -796,7 +721,6 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             respawn_replaced_runtimes: std::collections::HashSet::new(),
-            tui_request_in_flight: false,
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
@@ -918,7 +842,7 @@ impl App {
     }
 
     pub(crate) fn dismiss_product_announcement(&mut self) {
-        if let Some(announcement) = self.state.take_product_announcement() {
+        if let Some(announcement) = self.state.product_announcement.take() {
             if !announcement.preview {
                 if let Err(err) =
                     crate::product_announcements::mark_seen(&announcement.version, &announcement.id)
@@ -1034,24 +958,13 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
-                self.state.show_pane_todo_indicator = config.ui.show_pane_todo_indicator;
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,
                 );
                 self.configure_window_title(&config.ui.window_title);
-                self.state.show_workspace_numbers = config.ui.show_workspace_numbers;
-                self.state.show_agent_numbers = config.ui.show_agent_numbers;
-                // `host_label` is intentionally not re-read here: the host is
-                // stable for the server's lifetime, so only the toggle reloads.
-                self.state.show_host = config.ui.show_host;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
-                self.state.status_spinner = config.ui.status_spinner;
-                self.state.status_spinner_interval =
-                    status_spinner_interval_from_config(config.ui.status_spinner_ms);
-                self.state.display_panes_duration =
-                    display_panes_duration_from_config(config.ui.display_panes_ms);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();

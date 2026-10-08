@@ -692,3 +692,19 @@ impl TerminalRuntime {
         (Self(runtime), rx)
     }
 }
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+impl TerminalRuntime {
+    /// `try_send_bytes` for automatic writes that are not pane activity.
+    pub fn try_send_bytes_untracked(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.try_send_bytes_untracked(bytes)
+    }
+
+    /// When input from a user or caller last reached the pane, in unix ms.
+    pub fn last_input_at_ms(&self) -> Option<i64> {
+        self.0.last_input_at_ms()
+    }
+}
+

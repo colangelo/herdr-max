@@ -292,50 +292,6 @@ impl App {
         self.pane_info(ws_idx, tab.root_pane)
     }
 
-    /// Sizes for splitting `target`: the new pane's, and the share `target`
-    /// keeps when it has to be resized now. With a client attached the next
-    /// frame lays both out, so the usual estimate does. With none, nothing
-    /// will, so the split divides the target's real size instead.
-    pub(super) fn split_sizes(
-        &self,
-        ws_idx: usize,
-        target: crate::layout::PaneId,
-        direction: ratatui::layout::Direction,
-        ratio: f32,
-    ) -> ((u16, u16), Option<(u16, u16)>) {
-        let estimate = self.state.estimate_pane_size();
-        if self.state.detached_pane_size.is_none() {
-            return (estimate, None);
-        }
-        let Some(size) = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, target)
-            .map(|runtime| runtime.current_size())
-        else {
-            return (estimate, None);
-        };
-        let (kept, new) = split_shares(size, direction, ratio);
-        (new, Some(kept))
-    }
-
-    /// Shrink a split's target to the share it kept (see `split_sizes`).
-    pub(super) fn resize_split_target(
-        &self,
-        ws_idx: usize,
-        target: crate::layout::PaneId,
-        kept: Option<(u16, u16)>,
-    ) {
-        let Some((rows, cols)) = kept else {
-            return;
-        };
-        if let Some(runtime) =
-            self.state
-                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, target)
-        {
-            runtime.resize(rows, cols, 0, 0);
-        }
-    }
-
     pub(super) fn pane_info(
         &self,
         ws_idx: usize,

@@ -526,7 +526,6 @@ impl App {
             .ok_or_else(|| "pane not found".to_string())?
             .map_err(|err| err.to_string())?;
         let new_pane_id = new_pane.pane_id;
-        self.resize_split_target(ws_idx, target_pane_id, kept_size);
         self.attach_new_layout_pane(new_pane);
         self.apply_layout_pane_label(ws_idx, new_pane_id, pane);
         Ok(new_pane_id)

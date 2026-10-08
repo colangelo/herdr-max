@@ -180,7 +180,7 @@ impl AgentViewEntry for AppAgentViewEntry<'_> {
     }
 
     fn attention(&self) -> u64 {
-        u64::from(super::api_helpers::tab_attention_priority(
+        u64::from(crate::agent_priority::attention_priority(
             self.entry.state,
             self.entry.seen,
         ))

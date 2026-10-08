@@ -33,6 +33,22 @@ fn take_prefix_width(text: &str, max_width: usize) -> String {
     output
 }
 
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+pub(crate) fn relative_time_label(now_unix: u64, then_unix: u64) -> String {
+    let seconds = now_unix.saturating_sub(then_unix);
+    if seconds < 10 {
+        "now".to_string()
+    } else if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("{}h", seconds / (60 * 60))
+    } else {
+        format!("{}d", seconds / (24 * 60 * 60))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

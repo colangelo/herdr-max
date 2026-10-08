@@ -276,7 +276,7 @@ impl App {
             .map(|tab| tab.layout.pane_ids())
             .unwrap_or_default();
 
-        if !self.tui_request_in_flight && !target.force {
+        if !target.force {
             if closes_workspace && self.would_ask_before_closing_worktree_group(ws_idx) {
                 return encode_error(
                     id,
@@ -298,15 +298,6 @@ impl App {
             ) {
                 return response;
             }
-            if self.tui_request_in_flight
-                && self.state.confirm_implicit_worktree_group_close(ws_idx)
-            {
-                return encode_error(
-                    id,
-                    "confirmation_required",
-                    "closing this tab would close a worktree group",
-                );
-            }
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
@@ -326,7 +317,6 @@ impl App {
                     workspace: Some(workspace),
                 },
             });
-            self.state.drop_stale_close_confirmation();
             return super::panes::closed_response(id, target.force, dropped);
         }
 
@@ -352,7 +342,6 @@ impl App {
             },
         });
 
-        self.state.drop_stale_close_confirmation();
         super::panes::closed_response(id, target.force, dropped)
     }
 

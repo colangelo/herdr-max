@@ -1792,6 +1792,15 @@ fn is_unmodified_printable(combo: KeyCombo) -> bool {
         && combo.1.difference(KeyModifiers::SHIFT).is_empty()
 }
 
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+impl Config {
+    /// Keybinding warnings: things that apply as configured but are probably
+    /// not what the user meant, such as an action left with no key.
+    pub fn keybind_warnings(&self) -> Vec<String> {
+        self.validated_keybinds_and_warnings().4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
