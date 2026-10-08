@@ -13,6 +13,7 @@ impl ClientShellState {
                     | ClientShellOverlay::GlobalMenu(_)
                     | ClientShellOverlay::NotificationCenter(_)
                     | ClientShellOverlay::TodoPanel(_)
+                    | ClientShellOverlay::MovePicker(_)
             );
         }
         matches!(

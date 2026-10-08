@@ -167,6 +167,19 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.close_pane), "close pane"),
                 entry(binding_label(&keybinds.respawn_pane), "respawn pane"),
                 entry(binding_label(&keybinds.rename_pane), "rename pane"),
+                entry(binding_label(&keybinds.break_pane), "break pane to new tab"),
+                entry(
+                    binding_label(&keybinds.move_pane_to_tab),
+                    "move pane to tab or space",
+                ),
+                entry(
+                    binding_label(&keybinds.move_pane_next_tab),
+                    "move pane to next tab",
+                ),
+                entry(
+                    binding_label(&keybinds.move_pane_prev_tab),
+                    "move pane to previous tab",
+                ),
                 entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
                 entry(binding_label(&keybinds.open_pane_todos), "pane todos"),
@@ -245,6 +258,17 @@ pub(crate) fn keybind_help_groups(
             entry("r", "mark all read"),
             entry("c", "clear all"),
             entry("esc / q", "close panel"),
+        ],
+    ));
+    groups.push((
+        "move pane picker",
+        vec![
+            entry("enter / click", "move pane there"),
+            entry("/", "search destinations"),
+            entry("up / down / j / k", "previous / next destination"),
+            entry("ctrl+u / ctrl+d", "half page up / down"),
+            entry("home / end", "first / last destination"),
+            entry("esc", "leave search / clear search / close"),
         ],
     ));
     groups.push((

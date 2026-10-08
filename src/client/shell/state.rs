@@ -125,6 +125,7 @@ pub(super) struct ShellHitMap {
     pub(super) notification_indicator: Rect,
     pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
     pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
+    pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -304,6 +305,7 @@ pub(super) enum ClientShellOverlayKind {
     NotificationCenter,
     TodoPanel,
     TodoEdit,
+    MovePicker,
 }
 
 #[derive(Debug)]
@@ -638,6 +640,7 @@ pub(super) enum ClientShellOverlay {
     NotificationCenter(super::notification_center::ClientNotificationCenterOverlay),
     TodoPanel(super::todo_panel::ClientTodoPanelOverlay),
     TodoEdit(super::todo_edit::ClientTodoEditOverlay),
+    MovePicker(super::move_picker::ClientMovePickerOverlay),
 }
 
 impl ClientShellOverlay {
@@ -659,6 +662,7 @@ impl ClientShellOverlay {
             Self::NotificationCenter(_) => ClientShellOverlayKind::NotificationCenter,
             Self::TodoPanel(_) => ClientShellOverlayKind::TodoPanel,
             Self::TodoEdit(_) => ClientShellOverlayKind::TodoEdit,
+            Self::MovePicker(_) => ClientShellOverlayKind::MovePicker,
         }
     }
 }
@@ -729,6 +733,7 @@ pub(super) enum PendingEndpointKind {
         todo_id: Option<u64>,
         follow: Option<String>,
     },
+    PaneMove,
     CopySearch {
         pane_id: String,
         origin: crate::api::schema::PaneTextPoint,
