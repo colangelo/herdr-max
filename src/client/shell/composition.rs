@@ -390,7 +390,7 @@ impl ClientShellState {
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
-        let mode_bar_cells = mode_bar.map(|bar| {
+        let mut mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
@@ -453,6 +453,14 @@ impl ClientShellState {
                 occlusion.cover(rect);
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            if self.mode == ClientShellMode::Resize {
+                // Subsequent selection/popup composition restores this bar:
+                // retain the complete fork resize summary, not the base hints.
+                mode_bar_cells = mode_bar.map(|bar| {
+                    let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
+                    frame.cells[start..start + usize::from(bar.width)].to_vec()
+                });
+            }
         }
         let has_selection = self
             .selection

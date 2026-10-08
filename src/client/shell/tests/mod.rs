@@ -267,3 +267,26 @@ mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
 mod startup_overlays;
+
+#[test]
+fn resize_summary_survives_composition_with_connected_version() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_server_version(&ClientEndpointId::Local, Some("connected-build".into()));
+    let layout = state.layout(180, 30);
+    let mut surface = surface();
+    let area = Rect::new(0, 0, layout.pane_surface.width, layout.pane_surface.height);
+    surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::empty(area), None, &[]);
+    surface.panes[0].rect.width = area.width;
+    surface.panes[0].rect.height = area.height;
+    surface.panes[0].inner_rect = surface.panes[0].rect;
+    state.set_pane_surface(surface);
+    state.mode = ClientShellMode::Resize;
+    let frame = state.compose(180, 30).unwrap();
+    let text = frame_rows(&frame).join("\n");
+    assert!(
+        text.contains("h/l width  j/k height  esc done  window 180x30"),
+        "{text}"
+    );
+    assert!(text.contains("VERSION  connected-build"), "{text}");
+}
