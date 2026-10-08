@@ -394,6 +394,7 @@ impl ClientShellState {
                 .map(|pane| pane.workspace_id.clone()),
             _ => None,
         };
+        let force_target = super::force_confirm::force_target_for(&method);
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let request_id = format!("client-shell:{request_id}");
@@ -403,6 +404,7 @@ impl ClientShellState {
                 boot_id: snapshot.boot_id.clone(),
                 method_name,
                 confirmation_workspace_id,
+                force_target,
                 kind,
             },
         );
@@ -834,6 +836,14 @@ impl ClientShellState {
         let repaint = match result {
             Ok(_) => false,
             Err(error)
+                if error.code.as_deref() == Some("confirmation_required")
+                    && pending.force_target.as_ref().is_some_and(|target| {
+                        self.open_force_confirmation(target, boot_id, &error.message)
+                    }) =>
+            {
+                true
+            }
+            Err(error)
                 if self.config.confirm_close
                     && error.code.as_deref() == Some("confirmation_required")
                     && pending.confirmation_workspace_id.is_some() =>
@@ -1055,6 +1065,12 @@ impl ClientShellState {
                 pane_id: focused_pane.clone()?,
                 force: false,
             })),
+            KeybindAction::RespawnPane => {
+                Some(Method::PaneRespawn(crate::api::schema::PaneRespawnParams {
+                    pane_id: focused_pane.clone()?,
+                    force: false,
+                }))
+            }
             KeybindAction::CyclePaneNext | KeybindAction::CyclePanePrevious => {
                 let focused_tab = focused_tab?;
                 let panes = snapshot

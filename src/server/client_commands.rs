@@ -30,6 +30,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.link.resolve",
     "pane.rename",
     "pane.resize",
+    "pane.respawn",
     "pane.scroll",
     "pane.selection.read",
     "pane.split",
@@ -321,6 +322,12 @@ mod tests {
                 "{method} changed shape"
             );
         }
+        // Fork (herdr-max): `pane.respawn` is additive, advertised so the
+        // client shell can ask before a forced respawn (fork issue 125).
+        assert_eq!(
+            actual.remove("pane.respawn").as_deref(),
+            Some("b261b69cb75bc97794320ac121948b1c8d8740ce4996d2bfce9f6b1c184b6897")
+        );
         let mut expected = expected;
         for method in ["pane.close", "tab.close", "workspace.close"] {
             expected.remove(method);

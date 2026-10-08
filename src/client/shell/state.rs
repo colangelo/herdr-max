@@ -569,11 +569,40 @@ pub(super) struct ClientTabCloseConfirmation {
     pub(super) workspace: WorkspaceNavigationTarget,
 }
 
+/// A close or respawn the server refused without `force` because it would drop
+/// open todos or stop a running process. Accepting the confirmation resends
+/// exactly this target with `force`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ClientForceTarget {
+    PaneClose {
+        pane_id: String,
+    },
+    TabClose {
+        tab_id: String,
+    },
+    WorkspaceClose {
+        workspace_id: String,
+        close_group: bool,
+    },
+    PaneRespawn {
+        pane_id: String,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct ClientForceConfirmation {
+    pub(super) target: ClientForceTarget,
+    pub(super) boot_id: String,
+}
+
 #[derive(Debug)]
 pub(super) struct ClientConfirmCloseOverlay {
     pub(super) workspace_id: String,
     pub(super) close_group: bool,
     pub(super) tab_target: Option<ClientTabCloseConfirmation>,
+    /// Set when this confirmation answers a server refusal; accepting resends
+    /// the refused request with `force` instead of a plain close.
+    pub(super) force: Option<ClientForceConfirmation>,
     pub(super) title: String,
     pub(super) detail: String,
 }
@@ -679,6 +708,7 @@ pub(super) struct PendingEndpointRequest {
     pub(super) boot_id: String,
     pub(super) method_name: String,
     pub(super) confirmation_workspace_id: Option<String>,
+    pub(super) force_target: Option<ClientForceTarget>,
     pub(super) kind: PendingEndpointKind,
 }
 

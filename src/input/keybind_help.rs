@@ -158,6 +158,7 @@ pub(crate) fn keybind_help_groups(
                     "split horizontal",
                 ),
                 entry(binding_label(&keybinds.close_pane), "close pane"),
+                entry(binding_label(&keybinds.respawn_pane), "respawn pane"),
                 entry(binding_label(&keybinds.rename_pane), "rename pane"),
                 entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
@@ -280,5 +281,24 @@ mod tests {
         let global = &groups[0].1;
         assert_eq!(global[0].0, "ctrl+space / ctrl+s");
         assert_eq!(global[0].1, "prefix mode");
+    }
+
+    /// A shortcut that works but is absent from `prefix+?` is incomplete work.
+    #[test]
+    fn respawn_pane_is_discoverable_in_the_help_panel() {
+        let (live, _) = crate::config::Config::default()
+            .live_keybinds_with_diagnostics()
+            .expect("default keybinds");
+
+        let entry = keybind_help_groups(&live.keybinds, &live.prefix)
+            .into_iter()
+            .find(|(group, _)| *group == "panes")
+            .expect("the panes group should exist")
+            .1
+            .into_iter()
+            .find(|(_, label)| label == "respawn pane")
+            .expect("respawn pane should appear in the help panel");
+
+        assert_eq!(entry.0, "prefix+ctrl+x");
     }
 }

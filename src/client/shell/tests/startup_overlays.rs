@@ -616,6 +616,7 @@ fn endpoint_reload_result_does_not_override_snapshot_diagnostic_authority() {
             boot_id: "boot-1".into(),
             method_name: "server.reload_config".into(),
             confirmation_workspace_id: None,
+            force_target: None,
             kind: PendingEndpointKind::ReloadConfig,
         },
     );

@@ -1271,14 +1271,36 @@ fn render_confirm_close_overlay(
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
+    // As the fork draws it: the name in bold, then " — scope" dimmed.
+    let (name, scope) = c
+        .detail
+        .split_once(" — ")
+        .map_or((c.detail.as_str(), None), |(name, scope)| {
+            (name, Some(scope))
+        });
+    let name = format!(" {name}");
     put_text(
         b,
         i.x,
         i.y + 1,
         i.width,
-        &format!(" {}", c.detail),
-        Style::default().fg(p.text).bg(p.panel_bg),
+        &name,
+        Style::default()
+            .fg(p.text)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD),
     );
+    if let Some(scope) = scope {
+        let x = i.x.saturating_add(display_width(&name).min(i.width));
+        put_text(
+            b,
+            x,
+            i.y + 1,
+            i.right().saturating_sub(x),
+            &format!(" — {scope}"),
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+    }
     let rs = row(i, &[13, 12], 2, 3);
     let [ok, cancel] = rs.as_slice() else {
         return None;

@@ -2610,6 +2610,7 @@ fn split_path_id(idx: usize, path: &[bool]) -> String {
 
 /// `confirmation_required` for a close that would drop open todos, naming them.
 pub(super) fn open_todos_refusal(id: String, what: &str, open: &[ClosedPaneTodos]) -> String {
+    let count = open.iter().map(|pane| pane.todos.len()).sum::<usize>();
     let todos = open
         .iter()
         .flat_map(|pane| {
@@ -2623,7 +2624,8 @@ pub(super) fn open_todos_refusal(id: String, what: &str, open: &[ClosedPaneTodos
         id,
         "confirmation_required",
         format!(
-            "{what} still has open todos ({todos}); pass --force (force=true) to close it anyway"
+            "{what} still has {} ({todos}); pass --force (force=true) to close it anyway",
+            open_todo_count_phrase(count)
         ),
     )
 }
@@ -2649,7 +2651,10 @@ fn respawn_refusal(
             .map(|todo| format!("{pane_ref}: {}", todo.text))
             .collect::<Vec<_>>()
             .join("; ");
-        reasons.push(format!("has open todos ({todos})"));
+        reasons.push(format!(
+            "has {} ({todos})",
+            open_todo_count_phrase(open_todos.len())
+        ));
     }
     encode_error(
         id,
@@ -2659,6 +2664,16 @@ fn respawn_refusal(
             reasons.join(" and ")
         ),
     )
+}
+
+/// "1 open todo" / "N open todos": the count a refusal leads with, so a client
+/// can show how many todos a forced close or respawn would drop.
+fn open_todo_count_phrase(count: usize) -> String {
+    if count == 1 {
+        "1 open todo".to_owned()
+    } else {
+        format!("{count} open todos")
+    }
 }
 
 /// A forced close always answers with the todos it dropped, so a script can
@@ -2733,7 +2748,7 @@ mod tests {
         assert_eq!(response["error"]["code"], "confirmation_required");
         assert_eq!(
             response["error"]["message"],
-            "this pane is still running claude (pid 4242) and has open todos \
+            "this pane is still running claude (pid 4242) and has 1 open todo \
              (w1:p2: finish the migration); pass --force (force=true) to respawn it anyway"
         );
     }

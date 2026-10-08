@@ -878,6 +878,16 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
             if key.code == KeyCode::Enter {
                 self.accept_close_confirmation(outcome);
+            } else if key.code == KeyCode::Esc
+                && matches!(
+                    &self.overlay,
+                    Some(ClientShellOverlay::ConfirmClose(confirm)) if confirm.force.is_some()
+                )
+            {
+                // A refused close or respawn: cancelling leaves the pane alone
+                // and returns to where the user was.
+                self.overlay = None;
+                outcome.repaint = true;
             } else if key.code == KeyCode::Esc {
                 self.overlay = None;
                 self.mode = ClientShellMode::Navigate;
@@ -1044,6 +1054,10 @@ impl ClientShellState {
         let Some(ClientShellOverlay::ConfirmClose(confirm)) = self.overlay.take() else {
             return;
         };
+        if let Some(force) = confirm.force {
+            self.accept_force_confirmation(force, outcome);
+            return;
+        }
         outcome.repaint = true;
         let method = if let Some(target) = confirm.tab_target {
             if target.workspace.endpoint_id != self.active_endpoint_id
@@ -1156,6 +1170,7 @@ impl ClientShellState {
                 workspace_id,
                 close_group: closes_group,
                 tab_target,
+                force: None,
                 title: if closes_group {
                     "Close worktree group?".to_owned()
                 } else {
