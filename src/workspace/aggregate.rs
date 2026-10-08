@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::detect::AgentState;
 use crate::agent_priority::{attention_priority, display_priority};
+use crate::detect::AgentState;
 use crate::layout::PaneId;
 use crate::terminal::{TerminalId, TerminalState};
 

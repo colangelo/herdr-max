@@ -7,10 +7,9 @@ use super::{
     config::{deps_current, read_config, stamp, upstream_full_ref, ConfigCtx, FileDep},
     discovery::{
         automatic_workspace_label, canonicalize_best_effort_path, fallback_label_from_cwd,
-        git_ref_storage_is_reftable, git_rev_parse_verify, git_space_metadata_from_info,
-        git_symbolic_head_full, git_worktree_info, read_git_ref_file, read_ref_oid,
-        GitWorktreeInfo,
-        git_operation_in_progress, short_oid, DetachedHead,
+        git_operation_in_progress, git_ref_storage_is_reftable, git_rev_parse_verify,
+        git_space_metadata_from_info, git_symbolic_head_full, git_worktree_info, read_git_ref_file,
+        read_ref_oid, short_oid, DetachedHead, GitWorktreeInfo,
     },
 };
 

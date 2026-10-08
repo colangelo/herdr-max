@@ -496,30 +496,6 @@ mod split_share_tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_split_while_detached_divides_the_target_at_a_remembered_size() {
-        let config = crate::config::Config::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app =
-            crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default());
-        app.state.last_client_size = Some((310, 56));
-        app.state.detached_pane_size = Some(app.state.no_client_size(None));
-        let mut workspace = crate::workspace::Workspace::test_new("detached");
-        let target = workspace.tabs[0].root_pane;
-        workspace.insert_test_runtime(
-            target,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(120, 40, b""),
-        );
-        app.state.workspaces = vec![workspace];
-        app.state.active = Some(0);
-
-        assert_eq!(
-            app.split_sizes(0, target, Direction::Vertical, 0.65),
-            ((14, 120), Some((26, 120))),
-            "the target's real size, not the remembered one"
-        );
-    }
-
     #[test]
     fn neither_side_collapses_to_nothing() {
         assert_eq!(

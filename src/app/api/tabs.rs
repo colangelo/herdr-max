@@ -386,7 +386,13 @@ mod tests {
         use crate::api::schema::{PaneSyncParams, SyncMode};
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
         let mut workspace = Workspace::test_new("sync");
         let right = workspace.test_split(ratatui::layout::Direction::Horizontal);
         app.state.workspaces = vec![workspace];

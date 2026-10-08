@@ -813,24 +813,6 @@ mod tests {
     }
 
     #[test]
-    fn install_scopes_claude_session_start_sources() {
-        let (settings_path, hook_path) = paths();
-        let installed = install("{}", settings_path, hook_path).unwrap();
-        let settings: Value = serde_json::from_str(&installed).unwrap();
-        let matcher = settings["hooks"]["SessionStart"][0]["matcher"]
-            .as_str()
-            .unwrap();
-        assert_eq!(matcher, "^(startup|resume|clear|compact|fork)$");
-        let pattern = regex::Regex::new(matcher).unwrap();
-        for source in ["startup", "resume", "clear", "compact", "fork"] {
-            assert!(pattern.is_match(source), "Claude source: {source}");
-        }
-        for source in ["new", "load", "", "future-source", "startup-extra"] {
-            assert!(!pattern.is_match(source), "non-Claude source: {source}");
-        }
-    }
-
-    #[test]
     fn install_adds_prompt_and_stop_hooks_to_a_session_start_only_file() {
         let (settings_path, hook_path) = paths();
         let session = serde_json::to_string_pretty(&canonical("SessionStart")).unwrap();
@@ -901,39 +883,6 @@ mod tests {
         let updated = install(&input, settings_path, hook_path).unwrap();
 
         assert_eq!(updated, input);
-    }
-
-    #[test]
-    fn install_migrates_wildcard_session_start_and_preserves_user_hook() {
-        let (settings_path, hook_path) = paths();
-        let command = serde_json::to_string(&hook_command(hook_path, Some("session"))).unwrap();
-        let user_hook = r#"{ "type" : "command", "command" : "echo keep", "timeout" : 3 }"#;
-        let input = format!(
-            "{{\n  \"hooks\": {{\n    \"SessionStart\": [{{\"matcher\":\"*\",\"hooks\":[{{\"type\":\"command\",\"command\":{command},\"timeout\":10}},{user_hook}]}}]\n  }}\n}}\n\n"
-        );
-        let installed = install(&input, settings_path, hook_path).unwrap();
-        assert!(installed.contains(user_hook));
-        assert!(installed.ends_with("}\n\n"));
-        let settings: Value = serde_json::from_str(&installed).unwrap();
-        let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0]["matcher"], "*");
-        assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
-        assert_eq!(groups[0]["hooks"][0]["command"], "echo keep");
-        assert_eq!(groups[1], canonical_hook_value(hook_path));
-        assert_eq!(
-            install(&installed, settings_path, hook_path).unwrap(),
-            installed
-        );
-
-        let removed = uninstall(&installed, settings_path, hook_path).unwrap();
-        assert!(removed.contains(user_hook));
-        assert!(!removed.contains(&command));
-        let settings: Value = serde_json::from_str(&removed).unwrap();
-        assert_eq!(
-            settings["hooks"]["SessionStart"].as_array().unwrap().len(),
-            1
-        );
     }
 
     #[test]

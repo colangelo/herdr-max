@@ -23,13 +23,13 @@ use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
 // Fork-aware update check: point at this fork's own checked-in manifests served
-// via raw GitHub, not upstream herdr.dev. `website/preview.json` is maintained by
-// the fork's preview workflow; `website/latest.json` is rewritten by the
-// `release-ac` publish step on each stable fork release.
+// via raw GitHub, not upstream herdr.dev. `distribution/latest.json` is rewritten
+// by the release workflow on each stable fork release (which also keeps a copy at
+// `website/latest.json` for binaries from before the v0.9.3 sync).
 const STABLE_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/latest.json";
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/preview.json";
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
@@ -3399,6 +3399,7 @@ mod tests {
                     health_check: true,
                     ssh_agent_registration: false,
                 }),
+                exe: None,
             },
         };
         let decisions = confirm_running_server_update_action(

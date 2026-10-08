@@ -25,7 +25,6 @@ pub(crate) struct PopupPaneState {
 use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
 
-
 // ---------------------------------------------------------------------------
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
@@ -944,7 +943,6 @@ pub enum TabBarStatusSegment {
     Text(Option<String>),
 }
 
-
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
@@ -1247,31 +1245,13 @@ impl AppState {
                 crate::config::DEFAULT_HEADLESS_COLS,
                 crate::config::DEFAULT_HEADLESS_ROWS,
             ),
+            last_client_size: None,
+            remember_client_size: true,
             agent_panel_sort: AgentPanelSort::Spaces,
-            status_spinner: crate::config::StatusSpinnerConfig::On,
-            status_spinner_interval: std::time::Duration::from_millis(
-                crate::config::DEFAULT_STATUS_SPINNER_MS,
-            ),
-            display_panes_duration: std::time::Duration::from_millis(
-                crate::config::DEFAULT_DISPLAY_PANES_MS,
-            ),
-            spinner_frame: 0,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             workspace_sort: WorkspaceSort::Manual,
-            sort_motion_bubble: true,
-            sort_motion_timing: crate::ui::list_motion::ListMotionTiming {
-                settle: std::time::Duration::from_millis(2000),
-                step: std::time::Duration::from_millis(150),
-                easing: crate::ui::list_motion::ListMotionEasing::Linear,
-            },
-            workspace_list_motion: crate::ui::list_motion::ListMotion::new(),
-            agent_panel_motion: crate::ui::list_motion::ListMotion::new(),
-            sidebar_style: crate::config::SidebarStyleConfig::Default,
-            state_color_overrides: StateColorOverrides::default(),
-            state_symbol_overrides: StateSymbolOverrides::default(),
-            notification_center_position: crate::config::NotificationCenterPositionConfig::TopRight,
             next_agent_state_change_seq: 0,
             confirm_close: true,
             pane_borders: crate::config::PaneBordersConfig::Auto,
@@ -1279,13 +1259,8 @@ impl AppState {
             pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
-            show_pane_todo_indicator: true,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
-            show_workspace_numbers: false,
-            show_agent_numbers: false,
-            show_host: false,
-            host_label: None,
             reveal_hidden_cursor_for_cjk_ime: false,
             cjk_ime_agent_filter_configured: false,
             cjk_ime_agents: Vec::new(),
@@ -1295,26 +1270,6 @@ impl AppState {
             shell_mode: crate::config::ShellModeConfig::Auto,
             new_terminal_cwd: NewTerminalCwdConfig::Follow,
             pane_scrollback_limit_bytes: crate::config::DEFAULT_SCROLLBACK_LIMIT_BYTES,
-            workspace_number_color: None,
-            agent_number_color: None,
-            workspace_number_prefix: String::new(),
-            agent_number_prefix: String::new(),
-            pane_border_active_color: None,
-            pane_border_inactive_color: None,
-            pane_border_active_style: crate::config::PaneBorderActiveStyleConfig::Light,
-            pane_title_active_color: None,
-            pane_title_inactive_color: None,
-            pane_todo_color: None,
-            sidebar_active_border: crate::config::SidebarActiveBorderConfig::Off,
-            sidebar_overflow: crate::config::SidebarOverflowConfig::default(),
-            sidebar_fog: crate::config::Config::default().sidebar_fog().0,
-            sidebar_fog_tint: crate::config::Config::default().sidebar_fog().1,
-            sidebar_fog_style: crate::config::SidebarFogStyle::default(),
-            sidebar_fade: crate::config::Config::default().sidebar_fade(),
-            pane_active_bg: None,
-            pane_inactive_bg: None,
-            dim_inactive_panes: false,
-            inactive_pane_dim: 0,
             sound: SoundConfig {
                 enabled: false,
                 ..SoundConfig::default()
@@ -1380,24 +1335,6 @@ impl AppState {
     }
 
     pub fn assert_invariants_for_test(&self) {
-        // Mode and overlay are one fact. An open overlay names the mode, and a
-        // mode that names an overlay has that overlay open — the pairing that
-        // used to be convention between `Mode` and ten-plus parallel
-        // `Option<XState>` fields.
-        if let Some(overlay) = self.overlay.as_ref() {
-            assert_eq!(
-                self.mode,
-                overlay.mode(),
-                "the open overlay ({:?}) and the active mode disagree",
-                overlay.kind()
-            );
-        } else if let Some(kind) = OverlayKind::ALL
-            .iter()
-            .find(|kind| kind.mode() == self.mode)
-        {
-            panic!("mode {:?} names {kind:?} but no overlay is open", self.mode);
-        }
-
         // A pin order names one place in the pinned block: no two spaces share it.
         let mut pin_orders: Vec<u64> = self
             .workspaces
@@ -1651,25 +1588,6 @@ mod tests {
 
     #[test]
     fn new_pane_size_uses_headless_size_before_first_view() {
-    fn pane_size_estimate_uses_the_no_client_size_while_detached() {
-        let mut state = AppState::test_new();
-        state.headless_size = (132, 41);
-        state.view.pane_infos = vec![crate::layout::PaneInfo {
-            id: crate::layout::PaneId::from_raw(1),
-            rect: ratatui::layout::Rect::new(0, 0, 46, 39),
-            inner_rect: ratatui::layout::Rect::new(0, 0, 46, 39),
-            scrollbar_rect: None,
-            borders: ratatui::widgets::Borders::NONE,
-            is_focused: true,
-        }];
-        assert_eq!(state.estimate_pane_size(), (39, 46), "attached: the view");
-
-        state.detached_pane_size = Some((310, 56));
-
-        assert_eq!(state.estimate_pane_size(), (56, 310));
-    }
-
-    #[test]
         let mut state = AppState::test_new();
         state.headless_size = (132, 41);
         state.pane_scrollbars = false;
@@ -1678,191 +1596,6 @@ mod tests {
             state.new_pane_size(crate::ui::NewPanePlacement::Alone),
             (41, 132)
         );
-    }
-
-    /// Builds two workspaces, each with two panes, and opens the link picker
-    /// on a todo belonging to the first pane of the first workspace.
-    fn state_with_link_picker_open() -> (AppState, PaneId) {
-        let mut state = AppState::test_new();
-        let mut first = crate::workspace::Workspace::test_new("here");
-        first.test_split(ratatui::layout::Direction::Horizontal);
-        let mut second = crate::workspace::Workspace::test_new("there");
-        second.test_split(ratatui::layout::Direction::Horizontal);
-        state.workspaces = vec![first, second];
-        state.active = Some(0);
-        state.ensure_test_terminals();
-        let pane_id = state.workspaces[0].tabs[0].root_pane;
-
-        state.open_new_pane_todo(pane_id);
-        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.open_pane_todo_link_picker_from(&runtimes);
-        (state, pane_id)
-    }
-
-    fn accept(state: &mut AppState) -> bool {
-        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.accept_navigator_selection_from(&runtimes)
-    }
-
-    fn rows(state: &AppState) -> Vec<NavigatorRow> {
-        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        state.navigator_rows_from(&runtimes)
-    }
-
-    fn select(state: &mut AppState, want: impl Fn(&NavigatorRow) -> bool) {
-        state.set_navigator_selected(
-            rows(state)
-                .iter()
-                .position(want)
-                .expect("the picker should offer such a row"),
-        );
-    }
-
-    /// Spec: "the navigator opens in selection mode listing panes across every
-    /// workspace". The old control cycled only within the todo's own
-    /// workspace, which is why most panes could never be reached.
-    #[test]
-    fn the_link_picker_offers_panes_from_every_workspace() {
-        let (state, pane_id) = state_with_link_picker_open();
-        let rows = rows(&state);
-
-        for ws_idx in 0..2 {
-            assert!(
-                rows.iter().any(|row| matches!(
-                    row.target,
-                    NavigatorTarget::Pane { ws_idx: idx, .. } if idx == ws_idx
-                )),
-                "workspace {ws_idx} must contribute pane rows"
-            );
-        }
-        assert!(
-            !rows.iter().any(|row| matches!(
-                row.target,
-                NavigatorTarget::Pane { pane_id: candidate, .. } if candidate == pane_id
-            )),
-            "a todo linking to its own pane says nothing, so it is not offered"
-        );
-    }
-
-    /// Spec: "when a pane row is chosen, the edit returns with that pane
-    /// staged as the link target".
-    #[test]
-    fn choosing_a_pane_row_stages_it_and_returns_to_the_modal() {
-        let (mut state, pane_id) = state_with_link_picker_open();
-        select(&mut state, |row| {
-            matches!(row.target, NavigatorTarget::Pane { ws_idx: 1, .. })
-        });
-        let NavigatorTarget::Pane {
-            pane_id: target, ..
-        } = rows(&state)[state.navigator_selected()].target
-        else {
-            panic!("selected row should be a pane");
-        };
-
-        assert!(accept(&mut state));
-
-        assert_eq!(
-            state.editing_pane_todo().expect("edit state").link,
-            PaneTodoEditLink::Set(target),
-            "a target in another workspace stages like any other"
-        );
-        assert_eq!(state.mode, Mode::PaneTodoEdit);
-        assert_eq!(state.navigator_purpose(), NavigatorPurpose::Goto);
-        assert_ne!(target, pane_id);
-    }
-
-    /// Spec: "non-pane rows are not targets" — a workspace row expands or
-    /// collapses instead, and neither kind ends the selection.
-    #[test]
-    fn workspace_and_tab_rows_never_resolve_a_link() {
-        let (mut state, _) = state_with_link_picker_open();
-        select(&mut state, |row| row.is_workspace);
-        let expanded_before = state.navigator_expanded_count();
-
-        assert!(!accept(&mut state), "a workspace row resolves nothing");
-
-        assert_eq!(
-            state.editing_pane_todo().expect("edit state").link,
-            PaneTodoEditLink::Keep,
-            "the staged link is untouched"
-        );
-        assert_eq!(state.mode, Mode::Navigator, "the picker stays open");
-        assert_ne!(
-            state.navigator_expanded_count(),
-            expanded_before,
-            "it collapses or expands instead"
-        );
-    }
-
-    #[test]
-    fn the_clear_entry_clears_the_link() {
-        let (mut state, _) = state_with_link_picker_open();
-        select(&mut state, |row| {
-            matches!(row.target, NavigatorTarget::ClearLink)
-        });
-
-        assert!(accept(&mut state));
-
-        assert_eq!(
-            state.editing_pane_todo().expect("edit state").link,
-            PaneTodoEditLink::Clear
-        );
-        assert_eq!(state.mode, Mode::PaneTodoEdit);
-    }
-
-    /// Spec: "leaving the selection without choosing SHALL leave the link as
-    /// it was".
-    #[test]
-    fn dismissing_the_picker_keeps_the_link_it_had() {
-        let (mut state, _) = state_with_link_picker_open();
-        let target = match rows(&state)
-            .iter()
-            .find(|row| matches!(row.target, NavigatorTarget::Pane { .. }))
-            .expect("a pane row")
-            .target
-        {
-            NavigatorTarget::Pane { pane_id, .. } => pane_id,
-            _ => unreachable!(),
-        };
-        state.editing_pane_todo_mut().expect("edit state").link = PaneTodoEditLink::Set(target);
-
-        state.close_pane_todo_link_picker();
-
-        assert_eq!(
-            state.editing_pane_todo().expect("edit state").link,
-            PaneTodoEditLink::Set(target),
-            "dismissal stages nothing, so the previous choice stands"
-        );
-        assert_eq!(state.mode, Mode::PaneTodoEdit);
-        assert_eq!(state.navigator_purpose(), NavigatorPurpose::Goto);
-    }
-
-    /// The picker never opens on the clear entry, so a mis-keyed Enter cannot
-    /// wipe a link the user meant to keep.
-    #[test]
-    fn the_picker_does_not_open_on_the_clear_entry() {
-        let (state, _) = state_with_link_picker_open();
-        assert!(state.navigator_selected() > 0);
-        assert!(matches!(rows(&state)[0].target, NavigatorTarget::ClearLink));
-    }
-
-    /// Ordinary navigation must be unaffected: no clear entry, every pane
-    /// offered, and Enter still focuses.
-    #[test]
-    fn the_goto_navigator_is_unchanged_by_the_picker() {
-        let mut state = AppState::test_new();
-        state.workspaces = vec![crate::workspace::Workspace::test_new("here")];
-        state.active = Some(0);
-        state.ensure_test_terminals();
-        state.open_navigator();
-
-        assert_eq!(state.navigator_purpose(), NavigatorPurpose::Goto);
-        assert!(!rows(&state)
-            .iter()
-            .any(|row| matches!(row.target, NavigatorTarget::ClearLink)));
-
-        assert!(accept(&mut state));
-        assert_eq!(state.mode, Mode::Terminal, "goto still focuses and closes");
     }
 
     fn test_toast(kind: ToastKind, title: &str, target: Option<ToastTarget>) -> ToastNotification {
@@ -1874,11 +1607,6 @@ mod tests {
             target,
             anchor_pane: None,
         }
-    }
-
-    #[test]
-    fn notification_center_mode_wants_ascii_input() {
-        assert!(Mode::NotificationCenter.wants_ascii_input());
     }
 
     #[test]
@@ -1960,164 +1688,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_notifications_empties_log_and_resets_panel_selection() {
-        let mut state = AppState::test_new();
-        for title in ["a", "b", "c"] {
-            state.post_notification(test_toast(ToastKind::Finished, title, None));
-        }
-        state.open_notification_center();
-        state.notification_center_move_selection(2);
-        assert_eq!(
-            state.notification_center().map(|c| c.list.selected),
-            Some(2)
-        );
-
-        state.clear_notifications();
-
-        assert!(state.notification_log.is_empty());
-        assert_eq!(
-            state.mode,
-            Mode::NotificationCenter,
-            "clearing leaves the panel open"
-        );
-        assert_eq!(
-            state.notification_center().map(|c| c.list.selected),
-            Some(0),
-            "selection resets after clear"
-        );
-    }
-
-    #[test]
-    fn notification_center_footer_splits_the_list_and_button_rows() {
-        let mut state = AppState::test_new();
-        state.view.terminal_area = Rect::new(0, 1, 80, 24);
-        state.view.tab_bar_rect = Rect::new(0, 0, 80, 1);
-        for title in ["a", "b", "c"] {
-            state.post_notification(test_toast(ToastKind::Finished, title, None));
-        }
-        state.open_notification_center();
-
-        let buttons = state
-            .notification_center_buttons()
-            .expect("footer buttons present with entries");
-        let button = buttons
-            .rect(NotificationCenterButton::Clear)
-            .expect("clear all is never dropped");
-        let close = buttons
-            .rect(NotificationCenterButton::Close)
-            .expect("close is never dropped");
-        let (list, _start) = state
-            .notification_center_list_window()
-            .expect("list window present");
-
-        // One blank row separates the last entry from the buttons — the panel
-        // convention, so nothing sits flush against the footer.
-        assert_eq!(button.height, 1);
-        assert_eq!(
-            list.y + list.height + 1,
-            button.y,
-            "one blank row between the list and the buttons"
-        );
-        assert_eq!(close.y, button.y, "buttons share the footer row");
-        assert_eq!(list.height, 3);
-        assert!(button.width <= list.width, "button fits within the panel");
-        assert!(button.x >= list.x, "button sits within the inner area");
-        assert!(
-            close.x + close.width <= list.x + list.width,
-            "buttons stay within the inner area"
-        );
-    }
-
-    /// The regression this fixes: at the panel's old 30-column minimum the
-    /// footer wanted 41, so `mark read` was dropped and the `r` hint went with
-    /// it — the action was reachable only by a key nothing advertised.
-    #[test]
-    fn the_notification_panel_is_never_narrower_than_its_own_footer() {
-        let mut state = AppState::test_new();
-        state.view.terminal_area = Rect::new(0, 1, 80, 24);
-        state.view.tab_bar_rect = Rect::new(0, 0, 80, 1);
-        // One short title: nothing about the entries wants a wide panel.
-        state.post_notification(test_toast(ToastKind::Finished, "ok", None));
-        state.open_notification_center();
-
-        let rect = state.notification_center_rect().expect("panel rect");
-        assert!(
-            rect.width >= crate::ui::notification_center_footer_width() + 2,
-            "panel {} is narrower than its footer",
-            rect.width
-        );
-
-        let buttons = state
-            .notification_center_buttons()
-            .expect("footer buttons present with entries");
-        assert!(
-            buttons.rect(NotificationCenterButton::MarkRead).is_some(),
-            "mark read must survive at the panel's own width"
-        );
-    }
-
-    /// An empty log has no footer to fit, so it stays the narrow box it was.
-    #[test]
-    fn an_empty_notification_panel_does_not_widen_for_a_footer_it_has_not_got() {
-        let mut state = AppState::test_new();
-        state.view.terminal_area = Rect::new(0, 1, 80, 24);
-        state.view.tab_bar_rect = Rect::new(0, 0, 80, 1);
-        state.open_notification_center();
-
-        let rect = state.notification_center_rect().expect("panel rect");
-        assert_eq!(rect.width, 30);
-        assert!(state.notification_center_buttons().is_none());
-    }
-
-    #[test]
-    fn notification_center_rect_honors_bottom_right_position() {
-        let mut state = AppState::test_new();
-        state.view.terminal_area = Rect::new(0, 1, 80, 24);
-        state.view.tab_bar_rect = Rect::new(0, 0, 80, 1);
-        state.post_notification(test_toast(ToastKind::Finished, "one", None));
-        state.open_notification_center();
-
-        let top = state.notification_center_rect().expect("top-right rect");
-        assert_eq!(top.y, 1, "top-right anchors under the tab bar");
-
-        state.notification_center_position =
-            crate::config::NotificationCenterPositionConfig::BottomRight;
-        let bottom = state.notification_center_rect().expect("bottom-right rect");
-        assert_eq!(
-            bottom.y + bottom.height,
-            25,
-            "without a floating indicator the panel sits at the screen bottom"
-        );
-        assert_eq!(bottom.x, top.x, "right alignment is unchanged");
-        assert_eq!(bottom.width, top.width);
-        assert_eq!(bottom.height, top.height);
-
-        // With the floating indicator on the frame's last row (as compute_view
-        // sets it for bottom-right), the panel opens directly above it so the
-        // diamond stays visible as the toggle.
-        state.view.notification_hit_area = Rect::new(75, 24, 5, 1);
-        let above = state
-            .notification_center_rect()
-            .expect("indicator-anchored rect");
-        assert_eq!(
-            above.y + above.height,
-            24,
-            "panel bottom sits on top of the indicator row"
-        );
-    }
-
-    #[test]
-    fn notification_center_has_no_footer_button_when_empty() {
-        let mut state = AppState::test_new();
-        state.view.terminal_area = Rect::new(0, 1, 80, 24);
-        state.view.tab_bar_rect = Rect::new(0, 0, 80, 1);
-        state.open_notification_center();
-
-        assert!(state.notification_log.is_empty());
-        assert!(state.notification_center_buttons().is_none());
-    }
-
-    #[test]
     fn post_notification_shows_toast_and_appends_log_entry() {
         let mut state = AppState::test_new();
         state.post_notification(test_toast(ToastKind::Finished, "claude finished", None));
@@ -2138,53 +1708,6 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, entry.id);
         assert!(state.notification_log.take_pending_events().is_empty());
-    }
-
-    #[test]
-    fn open_notification_center_keeps_unread_and_clamps_selection() {
-        let mut state = AppState::test_new();
-        for title in ["one", "two", "three"] {
-            state.post_notification(test_toast(ToastKind::Finished, title, None));
-        }
-        assert_eq!(state.notification_log.unread_count(), 3);
-
-        state.open_notification_center();
-        assert_eq!(state.mode, Mode::NotificationCenter);
-        assert_eq!(
-            state.notification_log.unread_count(),
-            3,
-            "opening the panel leaves read state alone"
-        );
-        assert_eq!(
-            state
-                .notification_center()
-                .map(|center| center.list.selected),
-            Some(0)
-        );
-
-        state.notification_center_move_selection(1);
-        state.notification_center_move_selection(10);
-        assert_eq!(
-            state
-                .notification_center()
-                .map(|center| center.list.selected),
-            Some(2),
-            "selection clamps to newest-first list length"
-        );
-        state.notification_center_move_selection(-10);
-        assert_eq!(
-            state
-                .notification_center()
-                .map(|center| center.list.selected),
-            Some(0)
-        );
-        assert_eq!(
-            state
-                .notification_center_selected_entry()
-                .map(|entry| entry.title.as_str()),
-            Some("three"),
-            "selection 0 is the newest entry"
-        );
     }
 
     #[test]

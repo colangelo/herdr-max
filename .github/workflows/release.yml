@@ -14,10 +14,9 @@ env:
 
 jobs:
   validate-release-source:
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'colangelo/herdr-max' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
-      preview_commit: ${{ steps.source.outputs.preview_commit }}
       previous_tag: ${{ steps.source.outputs.previous_tag }}
     steps:
       - &require-release-admins
@@ -38,17 +37,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Require a published preview and release-only changes
+      # fork: -ac releases are cut straight from master by `just release-ac`, with
+      # no published upstream preview, so scripts/release.py check-tag (which
+      # requires one) does not apply. Only the previous release tag is needed, for
+      # close-released-issues.
+      - name: Find the previous release tag
         id: source
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch origin master:refs/remotes/origin/master --tags
-          python3 scripts/release.py check-tag --tag "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+          set -euo pipefail
+          CURRENT_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          PREVIOUS_TAG="$(git describe --first-parent --tags --match 'v[0-9]*' --abbrev=0 "${CURRENT_COMMIT}^" 2>/dev/null || true)"
+          echo "previous_tag=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
 
   flake-check:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'colangelo/herdr-max'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,7 +75,7 @@ jobs:
 
   build:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'colangelo/herdr-max'
     permissions:
       contents: read
     strategy:
@@ -98,16 +101,12 @@ jobs:
             name: herdr-macos-aarch64
             libghostty_vt_optimize: ReleaseFast
             libghostty_vt_simd: 'true'
-          - target: x86_64-pc-windows-msvc
-            os: windows-2022
-            name: herdr-windows-x86_64.zip
-            libghostty_vt_optimize: ReleaseFast
-            libghostty_vt_simd: 'true'
 
     runs-on: ${{ matrix.os }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ${{ matrix.libghostty_vt_optimize }}
       LIBGHOSTTY_VT_SIMD: ${{ matrix.libghostty_vt_simd }}
+      HERDR_BUILD_CHANNEL: ac
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -119,8 +118,9 @@ jobs:
         run: |
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "error: tag $GITHUB_REF_NAME doesn't match Cargo.toml version $CARGO_VERSION"
+          TAG_BASE="${TAG_VERSION%%-ac*}"
+          if [ "$CARGO_VERSION" != "$TAG_BASE" ]; then
+            echo "error: tag $GITHUB_REF_NAME base $TAG_BASE doesn't match Cargo.toml version $CARGO_VERSION"
             exit 1
           fi
 
@@ -168,31 +168,19 @@ jobs:
         shell: bash
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
 
+      # fork: v0.7.1-ac.2 style tags carry the .2 into the binary version via HERDR_BUILD_ID
+      - name: Set fork build id from tag
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-ac.*) echo "HERDR_BUILD_ID=${GITHUB_REF_NAME##*-ac.}" >> "$GITHUB_ENV" ;;
+          esac
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifact
-        if: runner.os != 'Windows'
         shell: bash
         run: cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
-
-      - name: Package artifact
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
-          .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe target\${{ matrix.target }}\release\herdr.exe `
-            -PackagePath $package `
-            -StageDir $stage `
-            -OutputPath ${{ matrix.name }}
-          $version = (& (Join-Path $stage "herdr.exe") --version | Out-String).Trim()
-          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          if ($version -notmatch [regex]::Escape($tagVersion) -or $version -match "preview") {
-            throw "Packaged Windows binary has unexpected version identity: $version"
-          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -202,7 +190,7 @@ jobs:
 
   validate-release-inputs:
     needs: validate-release-source
-    if: github.repository == 'herdrdev/herdr'
+    if: github.repository == 'colangelo/herdr-max'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -223,7 +211,9 @@ jobs:
           python3 scripts/changelog.py validate-product-announcement
           python3 scripts/agent_detection_manifest_check.py --require-all-published
           python3 scripts/config_reference_check.py
-          node scripts/docs/versions.mjs check
+          # fork: `scripts/docs/versions.mjs check` is omitted (see justfile
+          # release-docs-check): docs/versions tracks upstream's herdr.dev releases
+          # while distribution/latest.json is the fork's own.
           node scripts/docs/preview.mjs check
           bun test scripts/docs/*.test.ts
           test -f docs/next/README.md
@@ -231,7 +221,7 @@ jobs:
 
   release:
     needs: [build, flake-check, validate-release-inputs]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'colangelo/herdr-max' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -256,9 +246,11 @@ jobs:
             herdr-linux-aarch64/herdr-linux-aarch64
             herdr-macos-x86_64/herdr-macos-x86_64
             herdr-macos-aarch64/herdr-macos-aarch64
-            herdr-windows-x86_64.zip/herdr-windows-x86_64.zip
           body_path: RELEASE_NOTES.md
 
+  # fork: triggers upstream's herdrdev/herdr-nix package update, which the fork does
+  # not own. Kept (scripts/release-workflows.test.ts asserts it) but guarded to
+  # upstream's repository, so it is skipped on the fork.
   update-nix-package:
     needs: release
     if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -281,7 +273,7 @@ jobs:
 
   close-released-issues:
     needs: [release, validate-release-source]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'colangelo/herdr-max' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
@@ -310,6 +302,10 @@ jobs:
 
           VERSION="${GITHUB_REF_NAME#v}"
           CURRENT_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous release tag found; skipping issue close."
+            exit 0
+          fi
           echo "Scanning released commits in $PREVIOUS_TAG..$GITHUB_REF_NAME for refs #<issue> mentions."
           mapfile -t ISSUES < <(
             git log --format='%s%n%b' "$PREVIOUS_TAG..$CURRENT_COMMIT" \
@@ -411,9 +407,53 @@ jobs:
             fi
           done
 
+  # fork: publishes the stable -ac formula to colangelo/homebrew-tap (the rolling
+  # beta formula is updated by beta.yml).
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    if: github.repository == 'colangelo/herdr-max' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      FORMULA_TEMPLATE: Y2xhc3MgSGVyZHIgPCBGb3JtdWxhCiAgZGVzYyAiVGVybWluYWwgd29ya3NwYWNlIG1hbmFnZXIgZm9yIEFJIGNvZGluZyBhZ2VudHMiCiAgaG9tZXBhZ2UgImh0dHBzOi8vZ2l0aHViLmNvbS9jb2xhbmdlbG8vaGVyZHItbWF4IgogIHZlcnNpb24gIlZFUlNJT05fUExBQ0VIT0xERVIiCiAgbGljZW5zZSAiQUdQTC0zLjAtb3ItbGF0ZXIiCgogIG9uX21hY29zIGRvCiAgICBpZiBIYXJkd2FyZTo6Q1BVLmFybT8KICAgICAgdXJsICJodHRwczovL2dpdGh1Yi5jb20vY29sYW5nZWxvL2hlcmRyLW1heC9yZWxlYXNlcy9kb3dubG9hZC92I3t2ZXJzaW9ufS9oZXJkci1tYWNvcy1hYXJjaDY0IgogICAgICBzaGEyNTYgIkRBUldJTl9BUk02NF9QTEFDRUhPTERFUiIKICAgIGVsc2UKICAgICAgdXJsICJodHRwczovL2dpdGh1Yi5jb20vY29sYW5nZWxvL2hlcmRyLW1heC9yZWxlYXNlcy9kb3dubG9hZC92I3t2ZXJzaW9ufS9oZXJkci1tYWNvcy14ODZfNjQiCiAgICAgIHNoYTI1NiAiREFSV0lOX0FNRDY0X1BMQUNFSE9MREVSIgogICAgZW5kCiAgZW5kCgogIG9uX2xpbnV4IGRvCiAgICBpZiBIYXJkd2FyZTo6Q1BVLmFybT8KICAgICAgdXJsICJodHRwczovL2dpdGh1Yi5jb20vY29sYW5nZWxvL2hlcmRyLW1heC9yZWxlYXNlcy9kb3dubG9hZC92I3t2ZXJzaW9ufS9oZXJkci1saW51eC1hYXJjaDY0IgogICAgICBzaGEyNTYgIkxJTlVYX0FSTTY0X1BMQUNFSE9MREVSIgogICAgZWxzZQogICAgICB1cmwgImh0dHBzOi8vZ2l0aHViLmNvbS9jb2xhbmdlbG8vaGVyZHItbWF4L3JlbGVhc2VzL2Rvd25sb2FkL3Yje3ZlcnNpb259L2hlcmRyLWxpbnV4LXg4Nl82NCIKICAgICAgc2hhMjU2ICJMSU5VWF9BTUQ2NF9QTEFDRUhPTERFUiIKICAgIGVuZAogIGVuZAoKICBkZWYgaW5zdGFsbAogICAgYmluYXJ5ID0gRGlyWyJoZXJkci0qIl0uZmlyc3QgfHwgImhlcmRyIgogICAgYmluLmluc3RhbGwgYmluYXJ5ID0+ICJoZXJkciIKICBlbmQKCiAgZGVmIGNhdmVhdHMKICAgIDw8fkVPUwogICAgICBoZXJkciBydW5zIGEgcGVyc2lzdGVudCBiYWNrZ3JvdW5kIHNlcnZlci4gVG8gdXBncmFkZSB3aXRob3V0IGtpbGxpbmcgeW91cgogICAgICBydW5uaW5nIHBhbmVzLCBtaWdyYXRlIHRoZSBzZXJ2ZXIgb250byB0aGUgbmV3IGJpbmFyeSBhZnRlciB1cGdyYWRpbmc6CgogICAgICAgIGJyZXcgdXBncmFkZSBoZXJkcgogICAgICAgIGhlcmRyIHNlcnZlciBsaXZlLWhhbmRvZmYgLS1pbXBvcnQtZXhlICIje29wdF9iaW59L2hlcmRyIgoKICAgICAgKHNlbGYtdXBkYXRlIGlzIGRpc2FibGVkIGZvciBIb21lYnJldyBpbnN0YWxsczsgdXNlIGJyZXcgdXBncmFkZS4pCiAgICBFT1MKICBlbmQKCiAgdGVzdCBkbwogICAgYXNzZXJ0X21hdGNoICJoZXJkciAje3ZlcnNpb259Iiwgc2hlbGxfb3V0cHV0KCIje2Jpbn0vaGVyZHIgLS12ZXJzaW9uIikKICBlbmQKZW5kCg==
+    steps:
+      - *require-release-admins
+      - name: Calculate checksums
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE_URL="https://github.com/colangelo/herdr-max/releases/download/${GITHUB_REF_NAME}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          curl -fsSL "${BASE_URL}/herdr-macos-aarch64" | sha256sum | cut -d' ' -f1 > darwin-arm64.sha
+          curl -fsSL "${BASE_URL}/herdr-macos-x86_64"  | sha256sum | cut -d' ' -f1 > darwin-amd64.sha
+          curl -fsSL "${BASE_URL}/herdr-linux-aarch64" | sha256sum | cut -d' ' -f1 > linux-arm64.sha
+          curl -fsSL "${BASE_URL}/herdr-linux-x86_64"  | sha256sum | cut -d' ' -f1 > linux-amd64.sha
+
+      - name: Update homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/colangelo/homebrew-tap.git
+          cd homebrew-tap
+          echo "$FORMULA_TEMPLATE" | base64 -d > Formula/herdr.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" Formula/herdr.rb
+          sed -i "s/DARWIN_ARM64_PLACEHOLDER/$(cat ../darwin-arm64.sha)/" Formula/herdr.rb
+          sed -i "s/DARWIN_AMD64_PLACEHOLDER/$(cat ../darwin-amd64.sha)/" Formula/herdr.rb
+          sed -i "s/LINUX_ARM64_PLACEHOLDER/$(cat ../linux-arm64.sha)/" Formula/herdr.rb
+          sed -i "s/LINUX_AMD64_PLACEHOLDER/$(cat ../linux-amd64.sha)/" Formula/herdr.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/herdr.rb
+          git diff --staged --quiet || git commit -m "Update herdr to v${VERSION}"
+          git push
+
+  # fork: publishes the fork's OWN distribution/latest.json (served via raw GitHub
+  # and read by the fork-aware update check) from the fork's -ac release data. This
+  # replaces upstream's job, which needed upstream deploy keys, archived docs into
+  # docs/versions and served herdr.dev data. See openspec/changes/fork-aware-update-check.
   update-latest-json:
     needs: [release, validate-release-source]
-    if: github.repository == 'herdrdev/herdr' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'colangelo/herdr-max' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     concurrency:
       group: docs-publish-master
@@ -427,57 +467,39 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
-          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
-      - name: Publish tagged documentation and update distribution manifest
+      - name: Update fork latest manifest
         env:
           GH_TOKEN: ${{ github.token }}
-          PREVIEW_COMMIT: ${{ needs.validate-release-source.outputs.preview_commit }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          node scripts/docs/versions.mjs publish "$GITHUB_REF_NAME"
-          ANNOUNCEMENT_PATH="$RUNNER_TEMP/product-announcement.json"
-          ANNOUNCEMENT_ORIGINAL_PATH="$RUNNER_TEMP/product-announcement-original.json"
-          git show "${GITHUB_REF_NAME}:docs/next/product-announcement.json" > "$ANNOUNCEMENT_PATH"
-          cp "$ANNOUNCEMENT_PATH" "$ANNOUNCEMENT_ORIGINAL_PATH"
-          python3 scripts/changelog.py validate-product-announcement --path "$ANNOUNCEMENT_PATH"
-          RELEASE_PROTOCOL=$(git show "${GITHUB_REF_NAME}:src/protocol/wire.rs" | python3 -c 'import re, sys; match = re.search(r"pub const PROTOCOL_VERSION: u32 = (\d+);", sys.stdin.read()); sys.exit(1) if match is None else print(match.group(1))')
-          RELEASE_ENDPOINT_GENERATION=$(git show "${GITHUB_REF_NAME}:src/protocol/endpoint.rs" | python3 -c 'import re, sys; match = re.search(r"pub const ENDPOINT_PROTOCOL_GENERATION: u32 = (\d+);", sys.stdin.read()); sys.exit(1) if match is None else print(match.group(1))')
+          TAG="${GITHUB_REF_NAME}"                 # e.g. v0.7.4-ac
+          VERSION="${TAG#v}"                       # e.g. 0.7.4-ac
+          BASE="${VERSION%%-ac*}"                  # e.g. 0.7.4 (matches Cargo.toml / binary version)
+          RELEASE_PROTOCOL=$(git show "${TAG}:src/protocol/wire.rs" | python3 -c 'import re, sys; match = re.search(r"pub const PROTOCOL_VERSION: u32 = (\d+);", sys.stdin.read()); sys.exit(1) if match is None else print(match.group(1))')
+          RELEASE_ENDPOINT_GENERATION=$(git show "${TAG}:src/protocol/endpoint.rs" | python3 -c 'import re, sys; match = re.search(r"pub const ENDPOINT_PROTOCOL_GENERATION: u32 = (\d+);", sys.stdin.read()); sys.exit(1) if match is None else print(match.group(1))')
+          # --tag reads the fork's suffixed release; --version keeps the base semver
+          # the binary reports; --force allows same-base -ac.N hotfix republishes.
+          python3 scripts/changelog.py sync-latest-json \
+            --repo colangelo/herdr-max \
+            --tag "$TAG" \
+            --version "$BASE" \
+            --protocol "$RELEASE_PROTOCOL" \
+            --endpoint-generation "$RELEASE_ENDPOINT_GENERATION" \
+            --force \
+            --output distribution/latest.json
+          # Binaries released before the v0.9.3 sync (0.8.x-ac) read the manifest at
+          # website/latest.json; keep a copy there until no machine runs one.
+          mkdir -p website
+          cp distribution/latest.json website/latest.json
 
-          DOCS_CURRENT=$(node scripts/docs/versions.mjs current)
-          if [ "$DOCS_CURRENT" != "$VERSION" ]; then
-            echo "Archived v$VERSION documentation without moving current docs backward from v$DOCS_CURRENT"
-            exit 0
-          fi
-          CURRENT_VERSION=$(python3 -c 'import json; print(json.load(open("distribution/latest.json")).get("version", ""))')
-          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
-            echo "distribution/latest.json is already at v$VERSION"
-            exit 0
-          fi
-          # Apply only release preparation, never the hotfix implementation or newer master code.
-          git diff --binary --default-prefix "$PREVIEW_COMMIT" "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-preparation.patch"
-          if [ -s "$RUNNER_TEMP/release-preparation.patch" ]; then
-            git apply --3way --index "$RUNNER_TEMP/release-preparation.patch"
-          fi
-          python3 scripts/changelog.py sync-latest-json --version "$VERSION" --output distribution/latest.json --announcement "$ANNOUNCEMENT_PATH" --protocol "$RELEASE_PROTOCOL" --endpoint-generation "$RELEASE_ENDPOINT_GENERATION"
-          if cmp -s "$ANNOUNCEMENT_ORIGINAL_PATH" docs/next/product-announcement.json; then
-            printf 'null\n' > docs/next/product-announcement.json
-          else
-            echo "::warning::docs/next/product-announcement.json changed after $GITHUB_REF_NAME; leaving it unchanged."
-          fi
-
-      - name: Commit release distribution
+      - name: Commit fork latest manifest
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A README.md README.zh-CN.md docs/versions distribution/latest.json docs/next/product-announcement.json
-          # Release-only changes applied above are already staged by git apply --index.
-          git diff --cached --quiet || git commit -m "release: synchronize metadata for v$VERSION"
+          git add distribution/latest.json website/latest.json docs/next/product-announcement.json
+          git diff --cached --quiet || git commit -m "docs: update fork latest manifest for ${GITHUB_REF_NAME}"
           for attempt in 1 2 3; do
             git pull --rebase origin master
-            node scripts/docs/versions.mjs check
-            node scripts/docs/preview.mjs check
             if git push origin master; then
               exit 0
             fi
@@ -486,5 +508,5 @@ jobs:
               sleep $((attempt * 2))
             fi
           done
-          echo "failed to publish release documentation after 3 attempts" >&2
+          echo "failed to publish the fork latest manifest after 3 attempts" >&2
           exit 1

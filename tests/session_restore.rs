@@ -144,7 +144,7 @@ fn server_restores_while_git_metadata_is_blocked() {
             .unwrap();
         support::register_spawned_herdr_pid(Some(child.id()));
         let mut herdr = RestoredServer { child, base };
-        support::wait_for_socket(&socket_path, Duration::from_secs(5));
+        support::wait_for_socket(&socket_path);
 
         let workspaces = restore_request(&socket_path, "workspace.list");
         let restored = &workspaces["result"]["workspaces"][0];

@@ -719,8 +719,8 @@ fn pane_created_after_detach_uses_the_last_client_size() {
     wait_for_socket(&client_socket);
 
     let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
-    let (version, error) =
-        client_handshake(&mut stream, CURRENT_PROTOCOL, 160, 50).expect("handshake should succeed");
+    let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 160, 50)
+        .expect("handshake should succeed");
     assert_eq!(version, CURRENT_PROTOCOL);
     assert!(error.is_none(), "{error:?}");
     drain_messages(&mut stream);

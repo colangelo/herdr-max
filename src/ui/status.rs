@@ -29,9 +29,7 @@ pub(crate) fn copy_feedback_rect(
         ToastClipboardPosition::TopLeft | ToastClipboardPosition::BottomLeft => area.x,
         ToastClipboardPosition::TopCenter
         | ToastClipboardPosition::BottomCenter
-        | ToastClipboardPosition::Pane => {
-            area.x + area.width.saturating_sub(width) / 2
-        }
+        | ToastClipboardPosition::Pane => area.x + area.width.saturating_sub(width) / 2,
         ToastClipboardPosition::TopRight | ToastClipboardPosition::BottomRight => {
             area.x + area.width.saturating_sub(width)
         }
@@ -43,9 +41,7 @@ pub(crate) fn copy_feedback_rect(
         ToastClipboardPosition::BottomLeft
         | ToastClipboardPosition::BottomCenter
         | ToastClipboardPosition::BottomRight
-        | ToastClipboardPosition::Pane => {
-            area.y + area.height.saturating_sub(height + offset_rows)
-        }
+        | ToastClipboardPosition::Pane => area.y + area.height.saturating_sub(height + offset_rows),
     };
     Rect::new(x, y, width, height)
 }
@@ -136,6 +132,7 @@ mod tests {
         let area = Rect::new(10, 20, 100, 40);
         let feedback = CopyFeedback {
             message: "copied to clipboard".to_owned(),
+            source_pane: None,
         };
 
         let top = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::TopCenter);

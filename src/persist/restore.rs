@@ -15,9 +15,8 @@ use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
 use crate::workspace::Workspace;
 
 use super::snapshot::{
-    PaneAgentResumeSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot, TabHistorySnapshot,
-    WorkspaceHistorySnapshot,
-    PaneTodoSnapshot,
+    PaneAgentResumeSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot, PaneTodoSnapshot,
+    TabHistorySnapshot, WorkspaceHistorySnapshot,
 };
 use super::{
     DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
@@ -1128,8 +1127,6 @@ fn with_session_transcript(
     plan.with_claude_transcript(transcript)
 }
 
-
-
 fn restore_plan_for_snapshot(
     session: &PaneAgentSessionSnapshot,
     resume_agents_on_restore: bool,
@@ -1926,6 +1923,7 @@ mod tests {
             Some(&resume),
             project_a,
             Some(&history),
+            None,
             &mut agent_restore,
         );
         let plan = startup.restore_plan.expect("reported resume plan");
@@ -1938,13 +1936,32 @@ mod tests {
             agent: "prime-agent".into(),
             argv: vec!["prime-agent".into(), "--continue".into()],
         };
-        let first = pane_restore_startup(None, Some(&custom), project_a, None, &mut agent_restore);
+        let first = pane_restore_startup(
+            None,
+            Some(&custom),
+            project_a,
+            None,
+            None,
+            &mut agent_restore,
+        );
         assert_eq!(first.restore_plan.unwrap().argv, custom.argv);
-        let other_project =
-            pane_restore_startup(None, Some(&custom), project_b, None, &mut agent_restore);
+        let other_project = pane_restore_startup(
+            None,
+            Some(&custom),
+            project_b,
+            None,
+            None,
+            &mut agent_restore,
+        );
         assert!(other_project.restore_plan.is_some());
-        let duplicate =
-            pane_restore_startup(None, Some(&custom), project_a, None, &mut agent_restore);
+        let duplicate = pane_restore_startup(
+            None,
+            Some(&custom),
+            project_a,
+            None,
+            None,
+            &mut agent_restore,
+        );
         assert!(duplicate.restore_plan.is_none());
         assert!(duplicate.duplicate_agent_session);
 
@@ -1958,6 +1975,7 @@ mod tests {
             Some(&custom),
             project_a,
             Some(&history),
+            None,
             &mut disabled,
         );
         assert!(startup.restore_plan.is_none());
@@ -2237,7 +2255,8 @@ mod tests {
                 Arc::new(RenderSignal::new()),
             );
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            let captured =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
             assert_eq!(
                 captured.workspaces.len(),
                 2,
@@ -2313,7 +2332,6 @@ mod tests {
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "opencode-session".into(),
                             }),
-                            agent_resume: None,
                             agent_resume: None,
                             agent_launch: None,
                             launch_argv: None,
@@ -2484,7 +2502,6 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
-                                agent_resume: None,
                                 agent_launch: None,
                                 launch_argv: None,
                                 todos: Vec::new(),
@@ -2502,7 +2519,6 @@ mod tests {
                                 agent_name: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
-                                agent_resume: None,
                                 agent_resume: None,
                                 agent_launch: None,
                                 launch_argv: None,
@@ -2666,7 +2682,6 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     agent_resume: None,
-                    agent_resume: None,
                     agent_launch: None,
                     launch_argv: None,
                     todos: Vec::new(),
@@ -2688,7 +2703,6 @@ mod tests {
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "codex-session".into(),
             }),
-            agent_resume: None,
             agent_resume: None,
             agent_launch: None,
             launch_argv: None,
@@ -2852,7 +2866,6 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             agent_resume: None,
-                            agent_resume: None,
                             agent_launch: None,
                             launch_argv: None,
                             todos: Vec::new(),
@@ -2976,119 +2989,8 @@ mod tests {
             );
             assert_eq!(terminal.state, state_before_handoff);
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let snapshot = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
-            let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
-            let runtime = runtimes.values().next().unwrap();
-            runtime
-                .pause_handoff_reader(std::time::Duration::from_secs(2))
-                .unwrap();
-            let mut state = runtime.handoff_runtime_state(pane_id.raw());
-            state.agent_state = terminals.values().next().unwrap().handoff_agent_state();
-            let state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
-            let mut imports = HashMap::from([(
-                pane_id.raw(),
-                crate::handoff_runtime::ImportedHandoffRuntime {
-                    master_fd: runtime.duplicate_handoff_fd().unwrap(),
-                    state,
-                },
-            )]);
-            let (_, mut restored_terminals, restored_runtimes) = restore_handoff(
-                &snapshot,
-                4096,
-                test_restore_shell(),
-                crate::config::ShellModeConfig::NonLogin,
-                &mut imports,
-                events,
-                Arc::new(Notify::new()),
-                Arc::new(RenderSignal::new()),
-            )
-            .unwrap();
-            drop(restored_runtimes);
-            drop(runtimes);
-            let terminal = restored_terminals.values_mut().next().unwrap();
-            assert_eq!(terminal.state, state_before_handoff);
-            terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
-            assert_eq!(
-                terminal.state, state_before_handoff,
-                "screen fallback must not erase the transferred hook status"
-            );
-            terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
-                "pi".into(),
-                AgentState::Idle,
-                None,
-                Some(
-                    crate::agent_resume::AgentSessionRef::path("/var/tmp/handoff-test.jsonl")
-                        .unwrap(),
-                ),
-                Some(2),
-            );
-            assert_eq!(
-                terminal.state,
-                AgentState::Idle,
-                "the next hook report must take effect immediately"
-            );
-            assert_eq!(
-                terminal.finish_agent_process_acquisition(),
-                state_before_handoff == AgentState::Blocked
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn live_handoff_preserves_hook_status_until_next_report() {
-        for state_before_handoff in [AgentState::Working, AgentState::Blocked] {
-            let (snapshot, _) = snapshot_with_saved_pane_history();
-            let (events, _events_rx) = mpsc::channel(32);
-            let (workspaces, mut terminals, runtimes) = restore(
-                &snapshot,
-                None,
-                24,
-                80,
-                4096,
-                test_restore_shell(),
-                crate::config::ShellModeConfig::NonLogin,
-                false,
-                events.clone(),
-                Arc::new(Notify::new()),
-                Arc::new(RenderSignal::new()),
-            );
-            let terminal = terminals.values_mut().next().unwrap();
-            terminal
-                .set_detected_agent_process_at(crate::detect::Agent::Pi, std::time::Instant::now());
-            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-                source: "herdr:pi".into(),
-                agent: "pi".into(),
-                session_ref: crate::agent_resume::AgentSessionRef::path(
-                    "/var/tmp/handoff-test.jsonl",
-                )
-                .unwrap(),
-            });
-            terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
-                "pi".into(),
-                state_before_handoff,
-                None,
-                Some(
-                    crate::agent_resume::AgentSessionRef::path("/var/tmp/handoff-test.jsonl")
-                        .unwrap(),
-                ),
-                Some(1),
-            );
-            assert_eq!(terminal.state, state_before_handoff);
-            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let snapshot = crate::persist::capture(
-                &workspaces,
-                &terminals,
-                &runtimes,
-                Some(0),
-                0,
-                26,
-                0.5,
-                Default::default(),
-                None,
-            );
+            let snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
             let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
             let runtime = runtimes.values().next().unwrap();
             runtime
@@ -3177,17 +3079,8 @@ mod tests {
                 Arc::new(RenderSignal::new()),
             );
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-            let snapshot = crate::persist::capture(
-                &workspaces,
-                &terminals,
-                &runtimes,
-                Some(0),
-                0,
-                26,
-                0.5,
-                Default::default(),
-                None,
-            );
+            let snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
             let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
             let runtime = runtimes.values().next().unwrap();
             runtime
@@ -3373,7 +3266,6 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
-                agent_resume: None,
                 agent_resume: None,
                 agent_launch: None,
                 launch_argv: None,

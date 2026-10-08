@@ -629,7 +629,13 @@ mod tests {
             ))
             .unwrap();
             let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+            let mut app = App::new(
+                &config,
+                crate::app::AppPolicy::TEST,
+                None,
+                api_rx,
+                crate::api::EventHub::default(),
+            );
             app.state.workspaces = (0..4)
                 .map(|_| crate::workspace::Workspace::test_new("restore"))
                 .collect();
