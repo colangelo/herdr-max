@@ -98,8 +98,8 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
+            config.state_icon(status),
+            Style::default().fg(config.state_color(status)),
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
@@ -165,8 +165,8 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(2),
             rect.y,
             rect.width.saturating_sub(2),
-            status_icon(agent.agent_status, config.status_indicators),
-            Style::default().fg(status_color(agent.agent_status, palette)),
+            config.state_icon(agent.agent_status),
+            Style::default().fg(config.state_color(agent.agent_status)),
         );
         hits.agents.push((rect, pane_id));
     }
@@ -325,7 +325,7 @@ pub(crate) fn render_sidebar(
             buffer,
             rect,
             status,
-            config.status_indicators,
+            config,
             entry,
             rows,
             workspace.focused,
@@ -693,7 +693,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
     status: crate::api::schema::AgentStatus,
-    indicators: crate::config::StatusIndicatorStyle,
+    config: &ClientShellConfig,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     focused: bool,
@@ -753,10 +753,10 @@ pub(in crate::client::shell) fn render_workspace_rows(
         let spans = crate::ui::resolved_token_spans(
             row,
             (
-                status_icon(status, indicators),
-                Style::default().fg(status_color(status, palette)),
+                config.state_icon(status),
+                Style::default().fg(config.state_color(status)),
             ),
-            Style::default().fg(status_color(status, palette)),
+            Style::default().fg(config.state_color(status)),
             workspace_style,
             secondary_style,
             Style::default().fg(palette.overlay1),

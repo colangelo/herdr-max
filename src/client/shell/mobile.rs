@@ -107,12 +107,9 @@ fn render_header_status(
         area.x,
         area.y,
         name_width.min(3),
-        &format!(
-            " {} ",
-            status_icon(workspace.agent_status, config.status_indicators)
-        ),
+        &format!(" {} ", config.state_icon(workspace.agent_status)),
         Style::default()
-            .fg(status_color(workspace.agent_status, palette))
+            .fg(config.state_color(workspace.agent_status))
             .bg(palette.panel_bg),
     );
     put_text(
@@ -193,11 +190,10 @@ fn render_header_button(
             area.right().saturating_sub(1),
             area.y,
             1,
-            status_icon(
-                crate::api::schema::AgentStatus::Blocked,
-                config.status_indicators,
-            ),
-            Style::default().fg(palette.red).bg(palette.surface0),
+            config.state_icon(crate::api::schema::AgentStatus::Blocked),
+            Style::default()
+                .fg(config.state_color(crate::api::schema::AgentStatus::Blocked))
+                .bg(palette.surface0),
         );
     }
 }
@@ -297,7 +293,7 @@ fn render_agent_summary(
             (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Blocked) => Some("◉"),
             (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Done) => Some("●"),
             (crate::config::StatusIndicatorStyle::Dots, _) => None,
-            _ => Some(status_icon(status, config.status_indicators)),
+            _ => Some(config.state_icon(status)),
         };
         let text = symbol.map_or_else(
             || format!("{count} {label}"),
@@ -324,7 +320,7 @@ fn render_agent_summary(
         let color = if shown == 0 {
             match status {
                 AgentStatus::Done => config.palette.blue,
-                _ => status_color(status, &config.palette),
+                _ => config.state_color(status),
             }
         } else {
             config.palette.overlay1
@@ -705,12 +701,12 @@ fn mobile_items(
                     Line::from(vec![
                         Span::styled("  ", Style::default().bg(background)),
                         Span::styled(
-                            status_icon(agent.agent_status, config.status_indicators),
+                            config.state_icon(agent.agent_status).to_owned(),
                             Style::default()
                                 .fg(if endpoint.stale() {
                                     palette.overlay0
                                 } else {
-                                    status_color(agent.agent_status, palette)
+                                    config.state_color(agent.agent_status)
                                 })
                                 .bg(background)
                                 .add_modifier(dim),
@@ -819,7 +815,7 @@ fn mobile_items(
             let status = if endpoint.stale() {
                 palette.overlay0
             } else {
-                status_color(workspace.agent_status, palette)
+                config.state_color(workspace.agent_status)
             };
             let stale_detail = if endpoint.stale() {
                 format!(" · {}", mobile_endpoint_state(endpoint.status))
@@ -837,7 +833,7 @@ fn mobile_items(
                                 .add_modifier(dim),
                         ),
                         Span::styled(
-                            status_icon(workspace.agent_status, config.status_indicators),
+                            config.state_icon(workspace.agent_status).to_owned(),
                             Style::default().fg(status).bg(background).add_modifier(dim),
                         ),
                         Span::styled(" ", Style::default().bg(background)),

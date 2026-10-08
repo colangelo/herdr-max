@@ -21,15 +21,12 @@ pub(super) fn render_collapsed(
             rect.x,
             rect.y,
             rect.width,
-            &format!(
-                "{initial}{}",
-                status_icon(row.agent.status, config.status_indicators)
-            ),
+            &format!("{initial}{}", config.state_icon(row.agent.status)),
             Style::default()
                 .fg(if row.stale {
                     config.palette.overlay0
                 } else {
-                    status_color(row.agent.status, &config.palette)
+                    config.state_color(row.agent.status)
                 })
                 .add_modifier(if row.stale {
                     Modifier::DIM

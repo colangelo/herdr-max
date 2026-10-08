@@ -32,6 +32,7 @@ mod render;
 mod scroll;
 mod settings;
 mod state;
+mod state_presentation;
 mod surface_patch;
 mod text_editor;
 mod word_selection;
@@ -190,14 +191,10 @@ fn status_icon(
         (StatusIndicatorStyle::Dots, AgentStatus::Unknown) => "·",
         (StatusIndicatorStyle::Symbols, AgentStatus::Blocked) => "×",
         (StatusIndicatorStyle::Symbols, AgentStatus::Working) => "◐",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "✓",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "○",
+        (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "□",
+        (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "✓",
         (StatusIndicatorStyle::Symbols, AgentStatus::Unknown) => "·",
     }
-}
-
-fn status_dot(status: crate::api::schema::AgentStatus) -> &'static str {
-    status_icon(status, crate::config::StatusIndicatorStyle::Dots)
 }
 
 fn status_priority(status: crate::api::schema::AgentStatus) -> u8 {
