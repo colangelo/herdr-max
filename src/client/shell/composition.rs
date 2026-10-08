@@ -344,6 +344,23 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        if self.mode != ClientShellMode::Terminal && self.hits.panes.len() > 1 {
+            for pane in
+                self.hits.panes.iter().filter(|pane| {
+                    snapshot.focused_pane_id.as_deref() != Some(pane.pane_id.as_str())
+                })
+            {
+                let inner =
+                    pane.inner_rect
+                        .intersection(Rect::new(0, 0, frame.width, frame.height));
+                for y in inner.y..inner.bottom() {
+                    for x in inner.x..inner.right() {
+                        frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+                            .modifier |= Modifier::DIM.bits();
+                    }
+                }
+            }
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let has_selection = self

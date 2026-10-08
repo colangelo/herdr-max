@@ -504,6 +504,18 @@ pub(super) fn render_panes(
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
+            let multi_pane = ws
+                .tabs
+                .get(target.tab_index)
+                .is_some_and(|tab| tab.layout.pane_count() > 1);
+            apply_pane_appearance(
+                frame.buffer_mut(),
+                info,
+                multi_pane,
+                &app.pane_appearance,
+                &app.palette,
+                &app.host_terminal_theme,
+            );
         } else if let Some(reason) = ws
             .tabs
             .get(target.tab_index)
@@ -519,6 +531,55 @@ pub(super) fn render_panes(
     }
 
     render_pane_borders(app, ws, pane_infos, split_borders, frame);
+}
+
+fn apply_pane_appearance(
+    buffer: &mut ratatui::buffer::Buffer,
+    info: &PaneInfo,
+    multi_pane: bool,
+    appearance: &crate::app::state::PaneAppearance,
+    palette: &Palette,
+    host: &crate::terminal_theme::TerminalTheme,
+) {
+    let tint = if info.is_focused {
+        appearance.active_bg
+    } else {
+        appearance.inactive_bg
+    };
+    let dim = !info.is_focused && multi_pane && appearance.dim_inactive;
+    let mut fade = if !info.is_focused && multi_pane {
+        super::inactive_dim::InactiveDim::new(
+            appearance.inactive_dim,
+            tint,
+            palette.panel_bg,
+            palette.text,
+            host,
+        )
+    } else {
+        None
+    };
+    if !dim && tint.is_none() && fade.is_none() {
+        return;
+    }
+    let inner = info.inner_rect.intersection(buffer.area);
+    for y in inner.y..inner.bottom() {
+        for x in inner.x..inner.right() {
+            let cell = &mut buffer[(x, y)];
+            if dim {
+                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            }
+            if let Some(bg) = tint {
+                if cell.bg == Color::Reset {
+                    cell.set_bg(bg);
+                }
+            }
+            if let Some(fade) = fade.as_mut() {
+                if let Some(fg) = fade.faded_fg(cell.fg, cell.bg, cell.modifier) {
+                    cell.set_fg(fg);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn popup_pane_rects(app: &AppState, area: Rect) -> Option<(Rect, Rect)> {
@@ -590,17 +651,18 @@ fn render_pane_borders(
         let focused = pane_infos
             .iter()
             .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let symbol = line_cell_symbol(line);
+        let glyph_style = if focused {
+            app.pane_appearance.border_style
+        } else {
+            crate::config::PaneBorderActiveStyleConfig::Light
+        };
+        let symbol = line_cell_symbol(line, glyph_style);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
+        let color = app.pane_appearance.border_color(focused, &app.palette);
         cell.set_style(Style::default().fg(color));
     }
 
@@ -763,11 +825,9 @@ fn render_pane_border_titles(
         if start_x >= end_x {
             continue;
         }
-        let color = if info.is_focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
+        let color = app
+            .pane_appearance
+            .title_color(info.is_focused, &app.palette);
         let mut style = Style::default().fg(color);
         if info.is_focused {
             style = style.add_modifier(Modifier::BOLD);
@@ -782,24 +842,34 @@ fn render_pane_border_titles(
     }
 }
 
-fn line_cell_symbol(line: LineCell) -> &'static str {
-    match (line.up, line.down, line.left, line.right) {
-        (true, true, true, true) => "┼",
-        (true, true, true, false) => "┤",
-        (true, true, false, true) => "├",
-        (true, false, true, true) => "┴",
-        (false, true, true, true) => "┬",
-        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
-            "│"
-        }
-        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
-            "─"
-        }
-        (false, true, false, true) => "┌",
-        (false, true, true, false) => "┐",
-        (true, false, false, true) => "└",
-        (true, false, true, false) => "┘",
-        _ => "",
+fn line_cell_symbol(
+    line: LineCell,
+    style: crate::config::PaneBorderActiveStyleConfig,
+) -> &'static str {
+    // cross, tee-left, tee-right, tee-up, tee-down, vertical, horizontal,
+    // corner-tl, corner-tr, corner-bl, corner-br
+    const LIGHT: [&str; 11] = ["┼", "┤", "├", "┴", "┬", "│", "─", "┌", "┐", "└", "┘"];
+    const HEAVY: [&str; 11] = ["╋", "┫", "┣", "┻", "┳", "┃", "━", "┏", "┓", "┗", "┛"];
+    const DOUBLE: [&str; 11] = ["╬", "╣", "╠", "╩", "╦", "║", "═", "╔", "╗", "╚", "╝"];
+
+    let index = match (line.up, line.down, line.left, line.right) {
+        (true, true, true, true) => 0,
+        (true, true, true, false) => 1,
+        (true, true, false, true) => 2,
+        (true, false, true, true) => 3,
+        (false, true, true, true) => 4,
+        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => 5,
+        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => 6,
+        (false, true, false, true) => 7,
+        (false, true, true, false) => 8,
+        (true, false, false, true) => 9,
+        (true, false, true, false) => 10,
+        _ => return "",
+    };
+    match style {
+        crate::config::PaneBorderActiveStyleConfig::Light => LIGHT[index],
+        crate::config::PaneBorderActiveStyleConfig::Heavy => HEAVY[index],
+        crate::config::PaneBorderActiveStyleConfig::Double => DOUBLE[index],
     }
 }
 
@@ -1646,6 +1716,113 @@ mod tests {
             assert_eq!(
                 automatic_selection_bg(&palette, Default::default()),
                 fallback
+            );
+        }
+    }
+    #[test]
+    fn inactive_pane_dim_fades_unfocused_cells_and_preserves_app_backgrounds() {
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        buffer.set_style(area, Style::default().fg(Color::Rgb(200, 200, 200)));
+        buffer[(0, 0)].set_bg(Color::Rgb(100, 100, 100));
+        let mut info = PaneInfo {
+            id: PaneId::from_raw(1),
+            rect: area,
+            inner_rect: area,
+            scrollbar_rect: None,
+            borders: Borders::NONE,
+            is_focused: false,
+        };
+        let appearance = crate::app::state::PaneAppearance {
+            inactive_bg: Some(Color::Rgb(0, 0, 0)),
+            inactive_dim: 20,
+            ..Default::default()
+        };
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            true,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(100, 100, 100));
+        assert_eq!(buffer[(0, 0)].fg, Color::Rgb(180, 180, 180));
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(160, 160, 160));
+        buffer.set_style(area, Style::default().fg(Color::Rgb(200, 200, 200)));
+        info.is_focused = true;
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            true,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(200, 200, 200));
+        info.is_focused = false;
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            false,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(200, 200, 200));
+    }
+    #[test]
+    fn line_cell_symbol_maps_every_shape_per_style() {
+        use crate::config::PaneBorderActiveStyleConfig;
+        let cell = |up, down, left, right| LineCell {
+            up,
+            down,
+            left,
+            right,
+        };
+        let shapes: [(LineCell, [&str; 3]); 11] = [
+            (cell(true, true, true, true), ["┼", "╋", "╬"]),
+            (cell(true, true, true, false), ["┤", "┫", "╣"]),
+            (cell(true, true, false, true), ["├", "┣", "╠"]),
+            (cell(true, false, true, true), ["┴", "┻", "╩"]),
+            (cell(false, true, true, true), ["┬", "┳", "╦"]),
+            (cell(true, true, false, false), ["│", "┃", "║"]),
+            (cell(false, false, true, true), ["─", "━", "═"]),
+            (cell(false, true, false, true), ["┌", "┏", "╔"]),
+            (cell(false, true, true, false), ["┐", "┓", "╗"]),
+            (cell(true, false, false, true), ["└", "┗", "╚"]),
+            (cell(true, false, true, false), ["┘", "┛", "╝"]),
+        ];
+        for (line, [light, heavy, double]) in shapes {
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Light),
+                light
+            );
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Heavy),
+                heavy
+            );
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Double),
+                double
+            );
+        }
+        // dangling stubs render as plain lines; empty cells render nothing
+        assert_eq!(
+            line_cell_symbol(
+                cell(true, false, false, false),
+                PaneBorderActiveStyleConfig::Heavy
+            ),
+            "┃"
+        );
+        for style in [
+            PaneBorderActiveStyleConfig::Light,
+            PaneBorderActiveStyleConfig::Heavy,
+            PaneBorderActiveStyleConfig::Double,
+        ] {
+            assert_eq!(
+                line_cell_symbol(cell(false, false, false, false), style),
+                ""
             );
         }
     }
