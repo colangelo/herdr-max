@@ -2740,6 +2740,12 @@ mod tests {
         let moved_to =
             std::fs::canonicalize(&moved_to).expect("test directory should canonicalize");
         let marker = moved_to.join("pwd");
+        // `pwd > marker` creates the file before it writes, so `exists()` can
+        // be true while the file is still empty (fork issue 115): wait for the
+        // finished line instead.
+        fn marker_written(marker: &std::path::Path) -> bool {
+            std::fs::read_to_string(marker).is_ok_and(|text| text.ends_with('\n'))
+        }
 
         // A shell that has been `cd`-ed away from its launch directory without
         // reporting it, which is what leaves `terminal.cwd` stale.
@@ -2761,10 +2767,13 @@ mod tests {
         assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && !marker.exists() {
+        while Instant::now() < deadline && !marker_written(&marker) {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(marker.exists(), "the first respawn should have started");
+        assert!(
+            marker_written(&marker),
+            "the first respawn should have started"
+        );
 
         // The second respawn must land in the directory the pane is in now,
         // not the stale launch directory.
@@ -2782,7 +2791,7 @@ mod tests {
         assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
 
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && !marker.exists() {
+        while Instant::now() < deadline && !marker_written(&marker) {
             std::thread::sleep(Duration::from_millis(25));
         }
         let reported = std::fs::read_to_string(&marker).unwrap_or_default();
