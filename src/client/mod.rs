@@ -26,11 +26,13 @@ mod events;
 mod frame_output;
 #[cfg(test)]
 mod frame_output_tests;
+mod handoff;
 mod handshake;
 mod image_files;
 mod input;
 mod loop_config;
 mod notifications;
+mod reexec;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -159,7 +161,8 @@ fn run_client_with_mode(
     attach_request: Option<(String, bool)>,
     attach_escape: Option<AttachEscapeState>,
     log_message: &'static str,
-) -> io::Result<()> {
+    reconnecting: bool,
+) -> io::Result<handoff::ClientExit> {
     init_logging();
 
     let loaded_config = crate::config::Config::load();
@@ -177,6 +180,7 @@ fn run_client_with_mode(
         } else {
             crate::config::config_diagnostic_summary(&loaded_config.diagnostics)
         };
+    let startup_config_diagnostic = reexec::with_update_notice(startup_config_diagnostic);
     let shell_config = client_rendered_shell.then(|| {
         shell::ClientShellConfig::from_config(&loaded_config.config)
             .with_startup_config_diagnostic(startup_config_diagnostic)
@@ -231,6 +235,8 @@ fn run_client_with_mode(
             warn!(%error, "Local is unavailable; keeping saved machines available");
             None
         }
+        // Mid-handoff the socket may be gone or not yet the new server's.
+        Err(_) if reconnecting => return Ok(handoff::ClientExit::Retry),
         Err(error) => {
             return Err(io::Error::other(
                 ClientError::ConnectionFailed(error).to_string(),
@@ -262,7 +268,7 @@ fn run_client_with_mode(
                 true,
                 !is_remote_client_process(),
             )
-            .map_err(|error| io::Error::other(error.to_string()))?;
+            .map_err(io::Error::other)?;
             if federated
                 && !endpoint::EndpointNegotiation::new(
                     handshake.endpoint_methods.clone().unwrap_or_default(),
@@ -292,6 +298,13 @@ fn run_client_with_mode(
         Err(error) if federated => {
             warn!(%error, "Local handshake failed; keeping saved machines available");
             None
+        }
+        // Still the old server, refusing, or the new one not ready yet.
+        Err(error) if reconnecting && handoff::is_transient_attach_failure(&error) => {
+            return Ok(handoff::ClientExit::Retry);
+        }
+        Err(error) if client_rendered_shell && handoff::is_live_handoff_attach_failure(&error) => {
+            return Ok(handoff::ClientExit::HandedOff);
         }
         Err(error) => return Err(error),
     };
@@ -326,16 +339,8 @@ fn run_client_with_mode(
         .build()
         .map_err(io::Error::other)?;
 
-    let should_quit = Arc::new(AtomicBool::new(false));
-
-    // ctrlc's "termination" feature also catches SIGTERM/SIGHUP so direct
-    // termination signals still run the quit path and TerminalGuard::Drop.
-    let quit_flag = should_quit.clone();
-    if let Err(err) = ctrlc::set_handler(move || {
-        quit_flag.store(true, Ordering::Release);
-    }) {
-        warn!(%err, "failed to install termination handler; terminal restore relies on TerminalGuard::Drop and the panic hook");
-    }
+    let should_quit = handoff::new_session_quit_flag();
+    let session_quit = should_quit.clone();
 
     let result = rt.block_on(async {
         run_client_loop(
@@ -354,10 +359,20 @@ fn run_client_with_mode(
         .await
     });
 
+    // Stop the reader threads this session started; a reattached session
+    // starts its own.
+    session_quit.store(true, Ordering::Release);
+
     // Restore the terminal before printing any final status message.
     let terminal_restore_failed = terminal_guard.restore().is_err();
 
     if let Err(err) = result {
+        // An app client follows its session to the server that took over. A
+        // direct terminal attach has no session to follow, so it exits.
+        if handoff::follows_handoff(&err, client_rendered_shell) {
+            rt.shutdown_timeout(Duration::from_millis(100));
+            return Ok(handoff::ClientExit::HandedOff);
+        }
         let _ = writeln!(io::stderr(), "herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
@@ -371,7 +386,7 @@ fn run_client_with_mode(
         let connection_lost_during_terminal_hangup =
             terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
         if detached || connection_lost_during_terminal_hangup {
-            return Ok(());
+            return Ok(handoff::ClientExit::Done);
         }
 
         std::process::exit(1);
@@ -379,7 +394,7 @@ fn run_client_with_mode(
 
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("client");
-    Ok(())
+    Ok(handoff::ClientExit::Done)
 }
 
 // This guards server-supplied paths only. Client-owned temporary files generated

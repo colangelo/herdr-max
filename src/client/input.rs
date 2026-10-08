@@ -158,7 +158,15 @@ fn unix_stdin_reader_loop(
         pending_mode = framer.has_pending_input().then_some(sgr_pixels);
     }
 
+    // Whether the last read filled `scratch`, so std's stdin buffer may still hold bytes.
+    let mut read_may_be_buffered = false;
     while !should_quit.load(Ordering::Acquire) {
+        // Wake to notice a quit: a client that reattaches after a live handoff
+        // starts a new reader on this stdin, and this one must release it
+        // without taking the next keystroke.
+        if !read_may_be_buffered && stdin_read_ready(&reader, STDIN_QUIT_POLL_MS) == Some(false) {
+            continue;
+        }
         if direct_filter.has_pending()
             && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
                 == Some(false)
@@ -180,6 +188,7 @@ fn unix_stdin_reader_loop(
         match reader.read(&mut scratch) {
             Ok(0) => break,
             Ok(n) => {
+                read_may_be_buffered = n == scratch.len();
                 // A redraw can issue queries while this thread is blocked in read().
                 // Arm the split-reply guard before framing the returned bytes.
                 for _ in 0..host_theme_query_pending.swap(0, Ordering::AcqRel) {
@@ -457,6 +466,10 @@ fn windows_client_input_event_from_raw(
         | crate::raw_input::RawInputEvent::Unsupported => None,
     }
 }
+
+/// How often an idle stdin reader checks whether its session ended.
+#[cfg(unix)]
+const STDIN_QUIT_POLL_MS: i32 = 100;
 
 #[cfg(unix)]
 fn stdin_read_ready<R: AsRawFd>(reader: &R, timeout_ms: i32) -> Option<bool> {
