@@ -1473,10 +1473,10 @@ impl GhosttyPaneTerminal {
         if synchronized_output != synchronized_output_before {
             core.synchronized_output_epoch = core.synchronized_output_epoch.wrapping_add(1);
         }
+        let synchronized_output_began =
+            observe_synchronized_output(&mut core, synchronized_output, bytes);
         // Intermediate synchronized-frame positions must not become settled cursors.
         if CURSOR_POSITION_SETTLE_ENABLED && !synchronized_output {
-        let synchronized_output_began =
-            observe_synchronized_output(&mut core, synchronized_output, filtered_bytes.as_ref());
             let cursor_started = crate::render_prof::timer();
             let cursor_after_write = current_cursor_state(&mut core);
             crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);

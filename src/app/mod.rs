@@ -511,9 +511,9 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             policy.restore_session && snapshot.is_none(),
         )));
-        let (workspaces, active, selected) = if let Some(snap) = snapshot {
         let mut restored_last_client_size = None;
         let mut restored_former_public_ids = std::collections::HashMap::new();
+        let (workspaces, active, selected) = if let Some(snap) = snapshot {
             let history = config
                 .experimental
                 .pane_history
@@ -640,6 +640,8 @@ impl App {
             prefix_keys,
             extra_prefixes: config.extra_prefix_keys(),
             headless_size: config.headless_size(),
+            last_client_size: restored_last_client_size,
+            remember_client_size: config.server.remember_client_size,
             agent_panel_sort,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
@@ -764,10 +766,6 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
-            startup_per_agent_delay: Duration::from_millis(
-                config.session.startup_per_agent_delay_ms.into(),
-            ),
-            next_agent_resume_at: None,
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),
             ),

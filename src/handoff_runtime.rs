@@ -27,11 +27,13 @@ pub(crate) struct HandoffRuntimeState {
     pub terminal_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_state: Option<crate::terminal::state::HandoffAgentState>,
     /// Canonical label of the agent detected in the pane before the handoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Live agent state before the handoff. Only carried for non-idle states;
+    /// absent means the receiving server seeds `Idle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<String>,
     /// The hook-reported agent status before the handoff, so the receiving
     /// server keeps it until the next report. Named apart from `agent_state`,
     /// which older fork servers write as a label.

@@ -1147,6 +1147,7 @@ fn nested_process_probe_result(
     #[cfg(not(unix))]
     let _ = shell_pid;
     ProcessProbeResult {
+        agent_pid: None,
         process_group_id: Some(job.process_group_id),
         #[cfg(unix)]
         nested_process_group_id: Some(nested_job.process_group_id),
@@ -1213,7 +1214,7 @@ fn probe_foreground_process_from_jobs(
         }
         #[cfg_attr(not(unix), allow(unused_mut))] // only unix records the wrapped shell
         let mut wrapped_shell = None;
-        if identified.is_none() {
+        {
             // Only now, with the pane's own job exhausted, is it worth asking
             // whether a recognised wrapper is hiding the agent one PTY down.
             if let Some((shell_pid, nested_job)) =
@@ -1343,7 +1344,6 @@ fn spawn_basic_detection_task(
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
         let mut last_resolved_cwd_refresh = None;
-        let mut last_self_reported_shell_check = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -1517,6 +1517,7 @@ fn spawn_basic_detection_task(
                         }
                     }
                 }
+                let agent_process_group = new_agent.and(probe.agent_process_group());
                 publish_agent_launch_once(
                     &state_events,
                     pane_id,
@@ -1917,11 +1918,6 @@ impl TerminalCompressionWake {
 }
 
 
-impl Drop for TerminalCompressionTask {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
 
 impl TerminalCompressionTask {
 
@@ -2769,7 +2765,6 @@ impl PaneRuntime {
             // Filled in by the server from app-level terminal state; the pane
             // runtime does not know the detected agent.
             agent: None,
-            agent_state: None,
             hook_agent_state: None,
             unseen: false,
         }
@@ -2985,7 +2980,6 @@ impl PaneRuntime {
             initial_history_ansi,
             agent_state: _,
             agent: _,
-            agent_state: _,
             hook_agent_state: _,
             unseen: _,
         } = state;
@@ -3163,7 +3157,6 @@ impl PaneRuntime {
             preserve_processes_on_drop: true,
             compression,
             last_input_ms: AtomicU64::new(0),
-            compression,
             detect_handle: Some(detect_handle),
         })
     }
@@ -3393,7 +3386,6 @@ impl PaneRuntime {
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
                 let mut last_resolved_cwd_refresh = None;
-                let mut last_self_reported_shell_check = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -3650,6 +3642,7 @@ impl PaneRuntime {
                                 }
                                 agent_changed = true;
                             }
+                            let agent_process_group = new_agent.and(probed_agent_process_group);
                             publish_agent_launch_once(
                                 &state_events,
                                 pane_id,
@@ -3842,7 +3835,6 @@ impl PaneRuntime {
             preserve_processes_on_drop: false,
             compression,
             last_input_ms: AtomicU64::new(0),
-            compression,
             detect_handle,
         })
     }

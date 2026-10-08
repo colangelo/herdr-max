@@ -258,6 +258,9 @@ pub struct HeadlessServer {
     shutting_down: bool,
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
+    /// Imported panes get one app-safe resize nudge after the first client attaches.
+    #[cfg(unix)]
+    pending_handoff_repaint_nudge: bool,
     /// In-progress post-handoff detection sweep over imported panes.
     #[cfg(unix)]
     handoff_detection_sweep: Option<HandoffDetectionSweep>,
@@ -402,6 +405,8 @@ impl HeadlessServer {
             #[cfg(test)]
             host_shutdown_probe: crate::platform::host_shutdown_in_progress,
             handoff_in_progress: false,
+            #[cfg(unix)]
+            pending_handoff_repaint_nudge: false,
             #[cfg(unix)]
             handoff_detection_sweep: None,
             should_quit,
@@ -3488,6 +3493,33 @@ fn server_config_diagnostic_summaries(diagnostics: &[String]) -> (Option<String>
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+impl HeadlessServer {
+    /// Process at most one due sweep step: nudge the pane's child to repaint
+    /// and force a detection rescan, then wait out the stagger interval.
+    #[cfg(unix)]
+    fn advance_handoff_detection_sweep(&mut self, now: Instant) {
+        let Some(sweep) = &mut self.handoff_detection_sweep else {
+            return;
+        };
+        if now < sweep.next_at {
+            return;
+        }
+        while let Some(terminal_id) = sweep.queue.pop_front() {
+            if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
+                debug!(terminal = %terminal_id, "post-handoff detection sweep nudging pane");
+                runtime.nudge_child_redraw_after_handoff();
+                runtime.force_detection_rescan();
+                sweep.next_at = now + HANDOFF_DETECTION_SWEEP_STAGGER;
+                break;
+            }
+        }
+        if sweep.queue.is_empty() {
+            self.handoff_detection_sweep = None;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

@@ -2313,6 +2313,20 @@ impl AppState {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+/// The command a pane was launched with, reduced to its basename. Shared with
+/// the `todo.*` link handlers so a stored link and the navigator name a plain
+/// shell the same way.
+pub(super) fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
+    let argv = argv?;
+    let command = argv.first()?;
+    std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .or_else(|| Some(command.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

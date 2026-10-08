@@ -800,9 +800,6 @@ fn restore_tab(
             if let Some(resume) = restored_agent_resume {
                 terminal.restore_reported_resume(resume);
             }
-            if let Some(resume) = restored_agent_resume {
-                terminal.restore_reported_resume(resume);
-            }
             if let Some(record) = restored_agent_launch.clone() {
                 terminal.restore_agent_launch(record);
             }
@@ -912,9 +909,6 @@ fn restore_tab(
                 }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
-                }
-                if let Some(resume) = restored_agent_resume {
-                    terminal.restore_reported_resume(resume);
                 }
                 if let Some(resume) = restored_agent_resume {
                     terminal.restore_reported_resume(resume);

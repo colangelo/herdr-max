@@ -988,6 +988,13 @@ pub struct AppState {
     pub extra_prefixes: Vec<(KeyCode, KeyModifiers)>,
     /// Virtual terminal size (columns, rows) used when no client is attached.
     pub(crate) headless_size: (u16, u16),
+    /// The size, (cols, rows), of the last foreground client that was at least
+    /// [`REMEMBERED_CLIENT_SIZE_FLOOR`]. The session file keeps it, so it
+    /// outlives the client and the server.
+    pub(crate) last_client_size: Option<(u16, u16)>,
+    /// `server.remember_client_size`: whether the last client size is kept
+    /// and used as the no-client size.
+    pub(crate) remember_client_size: bool,
     pub agent_panel_sort: AgentPanelSort,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
@@ -1577,6 +1584,72 @@ impl AppState {
         }
     }
 }
+
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WorkspaceSort {
+    #[default]
+    Manual,
+    Priority,
+}
+
+/// `size` if it is big enough to remember, or `None`. A zero or corrupt size
+/// from a session file falls below the floor too.
+pub(crate) fn rememberable_client_size(size: (u16, u16)) -> Option<(u16, u16)> {
+    let (min_cols, min_rows) = REMEMBERED_CLIENT_SIZE_FLOOR;
+    (size.0 >= min_cols && size.1 >= min_rows).then_some(size)
+}
+
+impl AppState {
+    /// The size, (cols, rows), panes are laid out at while no client is
+    /// attached: a size a live handoff carried, then the remembered client
+    /// size, then the configured headless size.
+    pub(crate) fn no_client_size(&self, handoff_client_size: Option<(u16, u16)>) -> (u16, u16) {
+        handoff_client_size
+            .or(self.last_client_size.filter(|_| self.remember_client_size))
+            .unwrap_or(self.headless_size)
+    }
+
+    /// Remembers the foreground client's size, (cols, rows), unless
+    /// remembering is off or the size is below the floor. A change is saved
+    /// with the session.
+    pub(crate) fn remember_foreground_client_size(&mut self, size: (u16, u16)) {
+        if !self.remember_client_size {
+            return;
+        }
+        let Some(size) = rememberable_client_size(size) else {
+            return;
+        };
+        if self.last_client_size != Some(size) {
+            self.last_client_size = Some(size);
+            self.mark_session_dirty();
+        }
+    }
+
+    /// The terminal backing a pane, wherever that pane lives. Todos are stored
+    /// on `TerminalState`, so every todo surface resolves through here.
+    pub(crate) fn pane_terminal(&self, pane_id: PaneId) -> Option<&crate::terminal::TerminalState> {
+        let pane = self
+            .workspaces
+            .iter()
+            .find_map(|workspace| workspace.pane_state(pane_id))?;
+        self.terminals.get(&pane.attached_terminal_id)
+    }
+
+    /// Post a herdr toast: shows it as the transient toast (behavior
+    /// unchanged) and appends it to the notification log. All production
+    /// toast sites go through here so the log stays complete.
+    pub(crate) fn post_notification(&mut self, toast: ToastNotification) {
+        self.notification_log.post(&toast, now_unix());
+        self.toast = Some(toast);
+    }
+}
+
+// Restored fork items (v0.9.3 sync): re-home next to their kin later.
+/// The smallest client size, (cols, rows), remembered as the no-client size.
+/// A quick look from a phone or a tiny split is used while it is attached,
+/// but must not leave every pane that small once it detaches.
+pub(crate) const REMEMBERED_CLIENT_SIZE_FLOOR: (u16, u16) = (80, 24);
 
 #[cfg(test)]
 mod tests {

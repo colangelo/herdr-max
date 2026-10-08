@@ -1682,21 +1682,6 @@ impl App {
             params.agent_session_id,
             params.agent_session_path,
         );
-        let codex_thread = (agent_label == "codex")
-            .then(|| params.agent_session_id.clone())
-            .flatten();
-        if let Err(message) = validate_optional_resume_argv(params.resume_argv.as_deref()) {
-            return encode_error(id, "invalid_resume_argv", message);
-        }
-        let report_is_newer = self
-            .pane_terminal(ws_idx, pane_id)
-            .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
-        let session_ref = crate::agent_resume::session_ref_from_report(
-            &params.source,
-            &agent_label,
-            params.agent_session_id,
-            params.agent_session_path,
-        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref: session_ref.clone(),
