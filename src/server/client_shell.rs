@@ -819,10 +819,7 @@ mod tests {
         for pane in &shell.panes {
             let todos = &facts.pane_todos.as_ref().unwrap()[&pane.pane_id];
             assert_eq!((todos.total, todos.open), (0, 0));
-            assert_eq!(
-                facts.background_activity.as_ref().unwrap()[&pane.pane_id],
-                false
-            );
+            assert!(!facts.background_activity.as_ref().unwrap()[&pane.pane_id]);
         }
         assert!(facts.tab_sync.as_ref().unwrap().is_empty());
         assert_eq!(shell.focused_pane_id, metadata.focused_pane_id);

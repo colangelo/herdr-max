@@ -131,7 +131,8 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("main"));
-    assert!(text.contains("└─"));
+    assert!(text.contains("▾"));
+    assert!(!text.contains("└─"), "fork group rows use compact chevrons");
     assert!(text.contains("feature"));
 
     let mut replacement = (**state.snapshot.as_ref().expect("snapshot")).clone();
@@ -830,7 +831,7 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
 }
 
 #[test]
-fn workspace_state_text_does_not_stack_terminal_faint() {
+fn workspace_state_text_matches_the_fork_faint_style() {
     use crate::config::SpaceSidebarToken;
 
     let mut config = Config::default();
@@ -847,8 +848,8 @@ fn workspace_state_text_does_not_stack_terminal_faint() {
     let (x, y) = cell_symbol_position(&frame, rect, "idle");
     let cell = buffer.cell((x, y)).expect("workspace state text cell");
     assert!(
-        !cell.modifier.contains(Modifier::DIM),
-        "workspace state text at ({x},{y}) should not stack terminal faint: {cell:?}"
+        cell.modifier.contains(Modifier::DIM),
+        "fork workspace state text at ({x},{y}) retains its faint style: {cell:?}"
     );
 }
 
