@@ -3,6 +3,15 @@ set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
 
+# The vendored libghostty-vt needs zig 0.16. Use ZIG when set, else the
+# keg-only zig@0.16 when it is installed (the global zig can be newer and then
+# fails the build), else whatever `zig` is on PATH.
+export ZIG := env_var_or_default("ZIG", if path_exists("/opt/homebrew/opt/zig@0.16/bin/zig") == "true" { "/opt/homebrew/opt/zig@0.16/bin/zig" } else { "zig" })
+
+# List available recipes (default)
+default:
+    @just --list
+
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
@@ -13,7 +22,7 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_beta_build_id scripts.test_beta_publish scripts.test_changelog scripts.test_claude_mod_hint scripts.test_config_reference_check scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_release scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross scripts.test_windows_input
     bun test scripts/release-workflows.test.ts
 
 # Local interactive Windows Terminal input qualification (never runs in normal CI).
@@ -140,7 +149,12 @@ build-libghostty-vt:
 release-docs-check:
     python3 scripts/agent_detection_manifest_check.py --require-all-published
     python3 scripts/config_reference_check.py
-    node scripts/docs/versions.mjs check
+    # fork: `scripts/docs/versions.mjs check` is omitted — it asserts the
+    # docs/versions manifest's current version == distribution/latest.json's version,
+    # and the fork's latest.json is fork-scoped (its own -ac releases) while
+    # docs/versions tracks upstream's herdr.dev release docs. The fork does not
+    # publish herdr.dev, so the two are intentionally out of step.
+    # `just docs-contract-test` below still tests the snapshot/version tooling.
     node scripts/docs/preview.mjs check
     just docs-contract-test
     @test -f docs/next/README.md
@@ -172,7 +186,6 @@ release-docs-check:
             exit 1; \
         fi; \
     done
-    python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
 
 # Validate release docs, render scaling, and end-to-end CPU before release preparation
 pre-release-check:
@@ -260,3 +273,105 @@ release $version $preview:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# Fork: release an -ac suffixed build on the upstream base version (usage: just release-ac 0.7.1-ac or 0.7.1-ac.2).
+# Cargo.toml keeps the base X.Y.Z (Version::parse requires it); binaries get the
+# -ac suffix via HERDR_BUILD_CHANNEL=ac in the release workflow.
+release-ac $version:
+    @printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-ac(\.[0-9]+)?$' || { \
+        echo "error: version must look like 0.7.1-ac or 0.7.1-ac.2"; \
+        exit 1; \
+    }
+    @if [ -n "$(git status --porcelain)" ]; then \
+        echo "error: commit your changes first"; \
+        exit 1; \
+    fi
+    @git fetch origin master --tags
+    @if git rev-parse "v$version" >/dev/null 2>&1; then \
+        echo "error: tag v$version already exists"; \
+        exit 1; \
+    fi
+    just release-docs-check
+    python3 scripts/changelog.py prepare --version "$version"
+    cp CHANGELOG.md docs/next/CHANGELOG.md
+    @base="$(printf '%s' "$version" | sed 's/-ac.*//')"; \
+    sed -i.bak "s/^version = \".*\"/version = \"$base\"/" Cargo.toml && rm -f Cargo.toml.bak; \
+    cargo update -p herdr --offline || cargo update -p herdr
+    just check
+    git add CHANGELOG.md docs/next/CHANGELOG.md Cargo.toml Cargo.lock
+    git diff --cached --quiet || git commit -m "release: v$version"
+    git tag -a "v$version" -m "v$version"
+    git push origin HEAD:master
+    git push origin "v$version"
+    @echo "v$version released — CI builds -ac binaries and updates colangelo/homebrew-tap"
+
+# Fork: verify the newest -ac release, distribution/latest.json, the live raw-GitHub
+# manifest, and the release asset URLs all agree. Defaults to the newest v*-ac tag;
+# pass one explicitly to check an older release.
+#
+# Run this after `just release` AND after every upstream sync. The release
+# workflow's update-latest-json job commits the manifest to master, so the sync's
+# force-push of a replayed patch set can drop that commit — which silently pins
+# every fork binary's update check to an older version, with no failing job to
+# show for it. That is exactly what happened to v0.7.4-ac between 2026-07-18 and
+# 2026-07-27 (see AC-forks/herdr#38).
+latest-json-check tag="":
+    @set -e; \
+    TAG="{{tag}}"; \
+    if [ -z "$TAG" ]; then TAG="$(git tag --list 'v*-ac' 'v*-ac.*' --sort=-v:refname | head -n1)"; fi; \
+    test -n "$TAG" || { echo "error: no v*-ac tag found — run: git fetch origin --tags"; exit 1; }; \
+    BASE="$(printf '%s' "${TAG#v}" | sed 's/-ac.*//')"; \
+    PROTOCOL="$(git show "$TAG:src/protocol/wire.rs" | sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9]*\);/\1/p')"; \
+    test -n "$PROTOCOL" || { echo "error: no PROTOCOL_VERSION in $TAG:src/protocol/wire.rs"; exit 1; }; \
+    ENDPOINT="$(git show "$TAG:src/protocol/endpoint.rs" | sed -n 's/^pub const ENDPOINT_PROTOCOL_GENERATION: u32 = \([0-9]*\);/\1/p')"; \
+    test -n "$ENDPOINT" || { echo "error: no ENDPOINT_PROTOCOL_GENERATION in $TAG:src/protocol/endpoint.rs"; exit 1; }; \
+    echo "checking $TAG (version $BASE, protocol $PROTOCOL, endpoint generation $ENDPOINT)"; \
+    python3 scripts/changelog.py verify-release-state \
+        --repo colangelo/herdr-max \
+        --version "$BASE" \
+        --tag "$TAG" \
+        --protocol "$PROTOCOL" \
+        --endpoint-generation "$ENDPOINT" \
+        --live-url https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/latest.json
+
+# Fork: trigger a rolling -ac-beta build from a branch (default master).
+# Runs .github/workflows/beta.yml: builds macOS binaries, replaces the rolling
+# `beta` prerelease, and updates the colangelo/homebrew-tap herdr-beta formula.
+# Install/upgrade the result with `brew install colangelo/tap/herdr-beta`.
+# Pass a codename to pin the build's suffix, e.g. `just beta master pirlo`;
+# it must be one of the names in beta.yml's pool. Empty derives it from the run.
+beta ref="master" codename="":
+    command gh workflow run beta.yml --repo colangelo/herdr-max --ref {{ref}} -f ref={{ref}} -f codename={{codename}}
+    @echo "beta build dispatched from {{ref}} — watch: gh run watch --repo colangelo/herdr-max"
+
+# Upgrade a Homebrew-installed herdr and live-hand-off the running server onto the
+# new binary so panes survive — replicates `herdr update --handoff` for brew installs
+# (self-update is disabled for brew, but `server live-handoff` is source-agnostic).
+# Usage: just brew-upgrade            # stable formula/binary `herdr`
+#        just brew-upgrade herdr-beta # beta formula/binary `herdr-beta`
+# Always addresses the brew binary by its full path: another `{{formula}}` earlier
+# on PATH (e.g. a hand-built ~/.local/bin/herdr) would otherwise shadow it and the
+# upgrade would silently act on the wrong binary.
+brew-upgrade formula="herdr":
+    @test -x "$(brew --prefix)/bin/{{formula}}" || { echo "$(brew --prefix)/bin/{{formula}} not installed — run: brew install colangelo/tap/{{formula}}"; exit 1; }
+    brew update
+    brew upgrade {{formula}}
+    "$(brew --prefix)/bin/{{formula}}" server live-handoff --import-exe "$(brew --prefix)/bin/{{formula}}"
+    @echo "{{formula}} upgraded; running server handed off onto $(brew --prefix)/bin/{{formula}}, panes preserved"
+
+# Hands the current (stable) server off to the herdr-beta binary via live handoff
+# (source-agnostic); they share one session socket, so it takes over in place.
+# Live-switch the running server to the BETA channel, panes preserved (reattach: herdr-beta)
+switch-beta:
+    @command -v herdr-beta >/dev/null || { echo "herdr-beta not installed — run: brew install colangelo/tap/herdr-beta"; exit 1; }
+    @echo "handing off onto $(command -v herdr-beta)"
+    herdr server live-handoff --import-exe "$(command -v herdr-beta)"
+    @echo "server is now herdr-beta — reattach with: herdr-beta"
+
+# Hands the current (beta) server off to the herdr binary via live handoff.
+# Live-switch the running server to the STABLE channel, panes preserved (reattach: herdr)
+switch-stable:
+    @command -v herdr >/dev/null || { echo "herdr not installed — run: brew install colangelo/tap/herdr"; exit 1; }
+    @echo "handing off onto $(command -v herdr)"
+    herdr-beta server live-handoff --import-exe "$(command -v herdr)"
+    @echo "server is now herdr — reattach with: herdr"

@@ -38,6 +38,7 @@ fn detect(app: &mut AppState, pane_id: PaneId, agent: Agent, at: Instant) {
         pane_id,
         agent,
         observed_at: at,
+        replaced_process: false,
     });
 }
 
@@ -54,6 +55,8 @@ fn detection_state(
         state: AgentState::Idle,
         visible_blocker: false,
         visible_working: false,
+        background_work: false,
+        blocked_reason: None,
         process_exited,
         observed_at: at,
     });

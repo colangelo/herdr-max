@@ -45,6 +45,7 @@ class WindowsCrossTests(unittest.TestCase):
     def test_missing_setup_does_not_run_build_or_download(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(windows_cross, "SDK_ROOT", Path(directory)), \
+                    patch.object(windows_cross.sys, "platform", "linux"), \
                     patch.dict(os.environ, {}, clear=True), \
                     patch.object(windows_cross.subprocess, "run") as run:
                 with self.assertRaisesRegex(ValueError, "just setup-windows-cross"):
@@ -53,6 +54,7 @@ class WindowsCrossTests(unittest.TestCase):
 
     def test_lint_passes_sdk_to_cargo_without_changing_parent_environment(self):
         with patch.object(windows_cross, "libc_path", return_value=Path("/sdk/libc.txt")), \
+                patch.object(windows_cross.sys, "platform", "linux"), \
                 patch.dict(os.environ, {"KEEP_ME": "yes"}, clear=True), \
                 patch.object(windows_cross.subprocess, "run") as run:
             windows_cross.lint()
@@ -62,6 +64,22 @@ class WindowsCrossTests(unittest.TestCase):
             self.assertEqual(cargo.kwargs["env"][windows_cross.LIBC_ENV], str(Path("/sdk/libc.txt")))
             self.assertEqual(cargo.kwargs["env"]["KEEP_ME"], "yes")
             self.assertNotIn(windows_cross.LIBC_ENV, os.environ)
+
+    def test_lint_is_skipped_on_macos_without_needing_the_sdk(self):
+        with patch.object(windows_cross.sys, "platform", "darwin"), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch.object(windows_cross, "libc_path", side_effect=AssertionError("no SDK lookup")), \
+                patch.object(windows_cross.subprocess, "run") as run:
+            windows_cross.lint()
+            run.assert_not_called()
+
+    def test_lint_runs_on_macos_when_opted_in(self):
+        with patch.object(windows_cross.sys, "platform", "darwin"), \
+                patch.dict(os.environ, {windows_cross.OPT_IN_ENV: "1"}, clear=True), \
+                patch.object(windows_cross, "libc_path", return_value=Path("/sdk/libc.txt")), \
+                patch.object(windows_cross.subprocess, "run") as run:
+            windows_cross.lint()
+            self.assertEqual(run.call_args.args[0][:2], ["cargo", "clippy"])
 
     def test_license_acceptance_is_only_forwarded_when_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

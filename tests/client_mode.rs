@@ -735,8 +735,8 @@ fn sigwinch_refreshes_host_palette_without_resizing() {
         &client_socket,
         "onboarding = false\n[theme]\nname = \"terminal\"\n",
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
     let client = spawn_client_shell_process(&config_home, &runtime_dir, &api_socket);
     let master = client._master.as_ref().expect("client PTY");
     let output = spawn_pty_drain(master.try_clone_reader().unwrap());
@@ -953,7 +953,7 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
             );
             let output =
                 spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
-            wait_for_socket(&api_socket, Duration::from_secs(10));
+            wait_for_socket(&api_socket);
             assert!(wait_until(
                 Duration::from_secs(10),
                 Duration::from_millis(20),
@@ -1003,8 +1003,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let remote_client = remote_runtime.join("herdr-client.sock");
     let mut remote_server =
         spawn_server(&remote_config, &remote_runtime, &remote_api, &remote_client);
-    wait_for_socket(&remote_api, Duration::from_secs(10));
-    wait_for_socket(&remote_client, Duration::from_secs(10));
+    wait_for_socket(&remote_api);
+    wait_for_socket(&remote_client);
     let created = send_json_request(
         &remote_api,
         &serde_json::json!({
@@ -1117,7 +1117,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     }
 
     let mut local = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     let created = send_json_request(
         &api_socket,
         &serde_json::json!({
@@ -1152,7 +1152,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     assert!(client.child.try_wait().unwrap().is_none());
 
     let restarted = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     let created = send_json_request(
         &api_socket,
         &serde_json::json!({
@@ -1292,8 +1292,8 @@ fn client_shell_detaches_restores_and_freshly_reattaches_to_current_state() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut server = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     let created = send_json_request(
         &api_socket,
@@ -1963,7 +1963,7 @@ fn unavailable_restored_pane_keeps_saved_cwd_in_server() {
 
     fs::create_dir(missing_cwd).unwrap();
     let restarted = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     let recovered = send_json_request(
         &api_socket,
         &format!(r#"{{"id":"recovered","method":"pane.get","params":{{"pane_id":"{pane_id}"}}}}"#),

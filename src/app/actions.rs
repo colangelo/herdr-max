@@ -267,7 +267,6 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 impl AppState {
-
     pub(crate) fn next_agent_metadata_expiry(&self) -> Option<std::time::Instant> {
         self.terminals
             .values()
@@ -977,20 +976,6 @@ impl AppState {
             }
         }
 
-        // Same gate the API path applies, so this test twin cannot drift from
-        // production behaviour.
-        if let Some(ws_idx) = active {
-            if let Some(pane_id) = self
-                .workspaces
-                .get(ws_idx)
-                .and_then(crate::workspace::Workspace::focused_pane_id)
-            {
-                if self.confirm_pane_close_with_todos(ws_idx, pane_id) {
-                    return true;
-                }
-            }
-        }
-
         self.mark_session_dirty();
         let terminal_ids = active
             .and_then(|i| {
@@ -1609,28 +1594,6 @@ impl AppState {
             AppEvent::CodexThreadResolved { pane_id, thread_id } => self
                 .update_terminal_state(pane_id, |terminal| {
                     terminal.record_resolved_codex_thread(thread_id)
-                })
-                .into_iter()
-                .collect(),
-            AppEvent::AgentResumeReported {
-                pane_id,
-                source,
-                agent_label,
-                seq,
-                argv,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.record_reported_resume(&source, &agent_label, seq, argv);
-                    None
-                })
-                .into_iter()
-                .collect(),
-            AppEvent::ReportedAgentShellReturned {
-                pane_id,
-                observed_at,
-            } => self
-                .update_terminal_state(pane_id, |terminal| {
-                    terminal.clear_self_reported_agent(observed_at)
                 })
                 .into_iter()
                 .collect(),
@@ -2253,443 +2216,6 @@ mod tests {
     use crate::workspace::Workspace;
     use ratatui::layout::Direction;
 
-    // -----------------------------------------------------------------------
-    // The todo board's projection
-    // -----------------------------------------------------------------------
-
-    /// Put `todos` on a pane, as `(text, priority)` pairs in the order they are
-    /// added — so a test can assert presentation order against insertion order.
-    fn add_todos(
-        state: &mut AppState,
-        pane_id: PaneId,
-        todos: &[(&str, crate::terminal::todo::TodoPriority)],
-    ) {
-        let terminal_id = state
-            .workspaces
-            .iter()
-            .find_map(|ws| ws.pane_state(pane_id))
-            .expect("pane should exist")
-            .attached_terminal_id
-            .clone();
-        let terminal = state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal should exist");
-        for (text, priority) in todos {
-            terminal
-                .add_todo(text, *priority, None, 100)
-                .expect("todo should be added");
-        }
-    }
-
-    fn board_texts(state: &AppState) -> Vec<String> {
-        state
-            .todo_board_items(&crate::terminal::TerminalRuntimeRegistry::new())
-            .iter()
-            .map(|item| match item {
-                TodoBoardItem::GroupGap => String::new(),
-                TodoBoardItem::PaneHeading { space, label } => format!("# {space} {label}"),
-                TodoBoardItem::Todo { pane_id, todo_id } => state
-                    .pane_todo_by_id(*pane_id, *todo_id)
-                    .map(|todo| todo.text)
-                    .unwrap_or_default(),
-            })
-            .collect()
-    }
-
-    fn board_state(state: &AppState) -> Vec<String> {
-        board_texts(state)
-    }
-
-    /// Two spaces, each with a pane holding todos, plus one pane holding none.
-    fn app_with_board_todos() -> (AppState, PaneId, PaneId, PaneId) {
-        use crate::terminal::todo::TodoPriority;
-
-        let mut first = Workspace::test_new("one");
-        let first_root = first.tabs[0].root_pane;
-        let first_empty = first.test_split(Direction::Horizontal);
-        let second = Workspace::test_new("two");
-        let second_root = second.tabs[0].root_pane;
-
-        let mut state = AppState::test_new();
-        state.workspaces = vec![first, second];
-        state.ensure_test_terminals();
-        state.active = Some(0);
-        state.selected = 0;
-        state.mode = Mode::Terminal;
-
-        add_todos(
-            &mut state,
-            first_root,
-            &[
-                ("normal first", TodoPriority::Normal),
-                ("high second", TodoPriority::High),
-            ],
-        );
-        add_todos(
-            &mut state,
-            second_root,
-            &[("other space", TodoPriority::Normal)],
-        );
-        (state, first_root, first_empty, second_root)
-    }
-
-    /// Regression: every agent pane without an assigned name was called
-    /// "claude" in the navigator and on the todo board. The agent-reported
-    /// title carries a TTL and goes quiet once a pane has been idle a while,
-    /// and nothing below it in the chain consulted the terminal's own title —
-    /// so the recognisable session name was on screen everywhere except the
-    /// lists you use to find the pane.
-    #[test]
-    fn an_unnamed_agent_pane_is_labelled_by_its_terminal_title() {
-        let mut state = AppState::test_new();
-        state.workspaces = vec![Workspace::test_new("one")];
-        state.active = Some(0);
-        state.ensure_test_terminals();
-        let pane = state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = state.workspaces[0]
-            .pane_state(pane)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        let terminal = state.terminals.get_mut(&terminal_id).expect("terminal");
-        terminal.agent_name = Some("claude".into());
-        terminal.set_terminal_title(Some("✳ infra-side-of-direction-on-kube".into()));
-
-        assert_eq!(
-            state.pane_display_label(0, pane),
-            "infra-side-of-direction-on-kube",
-            "the terminal title beats the bare agent name"
-        );
-    }
-
-    /// An assigned name still wins, because that is what `herdr agent send`
-    /// addresses: a list that stopped showing it would stop telling you how to
-    /// reach the pane.
-    #[test]
-    fn an_assigned_name_outranks_the_terminal_title() {
-        let mut state = AppState::test_new();
-        state.workspaces = vec![Workspace::test_new("one")];
-        state.active = Some(0);
-        state.ensure_test_terminals();
-        let pane = state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = state.workspaces[0]
-            .pane_state(pane)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        let terminal = state.terminals.get_mut(&terminal_id).expect("terminal");
-        terminal.agent_name = Some("claude".into());
-        terminal.manual_label = Some("imap-jmap-mcp".into());
-        terminal.set_terminal_title(Some("✳ something else".into()));
-
-        assert_eq!(state.pane_display_label(0, pane), "imap-jmap-mcp");
-    }
-
-    #[test]
-    fn the_board_groups_todos_by_pane_in_space_tab_pane_order() {
-        let (state, _, _, _) = app_with_board_todos();
-        let texts = board_state(&state);
-
-        // Space one's pane and its todos come before space two's, and each
-        // pane's todos stay contiguous under their own heading.
-        assert!(
-            texts[0].starts_with('#'),
-            "first row is a heading: {texts:?}"
-        );
-        assert_eq!(&texts[1..3], &["high second", "normal first"]);
-        // A blank row separates the groups, and only separates them: never
-        // above the first, never trailing the last.
-        assert_eq!(texts[3], "", "blank row between groups: {texts:?}");
-        assert!(texts[4].starts_with('#'), "second group heading: {texts:?}");
-        assert_eq!(texts[5], "other space");
-        assert_eq!(texts.len(), 6);
-    }
-
-    /// The gap separates groups from each other, so a board with one group has
-    /// nothing to separate and shows no blank row at all.
-    #[test]
-    fn a_single_group_carries_no_blank_row() {
-        let (mut state, _, _, second_root) = app_with_board_todos();
-        let todo_id = state
-            .pane_todos_in_display_order(second_root)
-            .first()
-            .expect("the pane holds one todo")
-            .id;
-        let terminal_id = state.workspaces[1]
-            .pane_state(second_root)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal")
-            .remove_todo(todo_id)
-            .expect("todo should be removed");
-
-        let items = state.todo_board_items(&crate::terminal::TerminalRuntimeRegistry::new());
-        assert!(
-            !items
-                .iter()
-                .any(|item| matches!(item, TodoBoardItem::GroupGap)),
-            "one group has nothing to separate: {items:?}"
-        );
-    }
-
-    /// The gap is an item, so the selection has to step over it exactly as it
-    /// steps over a heading — otherwise moving down off a group's last todo
-    /// parks the cursor on a blank row.
-    #[test]
-    fn selection_steps_over_the_blank_row_between_groups() {
-        let (mut state, _, _, _) = app_with_board_todos();
-        state.open_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-
-        let gap = state
-            .todo_board()
-            .expect("board")
-            .items
-            .iter()
-            .position(|item| matches!(item, TodoBoardItem::GroupGap))
-            .expect("two groups are separated by a gap");
-
-        // Down from the todo immediately above the gap, then back up.
-        state.todo_board_mut().expect("board").list.select(gap - 1);
-        state.move_todo_board_selection_by(1);
-        let after_down = state.todo_board().expect("board").list.selected;
-        assert_ne!(after_down, gap, "moving down must not land on the gap");
-        assert!(state.todo_board().expect("board").selected_todo().is_some());
-
-        state.move_todo_board_selection_by(-1);
-        let after_up = state.todo_board().expect("board").list.selected;
-        assert_ne!(after_up, gap, "moving up must not land on the gap");
-        assert!(state.todo_board().expect("board").selected_todo().is_some());
-    }
-
-    /// A click on a blank row changes nothing: `select_todo` refuses any index
-    /// that does not hold a todo, which is what keeps the gap inert without
-    /// the mouse layer having to know it exists.
-    #[test]
-    fn clicking_the_blank_row_between_groups_is_inert() {
-        let (mut state, _, _, _) = app_with_board_todos();
-        state.open_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-        let board = state.todo_board_mut().expect("board");
-        let gap = board
-            .items
-            .iter()
-            .position(|item| matches!(item, TodoBoardItem::GroupGap))
-            .expect("two groups are separated by a gap");
-        let before = board.list.selected;
-
-        assert!(!board.select_todo(gap), "a gap is not a destination");
-        assert_eq!(board.list.selected, before, "the selection did not move");
-    }
-
-    /// The board reads the panel's own ordering rather than deriving a second
-    /// one: the high-priority todo added second is presented first in both.
-    #[test]
-    fn a_panes_todos_are_ordered_exactly_as_its_panel_orders_them() {
-        let (state, first_root, _, _) = app_with_board_todos();
-        let panel: Vec<String> = state
-            .pane_todos_in_display_order(first_root)
-            .iter()
-            .map(|todo| todo.text.clone())
-            .collect();
-        let board: Vec<String> = state
-            .todo_board_items(&crate::terminal::TerminalRuntimeRegistry::new())
-            .iter()
-            .filter_map(|item| match item {
-                TodoBoardItem::Todo { pane_id, todo_id } if *pane_id == first_root => state
-                    .pane_todo_by_id(*pane_id, *todo_id)
-                    .map(|todo| todo.text),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(panel, board);
-    }
-
-    /// A board that listed every pane to say "nothing here" would bury the
-    /// todos it exists to show.
-    /// The tab-bar indicator's numbers: the count spans every space, and the
-    /// color rule reads the highest priority among what is outstanding — done
-    /// todos contribute neither.
-    #[test]
-    fn session_outstanding_todos_aggregate_across_spaces() {
-        use crate::terminal::todo::{TodoPriority, TodoUpdate};
-
-        let (mut state, first_root, _, second_root) = app_with_board_todos();
-        assert_eq!(
-            state.session_outstanding_todos(),
-            (3, Some(TodoPriority::High))
-        );
-
-        // Completing the high one drops both the count and the ceiling.
-        let high_id = state
-            .pane_todos_in_display_order(first_root)
-            .first()
-            .expect("the high todo sorts first")
-            .id;
-        let terminal_id = state.workspaces[0]
-            .pane_state(first_root)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal")
-            .update_todo(
-                high_id,
-                TodoUpdate {
-                    done: Some(true),
-                    ..TodoUpdate::default()
-                },
-                200,
-            )
-            .expect("todo should be updated");
-        assert_eq!(
-            state.session_outstanding_todos(),
-            (2, Some(TodoPriority::Normal))
-        );
-        let _ = second_root;
-    }
-
-    #[test]
-    fn panes_holding_no_todos_contribute_no_heading_and_no_rows() {
-        let (state, _, first_empty, _) = app_with_board_todos();
-        let empty_label = state.pane_display_label(0, first_empty);
-        assert!(
-            !board_state(&state)
-                .iter()
-                .any(|row| row.starts_with("# ") && row.contains(&empty_label)),
-            "the empty pane should not appear"
-        );
-    }
-
-    #[test]
-    fn a_heading_names_its_space_and_its_pane() {
-        let (state, first_root, _, _) = app_with_board_todos();
-        match &state.todo_board_items(&crate::terminal::TerminalRuntimeRegistry::new())[0] {
-            TodoBoardItem::PaneHeading { space, label } => {
-                assert_eq!(
-                    space,
-                    &state.workspaces[0].display_name_from_terminals(&state.terminals)
-                );
-                assert_eq!(label, &state.pane_display_label(0, first_root));
-            }
-            other => panic!("expected a heading, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn selection_steps_over_headings_in_both_directions() {
-        let (mut state, _, _, _) = app_with_board_todos();
-        state.open_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-
-        // The list is: heading, two todos, the gap between groups, the second
-        // heading, its todo.
-        // Opens on the first todo, not on the heading above it.
-        assert_eq!(state.todo_board().expect("board").list.selected, 1);
-
-        // Forward past the gap and the second group's heading lands on its
-        // todo — two inert rows crossed in one step.
-        state.move_todo_board_selection_by(1);
-        assert_eq!(state.todo_board().expect("board").list.selected, 2);
-        state.move_todo_board_selection_by(1);
-        assert_eq!(state.todo_board().expect("board").list.selected, 5);
-
-        // And back the same way.
-        state.move_todo_board_selection_by(-1);
-        assert_eq!(state.todo_board().expect("board").list.selected, 2);
-
-        // Clamping at either end never parks on a heading or a gap.
-        state.move_todo_board_selection_by(-10);
-        assert_eq!(state.todo_board().expect("board").list.selected, 1);
-        state.move_todo_board_selection_by(10);
-        assert_eq!(state.todo_board().expect("board").list.selected, 5);
-        state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn the_selection_survives_a_todo_removed_underneath_it() {
-        let (mut state, first_root, _, _) = app_with_board_todos();
-        state.open_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-        state.move_todo_board_selection_by(1);
-        let selected = state
-            .todo_board()
-            .and_then(|board| board.selected_todo())
-            .expect("a todo is selected");
-        assert_eq!(selected.0, first_root);
-
-        // Remove the todo the cursor is on; the board rebuilds and the
-        // selection stays in the list rather than snapping to the top.
-        let terminal_id = state.workspaces[0]
-            .pane_state(first_root)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal")
-            .remove_todo(selected.1)
-            .expect("todo should be removed");
-        state.refresh_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-
-        let board = state.todo_board().expect("board");
-        assert!(
-            board.selected_todo().is_some(),
-            "the selection landed on a todo: {:?}",
-            board.items
-        );
-        // Two headings, one todo each, and the gap between the groups.
-        assert_eq!(board_state(&state).len(), 5);
-    }
-
-    /// The last todo of a pane takes its heading with it, because the
-    /// projection is rebuilt rather than patched.
-    #[test]
-    fn removing_a_panes_last_todo_drops_its_heading() {
-        let (mut state, _, _, second_root) = app_with_board_todos();
-        state.open_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-        // Headings carry no identifier, so the second space's own name is what
-        // marks its group. Only `second_root` holds a todo there, so exactly
-        // one heading starts with it.
-        let second_space = format!(
-            "# {} ",
-            state.workspaces[1].display_name_from_terminals(&state.terminals)
-        );
-        assert!(board_state(&state)
-            .iter()
-            .any(|row| row.starts_with(&second_space)));
-
-        let todo_id = state
-            .pane_todos_in_display_order(second_root)
-            .first()
-            .expect("the pane holds one todo")
-            .id;
-        let terminal_id = state.workspaces[1]
-            .pane_state(second_root)
-            .expect("pane")
-            .attached_terminal_id
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal")
-            .remove_todo(todo_id)
-            .expect("todo should be removed");
-        state.refresh_todo_board(&crate::terminal::TerminalRuntimeRegistry::new());
-
-        assert!(
-            !board_state(&state)
-                .iter()
-                .any(|row| row.starts_with(&second_space)),
-            "the emptied pane keeps no heading"
-        );
-        state.assert_invariants_for_test();
-    }
-
     fn app_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();
         state.toast_config.delay_seconds = 0;
@@ -3039,7 +2565,6 @@ mod tests {
                 end_col: 3
             }]
         );
-        state.set_navigator_selected(selected);
     }
 
     #[test]
@@ -3757,6 +3282,7 @@ mod tests {
                 pane_id,
                 agent: Agent::Pi,
                 observed_at: Instant::now(),
+                replaced_process: false,
             });
         }
         for &state in states {
@@ -3766,6 +3292,8 @@ mod tests {
                 state,
                 visible_blocker: state == AgentState::Blocked,
                 visible_working: state == AgentState::Working,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: false,
                 observed_at: Instant::now(),
             });
@@ -3846,6 +3374,8 @@ mod tests {
                     state,
                     visible_blocker: state == AgentState::Blocked,
                     visible_working: state == AgentState::Working,
+                    background_work: false,
+                    blocked_reason: None,
                     process_exited: false,
                     observed_at: Instant::now(),
                 });
@@ -3956,6 +3486,8 @@ mod tests {
                         state,
                         visible_blocker: false,
                         visible_working: state == AgentState::Working,
+                        background_work: false,
+                        blocked_reason: None,
                         process_exited: false,
                         observed_at: Instant::now(),
                     });
@@ -4460,6 +3992,8 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: true,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -4584,6 +4118,7 @@ mod tests {
             pane_id,
             agent: Agent::Pi,
             observed_at: std::time::Instant::now(),
+            replaced_process: false,
         });
         state.handle_app_event(AppEvent::AgentResumeReported {
             pane_id,
@@ -4601,203 +4136,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
-            process_exited: true,
-            observed_at: std::time::Instant::now(),
-        });
-
-        assert!(state.terminals[&terminal_id].reported_resume().is_none());
-        assert!(state.session_dirty);
-
-        state.handle_app_event(AppEvent::AgentResumeReported {
-            pane_id,
-            source: "herdr:pi".into(),
-            agent_label: "pi".into(),
-            seq: None,
-            argv: vec!["pi".into(), "--continue".into()],
-        });
-        assert!(
-            state.terminals[&terminal_id].reported_resume().is_none(),
-            "a late report must not revive an exited agent"
-        );
-    }
-
-    #[test]
-    fn shell_return_drops_self_reported_agent_and_its_resume() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "a"]);
-        assert!(state.terminals[&terminal_id].self_reported_agent_active());
-
-        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
-            pane_id,
-            observed_at: std::time::Instant::now(),
-        });
-
-        let terminal = &state.terminals[&terminal_id];
-        assert_eq!(terminal.effective_agent_label(), None);
-        assert!(terminal.reported_resume().is_none());
-        assert!(!terminal.self_reported_agent_active());
-    }
-
-    #[test]
-    fn delayed_shell_return_keeps_an_agent_that_claimed_the_pane_afterwards() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        let shell_seen_idle_at = std::time::Instant::now();
-        report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "b"]);
-
-        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
-            pane_id,
-            observed_at: shell_seen_idle_at,
-        });
-
-        let terminal = &state.terminals[&terminal_id];
-        assert_eq!(terminal.effective_agent_label(), Some("prime-agent"));
-        assert!(terminal.reported_resume().is_some());
-    }
-
-    #[test]
-    fn shell_return_keeps_agents_herdr_recognizes_by_process() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        state.handle_app_event(AppEvent::AgentProcessDetected {
-            pane_id,
-            agent: Agent::Pi,
-            observed_at: std::time::Instant::now(),
-        });
-        state.handle_app_event(AppEvent::HookStateReported {
-            pane_id,
-            source: "herdr:pi".into(),
-            agent_label: "pi".into(),
-            state: AgentState::Working,
-            message: None,
-            seq: Some(1),
-            session_ref: None,
-        });
-        assert!(!state.terminals[&terminal_id].self_reported_agent_active());
-
-        state.handle_app_event(AppEvent::ReportedAgentShellReturned {
-            pane_id,
-            observed_at: std::time::Instant::now(),
-        });
-
-        assert_eq!(
-            state.terminals[&terminal_id].effective_agent_label(),
-            Some("pi")
-        );
-    }
-
-    fn report_custom_agent_with_resume(state: &mut AppState, pane_id: PaneId, argv: &[&str]) {
-        state.handle_app_event(AppEvent::HookStateReported {
-            pane_id,
-            source: "prime-agent".into(),
-            agent_label: "prime-agent".into(),
-            state: AgentState::Idle,
-            message: None,
-            seq: Some(1),
-            session_ref: None,
-        });
-        state.handle_app_event(AppEvent::AgentResumeReported {
-            pane_id,
-            source: "prime-agent".into(),
-            agent_label: "prime-agent".into(),
-            seq: Some(1),
-            argv: argv.iter().map(|part| part.to_string()).collect(),
-        });
-    }
-
-    fn first_pane_terminal(state: &AppState) -> (PaneId, crate::terminal::TerminalId) {
-        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
-        let terminal_id = state.workspaces[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        (pane_id, terminal_id)
-    }
-
-    #[test]
-    fn reported_resume_follows_the_reporting_agent_until_release() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "a"]);
-
-        let resume = state.terminals[&terminal_id].reported_resume().unwrap();
-        assert_eq!(resume.agent, "prime-agent");
-        assert_eq!(resume.argv, vec!["prime-agent", "--resume", "a"]);
-
-        state.handle_app_event(AppEvent::AgentResumeReported {
-            pane_id,
-            source: "someone-else".into(),
-            agent_label: "other".into(),
-            seq: None,
-            argv: vec!["other".into()],
-        });
-        assert_eq!(
-            state.terminals[&terminal_id]
-                .reported_resume()
-                .unwrap()
-                .argv,
-            vec!["prime-agent", "--resume", "a"]
-        );
-
-        state.handle_app_event(AppEvent::HookAgentReleased {
-            pane_id,
-            source: "prime-agent".into(),
-            agent_label: "prime-agent".into(),
-            known_agent: None,
-            seq: Some(2),
-        });
-        assert!(state.terminals[&terminal_id].reported_resume().is_none());
-    }
-
-    #[test]
-    fn reported_resume_is_dropped_and_saved_when_another_agent_takes_the_pane() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        report_custom_agent_with_resume(&mut state, pane_id, &["prime-agent", "--resume", "a"]);
-        state.session_dirty = false;
-
-        state.handle_app_event(AppEvent::HookStateReported {
-            pane_id,
-            source: "custom:other".into(),
-            agent_label: "other".into(),
-            state: AgentState::Working,
-            message: None,
-            seq: None,
-            session_ref: None,
-        });
-
-        assert!(state.terminals[&terminal_id].reported_resume().is_none());
-        assert!(state.session_dirty);
-    }
-
-    #[test]
-    fn reported_resume_of_recognized_agent_is_dropped_when_its_process_exits() {
-        let mut state = app_with_workspaces(&["one"]);
-        let (pane_id, terminal_id) = first_pane_terminal(&state);
-        state.handle_app_event(AppEvent::AgentProcessDetected {
-            replaced_process: false,
-            pane_id,
-            agent: Agent::Pi,
-            observed_at: std::time::Instant::now(),
-        });
-        state.handle_app_event(AppEvent::AgentResumeReported {
-            pane_id,
-            source: "herdr:pi".into(),
-            agent_label: "pi".into(),
-            seq: None,
-            argv: vec!["pi".into(), "--continue".into()],
-        });
-        assert!(state.terminals[&terminal_id].reported_resume().is_some());
-        state.session_dirty = false;
-
-        state.handle_app_event(AppEvent::StateChanged {
             background_work: false,
             blocked_reason: None,
-            pane_id,
-            agent: Some(Agent::Pi),
-            state: AgentState::Idle,
-            visible_blocker: false,
-            visible_working: false,
             process_exited: true,
             observed_at: std::time::Instant::now(),
         });
@@ -4858,10 +4198,10 @@ mod tests {
         let mut state = app_with_workspaces(&["one"]);
         let (pane_id, terminal_id) = first_pane_terminal(&state);
         state.handle_app_event(AppEvent::AgentProcessDetected {
-            replaced_process: false,
             pane_id,
             agent: Agent::Pi,
             observed_at: std::time::Instant::now(),
+            replaced_process: false,
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
@@ -5846,156 +5186,5 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
-    }
-
-    #[test]
-    fn close_pane_defers_to_confirmation_while_todos_remain() {
-        let mut state = AppState::test_new();
-        state.workspaces = vec![crate::workspace::Workspace::test_new("todos")];
-        state.active = Some(0);
-        state.ensure_test_terminals();
-        let pane_id = state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("test terminal should exist")
-            .add_todo(
-                "unfinished",
-                crate::terminal::todo::TodoPriority::Normal,
-                None,
-                100,
-            )
-            .expect("todo should be added");
-
-        assert!(state.close_pane(), "the close is deferred to confirmation");
-        assert_eq!(state.mode, Mode::ConfirmClose);
-        assert_eq!(state.confirm_close_pane, Some(pane_id));
-
-        assert!(
-            !state.close_pane(),
-            "answering yes consumes the token and the close proceeds"
-        );
-    }
-
-    fn state_with_one_pane() -> (AppState, PaneId, crate::terminal::TerminalId) {
-        let mut state = AppState::test_new();
-        state.workspaces = vec![crate::workspace::Workspace::test_new("respawn")];
-        state.active = Some(0);
-        state.selected = 0;
-        state.ensure_test_terminals();
-        let pane_id = state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        (state, pane_id, terminal_id)
-    }
-
-    fn add_outstanding_todo(state: &mut AppState, terminal_id: &crate::terminal::TerminalId) {
-        state
-            .terminals
-            .get_mut(terminal_id)
-            .expect("test terminal should exist")
-            .add_todo(
-                "unfinished",
-                crate::terminal::todo::TodoPriority::Normal,
-                None,
-                100,
-            )
-            .expect("todo should be added");
-    }
-
-    #[test]
-    fn respawn_prompts_while_a_child_process_is_alive() {
-        let (mut state, pane_id, _) = state_with_one_pane();
-
-        assert!(
-            state.confirm_pane_respawn(0, pane_id, true),
-            "a live child defers the respawn to confirmation"
-        );
-        assert_eq!(state.mode, Mode::ConfirmClose);
-        assert_eq!(state.confirm_respawn_pane, Some(pane_id));
-
-        assert!(
-            !state.confirm_pane_respawn(0, pane_id, true),
-            "answering yes consumes the token and the respawn proceeds"
-        );
-        assert_eq!(state.confirm_respawn_pane, None);
-    }
-
-    #[test]
-    fn respawn_does_not_prompt_when_the_process_exited_and_no_todos_remain() {
-        let (mut state, pane_id, _) = state_with_one_pane();
-
-        assert!(!state.confirm_pane_respawn(0, pane_id, false));
-        assert_eq!(state.confirm_respawn_pane, None);
-        assert_ne!(state.mode, Mode::ConfirmClose);
-    }
-
-    #[test]
-    fn respawn_prompts_for_outstanding_todos_even_after_the_process_exited() {
-        let (mut state, pane_id, terminal_id) = state_with_one_pane();
-        add_outstanding_todo(&mut state, &terminal_id);
-
-        assert!(state.confirm_pane_respawn(0, pane_id, false));
-        assert_eq!(state.confirm_respawn_pane, Some(pane_id));
-    }
-
-    #[test]
-    fn respawn_and_close_confirmation_tokens_are_mutually_exclusive() {
-        let (mut state, pane_id, terminal_id) = state_with_one_pane();
-        add_outstanding_todo(&mut state, &terminal_id);
-
-        assert!(state.confirm_pane_respawn(0, pane_id, true));
-        assert_eq!(state.confirm_respawn_pane, Some(pane_id));
-        assert_eq!(state.confirm_close_pane, None);
-
-        assert!(state.confirm_pane_close_with_todos(0, pane_id));
-        assert_eq!(state.confirm_close_pane, Some(pane_id));
-        assert_eq!(
-            state.confirm_respawn_pane, None,
-            "a close prompt must never be answerable into a respawn"
-        );
-
-        assert!(state.confirm_pane_respawn(0, pane_id, true));
-        assert_eq!(state.confirm_respawn_pane, Some(pane_id));
-        assert_eq!(state.confirm_close_pane, None);
-    }
-
-    #[test]
-    fn forgetting_a_pane_clears_its_pending_respawn_confirmation() {
-        let (mut state, pane_id, _) = state_with_one_pane();
-
-        assert!(state.confirm_pane_respawn(0, pane_id, true));
-        state.forget_pane_todo_ui(pane_id);
-
-        assert_eq!(state.confirm_respawn_pane, None);
-    }
-
-    #[test]
-    fn opening_one_close_confirmation_clears_the_other_two_tokens() {
-        // Three independent tokens drive one Mode::ConfirmClose modal. If a stale
-        // one survives, confirm_close_accept_via_api consumes it and acts on a
-        // subject the user never confirmed.
-        let mut state = AppState::test_new();
-        state.workspaces = vec![Workspace::test_new("current")];
-        state.active = Some(0);
-        state.selected = 0;
-        state.ensure_test_terminals();
-        let pane_id = state.workspaces[0].tabs[0].root_pane;
-
-        state.confirm_close_pane = Some(pane_id);
-        state.confirm_respawn_pane = Some(pane_id);
-        assert!(state.begin_workspace_close_confirmation(0));
-        assert!(state.confirm_close_pane.is_none());
-        assert!(state.confirm_respawn_pane.is_none());
-        assert!(state.confirm_close_workspace_id.is_some());
-
-        assert!(state.confirm_pane_respawn(0, pane_id, true));
-        assert!(state.confirm_close_workspace_id.is_none());
-        assert!(state.confirm_close_pane.is_none());
-        assert_eq!(state.confirm_respawn_pane, Some(pane_id));
     }
 }

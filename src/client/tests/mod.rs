@@ -728,7 +728,13 @@ fn reload_local_client_config_keeps_ui_preferences_when_ui_is_invalid() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::write(&path, "[ui]\nmouse_capture = \"invalid\"\n").unwrap();
+    // A single bad value only drops that key to its default (fork issue
+    // 133), so the section is made invalid with impossible sidebar bounds.
+    std::fs::write(
+        &path,
+        "[ui]\nmouse_capture = true\nredraw_on_focus_gained = true\nsidebar_min_width = 40\nsidebar_max_width = 20\n",
+    )
+    .unwrap();
     let path_string = path.to_string_lossy().to_string();
     let _env = EnvVarGuard::set(crate::config::CONFIG_PATH_ENV_VAR, &path_string);
     let mut sound_config = crate::config::SoundConfig::default();

@@ -365,8 +365,9 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         use crate::api::schema::{
-            Method, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget, PaneSplitParams,
-            PaneCloseParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
+            Method, PaneCloseParams, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget,
+            PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
+            SplitDirection,
         };
 
         match action {
@@ -447,12 +448,13 @@ impl ClientShellState {
                 }),
                 outcome,
             ),
-            ClientContextMenuAction::ClosePane => {
-                self.push_endpoint_method(Method::PaneClose(PaneCloseParams {
+            ClientContextMenuAction::ClosePane => self.push_endpoint_method(
+                Method::PaneClose(PaneCloseParams {
                     pane_id,
                     force: false,
-                }), outcome)
-            }
+                }),
+                outcome,
+            ),
             _ => {}
         }
     }

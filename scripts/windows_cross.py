@@ -69,7 +69,21 @@ def setup(accept_license: bool) -> None:
     print(f"Windows SDK configured at {config}. Run `just windows-lint` or `just check`.")
 
 
+OPT_IN_ENV = "HERDR_WINDOWS_LINT"
+
+
 def lint() -> None:
+    # Fork: on macOS, zig applies the Windows libc configuration to the native
+    # helper tools it builds and runs on the host, which then cannot find
+    # libSystem. The fork ships no Windows binary, so skip rather than fail
+    # `just check`; HERDR_WINDOWS_LINT=1 still runs it. See
+    # https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/83
+    if sys.platform == "darwin" and os.environ.get(OPT_IN_ENV) != "1":
+        print(
+            "windows-lint: skipped on macOS (zig cannot link its native build tools "
+            f"against the Windows libc here). Set {OPT_IN_ENV}=1 to run it anyway."
+        )
+        return
     env = {**os.environ, LIBC_ENV: str(libc_path()), "LIBGHOSTTY_VT_SIMD": "false"}
     subprocess.run(["rustup", "target", "add", TARGET], check=True)
     subprocess.run(

@@ -189,7 +189,7 @@ def infer_protocol_from_notes(notes: str) -> int | None:
 def normalize_assets(
     value: Any,
     label: str,
-    required_targets: tuple[str, ...] = ASSET_TARGETS,
+    required_targets: tuple[str, ...] = CORE_ASSET_TARGETS,
 ) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ChangelogError(f"{label} must be an object")
@@ -212,7 +212,7 @@ def normalize_assets(
 def normalize_sha256(
     value: Any,
     label: str,
-    required_targets: tuple[str, ...] = ASSET_TARGETS,
+    required_targets: tuple[str, ...] = CORE_ASSET_TARGETS,
 ) -> dict[str, str]:
     if not isinstance(value, dict):
         raise ChangelogError(f"{label} must be an object")
@@ -374,12 +374,23 @@ def default_release_assets(version: str, repo: str = DEFAULT_RELEASE_REPO) -> di
 
 
 def manifest_from_release_payload(
-    payload: dict[str, Any], version: str, protocol: int | None = None,
+    payload: dict[str, Any],
+    version: str,
+    protocol: int | None = None,
     endpoint_generation: int | None = None,
+    expected_tag: str | None = None,
 ) -> dict[str, Any]:
     normalized_version = normalize_version(version)
     tag_name = str(payload.get("tagName") or "")
-    if normalize_version(tag_name) != normalized_version:
+    # Forks tag releases with a suffix (e.g. `v0.7.4-ac`) while the manifest
+    # `version` stays the base semver that the binary reports. When an explicit
+    # tag is given, validate against it instead of deriving `v{version}`.
+    if expected_tag is not None:
+        if tag_name != expected_tag:
+            raise ChangelogError(
+                f"GitHub release tag mismatch: expected {expected_tag}, got {tag_name or '<missing>'}"
+            )
+    elif normalize_version(tag_name) != normalized_version:
         raise ChangelogError(
             f"GitHub release tag mismatch: expected v{normalized_version}, got {tag_name or '<missing>'}"
         )
@@ -403,7 +414,13 @@ def manifest_from_release_payload(
             if isinstance(name, str) and name not in release_assets:
                 release_assets[name] = asset
 
-    missing_assets = [name for name in EXPECTED_ASSET_NAMES.values() if name not in release_assets]
+    # Fork: release.yml publishes the four Unix binaries only. A Windows asset is
+    # still carried through when a release has one, but it is not required here.
+    missing_assets = [
+        name
+        for target, name in EXPECTED_ASSET_NAMES.items()
+        if target in CORE_ASSET_TARGETS and name not in release_assets
+    ]
     if missing_assets:
         raise ChangelogError(
             f"GitHub release v{normalized_version} is missing asset {missing_assets[0]}"
@@ -414,6 +431,8 @@ def manifest_from_release_payload(
     for target, asset_name in EXPECTED_ASSET_NAMES.items():
         asset = release_assets.get(asset_name)
         if not isinstance(asset, dict):
+            if target not in CORE_ASSET_TARGETS:
+                continue
             raise ChangelogError(f"GitHub release v{normalized_version} is missing asset {asset_name}")
         url = str(asset.get("url") or "").strip()
         if not url:
@@ -583,13 +602,14 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def fetch_release_payload(version: str, repo: str) -> dict[str, Any]:
+def fetch_release_payload(version: str, repo: str, tag: str | None = None) -> dict[str, Any]:
     normalized_version = normalize_version(version)
+    release_tag = tag or f"v{normalized_version}"
     command = [
         "gh",
         "release",
         "view",
-        f"v{normalized_version}",
+        release_tag,
         "--repo",
         repo,
         "--json",
@@ -598,7 +618,7 @@ def fetch_release_payload(version: str, repo: str) -> dict[str, Any]:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip() or "unknown gh error"
-        raise ChangelogError(f"failed to read GitHub release v{normalized_version}: {stderr}")
+        raise ChangelogError(f"failed to read GitHub release {release_tag}: {stderr}")
 
     try:
         payload = json.loads(result.stdout)
@@ -639,6 +659,10 @@ def fetch_remote_json(url: str, label: str) -> dict[str, Any]:
 
 def verify_asset_urls_resolve(assets: dict[str, str], label: str) -> None:
     for target in ASSET_TARGETS:
+        # Fork: only the four Unix assets are published; check a Windows URL
+        # when a manifest happens to carry one.
+        if target not in assets:
+            continue
         url = assets[target]
         command = [
             "curl",
@@ -702,11 +726,21 @@ def cmd_sync_latest_json(args: argparse.Namespace) -> int:
     manifest_path = Path(args.output)
     version = normalize_version(args.version)
 
+    tag = getattr(args, "tag", None)
     current_manifest = load_json(manifest_path)
-    ensure_manifest_is_outdated(current_manifest, version)
+    # `--force` skips the monotonic-version guard so a fork can correct a manifest
+    # that was seeded with unrelated (upstream) data of an equal-or-higher version.
+    if not getattr(args, "force", False):
+        ensure_manifest_is_outdated(current_manifest, version)
 
-    release_payload = fetch_release_payload(version, args.repo)
-    new_manifest = manifest_from_release_payload(release_payload, version, args.protocol, args.endpoint_generation)
+    release_payload = fetch_release_payload(version, args.repo, tag=tag)
+    new_manifest = manifest_from_release_payload(
+        release_payload,
+        version,
+        args.protocol,
+        args.endpoint_generation,
+        expected_tag=tag,
+    )
     announcement_path = Path(args.announcement)
     announcement = load_product_announcement(announcement_path)
     output = build_latest_json(
@@ -756,8 +790,15 @@ def cmd_validate_product_announcement(args: argparse.Namespace) -> int:
 
 def cmd_verify_release_state(args: argparse.Namespace) -> int:
     version = normalize_version(args.version)
-    release_payload = fetch_release_payload(version, args.repo)
-    expected_manifest = manifest_from_release_payload(release_payload, version, args.protocol, args.endpoint_generation)
+    tag = getattr(args, "tag", None)
+    release_payload = fetch_release_payload(version, args.repo, tag=tag)
+    expected_manifest = manifest_from_release_payload(
+        release_payload,
+        version,
+        args.protocol,
+        args.endpoint_generation,
+        expected_tag=tag,
+    )
 
     local_raw_manifest = load_json(Path(args.output))
     local_manifest = ensure_manifest_matches_expected(
@@ -813,6 +854,16 @@ def build_parser() -> argparse.ArgumentParser:
     sync_latest_json.add_argument("--announcement", default=str(DEFAULT_PRODUCT_ANNOUNCEMENT_PATH))
     sync_latest_json.add_argument("--protocol", type=int)
     sync_latest_json.add_argument("--endpoint-generation", type=int)
+    sync_latest_json.add_argument(
+        "--tag",
+        default=None,
+        help="Explicit release tag to read (e.g. v0.7.4-ac for forks). Defaults to v{version}.",
+    )
+    sync_latest_json.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the monotonic-version guard (use to correct a manifest seeded with unrelated data).",
+    )
     sync_latest_json.set_defaults(func=cmd_sync_latest_json)
 
     validate_product_announcement = subparsers.add_parser(
@@ -834,6 +885,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify_release_state.add_argument("--live-url", default=DEFAULT_LIVE_MANIFEST_URL)
     verify_release_state.add_argument("--protocol", type=int)
     verify_release_state.add_argument("--endpoint-generation", type=int)
+    verify_release_state.add_argument(
+        "--tag",
+        default=None,
+        help="Explicit release tag to read (e.g. v0.7.4-ac for forks). Defaults to v{version}.",
+    )
     verify_release_state.set_defaults(func=cmd_verify_release_state)
 
     return parser
