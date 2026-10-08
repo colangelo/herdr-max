@@ -165,6 +165,24 @@ const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 /// avoid reintroducing the idle CPU spin.
 const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Delay between per-pane repaint nudges in the post-handoff detection sweep,
+/// so re-adopted agent TUIs repaint one at a time instead of all at once.
+/// Effective spacing is bounded below by the main loop's wake cadence
+/// (`CLIENT_ACCEPT_POLL_INTERVAL`).
+#[cfg(unix)]
+const HANDOFF_DETECTION_SWEEP_STAGGER: Duration = Duration::from_millis(150);
+
+/// Ordered background sweep over imported panes after a live handoff commit.
+///
+/// Each step nudges one pane's child to repaint (SIGWINCH shrink/restore) and
+/// forces a detection rescan, so working agents resurface in the sidebar
+/// without any client attaching or the user visiting panes.
+#[cfg(unix)]
+struct HandoffDetectionSweep {
+    queue: std::collections::VecDeque<crate::terminal::TerminalId>,
+    next_at: Instant,
+}
+
 // ---------------------------------------------------------------------------
 // Headless server
 // ---------------------------------------------------------------------------
@@ -229,18 +247,20 @@ pub struct HeadlessServer {
     deferred_alt_screen_reads: Vec<api::ApiRequestMessage>,
     /// Monotonic activity counter used to pick the most recently active client.
     next_activity_stamp: u64,
-    /// Configured virtual terminal size used when no clients are connected.
-    headless_size: (u16, u16),
+    /// The size a live handoff carried from the previous server, used ahead
+    /// of the remembered client size and the configured headless size while
+    /// no client is attached. The first client to attach ends it.
+    handoff_client_size: Option<(u16, u16)>,
     /// Shared pane runtime size derived from the foreground client, or the
-    /// configured headless size when no clients are connected.
+    /// no-client size (`AppState::no_client_size`) when none is connected.
     effective_size: (u16, u16),
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
-    /// Imported panes get one app-safe resize nudge after the first client attaches.
+    /// In-progress post-handoff detection sweep over imported panes.
     #[cfg(unix)]
-    pending_handoff_repaint_nudge: bool,
+    handoff_detection_sweep: Option<HandoffDetectionSweep>,
     /// Flag set by a stop signal or `server stop`; shares `server_stop`'s flag.
     should_quit: Arc<AtomicBool>,
     server_stop: ServerStop,
@@ -309,7 +329,7 @@ impl HeadlessServer {
     /// 2. Binds the client socket listener
     /// 3. Returns the server ready to run
     pub fn new(
-        app: app::App,
+        mut app: app::App,
         config_diagnostics: &[String],
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
@@ -334,7 +354,10 @@ impl HeadlessServer {
         spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())?;
 
         let server_keybindings = app_keybindings(&app);
-        let headless_size = app.state.headless_size;
+        // No client has attached yet: panes restored from the session file
+        // come back at the size the last client had.
+        let no_client_size = app.state.no_client_size(None);
+        app.state.detached_pane_size = Some(no_client_size);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
@@ -372,15 +395,15 @@ impl HeadlessServer {
             pending_alt_screen_reads: Vec::new(),
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
-            headless_size,
-            effective_size: headless_size,
+            handoff_client_size: None,
+            effective_size: no_client_size,
             shutting_down: false,
             host_shutdown_requested: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             host_shutdown_probe: crate::platform::host_shutdown_in_progress,
             handoff_in_progress: false,
             #[cfg(unix)]
-            pending_handoff_repaint_nudge: false,
+            handoff_detection_sweep: None,
             should_quit,
             server_stop,
             server_event_rx,
@@ -466,6 +489,16 @@ impl HeadlessServer {
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.metadata_expiry");
             }
+            if self.app.advance_sort_motion(Instant::now()) {
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.sort_motion");
+            }
+            if self.app.advance_spinner(Instant::now()) {
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.spinner");
+            }
 
             // 3. Drain API requests.
             if self.drain_api_requests_with_shutdown_check() {
@@ -495,6 +528,8 @@ impl HeadlessServer {
 
             // 6. Handle scheduled tasks.
             let now = Instant::now();
+            #[cfg(unix)]
+            self.advance_handoff_detection_sweep(now);
             if self.handle_scheduled_tasks_headless(now, needs_render) {
                 needs_render = true;
                 needs_full_render = true;
@@ -772,11 +807,25 @@ impl HeadlessServer {
         }
     }
 
+    /// The size to lay panes out at: a live handoff's carried size until the
+    /// first client attaches, the remembered client size while detached, and
+    /// the effective (foreground client) size otherwise.
+    fn detached_size(&self) -> (u16, u16) {
+        if let Some(size) = self.handoff_client_size {
+            return size;
+        }
+        if self.clients.is_empty() {
+            return self.app.state.no_client_size(None);
+        }
+        self.effective_size
+    }
+
     fn sync_runtime_view_geometry(&mut self) {
+        let (cols, rows) = self.detached_size();
         crate::ui::compute_view_without_resizing_panes(
             &mut self.app.state,
             &self.app.terminal_runtimes,
-            Rect::new(0, 0, self.effective_size.0, self.effective_size.1),
+            Rect::new(0, 0, cols, rows),
         );
     }
 
@@ -787,7 +836,8 @@ impl HeadlessServer {
                 .is_some_and(|client| client.pixel_mouse)
         });
         let Some(client_id) = self.foreground_client_id else {
-            self.effective_size = self.headless_size;
+            self.effective_size = self.detached_size();
+            self.app.state.detached_pane_size = Some(self.effective_size);
             self.app.state.outer_terminal_focus = None;
             self.app.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             self.sync_runtime_view_geometry();
@@ -798,7 +848,8 @@ impl HeadlessServer {
         };
         let Some(client) = self.clients.get(&client_id) else {
             self.foreground_client_id = None;
-            self.effective_size = self.headless_size;
+            self.effective_size = self.detached_size();
+            self.app.state.detached_pane_size = Some(self.effective_size);
             self.app.state.outer_terminal_focus = None;
             self.app.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             self.sync_runtime_view_geometry();
@@ -809,6 +860,10 @@ impl HeadlessServer {
         };
 
         let terminal_size = client.terminal_size;
+        self.handoff_client_size = None;
+        self.app
+            .state
+            .remember_foreground_client_size(terminal_size);
         let host_cell_size = if self.app.state.kitty_graphics_enabled && client.cell_size.is_known()
         {
             client.cell_size
@@ -822,6 +877,7 @@ impl HeadlessServer {
 
         self.effective_size = terminal_size;
         self.sync_runtime_view_geometry();
+        self.app.state.detached_pane_size = None;
         self.app.state.outer_terminal_focus = outer_terminal_focus;
         self.app.state.host_cell_size = host_cell_size;
         let server_keybindings = self.server_keybindings.clone();
@@ -1704,9 +1760,7 @@ impl HeadlessServer {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
-                    reason: Some(
-                        "live update in progress; reconnect after handoff completes".to_owned(),
-                    ),
+                    reason: Some(crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON.to_owned()),
                 },
             );
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -1900,10 +1954,7 @@ impl HeadlessServer {
                 if self.handoff_in_progress {
                     if let Ok(message) =
                         Self::frame_server_message(&ServerMessage::ServerShutdown {
-                            reason: Some(
-                                "live update in progress; reconnect after handoff completes"
-                                    .to_owned(),
-                            ),
+                            reason: Some(crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON.to_owned()),
                         })
                     {
                         let _ = writer.control.send(message);
@@ -2013,7 +2064,6 @@ impl HeadlessServer {
                 }
                 self.sync_foreground_client_state();
                 self.claim_unowned_shell_tab_geometry(client_id, true);
-                self.nudge_handoff_panes_on_first_client_attach();
                 true
             }
             ServerEvent::GraphicsTransmissionResult {
@@ -2280,6 +2330,7 @@ impl HeadlessServer {
                         && client.outer_terminal_focus == Some(true)
                         && self.shell_tab_id_for_client(other_id) == tab_id
                 });
+                let mut window_resized = false;
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.outer_terminal_focus = Some(focused);
                 }
@@ -2298,6 +2349,11 @@ impl HeadlessServer {
                 } else {
                     if self.foreground_client_id == Some(client_id) {
                         self.app.state.outer_terminal_focus = Some(false);
+                    // Fork issue 138: a real change of an app client's window
+                    // shows the pane-size labels, like a pane resize (#122).
+                    // The attach-time size arrives in Hello, not here, so a
+                    // resize repeating it (or any unchanged size) shows none.
+                    window_resized = client.terminal_size != (cols, rows);
                     }
                     if !another_focused_viewer {
                         if let Some(target) = self.shell_focus_target(client_id) {
@@ -2318,6 +2374,9 @@ impl HeadlessServer {
                 }
                 client.shell_mouse_capture = enabled;
                 client.host_mouse_capture_active = None;
+                if window_resized {
+                    self.app.state.show_window_resize_labels(Instant::now());
+                }
                 true
             }
             ServerEvent::ClientShellPresentationSync { client_id, token } => {
@@ -3351,6 +3410,16 @@ fn client_pane_input_releases_press(event: &protocol::ClientPaneInputEvent) -> b
         } | protocol::ClientPaneInputEvent::Mouse {
             kind: protocol::ClientMouseKind::Up(_),
             ..
+        if crate::ui::synchronized_output_holds_frame(
+            &self.app.state,
+            &self.app.terminal_runtimes,
+            sync_since,
+            Instant::now(),
+        ) {
+            // Fork issue 126: the full render holds the frame.
+            retained_fallback!("synchronized_output");
+        }
+
         }
     )
 }

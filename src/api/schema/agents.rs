@@ -14,6 +14,9 @@ pub struct AgentReadParams {
     pub format: ReadFormat,
     #[serde(default = "super::common::default_true")]
     pub strip_ansi: bool,
+    /// Leave out faint (SGR 2) cells, for every source (fork issue 146).
+    #[serde(default)]
+    pub strip_dim: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -183,11 +186,43 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
+/// Where an agent's reported `name` comes from when it is not an explicit
+/// herdr name (fork issue 130).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNameSource {
+    /// The agent's terminal title (its stripped form).
+    Title,
+}
+
+/// `agent.list` parameters. `input_box` asks for each Claude Code agent's input
+/// box draft, which reads every such pane's screen, so it is off by default
+/// (fork issue 146).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentListParams {
+    #[serde(default)]
+    pub input_box: bool,
+}
+
+/// What is typed in an agent's input box (fork issue 146).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentInputBox {
+    /// The draft, without the prompt marker. Faint text (a grey suggestion, a
+    /// command's argument hint) is not part of it; a pasted-text placeholder
+    /// is. Empty for an empty box.
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Set when `name` is not an explicit herdr name but stands in for one:
+    /// `title` when it comes from the agent's terminal title. Absent for an
+    /// explicit name (fork issue 130).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_source: Option<AgentNameSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,8 +234,27 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    /// Why the agent is blocked: `question`, `permission`, `form` or
+    /// `other`. Present only while `agent_status` is `blocked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<crate::detect::BlockedReason>,
+    /// When the pane entered its current blocked spell, in unix
+    /// milliseconds. Present only while `agent_status` is `blocked`; it does
+    /// not move while the pane stays blocked and restarts after a server
+    /// restore or live handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<i64>,
+    /// The input box's draft for a Claude Code agent whose screen shows one.
+    /// Always filled by `agent get`; `agent list` fills it only with
+    /// `input_box: true`. Never worked out by detection or rendering; absent
+    /// when no box is on screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_box: Option<AgentInputBox>,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub screen_detection_skipped: bool,
+    /// Pinned agents sit at the top of the agent panel in pin order.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub pinned: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -234,4 +288,10 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    /// The command a restore would run in this pane now (herdr adds
+    /// `--remote` for panes on its Codex app server). Absent when the pane
+    /// would not restore an agent, for example because the session on record
+    /// belongs to an agent that no longer runs there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_argv: Option<Vec<String>>,
 }

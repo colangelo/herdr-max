@@ -5,12 +5,14 @@ pub mod commands;
 pub mod common;
 pub mod events;
 pub mod integrations;
+pub mod notifications;
 pub mod panes;
 pub mod plugins;
 pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod todos;
 pub mod workspaces;
 pub mod worktrees;
 
@@ -19,12 +21,14 @@ pub use commands::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
+pub use notifications::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use todos::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
@@ -67,6 +71,22 @@ pub enum Method {
     ReleaseNotesDismiss(ReleaseNotesDismissParams),
     #[serde(rename = "command.invoke")]
     CommandInvoke(CommandInvokeParams),
+    #[serde(rename = "notification.list")]
+    NotificationList(EmptyParams),
+    #[serde(rename = "notification.mark_seen")]
+    NotificationMarkSeen(NotificationMarkSeenParams),
+    #[serde(rename = "notification.clear")]
+    NotificationClear(EmptyParams),
+    #[serde(rename = "todo.list")]
+    TodoList(TodoListParams),
+    #[serde(rename = "todo.add")]
+    TodoAdd(TodoAddParams),
+    #[serde(rename = "todo.update")]
+    TodoUpdate(TodoUpdateParams),
+    #[serde(rename = "todo.remove")]
+    TodoRemove(TodoRemoveParams),
+    #[serde(rename = "todo.clear")]
+    TodoClear(TodoClearParams),
     #[serde(rename = "client.window_title.set")]
     ClientWindowTitleSet(ClientWindowTitleSetParams),
     #[serde(rename = "client.window_title.clear")]
@@ -83,6 +103,10 @@ pub enum Method {
     WorkspaceGet(WorkspaceTarget),
     #[serde(rename = "workspace.focus")]
     WorkspaceFocus(WorkspaceTarget),
+    #[serde(rename = "workspace.pin")]
+    WorkspacePin(WorkspaceTarget),
+    #[serde(rename = "workspace.unpin")]
+    WorkspaceUnpin(WorkspaceTarget),
     #[serde(rename = "workspace.rename")]
     WorkspaceRename(WorkspaceRenameParams),
     #[serde(rename = "workspace.move")]
@@ -111,12 +135,14 @@ pub enum Method {
     TabFocus(TabTarget),
     #[serde(rename = "tab.rename")]
     TabRename(TabRenameParams),
+    #[serde(rename = "tab.sync")]
+    TabSync(TabSyncParams),
     #[serde(rename = "tab.move")]
     TabMove(TabMoveParams),
     #[serde(rename = "tab.close")]
-    TabClose(TabTarget),
+    TabClose(TabCloseParams),
     #[serde(rename = "agent.list")]
-    AgentList(EmptyParams),
+    AgentList(AgentListParams),
     #[serde(rename = "agent.get")]
     AgentGet(AgentTarget),
     #[serde(rename = "agent.read")]
@@ -133,6 +159,10 @@ pub enum Method {
     AgentViewClear(AgentViewClearParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
+    #[serde(rename = "agent.pin")]
+    AgentPin(AgentTarget),
+    #[serde(rename = "agent.unpin")]
+    AgentUnpin(AgentTarget),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]
@@ -147,6 +177,8 @@ pub enum Method {
     PaneMove(PaneMoveParams),
     #[serde(rename = "pane.zoom")]
     PaneZoom(PaneZoomParams),
+    #[serde(rename = "pane.sync")]
+    PaneSync(PaneSyncParams),
     #[serde(rename = "pane.layout")]
     PaneLayout(PaneLayoutParams),
     #[serde(rename = "pane.process_info")]
@@ -157,6 +189,10 @@ pub enum Method {
     LayoutApply(LayoutApplyParams),
     #[serde(rename = "layout.set_split_ratio")]
     LayoutSetSplitRatio(LayoutSetSplitRatioParams),
+    #[serde(rename = "layout.balance")]
+    LayoutBalance(LayoutBalanceParams),
+    #[serde(rename = "layout.set_preset")]
+    LayoutSetPreset(LayoutSetPresetParams),
     #[serde(rename = "pane.neighbor")]
     PaneNeighbor(PaneNeighborParams),
     #[serde(rename = "pane.edges")]
@@ -207,12 +243,18 @@ pub enum Method {
     PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
+    #[serde(rename = "pane.report_hint")]
+    PaneReportHint(PaneReportHintParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
     PaneReleaseAgent(PaneReleaseAgentParams),
+    #[serde(rename = "pane.clear")]
+    PaneClearScrollback(PaneTarget),
     #[serde(rename = "pane.close")]
-    PaneClose(PaneTarget),
+    PaneClose(PaneCloseParams),
+    #[serde(rename = "pane.respawn")]
+    PaneRespawn(PaneRespawnParams),
     #[serde(rename = "popup.close")]
     PopupClose(EmptyParams),
     #[serde(rename = "events.subscribe")]

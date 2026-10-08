@@ -1,13 +1,3 @@
-pub(super) fn tab_attention_priority(state: crate::detect::AgentState, seen: bool) -> u8 {
-    match (state, seen) {
-        (crate::detect::AgentState::Blocked, _) => 4,
-        (crate::detect::AgentState::Idle, false) => 3,
-        (crate::detect::AgentState::Working, _) => 2,
-        (crate::detect::AgentState::Idle, true) => 1,
-        (crate::detect::AgentState::Unknown, _) => 0,
-    }
-}
-
 fn parse_api_key(key: &str) -> Option<crossterm::event::KeyEvent> {
     let normalized = normalize_api_key_alias(key.trim());
     let (code, modifiers) = crate::config::parse_key_combo(normalized)?;
@@ -111,9 +101,13 @@ pub(super) fn read_terminal_snapshot(
     source: crate::api::schema::ReadSource,
     format: crate::api::schema::ReadFormat,
     lines: Option<u32>,
+    strip_dim: bool,
 ) -> crate::pane::TerminalReadSnapshot {
     use crate::api::schema::{ReadFormat, ReadSource};
 
+    if strip_dim {
+        return read_terminal_snapshot_without_dim(terminal, source, format, lines);
+    }
     let line_limit = lines.map(|lines| lines.min(1000) as usize);
     let recent_lines = line_limit.unwrap_or(80);
     match (format, source) {
@@ -140,6 +134,55 @@ pub(super) fn read_terminal_snapshot(
     }
 }
 
+/// The read with faint cells left out (fork issue 146): the styled snapshot of
+/// the same source, with its faint runs dropped, then plain text for a text
+/// read. Every source, so a detection read works too.
+fn read_terminal_snapshot_without_dim(
+    terminal: &crate::terminal::TerminalRuntime,
+    source: crate::api::schema::ReadSource,
+    format: crate::api::schema::ReadFormat,
+    lines: Option<u32>,
+) -> crate::pane::TerminalReadSnapshot {
+    use crate::api::schema::ReadSource;
+
+    let line_limit = lines.map(|lines| lines.min(1000) as usize);
+    let recent_lines = line_limit.unwrap_or(80);
+    let styled = match source {
+        ReadSource::Visible => limit_snapshot_lines(terminal.visible_ansi(), line_limit),
+        ReadSource::Recent => terminal.recent_ansi_snapshot(recent_lines),
+        ReadSource::RecentUnwrapped => terminal.recent_unwrapped_ansi_snapshot(recent_lines),
+        ReadSource::Detection => limit_snapshot_lines(terminal.detection_ansi(), line_limit),
+    };
+    crate::pane::TerminalReadSnapshot {
+        text: without_dim_text(&styled.text, format),
+        truncated: styled.truncated,
+    }
+}
+
+/// The styled snapshot without its faint runs. A text read ends its lines with
+/// LF like the plain read does (the styled snapshot uses CRLF, fork issue
+/// 147); an ANSI read stays as the snapshot has it.
+fn without_dim_text(styled: &str, format: crate::api::schema::ReadFormat) -> String {
+    let ansi = format == crate::api::schema::ReadFormat::Ansi;
+    let text = crate::api::dim::drop_dim_runs(styled, ansi);
+    if ansi {
+        text
+    } else {
+        // The plain read also trims each line's trailing blanks and ends on a
+        // line break; the styled snapshot does not (measured side by side).
+        let mut text = text
+            .replace("\r\n", "\n")
+            .split('\n')
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text
+    }
+}
+
 pub(crate) fn limit_snapshot_lines(
     text: String,
     limit: Option<usize>,
@@ -154,6 +197,35 @@ pub(crate) fn limit_snapshot_lines(
     crate::pane::TerminalReadSnapshot {
         text: lines[lines.len().saturating_sub(limit)..].concat(),
         truncated: lines.len() > limit,
+    }
+}
+
+#[cfg(test)]
+mod strip_dim_text_tests {
+    use super::without_dim_text;
+    use crate::api::schema::ReadFormat;
+
+    #[test]
+    fn a_strip_dim_text_read_ends_lines_with_lf_and_an_ansi_read_is_left_alone() {
+        let styled = "one \x1b[2mgrey\x1b[0m\r\ntwo\r\n";
+        let text = without_dim_text(styled, ReadFormat::Text);
+        assert_eq!(text, "one\ntwo\n");
+        assert!(!text.contains('\r'));
+        // A dropped suggestion leaves no trailing blank, so `❯` equals `❯`.
+        assert_eq!(
+            without_dim_text(
+                "❯ \x1b[2mcontinue\x1b[0m\r\n\r\n  x  \r\n",
+                ReadFormat::Text
+            ),
+            "❯\n\n  x\n"
+        );
+        // The snapshot has no final line break; the plain read does.
+        assert_eq!(without_dim_text("a  \r\nb", ReadFormat::Text), "a\nb\n");
+        assert_eq!(without_dim_text("", ReadFormat::Text), "");
+        assert_eq!(
+            without_dim_text(styled, ReadFormat::Ansi),
+            "one \x1b[2m\x1b[0m\r\ntwo\r\n"
+        );
     }
 }
 

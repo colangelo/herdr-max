@@ -33,6 +33,12 @@
           "type": "integer",
           "default": "40",
           "description": "Virtual terminal height used for layout and newly created panes when no client is attached. Must be greater than zero."
+        },
+        {
+          "key": "server.remember_client_size",
+          "type": "boolean",
+          "default": "true",
+          "description": "Lay out panes at the last attached client's size while no client is attached, and keep that size across restarts. Clients smaller than 80x24 are not remembered. false uses the headless size every time."
         }
       ]
     },
@@ -530,6 +536,24 @@
           "description": "Rename the selected workspace."
         },
         {
+          "key": "keys.toggle_sync_panes",
+          "type": "keybinding",
+          "default": "\"prefix+shift+s\"",
+          "description": "Type into every pane of the current tab at once, or stop."
+        },
+        {
+          "key": "keys.toggle_pin_workspace",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Pin or unpin the selected workspace to the top of the list."
+        },
+        {
+          "key": "keys.toggle_pin_agent",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Pin or unpin the focused pane's agent to the top of the agent panel."
+        },
+        {
           "key": "keys.close_workspace",
           "type": "keybinding",
           "default": "\"prefix+shift+d\"",
@@ -600,6 +624,36 @@
           "type": "keybinding",
           "default": "\"prefix+o\"",
           "description": "Focus the currently visible notification target."
+        },
+        {
+          "key": "keys.open_notification_center",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+n\"",
+          "description": "Open the notification center panel."
+        },
+        {
+          "key": "keys.open_pane_todos",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+t\"",
+          "description": "Open the focused pane's todo panel."
+        },
+        {
+          "key": "keys.add_pane_todo",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the todo editor on a new todo for the focused pane. Unbound by default."
+        },
+        {
+          "key": "keys.open_todo_board",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the session-wide todo board. Unbound by default."
+        },
+        {
+          "key": "keys.display_panes",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Show every pane's number, address, name and size in characters, and the window size, until the next key or for 3 seconds."
         },
         {
           "key": "keys.previous_workspace",
@@ -710,10 +764,52 @@
           "description": "Clear the focused pane screen and scrollback, keeping the current cursor line and its visible soft-wrapped rows. Sends no input to the running program and does nothing on the alternate screen (for example, Vim). Unset by default; for example, clear_pane = \"prefix+ctrl+k\"."
         },
         {
+          "key": "keys.clear_scrollback",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Purge the focused pane's saved scrollback (tmux clear-history). Unset by default."
+        },
+        {
           "key": "keys.copy_mode",
           "type": "keybinding",
           "default": "\"prefix+[\"",
           "description": "Enter keyboard copy mode for the focused pane."
+        },
+        {
+          "key": "keys.copy_mode_page_up",
+          "type": "keybinding",
+          "default": "\"prefix+pageup\"",
+          "description": "Enter copy mode and scroll up one page in the same gesture (tmux copy-mode -u)."
+        },
+        {
+          "key": "keys.copy_mode_half_page_up",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+u\"",
+          "description": "Enter copy mode and scroll up half a page."
+        },
+        {
+          "key": "keys.copy_mode_line_up",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+k\"",
+          "description": "Enter copy mode and scroll the viewport up one line."
+        },
+        {
+          "key": "keys.copy_mode_page_down",
+          "type": "keybinding",
+          "default": "\"prefix+pagedown\"",
+          "description": "Scroll the focused pane down a page."
+        },
+        {
+          "key": "keys.copy_mode_half_page_down",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+d\"",
+          "description": "Scroll the focused pane down half a page."
+        },
+        {
+          "key": "keys.copy_mode_line_down",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+j\"",
+          "description": "Scroll the focused pane down one line."
         },
         {
           "key": "keys.focus_pane_left",
@@ -798,6 +894,48 @@
           "type": "keybinding",
           "default": "\"prefix+x\"",
           "description": "Close the focused pane."
+        },
+        {
+          "key": "keys.respawn_pane",
+          "type": "keybinding",
+          "default": "\"prefix+ctrl+x\"",
+          "description": "Restart the focused pane's process in place."
+        },
+        {
+          "key": "keys.break_pane",
+          "type": "keybinding",
+          "default": "\"prefix+!\"",
+          "description": "Break the focused pane into a new tab."
+        },
+        {
+          "key": "keys.move_pane_to_tab",
+          "type": "keybinding",
+          "default": "\"prefix+m\"",
+          "description": "Move the focused pane to another tab or space via a picker."
+        },
+        {
+          "key": "keys.move_pane_next_tab",
+          "type": "keybinding",
+          "default": "\"prefix+>\"",
+          "description": "Move the focused pane to the next tab without wrapping."
+        },
+        {
+          "key": "keys.move_pane_prev_tab",
+          "type": "keybinding",
+          "default": "\"prefix+<\"",
+          "description": "Move the focused pane to the previous tab without wrapping."
+        },
+        {
+          "key": "keys.balance_panes",
+          "type": "keybinding",
+          "default": "\"prefix+=\"",
+          "description": "Balance all panes in the current tab to equal sizes."
+        },
+        {
+          "key": "keys.next_layout",
+          "type": "keybinding",
+          "default": "\"prefix+space\"",
+          "description": "Cycle the tab through layout presets (even-h -> even-v -> tiled)."
         },
         {
           "key": "keys.zoom",
@@ -994,6 +1132,77 @@
           "description": "Keep split panes visually separated instead of sharing divider borders."
         },
         {
+          "key": "ui.pane_border_active_color",
+          "type": "color",
+          "default": "unset",
+          "description": "Override color for the focused (active) pane border. Same syntax as `accent`. Unset uses the theme accent."
+        },
+        {
+          "key": "ui.pane_border_inactive_color",
+          "type": "color",
+          "default": "unset",
+          "description": "Override color for unfocused (inactive) pane borders. Same syntax as `accent`. Unset uses the theme's muted border color."
+        },
+        {
+          "key": "ui.pane_border_active_style",
+          "type": "enum",
+          "default": "\"light\"",
+          "description": "Box-drawing weight for the focused pane border: \"light\", \"heavy\", or \"double\".",
+          "values": [
+            "light",
+            "heavy",
+            "double"
+          ]
+        },
+        {
+          "key": "ui.pane_title_active_color",
+          "type": "color",
+          "default": "unset",
+          "description": "Override color for the focused pane's border title. Same syntax as `accent`. Unset follows `pane_border_active_color`, then the theme accent."
+        },
+        {
+          "key": "ui.pane_title_inactive_color",
+          "type": "color",
+          "default": "unset",
+          "description": "Override color for unfocused panes' border titles. Same syntax as `accent`. Unset follows `pane_border_inactive_color`, then the theme's muted color."
+        },
+        {
+          "key": "ui.show_pane_todo_indicator",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show a todo indicator at the far right of a split pane's top border, carrying the pane's outstanding todo count."
+        },
+        {
+          "key": "ui.pane_todo_color",
+          "type": "color",
+          "default": "unset",
+          "description": "Override color for the pane todo indicator while todos are outstanding. Same syntax as `accent`. Unset colors it by the highest outstanding priority (high red, normal yellow, low blue); an all-done indicator is always muted."
+        },
+        {
+          "key": "ui.pane_active_bg",
+          "type": "color",
+          "default": "unset",
+          "description": "Default background for the focused pane's cells (tmux `window-active-style` bg). Same syntax as `accent`. Only cells without an explicit app-painted background are tinted. Unset keeps the terminal default."
+        },
+        {
+          "key": "ui.pane_inactive_bg",
+          "type": "color",
+          "default": "unset",
+          "description": "Default background for unfocused panes' cells (tmux `window-style` bg). Same syntax and semantics as `pane_active_bg`."
+        },
+        {
+          "key": "ui.dim_inactive_panes",
+          "type": "boolean",
+          "default": "false",
+          "description": "Dim unfocused pane content in all modes, not only while a herdr mode (prefix/navigate) is active."
+        },
+        {
+          "key": "ui.inactive_pane_dim",
+          "type": "integer",
+          "default": "0",
+          "description": "How far the text colour of an unfocused pane moves toward the colour behind it, in percent, 0..=90 (clamped with a diagnostic; 0 is off). A real colour change that stays lighter than the faint `dim_inactive_panes` and prefix mode use, so the two states stay different. The colour behind is the cell's own background, else `pane_inactive_bg`, else the terminal's. Reloads live."
+        },
+        {
           "key": "ui.show_agent_labels_on_pane_borders",
           "type": "boolean",
           "default": "false",
@@ -1061,6 +1270,28 @@
           ]
         },
         {
+          "key": "ui.status_spinner",
+          "type": "enum",
+          "default": "\"on\"",
+          "description": "Working icon motion in sidebar agent rows: `on` steps a spinner on a slow shared tick while any agent is working; `off` keeps the static working glyph.",
+          "values": [
+            "on",
+            "off"
+          ]
+        },
+        {
+          "key": "ui.status_spinner_ms",
+          "type": "integer",
+          "default": "200",
+          "description": "Milliseconds between working-spinner frames, clamped to 50..=2000."
+        },
+        {
+          "key": "ui.display_panes_ms",
+          "type": "integer",
+          "default": "3000",
+          "description": "Milliseconds the `prefix+i` labels and the resize labels stay up, clamped to 500..=60000."
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",
@@ -1070,7 +1301,7 @@
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"machine\", \"workspace\", \"tab\"], [\"agent\"]]",
-          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon accepts fixed styles only. At most 16 rows and 16 tokens per row."
+          "description": "Default expanded Agent sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, italic, keep, truncate, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon accepts fixed styles only. At most 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.sidebar.agents.rows_by_agent",
@@ -1088,7 +1319,7 @@
           "key": "ui.sidebar.spaces.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
-          "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon and git_status accept fixed styles only. At most 16 rows and 16 tokens per row."
+          "description": "Expanded Space sidebar layout. Entries may be token strings or inline { token, fg, bold, dim, italic, keep, truncate, rules } style tables. Text-valued built-ins and $name metadata tokens accept up to 16 ordered rules using equals, contains, starts_with, gt, or lt; the first match overrides specified styles. Text conditions optionally accept ignore_case for ASCII matching; numeric conditions require full finite numbers. state_icon and git_status accept fixed styles only. At most 16 rows and 16 tokens per row."}, { "key": "ui.show_workspace_numbers", "type": "boolean", "default": "false", "description": "Show the workspace jump symbol (1-9, then a-z; the `switch_workspace` target) on the sidebar branch line." }, { "key": "ui.show_agent_numbers", "type": "boolean", "default": "false", "description": "Show each agent's jump symbol (1-9, then a-z; the `focus_agent` target) on the agent panel status line." }, { "key": "ui.show_host", "type": "boolean", "default": "true", "description": "Show the herdr server's short host name, right-aligned on the sidebar \"SPACES\" header row." }, { "key": "ui.workspace_number_color", "type": "color", "default": "unset", "description": "Color for `show_workspace_numbers` labels. Same syntax as `accent`. Unset uses the theme's muted number color." }, { "key": "ui.agent_number_color", "type": "color", "default": "unset", "description": "Color for `show_agent_numbers` labels. Same syntax as `accent`. Unset uses the theme's muted number color." }, { "key": "ui.workspace_number_prefix", "type": "string", "default": "\"\"", "description": "Leader glyph(s) shown before the workspace jump number when sidebar_style is \"editorial\", e.g. \"\u20bd\" to hint the prefix+N chord. Rendered in workspace_number_color. Empty leaves the bare number." }, { "key": "ui.agent_number_prefix", "type": "string", "default": "\"\"", "description": "Leader glyph(s) shown before the agent jump number when sidebar_style is \"editorial\", e.g. \"\u20bd\u2325\" to hint the prefix+alt+N chord. Rendered in agent_number_color. Empty leaves the bare number." }, { "key": "ui.workspace_sort", "type": "enum", "default": "\"manual\"", "description": "Sidebar workspace list ordering. \"manual\" keeps the user's drag order, \"priority\" bubbles attention-needing workspaces to the top.", "values": [ "manual", "priority" ] }, { "key": "ui.sort_motion", "type": "enum", "default": "\"bubble\"", "description": "How priority-sorted lists (spaces, agents panel) apply reorders. \"bubble\" holds a row in place for `sort_motion_settle_ms`, then moves it one position per `sort_motion_step_ms` so the list never teleports under the cursor; \"instant\" re-sorts immediately.", "values": [ "bubble", "instant" ] }, { "key": "ui.sort_motion_settle_ms", "type": "integer", "default": "2000", "description": "How long a row holds its position after its sort position changes before it starts bubbling, in milliseconds." }, { "key": "ui.sort_motion_step_ms", "type": "integer", "default": "150", "description": "Interval between one-position bubble steps, in milliseconds." }, { "key": "ui.sort_motion_easing", "type": "enum", "default": "\"linear\"", "description": "Step cadence across a reshuffle. \"linear\" spaces every step evenly; \"bubble\" eases in and out \u2014 slow to break away, quickest mid-flight, slowing into the final slot. The curve stretches over the reshuffle, so it only reads as acceleration when rows travel several positions.", "values": [ "linear", "bubble" ] }, { "key": "ui.sidebar_style", "type": "enum", "default": "\"default\"", "description": "Sidebar entry composition. \"default\" keeps the current layout; \"editorial\" right-aligns jump numbers on the name row, renders thin uppercase section headers, and dims inactive meta lines.", "values": [ "default", "editorial" ] }, { "key": "ui.state_colors.working", "type": "color", "default": "unset", "description": "Color for working state glyphs and state text (spinner, working dot). Same syntax as `accent`; unset follows the theme." }, { "key": "ui.state_colors.idle", "type": "color", "default": "unset", "description": "Color for idle (finished and seen) state glyphs and state text. Same syntax as `accent`; unset follows the theme." }, { "key": "ui.state_colors.done", "type": "color", "default": "unset", "description": "Color for done (finished, unseen) state glyphs and state text. Same syntax as `accent`; unset follows the theme." }, { "key": "ui.state_colors.blocked", "type": "color", "default": "unset", "description": "Color for blocked state glyphs and state text. Same syntax as `accent`; unset follows the theme." }, { "key": "ui.state_colors.unknown", "type": "color", "default": "unset", "description": "Color for unknown state glyphs and state text. Same syntax as `accent`; unset follows the theme." }, { "key": "ui.state_colors.background", "type": "color", "default": "unset", "description": "Color for agents parked at their prompt while work they launched keeps running (state glyph and state text). Same syntax as `accent`; unset follows `working`." }, { "key": "ui.state_symbols.working", "type": "string", "default": "unset", "description": "Glyph for the working state icon. Exactly one terminal cell wide; unset keeps the glyph from `ui.status_indicators`." }, { "key": "ui.state_symbols.idle", "type": "string", "default": "unset", "description": "Glyph for the idle (finished and seen) state icon. Exactly one terminal cell wide; unset keeps the glyph from `ui.status_indicators`." }, { "key": "ui.state_symbols.done", "type": "string", "default": "unset", "description": "Glyph for the done (finished, not yet seen) state icon. Exactly one terminal cell wide; unset keeps the glyph from `ui.status_indicators`." }, { "key": "ui.state_symbols.blocked", "type": "string", "default": "unset", "description": "Glyph for the blocked state icon. Exactly one terminal cell wide; unset keeps the glyph from `ui.status_indicators`." }, { "key": "ui.state_symbols.unknown", "type": "string", "default": "unset", "description": "Glyph for the unknown state icon. Exactly one terminal cell wide; unset keeps the glyph from `ui.status_indicators`." }, { "key": "ui.state_symbols.background", "type": "string", "default": "unset", "description": "First frame of the pulse drawn for an agent parked at its prompt while work it launched keeps running. Exactly one terminal cell wide; unset keeps the built-in glyph." }, { "key": "ui.state_symbols.background_alt", "type": "string", "default": "unset", "description": "Second frame of that pulse; the two swap once per four spinner ticks. Exactly one terminal cell wide; unset keeps the built-in glyph." }, { "key": "ui.notification_center_position", "type": "enum", "default": "\"top-right\"", "description": "Notification center position. \"top-right\" puts the indicator in the tab bar with the dropdown under its right edge; \"bottom-right\" floats the indicator in the frame's bottom-right corner with the dropdown opening above it.", "values": [ "top-right", "bottom-right" ] }, { "key": "ui.sidebar_active_border", "type": "enum", "default": "\"off\"", "description": "Highlight pattern for the active space and agent in the sidebar, using `pane_border_active_color` and `pane_border_active_style`. Accepts \"off\", \"above\", \"below\", \"both\", \"left\", \"right\" \u2014 or a bool for backward compatibility (true = \"both\"). \"left\"/\"right\" also apply in the collapsed sidebar, which reserves one extra edge column for the bar; \"above\"/\"below\"/\"both\" draw nothing there (no spacer rows).", "values": [ "off", "above", "below", "both", "left", "right" ] }, { "key": "ui.sidebar_overflow", "type": "enum", "default": "\"both\"", "description": "How the spaces list and the agent panel show rows scrolled out of view. \"rows\" puts a dim summary row at an edge with rows hidden past it (`\u2191 2 pinned \u00b7 3 more` above, `\u2193 5 more \u00b7 \u25cf 1 blocked` below; click it to scroll a page toward it). \"fog\" lifts the background of the two rows next to that edge, the nearest the most, toward the text colour, with a faint tint of the most urgent hidden state; the focused and selected rows never fog. \"both\" does both, \"off\" neither. Reloads live.", "values": [ "both", "rows", "fog", "off" ] }, { "key": "ui.sidebar_fog", "type": "array", "default": "[17, 7]", "description": "How far the `sidebar_overflow` fog lifts the two rows next to a hidden edge, in percent of the way from the background to the text colour, nearest row first. 0 to 2 entries, each clamped to 0..=60 with a diagnostic; 0 (or a missing entry) means no fog on that row. Reloads live." }, { "key": "ui.sidebar_fog_tint", "type": "integer", "default": "70", "description": "How much of the most urgent hidden state's colour (blocked, or finished and unseen) the fog takes, 0..=100, clamped with a diagnostic. 0 keeps the fog neutral. Reloads live." }, { "key": "ui.sidebar_fog_style", "type": "string", "default": "\"lift\"", "description": "What the `sidebar_overflow` fog does: `lift` (a lighter background), `dim` (the text of the fogged rows fades toward the background, by `sidebar_fade`, by recolouring rather than the terminal dim attribute) or `both`. An unknown value is reported and uses `lift`. Reloads live." }, { "key": "ui.sidebar_fade", "type": "array", "default": "[85, 55]", "description": "How far the `dim` and `both` fog styles move the text of the two fogged rows toward the fog base, in percent, nearest row first. 0 to 2 entries, each clamped to 0..=95 with a diagnostic; 0 (or a missing entry) means no fade on that row. Reloads live." 
         },
         {
           "key": "ui.accent",
@@ -1129,7 +1360,47 @@
             "top-left",
             "top-right",
             "bottom-left",
-            "bottom-right"
+            "bottom-right",
+            "center"
+          ]
+        },
+        {
+          "key": "ui.toast.herdr.size",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Toast box size preset: \"auto\" hugs the text, \"medium\" and \"large\" widen the box relative to the anchor area.",
+          "values": [
+            "auto",
+            "medium",
+            "large"
+          ]
+        },
+        {
+          "key": "ui.toast.herdr.needs_attention_seconds",
+          "type": "integer",
+          "default": "8",
+          "description": "How long a needs-attention toast stays visible, in seconds. 0 keeps it visible until clicked or replaced."
+        },
+        {
+          "key": "ui.toast.herdr.finished_seconds",
+          "type": "integer",
+          "default": "5",
+          "description": "How long a finished toast stays visible, in seconds. 0 keeps it visible until clicked or replaced."
+        },
+        {
+          "key": "ui.toast.herdr.update_seconds",
+          "type": "integer",
+          "default": "3",
+          "description": "How long an update-installed toast stays visible, in seconds. 0 keeps it visible until clicked or replaced."
+        },
+        {
+          "key": "ui.toast.herdr.pane_feedback",
+          "type": "enum",
+          "default": "\"corner\"",
+          "description": "Where notes about a pane action (a refused pane move, a failed clear scrollback or todo save) show: \"corner\" uses the position above, \"pane\" centers them in the pane acted on and falls back to the corner when that pane is not in view or is too small.",
+          "values": [
+            "corner",
+            "pane"
           ]
         },
         {
@@ -1142,14 +1413,15 @@
           "key": "ui.toast.clipboard.position",
           "type": "enum",
           "default": "\"bottom-center\"",
-          "description": "Copied-to-clipboard popup position.",
+          "description": "Copied-to-clipboard popup position. \"pane\" centers it in the pane the text came from (a mouse or copy-mode copy, or an app's OSC 52 write) and falls back to bottom-center when that pane is not in view or is too small.",
           "values": [
             "top-left",
             "top-center",
             "top-right",
             "bottom-left",
             "bottom-center",
-            "bottom-right"
+            "bottom-right",
+            "pane"
           ]
         }
       ]
@@ -1441,6 +1713,36 @@
           "type": "integer",
           "default": "100",
           "description": "Milliseconds between automatic agent restores after a server restart. The first agent starts without this delay; 0 disables spacing. Does not delay manual launches or explicit terminal attaches. Restart the server to apply."
+        },
+        {
+          "key": "session.startup_per_agent_delay_ms",
+          "type": "integer",
+          "default": "100",
+          "description": "Milliseconds between automatic agent restores after a server restart. The first agent starts without this delay; 0 disables spacing. Does not delay manual launches or explicit terminal attaches. Restart the server to apply."
+        }
+      ]
+    },
+    {
+      "id": "agents",
+      "title": "Agents",
+      "keys": [
+        {
+          "key": "agents.codex.app_server",
+          "type": "boolean",
+          "default": "false",
+          "description": "Launch and resume Codex panes on the shared Codex app-server daemon: herdr adds `--remote unix://<app_server_socket>` and `-C <pane cwd>` to `agent start --kind codex` and to restored `codex resume`. Arguments you pass yourself win. Unix only."
+        },
+        {
+          "key": "agents.codex.app_server_socket",
+          "type": "string",
+          "default": "\"~/.codex/app-server-control/app-server-control.sock\"",
+          "description": "The Codex app-server daemon's control socket. `~` expands to your home directory."
+        },
+        {
+          "key": "agents.codex.name_threads",
+          "type": "boolean",
+          "default": "false",
+          "description": "Name each Codex pane's daemon thread after the pane's agent name, and rename it when the agent is renamed. Needs `agents.codex.app_server`. Ephemeral threads are skipped."
         }
       ]
     },

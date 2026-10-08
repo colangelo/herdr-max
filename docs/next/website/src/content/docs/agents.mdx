@@ -75,6 +75,8 @@ Some restricted Linux runtimes do not expose a terminal foreground process group
 
 Blocked detection is deliberately strict for screen-manifest agents. Herdr only marks `blocked` when the live bottom-buffer snapshot matches known visible approval, question, or permission UI. If no manifest rule matches for a known agent, Herdr falls back to `idle` and labels that fallback as `default_known_agent_idle_fallback` in explain output.
 
+A blocked pane also carries a reason, which the socket API reports as `blocked_reason` next to `blocked_since` (see [Socket API](/docs/socket-api/)). A manifest rule names it with an optional `blocked_reason` key: `question`, `permission`, `form`, or `other`. The key is valid only on a `state = "blocked"` rule and needs manifest engine 4 or newer; a blocked rule without it, and a blocked state reported by a hook, reads as `other`. The bundled Claude manifest reports an AskUserQuestion dialog as `question`, tool and command approvals as `permission`, and other selection or MCP input forms as `form`.
+
 This means unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. The misclassification affects only the visible status and waits. It should not make Herdr send input or take destructive action.
 
 ## Detection manifests
@@ -89,6 +91,8 @@ Local overrides can replace a remote or bundled manifest from the platform confi
 
 Local overrides always win. Without a local override, Herdr uses the newer compatible manifest between the cached remote manifest and the bundled manifest in the running binary. On debug builds, the same config helper may use a development directory such as `herdr-dev`. Invalid override files are ignored with a warning and Herdr falls back to the cached remote or bundled manifest for that agent.
 
+A bundled manifest that carries this fork's own rules sets `fork = true` and is never replaced by a downloaded one, however new: `herdr server agent-manifests` then reports the bundled manifest as active with the warning "fork-owned bundled manifest wins" and the cached remote version. Today that is the `claude` manifest; the others take the newer remote one.
+
 Remote manifests patch detection rules for agents Herdr already knows how to identify. Adding a completely new agent still requires a Herdr binary update for process detection, labels, and integration behavior.
 
 The running server loads active manifests into memory on startup. Automatic remote manifest updates reload that in-memory cache after new rules are written. Run `herdr server update-agent-manifests` to fetch remote manifest updates immediately and reload the running server. After editing a local override manually, restart Herdr or run `herdr server reload-agent-manifests` to apply the file to the running server.
@@ -100,7 +104,7 @@ herdr agent explain <target>
 herdr agent explain --file screen.txt --agent codex --json
 ```
 
-Live explain is evaluated by the running server, so it reflects the active manifest cache. The explain output shows the agent, final state, whether screen detection was skipped by a full lifecycle authority, manifest source and version, cached remote version, local override shadowing, remote update status, matched rule, visible evidence flags, matcher and region evidence for evaluated rules, skipped-update reason for transcript viewers, and the idle fallback reason when no rule matched.
+Live explain is evaluated by the running server, so it reflects the active manifest cache. The explain output shows the agent, final state, whether screen detection was skipped by a full lifecycle authority, manifest source and version, cached remote version, local override shadowing, remote update status, matched rule, visible evidence flags, the blocked reason, matcher and region evidence for evaluated rules, skipped-update reason for transcript viewers, and the idle fallback reason when no rule matched.
 
 Herdr can run inside tmux as the outer terminal environment. Agent detection does not inspect tmux sessions launched inside a Herdr pane. If a shell framework auto-enters tmux inside Herdr, Herdr sees `tmux` as the pane process instead of the agent behind it.
 
@@ -114,9 +118,15 @@ fi
 
 ## State rollups
 
-The sidebar rolls state upward.
+The sidebar rolls state upward. A row covering several panes — a workspace, a tab, or a collapsed worktree group — shows the state of the most significant agent under it, ranked `blocked`, `working`, `done`, `idle`, `unknown`.
 
-A blocked agent makes its pane, tab, and workspace look blocked. A working agent makes the workspace look active. A done agent stays visible until you view it.
+So a blocked agent makes its pane, tab, and workspace look blocked, and a workspace holding a working agent reads as working even when another agent beside it has already finished. A done agent stays visible until you view it.
+
+A rolled-up row reflects only the panes it covers. Viewing one pane never changes what a row shows for the others.
+
+Sorting is ranked differently, on purpose. Under `agent_panel_sort = "priority"` or `workspace_sort = "priority"`, a finished agent sorts *above* a working one, because it is the one waiting on you. The top of a priority-sorted list is what wants a decision; the state on each row is what its agents are actually doing.
+
+The `agent_status` that `workspace.info` and `tab.info` report follows the same rollup as the sidebar row. Per-pane `agent_status` is that pane's own state, with no rollup.
 
 This is the main Herdr workflow: start several agents, let them work in parallel, and use the sidebar to see which project needs a decision, which one is still running, and which one is ready to review.
 
@@ -130,6 +140,10 @@ herdr agent rename reviewer --clear
 ```
 
 Targets accept a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not accepted.
+
+An agent nobody renamed still gets a name when its terminal title looks like one. Claude Code keeps its title equal to its session name, so a pane titled `jev-astra` answers to `herdr agent read jev-astra`, and `agent list` shows `"name": "jev-astra"` with `"name_source": "title"`. The title counts as a name only when it is one word of up to 64 characters from letters, digits, `.`, `_` and `-`, starting with a letter or digit, and is not an agent kind or a shell name. So "Claude Code", an empty or spinner-only title, and a task sentence give no name. It is dropped when another agent has that name, or when two agents have the same title. The name follows the title: a Claude `/rename` changes it. A name set with `agent rename` always wins, carries no `name_source`, and is never replaced by the title; renaming to a name another agent only had from its title is allowed and takes it over.
+
+Agent notifications use this name: "direction-builder finished" rather than "claude finished". An agent with no name keeps its kind in the title. The context line (space, number, tab) is unchanged, and the title is the same in the herdr toast, the notification center, and terminal and system notifications.
 
 ## Custom status labels
 

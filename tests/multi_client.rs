@@ -64,15 +64,8 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|p| p.into_inner())
 }
 
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
+fn wait_for_socket(path: &Path) {
+    support::wait_for_socket(path);
 }
 
 fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
@@ -90,6 +83,7 @@ fn spawn_server(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config);
     cmd.env("XDG_RUNTIME_DIR", runtime);
@@ -118,6 +112,7 @@ fn spawn_client(config: &Path, runtime: &Path, api: &Path) -> SpawnedHerdr {
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config);

@@ -248,6 +248,26 @@ pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<b
     Ok(false)
 }
 
+/// Best-effort short host name of the machine running this process, e.g.
+/// `mbm5` for a host reported as `mbm5.local`. Returns `None` when the OS
+/// lookup fails or yields an empty name. The short form drops everything from
+/// the first `.` so an FQDN or `.local` suffix never leaks into the UI. Casing
+/// is preserved; callers style it to taste.
+///
+/// Reads the raw name through the platform `hostname()` above, so there is one
+/// OS lookup per target and this layer only owns the truncation policy.
+pub fn short_hostname() -> Option<String> {
+    short_host_label(&hostname()?)
+}
+
+/// Reduce a raw host name to its short display label: the segment before the
+/// first `.`, trimmed. Returns `None` when nothing usable is left. Kept pure
+/// and separate from the OS read so the truncation policy is unit-testable.
+fn short_host_label(raw: &str) -> Option<String> {
+    let short = raw.split('.').next().unwrap_or(raw).trim();
+    (!short.is_empty()).then(|| short.to_string())
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -434,6 +454,70 @@ pub(crate) fn available_pane_shell_from_job(child_pid: u32, job: ForegroundJob) 
         .find(|process| process.pid == child_pid)
         .map(|process| process.name)
         .filter(|name| is_pane_shell_process_name(name))
+}
+
+/// The pane's shell when it is waiting at its prompt, looking through a
+/// recognised PTY wrapper to the shell it hosts.
+///
+/// A wrapper such as `atuin pty-proxy` replaces the pane's shell and re-runs it
+/// inside a PTY of its own, so the pane's own foreground job is only ever the
+/// wrapper. The wrapper stands in for the shell only when it is alone in that
+/// job, and its shell counts only when that shell is itself alone at the front
+/// of the nested PTY: a command or a subshell there means the pane is busy.
+///
+/// `nested` returns the wrapper's child that owns the nested PTY together with
+/// that PTY's foreground job, so the job can be checked against the child.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn available_pane_shell_behind_wrapper(
+    child_pid: u32,
+    job: ForegroundJob,
+    is_wrapper: impl Fn(&ForegroundProcess) -> bool,
+    nested: impl FnOnce(u32) -> Option<(u32, ForegroundJob)>,
+) -> Option<String> {
+    if job.process_group_id != child_pid
+        || job.processes.iter().any(|process| process.pid != child_pid)
+    {
+        return None;
+    }
+    let leader = job
+        .processes
+        .iter()
+        .find(|process| process.pid == child_pid)?;
+    if is_pane_shell_process_name(&leader.name) {
+        return Some(leader.name.clone());
+    }
+    if !is_wrapper(leader) {
+        return None;
+    }
+    let (shell_pid, nested_job) = nested(child_pid)?;
+    available_pane_shell_from_job(shell_pid, nested_job)
+}
+
+/// Pick the child that owns a nested PTY and resolve its foreground job.
+///
+/// This is the shared half of `nested_foreground_job`: "the foreground job of
+/// the PTY this process owns". A process that replaces the pane's shell and
+/// re-runs it inside a PTY of its own hides that shell's job from the pane's
+/// own foreground scan, and this reaches across that boundary.
+///
+/// `children` yields each child of the process paired with the device id of its
+/// controlling terminal, and `foreground_job` is the platform's ordinary
+/// foreground-job lookup. Only a child holding a controlling terminal of its
+/// own, different from the parent's, is followed: a child sharing the parent's
+/// terminal is an ordinary child rather than a nested PTY, and following it
+/// would make this a one-level process-tree walk instead.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+///
+/// Returns the child that owns the nested PTY alongside its foreground job.
+pub(crate) fn nested_foreground_job_from_children(
+    parent_terminal: u64,
+    children: impl IntoIterator<Item = (u32, Option<u64>)>,
+    mut foreground_job: impl FnMut(u32) -> Option<ForegroundJob>,
+) -> Option<(u32, ForegroundJob)> {
+    children
+        .into_iter()
+        .filter(|(_, terminal)| terminal.is_some_and(|terminal| terminal != parent_terminal))
+        .find_map(|(pid, _)| foreground_job(pid).map(|job| (pid, job)))
 }
 
 fn normalized_process_name(name: &str) -> String {
@@ -744,6 +828,35 @@ mod tests {
     }
 
     #[test]
+    fn short_host_label_strips_domain_and_trims() {
+        assert_eq!(short_host_label("mbm5.local").as_deref(), Some("mbm5"));
+        assert_eq!(
+            short_host_label("host.sub.example.com").as_deref(),
+            Some("host")
+        );
+        assert_eq!(short_host_label("  bare  ").as_deref(), Some("bare"));
+        assert_eq!(short_host_label("plain").as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn short_host_label_rejects_empty_or_leading_dot() {
+        assert_eq!(short_host_label(""), None);
+        assert_eq!(short_host_label("   "), None);
+        assert_eq!(short_host_label(".local"), None);
+    }
+
+    #[test]
+    fn hostname_returns_short_dotless_label() {
+        // A real host always has a name; assert the label is short and clean.
+        let host = short_hostname().expect("host name available");
+        assert!(!host.is_empty());
+        assert!(
+            !host.contains('.'),
+            "expected a short host label, got {host:?}"
+        );
+    }
+
+    #[test]
     fn detached_custom_command_preserves_unix_login_shell_flag() {
         let cmd = detached_custom_command_process("echo hello");
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("/bin/sh"));
@@ -805,6 +918,203 @@ mod tests {
         assert_eq!(
             interactive_shell_command(&argv, "pwsh").as_deref(),
             Some("pi '' 'two words' 'a''b' '$HOME' 'semi;colon' '@options'")
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn test_job(process_group_id: u32) -> ForegroundJob {
+        ForegroundJob {
+            process_group_id,
+            processes: vec![ForegroundProcess {
+                pid: process_group_id,
+                name: "claude".into(),
+                argv0: None,
+                argv: None,
+                cmdline: None,
+            }],
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_start_time_is_a_recent_past_instant() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as i64;
+        let started = process_started_at_ms(std::process::id()).expect("own start time");
+        assert!(started <= now, "started {started} after now {now}");
+        assert!(
+            now - started < 24 * 60 * 60 * 1000,
+            "started {started}, now {now}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn lone_job(pid: u32, name: &str) -> ForegroundJob {
+        ForegroundJob {
+            process_group_id: pid,
+            processes: vec![ForegroundProcess {
+                pid,
+                name: name.into(),
+                argv0: None,
+                argv: None,
+                cmdline: None,
+            }],
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn is_test_wrapper(process: &ForegroundProcess) -> bool {
+        process.name == "atuin"
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_accepts_the_pane_shell_at_its_prompt() {
+        assert_eq!(
+            available_pane_shell_behind_wrapper(
+                10,
+                lone_job(10, "zsh"),
+                is_test_wrapper,
+                |_| panic!("a bare shell needs no nested lookup"),
+            )
+            .as_deref(),
+            Some("zsh")
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_looks_through_a_wrapper_to_its_shell_at_the_prompt() {
+        assert_eq!(
+            available_pane_shell_behind_wrapper(
+                10,
+                lone_job(10, "atuin"),
+                is_test_wrapper,
+                |pid| (pid == 10).then(|| (20, lone_job(20, "zsh"))),
+            )
+            .as_deref(),
+            Some("zsh")
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_refuses_a_wrapped_shell_running_a_command() {
+        assert_eq!(
+            available_pane_shell_behind_wrapper(10, lone_job(10, "atuin"), is_test_wrapper, |_| {
+                Some((20, lone_job(30, "vim")))
+            },),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_refuses_a_nested_shell_that_is_not_the_wrappers_own() {
+        // A subshell started from the wrapped shell leads the nested terminal's
+        // foreground job, but it is not the shell the wrapper hosts.
+        assert_eq!(
+            available_pane_shell_behind_wrapper(10, lone_job(10, "atuin"), is_test_wrapper, |_| {
+                Some((20, lone_job(30, "bash")))
+            },),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_refuses_a_wrapper_without_a_nested_terminal() {
+        assert_eq!(
+            available_pane_shell_behind_wrapper(10, lone_job(10, "atuin"), is_test_wrapper, |_| {
+                None
+            }),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_does_not_look_behind_an_unrecognised_program() {
+        assert_eq!(
+            available_pane_shell_behind_wrapper(
+                10,
+                lone_job(10, "vim"),
+                is_test_wrapper,
+                |_| panic!("only a recognised wrapper is looked behind"),
+            ),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn available_shell_refuses_a_wrapper_sharing_its_job_with_another_process() {
+        let mut job = lone_job(10, "atuin");
+        job.processes.push(ForegroundProcess {
+            pid: 11,
+            name: "sleep".into(),
+            argv0: None,
+            argv: None,
+            cmdline: None,
+        });
+        assert_eq!(
+            available_pane_shell_behind_wrapper(10, job, is_test_wrapper, |_| {
+                Some((20, lone_job(20, "zsh")))
+            }),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn nested_lookup_follows_a_child_on_its_own_controlling_terminal() {
+        assert_eq!(
+            nested_foreground_job_from_children(5, [(200, Some(6))], |pid| Some(test_job(pid))),
+            Some((200, test_job(200)))
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn nested_lookup_ignores_a_child_sharing_the_parent_controlling_terminal() {
+        assert_eq!(
+            nested_foreground_job_from_children(5, [(200, Some(5))], |pid| Some(test_job(pid))),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn nested_lookup_ignores_a_child_with_no_controlling_terminal() {
+        assert_eq!(
+            nested_foreground_job_from_children(5, [(200, None)], |pid| Some(test_job(pid))),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn nested_lookup_without_children_yields_nothing() {
+        assert_eq!(
+            nested_foreground_job_from_children(5, [], |pid| Some(test_job(pid))),
+            None
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn nested_lookup_skips_ordinary_children_to_reach_the_nested_pty() {
+        // Order matters: the ordinary child comes first and must not shadow the
+        // nested one behind it.
+        assert_eq!(
+            nested_foreground_job_from_children(
+                5,
+                [(200, Some(5)), (300, None), (400, Some(6))],
+                |pid| Some(test_job(pid))
+            ),
+            Some((400, test_job(400)))
         );
     }
 

@@ -42,6 +42,7 @@ The socket API can:
 - list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
 - list, inspect, read, prompt, wait on, rename, focus, start, and attach agents through CLI helpers
 - report custom agent state from hooks and plugins
+- add, list, edit, remove, and clear per-pane todos
 - subscribe to events and wait for output or state changes
 - install and uninstall built-in integrations
 - stop the server and reload config
@@ -97,16 +98,17 @@ Raw socket method names use dot notation:
 | Area | Methods |
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
-| Notification | `notification.show` |
+| Notification | `notification.show`, `notification.list`, `notification.mark_seen`, `notification.clear` |
+| Todo | `todo.list`, `todo.add`, `todo.update`, `todo.remove`, `todo.clear` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
-| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
-| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
 | Popup | `popup.close` |
-| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -248,6 +250,27 @@ is `type: "layout_split_ratio_set"` with the updated portable `layout`.
 {"id":"req_ratio","method":"layout.set_split_ratio","params":{"tab_id":"w1:t1","path":[],"ratio":0.6}}
 ```
 
+`layout.balance` rebalances every split in a tab, preserving the tree shape and
+each split's orientation. Each split shares its own axis between its two sides
+in proportion to the slots they need: a lone pane beside a stacked pair splits
+50/50, and three side-by-side panes get equal thirds. Omit `tab_id` and `pane_id` to target the
+active tab. The response is `type: "layout_balanced"` with the updated portable
+`layout`.
+
+```json
+{"id":"req_balance","method":"layout.balance","params":{"tab_id":"w1:t1"}}
+```
+
+`layout.set_preset` rebuilds a tab into a tmux-style preset: `even_horizontal`
+(one equal-width row), `even_vertical` (one equal-height column), or `tiled` (a
+near-square grid). Unlike `layout.balance`, this restructures the tree. Omit
+`tab_id` and `pane_id` to target the active tab. The response is
+`type: "layout_preset_applied"` with the updated portable `layout`.
+
+```json
+{"id":"req_preset","method":"layout.set_preset","params":{"tab_id":"w1:t1","preset":"tiled"}}
+```
+
 Process-launching methods accept an `env` object. Herdr applies those key/value
 pairs to the newly launched process only. Herdr also injects `HERDR_SOCKET_PATH`,
 `HERDR_ENV=1`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` into
@@ -306,6 +329,57 @@ Omitting `pane_id` targets the server's active focused pane. The response is
 true when either zoom state or focus changed. Reason values are `single_pane`,
 `already_zoomed`, and `already_unzoomed`.
 
+`tab.sync` turns input sync on or off for a tab, and `pane.sync` puts one pane
+in or out of the synced set. While a tab syncs, keys, text and pastes typed
+into one synced pane go to the others too:
+
+```json
+{"id":"req_sync_on","method":"tab.sync","params":{"tab_id":"w1:1","mode":"on"}}
+{"id":"req_sync_out","method":"pane.sync","params":{"pane_id":"w1:p2","mode":"off"}}
+```
+
+`mode` is `toggle` (the default), `on` or `off`. Omitting `tab_id` or `pane_id`
+targets the tab or focused pane on screen. Both return the updated record
+(`type: "tab_info"` with `sync`, or `type: "pane_info"` with `synced`).
+`tab.sync` `on` makes every pane of the tab a member (keeping an existing group
+as it is). `pane.sync` `on` adds the pane to the group and `off` removes it; it
+fails with `sync_not_active` when the pane's tab is not syncing. Removing the
+last member leaves the tab in sync mode (`sync` still true) for about three
+seconds, then it ends on its own; adding a member in that time cancels it. Sync is runtime
+state: it is not saved, and it is off after a restart or a live handoff.
+
+`pane.clear` purges the target pane's saved scrollback with tmux
+`clear-history` semantics. The visible screen contents and the running process
+are untouched, and the call is a safe no-op when the scrollback is already
+empty:
+
+```json
+{"id":"req_clear","method":"pane.clear","params":{"pane_id":"w1:p1"}}
+```
+
+The response is `type: "ok"`. Unknown pane ids fail with `pane_not_found`.
+
+A pane's `agent_session` carries `restore_argv` when a restore would start an agent there: the exact command, resume command plus the launch flags Herdr kept (Herdr adds `--remote` for Codex panes on its app server). It is absent when the pane would come back as a plain shell, for example when the session on record belongs to an agent that no longer runs there.
+
+`pane.respawn` replaces the target pane's process without removing the pane.
+The pane keeps its pane id, terminal id, position, size, label, and todos; a
+pane launched with a command re-runs that command, and a plain shell pane gets
+a fresh shell. The pane's agent runtime identity is cleared so detection
+re-identifies whatever comes back:
+
+```json
+{"id":"req_respawn","method":"pane.respawn","params":{"pane_id":"w1:p1"}}
+```
+
+The response is `type: "ok"`. A pane that still holds live work — a running
+child process or outstanding todos — fails with `confirmation_required`, the
+message naming the process and the todos, and is left untouched; no dialog opens
+on any client, and repeating the request gets the same answer. With
+`"force": true` the respawn goes ahead and the result is
+`{"type": "respawned", "stopped_process": {"pid": ..., "name": ...}, "open_todos": [...]}`:
+the process it stopped (`null` when none was running) and the open todos the
+pane keeps. Unknown pane ids fail with `pane_not_found`.
+
 The CLI wrapper for `notification.show` is:
 
 ```bash
@@ -327,6 +401,123 @@ The response reports whether anything was shown:
 ```
 
 Possible reasons are `shown`, `disabled`, `rate_limited`, `no_foreground_client`, and `busy`. `disabled` means `ui.toast.delivery = "off"`. `busy` means an existing in-app toast was not replaced. Terminal and system delivery are best-effort through the current foreground attached Herdr client.
+
+The server also keeps a bounded in-memory notification log (the newest 100
+entries) of every in-app toast it showed: agent needs-attention and finished
+notifications, update notifications, and `notification.show` injections. Each
+entry carries a `read` flag, false when posted; the unread count is the
+number of unread entries. The log is in-memory only and empties on a cold
+server restart.
+
+List the log newest-first:
+
+```json
+{"id":"req_nlist","method":"notification.list","params":{}}
+```
+
+```json
+{"id":"req_nlist","result":{"type":"notification_list","notifications":[{"id":3,"kind":"finished","title":"claude finished","context":"api · 2","workspace_id":"w1","pane_id":"w1:p2","posted_at_unix":1789000000,"read":false}],"unread_count":1}}
+```
+
+`kind` is `needs_attention`, `finished`, or `update_installed`. `workspace_id`
+and `pane_id` are present when the notification targets a pane; `pane_id` is
+omitted when the pane no longer resolves.
+
+Mark one entry read by `id`, or every entry read with no `id` (idempotent
+either way):
+
+```json
+{"id":"req_nseen","method":"notification.mark_seen","params":{"id":3}}
+```
+
+```json
+{"id":"req_nseen","result":{"type":"notification_mark_seen","changed":true,"unread_count":0}}
+```
+
+Empty the log entirely (the notification center's "Clear all" action):
+
+```json
+{"id":"req_nclear","method":"notification.clear","params":{}}
+```
+
+```json
+{"id":"req_nclear","result":{"type":"notification_cleared","cleared":3}}
+```
+
+`cleared` is how many entries were removed. Ids stay monotonic across a clear,
+so a later entry never reuses an id.
+
+Activating a notification in the Herdr TUI's notification center marks that
+same entry read, so external consumers and the built-in unread indicator
+always agree. Subscribe to `notification.posted` for a push feed of new
+entries.
+
+Todos are the durable counterpart: each pane owns a list of next steps that
+survives a server restart and a live handoff, exposed as `todo.list`,
+`todo.add`, `todo.update`, `todo.remove`, and `todo.clear`. `herdr todo` is the
+CLI wrapper for the same methods.
+
+List one pane's todos, or every pane's when `pane_id` is omitted:
+
+```json
+{"id":"req_tlist","method":"todo.list","params":{"pane_id":"w1:p2"}}
+```
+
+```json
+{"id":"req_tlist","result":{"type":"todo_list","todos":[{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000100}]}}
+```
+
+Todos come back in display order: outstanding before done, then highest
+priority first (`high`, `normal`, `low`), then creation order. Every entry names
+its own `pane_id`, so a whole-session listing stays unambiguous. `link_pane_id`
+and `link_label` appear only on linked todos. `link_alive` is `false` once the
+linked pane is gone; the label is kept so a dead link can still say what it
+meant, and it never resolves to some other pane.
+
+Add a todo to a pane:
+
+```json
+{"id":"req_tadd","method":"todo.add","params":{"pane_id":"w1:p2","text":"rerun the deploy","priority":"high","link_pane_id":"w1:p1"}}
+```
+
+```json
+{"id":"req_tadd","result":{"type":"todo","todo":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000000}}}
+```
+
+`priority` is optional and defaults to `normal`. `link_pane_id` is optional and
+must resolve to a live pane; the link label is captured from that pane's label,
+its agent name, or the id you passed, in that order.
+Text is trimmed and must not be empty, a todo is capped at 500 characters, and
+a pane is capped at 50 todos. Nothing is silently truncated: over-limit or
+malformed writes fail with `todo_text_empty`, `todo_text_too_long`,
+`todo_limit_reached`, `todo_link_unresolved`, or `pane_not_found`.
+
+Update one todo. Omitted fields keep their current value, and `clear_link`
+removes the link and wins over `link_pane_id`:
+
+```json
+{"id":"req_tupd","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"done":true}}
+{"id":"req_tunlink","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy after review","priority":"normal","clear_link":true}}
+```
+
+The response is `type: "todo"` with the stored record. An id that is not on
+that pane fails with `todo_not_found`, and a rejected update leaves the todo
+untouched.
+
+Remove one todo, or clear a pane's list; `done_only` keeps the outstanding ones:
+
+```json
+{"id":"req_trm","method":"todo.remove","params":{"pane_id":"w1:p2","id":3}}
+{"id":"req_tclear","method":"todo.clear","params":{"pane_id":"w1:p2","done_only":true}}
+```
+
+```json
+{"id":"req_trm","result":{"type":"ok"}}
+{"id":"req_tclear","result":{"type":"todo_cleared","removed":2}}
+```
+
+Every call that changes a pane's list emits `todo.changed` for that pane; a
+clear that removed nothing changes nothing and emits nothing.
 
 Set or clear the foreground client's outer terminal window title:
 
@@ -364,6 +555,8 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
+
+`pane.close`, `tab.close` and `workspace.close` never open a confirmation dialog on a client. A close that would drop open todos returns `confirmation_required`, names the todos in its message, and changes nothing. With `"force": true` the close goes ahead and the result is `{"type": "closed", "closed_todos": [{"pane_id": ..., "todos": [...]}]}`, listing the open todos of every pane it closed (an empty list when there were none). For `pane.close` and `tab.close`, `force` also answers the worktree group confirmation; `workspace.close` still needs `close_group` for a group.
 
 ## Agent view queries
 
@@ -703,6 +896,22 @@ Both methods accept an optional `resume_argv` array with the command that resume
 }
 ```
 
+Both methods accept an optional `resume_argv` array with the command that resumes the reporter's current session after a Herdr server restart. Its first element must be a plain command name, not a path, and no element may contain an apostrophe; invalid values fail with `invalid_resume_argv` and the report is not applied. A custom agent must hold the pane through `pane.report_agent` before it can attach a command; otherwise the request fails with `resume_not_accepted`. Herdr keeps the command only while the same `source` and `agent` hold the pane, and it takes precedence over Herdr's built-in resume command for that agent. Older Herdr versions ignore the field.
+
+```json
+{
+  "id": "req_3",
+  "method": "pane.report_agent_session",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "custom:my-agent",
+    "agent": "my-agent",
+    "agent_session_id": "...",
+    "resume_argv": ["my-agent", "--resume", "..."]
+  }
+}
+```
+
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
 
 ```json
@@ -720,7 +929,33 @@ If no native session reference is stored, the field is omitted.
 
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
 
+`AgentInfo.name` is the agent's explicit name, or, when it has none, its `terminal_title_stripped` when that title is name-like and unique; then `name_source` is `"title"` (it is absent for an explicit name). Agent targets resolve these title names after explicit names. See [Custom agent labels](/docs/agents/#custom-agent-labels) for the rule.
+
+While `agent_status` is `blocked`, `PaneInfo` and `AgentInfo` also expose why and since when:
+
+- `blocked_reason`: `question` (the agent asked a question and waits for the answer), `permission` (it waits for approval to run a tool or command), `form` (a form or selection needs input), or `other`. The reason comes from the detection rule that matched the screen; a blocked state reported by a hook, or matched by a rule that names no reason, is `other`.
+- `blocked_since`: when the pane entered the current blocked spell, in unix milliseconds. It does not move while the pane stays blocked, even if the reason changes.
+
+Both fields are omitted whenever the pane is not blocked. They are runtime facts: after a cold restart or a live handoff, `blocked_since` restarts from the moment the new server sees the pane blocked.
+
+```json
+{
+  "agent_status": "blocked",
+  "blocked_reason": "question",
+  "blocked_since": 1790000000000
+}
+```
+
 `PaneInfo` and `AgentInfo` expose optional `terminal_title` and `terminal_title_stripped` fields. `terminal_title` is the latest OSC 0/2 title after safety normalization. `terminal_title_stripped` removes one recognized leading activity or spinner glyph and following whitespace. These server-owned values are ephemeral across a cold restart and are independent of the metadata `title` and semantic agent state.
+
+Use `pane.report_hint` when a source knows an agent is waiting on the user, to say so exactly where the screen cannot (an Esc'd or half-drawn dialog):
+
+```json
+{"id":"req_hint","method":"pane.report_hint","params":{"pane_id":"w1:p1","source":"herdr:claude-mod","agent":"claude","kind":"question","id":"toolu_01","seq":1790000000000001}}
+{"id":"req_hint_end","method":"pane.report_hint","params":{"pane_id":"w1:p1","source":"herdr:claude-mod","agent":"claude","clear":true,"seq":1790000004000002}}
+```
+
+`kind` is `question` or `permission`, and is required unless `clear` is set. A hint is evidence, not a state: while it is live and the pane's agent is `agent`, the pane reads `blocked` with that reason (`blocked_reason`). A `question` hint is held until it is cleared or ages out, whatever the screen shows. A `permission` hint is raised the same way, but the screen may clear it once it has stopped showing a blocked prompt (about 0.5 s, or 4 s if the screen never showed one), because the end of a permission prompt is not something a source can see. A hint ages out `ttl_ms` after its last report (default 15000, at most 60000), so a source repeats it while the dialog is open (the Claude Code mod every 5 s). `seq` orders a source's reports: one not above the last accepted is ignored, so derive it from the wall clock (microseconds) rather than a counter that restarts. One source owns a terminal's hint at a time. Hints are runtime state: not saved, not carried through a live handoff. The method returns `type: "ok"`; a stale or ignored report is still `ok`.
 
 Use `pane.report_metadata` when a user hook wants to customize presentation without taking over lifecycle state from a Herdr integration.
 
@@ -833,6 +1068,14 @@ Layout event subscriptions include `layout.updated`. The event carries the
 updated `PaneLayoutSnapshot` for one tab. Clients maintaining a cache with
 `session.snapshot` should use this event to refresh the affected layout through
 an authoritative read; a delayed payload may predate their latest snapshot.
+
+Notification subscriptions include `notification.posted`, emitted whenever an
+entry is appended to the server's notification log. The event carries the same
+`notification` record as `notification.list`.
+
+Todo subscriptions include `todo.changed`, emitted once per `todo.*` call that
+changed a pane's list. The event carries only the affected `pane_id`; read the
+list back with `todo.list` so consumers always see one shape.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 

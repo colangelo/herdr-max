@@ -1,7 +1,8 @@
 use crate::api::schema::{
-    EmptyParams, Method, PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams,
-    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneZoomParams, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    EmptyParams, LayoutBalanceParams, LayoutSetPresetParams, Method, PaneCloseParams,
+    PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams, PaneRenameParams,
+    PaneResizeParams, PaneRespawnParams, PaneSplitParams, PaneSwapParams, PaneZoomParams, Request,
+    TabCloseParams, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
     WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
     WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
@@ -38,6 +39,15 @@ pub(super) fn workspace_focus(workspace_id: String) -> std::io::Result<i32> {
     )
 }
 
+pub(super) fn workspace_pin(workspace_id: String, pin: bool) -> std::io::Result<i32> {
+    let target = WorkspaceTarget { workspace_id };
+    if pin {
+        print_method_response("cli:workspace:pin", Method::WorkspacePin(target))
+    } else {
+        print_method_response("cli:workspace:unpin", Method::WorkspaceUnpin(target))
+    }
+}
+
 pub(super) fn workspace_rename(params: WorkspaceRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:workspace:rename", Method::WorkspaceRename(params))
 }
@@ -66,8 +76,11 @@ pub(super) fn tab_rename(params: TabRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:tab:rename", Method::TabRename(params))
 }
 
-pub(super) fn tab_close(tab_id: String) -> std::io::Result<i32> {
-    print_method_response("cli:tab:close", Method::TabClose(TabTarget { tab_id }))
+pub(super) fn tab_close(tab_id: String, force: bool) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:tab:close",
+        Method::TabClose(TabCloseParams { tab_id, force }),
+    )
 }
 
 pub(super) fn worktree_list(params: WorktreeListParams) -> std::io::Result<i32> {
@@ -98,6 +111,14 @@ pub(super) fn pane_zoom(params: PaneZoomParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:zoom", Method::PaneZoom(params))
 }
 
+pub(super) fn pane_sync(params: crate::api::schema::PaneSyncParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:sync", Method::PaneSync(params))
+}
+
+pub(super) fn tab_sync(params: crate::api::schema::TabSyncParams) -> std::io::Result<i32> {
+    print_method_response("cli:tab:sync", Method::TabSync(params))
+}
+
 pub(super) fn pane_rename(params: PaneRenameParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:rename", Method::PaneRename(params))
 }
@@ -118,6 +139,24 @@ pub(super) fn pane_move(params: PaneMoveParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:move", Method::PaneMove(params))
 }
 
-pub(super) fn pane_close(pane_id: String) -> std::io::Result<i32> {
-    print_method_response("cli:pane:close", Method::PaneClose(PaneTarget { pane_id }))
+pub(super) fn pane_close(pane_id: String, force: bool) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:pane:close",
+        Method::PaneClose(PaneCloseParams { pane_id, force }),
+    )
+}
+
+pub(super) fn pane_respawn(pane_id: String, force: bool) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:pane:respawn",
+        Method::PaneRespawn(PaneRespawnParams { pane_id, force }),
+    )
+}
+
+pub(super) fn pane_balance(params: LayoutBalanceParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:balance", Method::LayoutBalance(params))
+}
+
+pub(super) fn pane_layout_set_preset(params: LayoutSetPresetParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:layout-set", Method::LayoutSetPreset(params))
 }

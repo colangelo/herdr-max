@@ -109,11 +109,23 @@ Install the Claude Code hook:
 herdr integration install claude
 ```
 
-The hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen manifest detection.
+The hook reports Claude Code session identity to the local Herdr socket on session start, on each prompt, and at the end of each turn. Claude Code state comes from Herdr's screen manifest detection.
+
+With each report the hook also sends the command that resumes the session as it is now, so a pane restored after a restart, reboot or crash comes back in the same permission mode, on the same model, and at the same effort:
+
+```bash
+claude --resume <session-id> --model <model> --effort <level> --allow-dangerously-skip-permissions --permission-mode <mode>
+```
+
+The hook takes each value from the hook input when Claude sends it, then from the end of the session transcript, then from the flags Claude was started with. A value it cannot find is left out, and Claude uses its settings default. `--allow-dangerously-skip-permissions` is added when the session was in bypass permissions or was started with `--dangerously-skip-permissions`, so a pane that could switch to bypass with shift+tab still can after restore. A mode changed with shift+tab is saved at the next prompt. On Windows the hook does not read Claude's start flags, so bypass is kept only when the session was seen in it.
+
+Claude integration v9 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
+
+Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries for `SessionStart`, `UserPromptSubmit` and `Stop`. Uninstall removes the matching hook entries and deletes the hook script.
 
 Claude integration v10 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
 
-Herdr uses `~/.claude` by default, or `CLAUDE_CONFIG_DIR` when set. The Claude config directory must already exist. Install writes `hooks/herdr-agent-state.sh` and updates `settings.json` with Herdr hook entries. Uninstall removes the matching hook entries and deletes the hook script.
+With Claude Code 2.1.287 or later, install also sets up the `herdr-attention` mod: a small plugin, kept under Herdr's config folder (`<herdr config dir>/claude-mod/`, which is also a one-plugin local marketplace named `herdr-local`) and registered with `claude plugin marketplace add` and `claude plugin install --scope user`. The mod reports to Herdr, through `pane.report_hint`, when Claude shows a question and when it stops, so such a pane reads `blocked` (reason `question`) exactly, including after Esc, where reading the screen can be late. Permission prompts are left to screen detection, which is as fast. Without the mod, or in a directory Claude has not been told to trust (a mod does not load there), Herdr reads the screen as it always did. With an older Claude, or none on `PATH`, install skips the mod with a one-line note and the hooks work as before. Running Claude sessions pick the mod up on `/reload-plugins` or at their next start; installing again after a Herdr upgrade rewrites it in place. Uninstall removes the plugin, the marketplace and the folder. The mod runs inside Claude with your permissions and declares only the calls it makes (timers, environment reads, one helper process, log lines); `claude plugin validate <herdr config dir>/claude-mod/herdr-attention` lists them.
 
 ## Codex
 

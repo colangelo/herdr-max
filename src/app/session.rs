@@ -18,10 +18,24 @@ impl App {
         }
     }
 
+    /// Pull a pending save forward to now. The snapshot is captured on the
+    /// next loop pass and written on the save thread, so the window in which
+    /// a forced shutdown loses the change shrinks from the debounce to the
+    /// write itself.
+    fn schedule_session_save_now(&mut self) {
+        if !self.no_session {
+            self.session_save_deadline = Some(Instant::now());
+        }
+    }
+
     pub(crate) fn sync_session_save_schedule(&mut self) {
         if self.state.session_dirty {
             self.state.session_dirty = false;
-            self.schedule_session_save();
+            if std::mem::take(&mut self.state.session_save_urgent) {
+                self.schedule_session_save_now();
+            } else {
+                self.schedule_session_save();
+            }
         }
     }
 
@@ -41,12 +55,18 @@ impl App {
         if self.state.workspaces.is_empty() {
             SessionSaveJob::Clear
         } else {
-            let snapshot = crate::persist::capture(
+            let mut snapshot = crate::persist::capture(
                 &self.state.workspaces,
                 &self.state.terminals,
                 &self.terminal_runtimes,
                 self.state.active,
                 self.state.selected,
+                self.state.last_client_size,
+            );
+            crate::persist::record_former_public_ids(
+                &mut snapshot,
+                &self.state.workspaces,
+                &self.state.public_pane_id_aliases,
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(

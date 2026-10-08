@@ -125,6 +125,16 @@ pub enum PaneZoomMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct PaneSyncParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// `on` puts the pane in the synced set, `off` takes it out. The pane's
+    /// tab must already sync (`sync_not_active` otherwise).
+    #[serde(default)]
+    pub mode: super::SyncMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PaneLayoutParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
@@ -165,6 +175,40 @@ pub struct LayoutSetSplitRatioParams {
     pub pane_id: Option<String>,
     pub path: Vec<bool>,
     pub ratio: f32,
+}
+
+/// Rebalance every split in a layout so all panes become equally sized. Targets
+/// a layout by `tab_id` or `pane_id`; with neither, the active tab is used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct LayoutBalanceParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+/// A tmux-style layout preset that rebuilds the pane tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutPreset {
+    /// One equal-width row of panes.
+    EvenHorizontal,
+    /// One equal-height column of panes.
+    EvenVertical,
+    /// A near-square grid.
+    Tiled,
+}
+
+/// Rebuild a layout into a preset (`even_horizontal` / `even_vertical` /
+/// `tiled`). Targets a layout by `tab_id` or `pane_id`; with neither, the
+/// active tab is used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutSetPresetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub preset: LayoutPreset,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -353,6 +397,9 @@ pub struct PaneReadParams {
     pub format: ReadFormat,
     #[serde(default = "super::default_true")]
     pub strip_ansi: bool,
+    /// Leave out faint (SGR 2) cells, for every source (fork issue 146).
+    #[serde(default)]
+    pub strip_dim: bool,
     #[serde(skip)]
     #[schemars(skip)]
     pub(crate) intent: super::common::ReadIntent,
@@ -376,6 +423,48 @@ pub struct PaneReportAgentParams {
     /// first element must be a plain command name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_argv: Option<Vec<String>>,
+    /// Command that resumes this agent's session after a Herdr restart. The
+    /// first element must be a plain command name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_argv: Option<Vec<String>>,
+}
+
+/// What an agent waits for, as a source reports it (fork issue 157).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHintKind {
+    /// The agent asked the user a question.
+    Question,
+    /// The agent waits for approval to run a tool or command.
+    Permission,
+}
+
+/// A source's claim that an agent waits on the user, or the end of it. A hint
+/// is evidence for the pane's state, not a state: it raises `blocked` with the
+/// reason and ages out unless it is repeated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportHintParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    /// What the agent waits for. Required unless `clear` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AgentHintKind>,
+    /// The source's own id for the dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// How long the hint lives without being repeated, in milliseconds.
+    /// Default 15000, at most 60000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    /// End the source's hint.
+    #[serde(default)]
+    pub clear: bool,
+    /// Per-source ordering: a report with a `seq` not above the last accepted
+    /// one is ignored. A wall-clock based value survives a restart of the
+    /// source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -471,6 +560,22 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    /// Pinned agents sit at the top of the agent panel in pin order.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub pinned: bool,
+    /// The pane's tab syncs input and this pane is in the synced set.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub synced: bool,
+    /// Why the agent is blocked: `question`, `permission`, `form` or
+    /// `other`. Present only while `agent_status` is `blocked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<crate::detect::BlockedReason>,
+    /// When the pane entered its current blocked spell, in unix
+    /// milliseconds. Present only while `agent_status` is `blocked`; it does
+    /// not move while the pane stays blocked and restarts after a server
+    /// restore or live handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<i64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -478,6 +583,10 @@ pub struct PaneInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
+    /// When input from a user or caller last reached the pane, in unix
+    /// seconds. Absent when none has been recorded; treat that as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_at_unix: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
     pub revision: u64,
@@ -501,6 +610,16 @@ pub struct PaneProcessInfo {
     pub tty: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreground_processes: Vec<PaneProcessInfoProcess>,
+    /// The foreground job of the PTY a recognised wrapper (such as `atuin
+    /// pty-proxy`) runs the pane's shell in. Absent for an unwrapped pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_foreground_process_group_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested_foreground_processes: Vec<PaneProcessInfoProcess>,
+    /// The pane's shell, directly or behind a recognised wrapper, is alone at
+    /// the front of its terminal: nothing is running in the pane.
+    #[serde(default)]
+    pub shell_at_prompt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

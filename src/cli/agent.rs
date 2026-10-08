@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, ErrorBody, ErrorResponse,
+    Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -23,6 +23,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
+        "pin" => agent_pin(&args[1..], true),
+        "unpin" => agent_pin(&args[1..], false),
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
@@ -203,6 +205,9 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     }
     if let Some(reason) = explain["screen_detection_skip_reason"].as_str() {
         println!("screen_detection_skip_reason: {reason}");
+    }
+    if let Some(reason) = explain["blocked_reason"].as_str() {
+        println!("blocked_reason: {reason}");
     }
     if let Some(reason) = explain["skipped_update_reason"].as_str() {
         println!("skipped_update_reason: {reason}");
@@ -436,14 +441,15 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_list(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr agent list");
+    let input_box = args == ["--input-box"];
+    if !args.is_empty() && !input_box {
+        eprintln!("usage: herdr agent list [--input-box]");
         return Ok(2);
     }
 
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:list".into(),
-        method: Method::AgentList(EmptyParams::default()),
+        method: Method::AgentList(crate::api::schema::AgentListParams { input_box }),
     })?)
 }
 
@@ -480,6 +486,26 @@ fn agent_focus(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentFocus(AgentTarget {
             target: target.clone(),
         }),
+    })?)
+}
+
+fn agent_pin(args: &[String], pin: bool) -> std::io::Result<i32> {
+    let verb = if pin { "pin" } else { "unpin" };
+    let [target] = args else {
+        eprintln!("usage: herdr agent {verb} <target>");
+        return Ok(2);
+    };
+    let target = AgentTarget {
+        target: target.clone(),
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: format!("cli:agent:{verb}"),
+        method: if pin {
+            Method::AgentPin(target)
+        } else {
+            Method::AgentUnpin(target)
+        },
     })?)
 }
 
@@ -867,7 +893,7 @@ fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
 
 fn agent_read(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]");
         return Ok(2);
     };
 
@@ -875,6 +901,7 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
     let mut lines = None;
     let mut format = ReadFormat::Text;
     let mut strip_ansi = true;
+    let mut strip_dim = false;
 
     let mut index = 1;
     while index < args.len() {
@@ -909,6 +936,10 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
                 strip_ansi = false;
                 index += 1;
             }
+            "--strip-dim" => {
+                strip_dim = true;
+                index += 1;
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 return Ok(2);
@@ -924,20 +955,23 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
             lines,
             format,
             strip_ansi,
+            strip_dim,
         }),
     })?;
-    super::print_read_response(&response)
+    super::print_read_response(&response, lines)
 }
 
 fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
-    eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent pin <target>");
+    eprintln!("  herdr agent unpin <target>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(

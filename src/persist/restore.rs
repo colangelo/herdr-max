@@ -17,6 +17,7 @@ use crate::workspace::Workspace;
 use super::snapshot::{
     PaneAgentResumeSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot, TabHistorySnapshot,
     WorkspaceHistorySnapshot,
+    PaneTodoSnapshot,
 };
 use super::{
     DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
@@ -33,6 +34,114 @@ struct PaneRestoreStartup<'a> {
     initial_history_ansi: Option<&'a str>,
     duplicate_agent_session: bool,
     reserved_agent_session: Option<String>,
+}
+
+/// A saved todo link waiting for the restore-wide pane id map.
+struct PendingTodoLink {
+    terminal_id: TerminalId,
+    todo_id: u64,
+    old_raw_pane: u32,
+}
+
+/// Cross-pane todo links cannot be resolved while terminals are built: restore
+/// allocates fresh pane ids tab by tab, so a link can target a pane that has not
+/// been remapped yet — or one in another workspace entirely. Links are recorded
+/// here as terminals are restored and resolved in a single pass afterwards,
+/// once every restored tab has contributed its mapping.
+#[derive(Default)]
+struct TodoLinkRestore {
+    id_map: HashMap<u32, PaneId>,
+    pending: Vec<PendingTodoLink>,
+}
+
+impl TodoLinkRestore {
+    /// Publish one tab's remap. Only panes that survived restore are published,
+    /// so a link to a dropped pane stays dead instead of pointing at nothing.
+    fn register_pane_ids(&mut self, id_map: &HashMap<u32, PaneId>, surviving: &HashSet<PaneId>) {
+        for (old_raw, new_id) in id_map {
+            if surviving.contains(new_id) {
+                self.id_map.insert(*old_raw, *new_id);
+            }
+        }
+    }
+
+    fn resolve(self, terminals: &mut HashMap<TerminalId, TerminalState>) {
+        let Self { id_map, pending } = self;
+        for link in pending {
+            let Some(terminal) = terminals.get_mut(&link.terminal_id) else {
+                continue;
+            };
+            let Some(todo) = terminal
+                .todos_mut()
+                .iter_mut()
+                .find(|todo| todo.id == link.todo_id)
+            else {
+                continue;
+            };
+            // The label was installed by `restore_pane_todos` from the
+            // snapshot. `capture_pane_todos` always writes `link_pane` and
+            // `link_label` together or neither, so a pending link always has a
+            // label here. A hand-edited session file carrying a target with no
+            // label drops the link rather than inventing one; the todo itself
+            // is still kept.
+            let label = todo.link.as_ref().map(|link| link.label.clone());
+            todo.link = resolve_todo_link(&id_map, Some(link.old_raw_pane), label);
+        }
+    }
+}
+
+/// Remap a saved todo link onto the restored pane ids. A target missing from
+/// the map becomes a dead link that keeps its label — never a different pane.
+fn resolve_todo_link(
+    id_map: &HashMap<u32, PaneId>,
+    link_pane: Option<u32>,
+    link_label: Option<String>,
+) -> Option<crate::terminal::todo::TodoLink> {
+    let label = link_label?;
+    Some(crate::terminal::todo::TodoLink {
+        pane: link_pane.and_then(|raw| id_map.get(&raw).copied()),
+        label,
+    })
+}
+
+/// Install a pane's saved todos on its restored terminal, with every link left
+/// unresolved and recorded for [`TodoLinkRestore::resolve`].
+fn restore_pane_todos(
+    terminal: &mut TerminalState,
+    saved_todos: &[PaneTodoSnapshot],
+    saved_next_todo_id: u64,
+    todo_links: &mut TodoLinkRestore,
+) {
+    if saved_todos.is_empty() && saved_next_todo_id <= 1 {
+        return;
+    }
+    let todos = saved_todos
+        .iter()
+        .map(|snap| crate::terminal::todo::PaneTodo {
+            id: snap.id,
+            text: snap.text.clone(),
+            done: snap.done,
+            priority: snap.priority,
+            // The label lands now so an unresolvable target degrades to a
+            // labelled dead link rather than losing what the link meant.
+            link: snap
+                .link_label
+                .clone()
+                .map(|label| crate::terminal::todo::TodoLink { pane: None, label }),
+            created_at_unix: snap.created_at_unix,
+            updated_at_unix: snap.updated_at_unix,
+        })
+        .collect();
+    terminal.restore_todos(todos, saved_next_todo_id);
+    for snap in saved_todos {
+        if let Some(old_raw_pane) = snap.link_pane {
+            todo_links.pending.push(PendingTodoLink {
+                terminal_id: terminal.id.clone(),
+                todo_id: snap.id,
+                old_raw_pane,
+            });
+        }
+    }
 }
 
 struct RestoreRuntimeContext<'a> {
@@ -138,14 +247,62 @@ pub fn handoff_pane_aliases(
     aliases
 }
 
-#[cfg(unix)]
+/// The former public ids saved in `snapshot`, each pointing at its pane in
+/// `workspaces` (restored from `snapshot`, so a pane's raw id may have
+/// changed). Spaces are matched by id and panes by their place in the layout,
+/// the way the restore built them. An id that names a live pane now is left
+/// out: a live id means the pane that has it.
+pub fn restored_former_public_ids(
+    snapshot: &SessionSnapshot,
+    workspaces: &[Workspace],
+) -> HashMap<String, PaneId> {
+    let live: HashSet<String> = workspaces
+        .iter()
+        .flat_map(|workspace| {
+            workspace
+                .public_pane_numbers
+                .values()
+                .map(|number| crate::workspace::public_pane_id_for_number(&workspace.id, *number))
+        })
+        .collect();
+    let mut aliases = HashMap::new();
+    for ws_snap in &snapshot.workspaces {
+        let Some(workspace) = workspaces
+            .iter()
+            .find(|workspace| ws_snap.id.as_deref() == Some(workspace.id.as_str()))
+        else {
+            continue;
+        };
+        if ws_snap.tabs.len() != workspace.tabs.len() {
+            continue;
+        }
+        for (tab_snap, tab) in ws_snap.tabs.iter().zip(&workspace.tabs) {
+            let old_ids = collect_snapshot_pane_ids(&tab_snap.layout);
+            let new_ids = tab.layout.pane_ids();
+            if old_ids.len() != new_ids.len() {
+                continue;
+            }
+            for (old_id, new_id) in old_ids.into_iter().zip(new_ids) {
+                let Some(pane) = tab_snap.panes.get(&old_id) else {
+                    continue;
+                };
+                for former in &pane.former_public_ids {
+                    if !live.contains(former) {
+                        aliases.insert(former.clone(), new_id);
+                    }
+                }
+            }
+        }
+    }
+    aliases
+}
+
 fn collect_snapshot_pane_ids(node: &LayoutSnapshot) -> Vec<u32> {
     let mut ids = Vec::new();
     collect_snapshot_ids_inner(node, &mut ids);
     ids
 }
 
-#[cfg(unix)]
 fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
@@ -280,6 +437,7 @@ fn restore_with_imports_and_failures(
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
+    let mut todo_links = TodoLinkRestore::default();
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
@@ -298,6 +456,7 @@ fn restore_with_imports_and_failures(
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
+            &mut todo_links,
         );
         failed_imports += workspace_failed_imports;
         if let Some((workspace, restored_terminals, restored_runtimes)) = restored {
@@ -308,6 +467,9 @@ fn restore_with_imports_and_failures(
             workspaces.push(workspace);
         }
     }
+    // Every tab has published its remap by now, so cross-pane todo links can
+    // finally point at the panes they were saved against.
+    todo_links.resolve(&mut terminals);
     crate::workspace::reserve_workspace_ids(&workspaces);
     ((workspaces, terminals, terminal_runtimes), failed_imports)
 }
@@ -320,6 +482,7 @@ fn restore_workspace(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    todo_links: &mut TodoLinkRestore,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
@@ -375,6 +538,7 @@ fn restore_workspace(
             resumed_agent_sessions,
             imported_panes,
             &public_pane_ids_by_old_raw,
+            todo_links,
         );
         failed_imports += tab_failed_imports;
         let Some((mut tab, restored_terminals, restored_runtimes, reverse_id_map)) = restored_tab
@@ -422,9 +586,11 @@ fn restore_workspace(
             cached_auto_label: crate::workspace::fallback_label_from_cwd(&snap.identity_cwd),
             cached_git_status_key: snap.identity_cwd.clone(),
             cached_git_branch: None,
+            cached_git_detached_head: crate::workspace::git_detached_head(&snap.identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: snap.worktree_space.clone(),
+            pin_order: snap.pin_order,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -499,6 +665,7 @@ fn restore_tab(
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
+    todo_links: &mut TodoLinkRestore,
 ) -> RestoreFailures<Option<RestoredTab>> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
@@ -540,6 +707,12 @@ fn restore_tab(
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
+        let saved_todos: &[PaneTodoSnapshot] =
+            saved_pane.map(|p| p.todos.as_slice()).unwrap_or_default();
+        let saved_next_todo_id = saved_pane.map(|p| p.next_todo_id).unwrap_or(1);
+        let saved_last_input_at_ms = saved_pane.and_then(|p| p.last_input_at_ms);
+        let saved_pin_order = saved_pane.and_then(|p| p.pin_order);
+        let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -552,6 +725,7 @@ fn restore_tab(
                 saved_agent_resume,
                 &cwd,
                 saved_history,
+                saved_pane.and_then(|p| p.agent_launch.as_ref()),
                 &mut agent_restore,
             )
         };
@@ -560,6 +734,14 @@ fn restore_tab(
             .map(reported_resume_from_snapshot);
         let restored_agent_session =
             restored_terminal_agent_session(saved_agent_session, startup.duplicate_agent_session);
+        let restored_agent_launch = saved_pane
+            .and_then(|p| p.agent_launch.as_ref())
+            .filter(|_| !startup.duplicate_agent_session)
+            .map(|launch| crate::agent_resume::AgentLaunchFlags {
+                agent: launch.agent.clone(),
+                flags: launch.flags.clone(),
+                started_at_ms: launch.started_at_ms,
+            });
         let initial_restore_agent = startup
             .restore_plan
             .as_ref()
@@ -584,6 +766,22 @@ fn restore_tab(
         let handoff_agent_state = imported_runtime
             .as_ref()
             .and_then(|imported| imported.state.agent_state.clone());
+        #[cfg(unix)]
+        let imported_agent_seed = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.agent_seed());
+        #[cfg(not(unix))]
+        let imported_agent_seed = None;
+        #[cfg(unix)]
+        let handoff_agent_state = imported_runtime
+            .as_ref()
+            .and_then(|imported| imported.state.hook_agent_state.clone());
+        #[cfg(unix)]
+        let handoff_unseen = imported_runtime
+            .as_ref()
+            .is_some_and(|imported| imported.state.unseen);
+        #[cfg(not(unix))]
+        let handoff_unseen = false;
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -602,9 +800,22 @@ fn restore_tab(
             if let Some(resume) = restored_agent_resume {
                 terminal.restore_reported_resume(resume);
             }
+            if let Some(resume) = restored_agent_resume {
+                terminal.restore_reported_resume(resume);
+            }
+            if let Some(record) = restored_agent_launch.clone() {
+                terminal.restore_agent_launch(record);
+            }
             match (saved_agent_name, saved_managed_agent) {
                 (Some(agent_name), Some(agent)) => {
                     terminal.restore_managed_agent(agent_name, agent)
+                }
+                // A name given to an agent herdr did not launch (`agent
+                // rename`, a rename hook) survives a restore when the pane
+                // resumes the agent session that holds it (fork issue 136).
+                // The session owns the name, so it goes if the session does.
+                (Some(agent_name), None) if saved_agent_session.is_some() => {
+                    terminal.set_agent_name(agent_name)
                 }
                 (Some(_), None) => {}
                 (None, _) => {}
@@ -620,6 +831,9 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
+            restore_pane_todos(&mut terminal, saved_todos, saved_next_todo_id, todo_links);
+            terminal.restored_last_input_at_ms = saved_last_input_at_ms;
+            terminal.pin_order = saved_pin_order;
             panes.insert(*id, PaneState::new(terminal_id));
             terminals.push(terminal);
             continue;
@@ -702,6 +916,12 @@ fn restore_tab(
                 if let Some(resume) = restored_agent_resume {
                     terminal.restore_reported_resume(resume);
                 }
+                if let Some(resume) = restored_agent_resume {
+                    terminal.restore_reported_resume(resume);
+                }
+                if let Some(record) = restored_agent_launch.clone() {
+                    terminal.restore_agent_launch(record);
+                }
                 match (saved_agent_name, saved_managed_agent) {
                     (Some(agent_name), Some(agent)) if was_imported => {
                         terminal.restore_managed_agent(agent_name, agent)
@@ -711,11 +931,13 @@ fn restore_tab(
                     (Some(_), None) => {}
                     (None, _) => {}
                 }
-                if let Some(agent) = initial_restore_agent {
+                let (seed_agent, seed_state) =
+                    restored_agent_seed(imported_agent_seed, initial_restore_agent);
+                if let Some(agent) = seed_agent {
                     let _ = terminal.set_detected_state_with_screen_signals_at(
                         Some(agent),
-                        AgentState::Idle,
-                        false,
+                        seed_state,
+                        seed_state == AgentState::Blocked,
                         false,
                         false,
                         false,
@@ -726,7 +948,17 @@ fn restore_tab(
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                restore_pane_todos(&mut terminal, saved_todos, saved_next_todo_id, todo_links);
+                terminal.restored_last_input_at_ms = saved_last_input_at_ms;
+                terminal.pin_order = saved_pin_order;
+                #[cfg(unix)]
+                if let Some(agent_state) = handoff_agent_state {
+                    terminal.restore_handoff_agent_state(agent_state);
+                }
+                let mut pane = PaneState::new(terminal_id.clone());
+                // Done (finished, not yet looked at) survives a live handoff.
+                pane.seen = !handoff_unseen;
+                panes.insert(*id, pane);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -786,6 +1018,7 @@ fn restore_tab(
         return (None, failed_imports);
     };
     let layout = TileLayout::from_saved(node, focus);
+    todo_links.register_pane_ids(&id_map, &surviving);
 
     (
         Some((
@@ -798,6 +1031,9 @@ fn restore_tab(
                 #[cfg(test)]
                 runtimes: HashMap::new(),
                 zoomed: snap.zoomed,
+                // Sync mode is never saved: a restart or a live handoff turns
+                // it off (fork issue 141).
+                sync: None,
                 events: runtime_context.events.clone(),
                 render_notify: runtime_context.render_notify.clone(),
                 render_dirty: runtime_context.render_dirty.clone(),
@@ -815,19 +1051,29 @@ fn pane_restore_startup<'a>(
     reported_resume: Option<&PaneAgentResumeSnapshot>,
     cwd: &std::path::Path,
     history: Option<&'a PaneHistorySnapshot>,
+    launch: Option<&super::snapshot::PaneAgentLaunchSnapshot>,
     agent_restore: &mut AgentRestoreState<'_>,
 ) -> PaneRestoreStartup<'a> {
     // Native agent resume owns the conversation history. If a pane has a
     // resumable agent session and resume is enabled, do not replay saved pane
     // presentation history into that terminal, even when this pane is a
     // duplicate suppressed by session de-duplication.
+    let launch = launch.map(|launch| crate::agent_resume::AgentLaunchFlags {
+        agent: launch.agent.clone(),
+        flags: launch.flags.clone(),
+        started_at_ms: launch.started_at_ms,
+    });
     let restore_plan = if !agent_restore.enabled {
         None
     } else if let Some(resume) = reported_resume {
         Some(reported_resume_from_snapshot(resume).plan(cwd))
     } else {
-        session.and_then(|session| restore_plan_for_snapshot(session, true))
-    };
+        session.and_then(|session| {
+            restore_plan_for_snapshot(session, true)
+                .map(|plan| with_session_transcript(plan, session, launch.as_ref()))
+        })
+    }
+    .map(|plan| plan.with_launch_flags(launch.as_ref()));
     let has_native_agent_restore = restore_plan.is_some();
     // Reserve before spawning so later panes in the same restore pass cannot
     // launch the same native agent session. The caller rolls this reservation
@@ -878,6 +1124,41 @@ fn reported_resume_from_snapshot(
     }
 }
 
+/// A Claude session with no hook report restores in the model, effort and
+/// mode its transcript shows (fork issue 123).
+fn with_session_transcript(
+    plan: crate::agent_resume::AgentResumePlan,
+    session: &PaneAgentSessionSnapshot,
+    launch: Option<&crate::agent_resume::AgentLaunchFlags>,
+) -> crate::agent_resume::AgentResumePlan {
+    if plan.agent != "claude" {
+        return plan;
+    }
+    // Only what the process that ran at shutdown wrote: an older record is
+    // an earlier run's, maybe in another mode.
+    let since = launch
+        .filter(|launch| launch.agent == "claude")
+        .and_then(|launch| launch.started_at_ms);
+    let transcript = crate::agent_resume::claude_transcript_resume(&session.value, since);
+    plan.with_claude_transcript(transcript)
+}
+
+fn saved_reported_resume(pane: &super::snapshot::PaneSnapshot) -> Option<&PaneAgentResumeSnapshot> {
+    pane.agent_resume
+        .as_ref()
+        .filter(|resume| crate::agent_resume::validate_resume_argv(&resume.argv).is_ok())
+}
+
+fn reported_resume_from_snapshot(
+    resume: &PaneAgentResumeSnapshot,
+) -> crate::agent_resume::ReportedAgentResume {
+    crate::agent_resume::ReportedAgentResume {
+        source: resume.source.clone(),
+        agent: resume.agent.clone(),
+        argv: resume.argv.clone(),
+    }
+}
+
 fn restore_plan_for_snapshot(
     session: &PaneAgentSessionSnapshot,
     resume_agents_on_restore: bool,
@@ -908,6 +1189,21 @@ fn restored_terminal_agent_session(
         return None;
     }
     session.and_then(persisted_agent_session_from_snapshot)
+}
+
+/// Agent identity and state to seed a restored pane's terminal with.
+///
+/// Live-handoff panes carry the pre-restart state in the handoff manifest so a
+/// working agent resurfaces immediately; everything else (cold restore,
+/// relaunched agents, old manifests without the field) keeps the Idle seeding.
+fn restored_agent_seed(
+    imported_agent_seed: Option<(crate::detect::Agent, AgentState)>,
+    initial_restore_agent: Option<crate::detect::Agent>,
+) -> (Option<crate::detect::Agent>, AgentState) {
+    match imported_agent_seed {
+        Some((agent, state)) => (Some(agent), state),
+        None => (initial_restore_agent, AgentState::Idle),
+    }
 }
 
 #[cfg(test)]
@@ -1014,12 +1310,346 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn restored_agent_seed_keeps_idle_seeding_without_manifest_state() {
+        use crate::detect::Agent;
+        // Characterization of pre-change behavior: no manifest seed means the
+        // restore-plan agent (if any) is seeded Idle.
+        assert_eq!(restored_agent_seed(None, None), (None, AgentState::Idle));
+        assert_eq!(
+            restored_agent_seed(None, Some(Agent::Claude)),
+            (Some(Agent::Claude), AgentState::Idle)
+        );
+    }
+
+    #[test]
+    fn seeded_working_state_is_effective_without_any_detection_event() {
+        use crate::detect::Agent;
+        // The sidebar spinner keys off `TerminalState.state == Working`; seeding
+        // alone must produce it, with no detection task publish involved.
+        let mut terminal = crate::terminal::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            std::path::PathBuf::from("/"),
+        );
+        let (seed_agent, seed_state) =
+            restored_agent_seed(Some((Agent::Claude, AgentState::Working)), None);
+        let _ = terminal.set_detected_state_with_screen_signals_at(
+            seed_agent,
+            seed_state,
+            false,
+            false,
+            false,
+            false,
+            std::time::Instant::now(),
+        );
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(terminal.detected_agent, Some(Agent::Claude));
+    }
+
+    #[test]
+    fn restored_agent_seed_prefers_manifest_state() {
+        use crate::detect::Agent;
+        assert_eq!(
+            restored_agent_seed(Some((Agent::Claude, AgentState::Working)), None),
+            (Some(Agent::Claude), AgentState::Working)
+        );
+        assert_eq!(
+            restored_agent_seed(
+                Some((Agent::Codex, AgentState::Blocked)),
+                Some(Agent::Claude)
+            ),
+            (Some(Agent::Codex), AgentState::Blocked)
+        );
+    }
+
     fn test_session_path(name: &str) -> String {
         std::env::current_dir()
             .unwrap()
             .join(name)
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn restore_remaps_a_todo_link_to_the_new_pane_id() {
+        // old raw 10 and 11 are two panes in the saved session; 11 is the link target
+        let id_map: std::collections::HashMap<u32, PaneId> = std::collections::HashMap::from([
+            (10, PaneId::from_raw(101)),
+            (11, PaneId::from_raw(102)),
+        ]);
+
+        let resolved = resolve_todo_link(&id_map, Some(11), Some("infra".to_string()));
+
+        assert_eq!(
+            resolved,
+            Some(crate::terminal::todo::TodoLink {
+                pane: Some(PaneId::from_raw(102)),
+                label: "infra".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn restore_turns_an_unmapped_todo_link_into_a_dead_link() {
+        let id_map: std::collections::HashMap<u32, PaneId> =
+            std::collections::HashMap::from([(10, PaneId::from_raw(101))]);
+
+        let resolved = resolve_todo_link(&id_map, Some(999), Some("gone".to_string()));
+
+        assert_eq!(
+            resolved,
+            Some(crate::terminal::todo::TodoLink {
+                pane: None,
+                label: "gone".into()
+            }),
+            "an unresolvable target must keep its label, not vanish or retarget"
+        );
+    }
+
+    #[test]
+    fn restore_leaves_unlinked_todos_unlinked() {
+        let id_map: std::collections::HashMap<u32, PaneId> = std::collections::HashMap::new();
+
+        assert_eq!(resolve_todo_link(&id_map, None, None), None);
+    }
+
+    #[tokio::test]
+    async fn restore_rehydrates_todos_and_resolves_cross_tab_links() {
+        let cwd = std::env::current_dir().unwrap();
+        // Every field varies from the struct default on purpose: a mapping
+        // regression that hardcoded `done: false` or `priority: default()`
+        // would otherwise pass the whole suite.
+        let todo = |id: u64,
+                    text: &str,
+                    done: bool,
+                    priority: crate::terminal::todo::TodoPriority,
+                    link_pane: Option<u32>,
+                    link_label: Option<&str>| {
+            super::super::snapshot::PaneTodoSnapshot {
+                id,
+                text: text.into(),
+                done,
+                priority,
+                link_pane,
+                link_label: link_label.map(str::to_string),
+                created_at_unix: 100,
+                updated_at_unix: 140 + id,
+            }
+        };
+        let owner_pane = super::super::snapshot::PaneSnapshot {
+            agent_resume: None,
+            agent_launch: None,
+            cwd: cwd.clone(),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+            todos: vec![
+                todo(
+                    4,
+                    "linked",
+                    true,
+                    crate::terminal::todo::TodoPriority::High,
+                    Some(20),
+                    Some("infra"),
+                ),
+                todo(
+                    5,
+                    "dead link",
+                    false,
+                    crate::terminal::todo::TodoPriority::Low,
+                    Some(999),
+                    Some("gone"),
+                ),
+                todo(
+                    6,
+                    "unlinked",
+                    false,
+                    crate::terminal::todo::TodoPriority::Normal,
+                    None,
+                    None,
+                ),
+            ],
+            next_todo_id: 7,
+            last_input_at_ms: Some(1_790_000_000_123),
+            pin_order: None,
+            former_public_ids: Vec::new(),
+        };
+        let target_pane = super::super::snapshot::PaneSnapshot {
+            agent_resume: None,
+            agent_launch: None,
+            cwd: cwd.clone(),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+            todos: Vec::new(),
+            next_todo_id: 1,
+            last_input_at_ms: None,
+            pin_order: None,
+            former_public_ids: Vec::new(),
+        };
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                pin_order: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1, 2],
+                next_public_tab_number: 3,
+                tabs: vec![
+                    TabSnapshot {
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(10),
+                        panes: HashMap::from([(10, owner_pane)]),
+                        zoomed: false,
+                        focused: Some(10),
+                        root_pane: Some(10),
+                    },
+                    TabSnapshot {
+                        custom_name: None,
+                        layout: LayoutSnapshot::Pane(20),
+                        panes: HashMap::from([(20, target_pane)]),
+                        zoomed: false,
+                        focused: Some(20),
+                        root_pane: Some(20),
+                    },
+                ],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            last_client_size: None,
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, mut terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let workspace = workspaces.first().expect("workspace should restore");
+        let owner = workspace.tabs[0].root_pane;
+        let target = workspace.tabs[1].root_pane;
+        let owner_terminal_id = workspace.tabs[0].panes[&owner].attached_terminal_id.clone();
+        let todos = terminals[&owner_terminal_id].todos();
+
+        assert_eq!(todos.len(), 3, "no todo may be dropped by restore");
+        // The last-input time rides along with the pane; a pane saved without
+        // one stays unknown.
+        let target_terminal_id = workspace.tabs[1].panes[&target]
+            .attached_terminal_id
+            .clone();
+        assert_eq!(
+            terminals[&owner_terminal_id].restored_last_input_at_ms,
+            Some(1_790_000_000_123)
+        );
+        assert_eq!(
+            terminals[&target_terminal_id].restored_last_input_at_ms,
+            None
+        );
+
+        // Scenario "Todos survive a restart" names text, done state, priority,
+        // and ids explicitly, so assert every one of them rather than trusting
+        // the field-for-field copy.
+        let restored: Vec<(u64, &str, bool, crate::terminal::todo::TodoPriority, u64)> = todos
+            .iter()
+            .map(|todo| {
+                (
+                    todo.id,
+                    todo.text.as_str(),
+                    todo.done,
+                    todo.priority,
+                    todo.updated_at_unix,
+                )
+            })
+            .collect();
+        assert_eq!(
+            restored,
+            vec![
+                (
+                    4,
+                    "linked",
+                    true,
+                    crate::terminal::todo::TodoPriority::High,
+                    144
+                ),
+                (
+                    5,
+                    "dead link",
+                    false,
+                    crate::terminal::todo::TodoPriority::Low,
+                    145
+                ),
+                (
+                    6,
+                    "unlinked",
+                    false,
+                    crate::terminal::todo::TodoPriority::Normal,
+                    146
+                ),
+            ],
+            "ids, text, done state, priority, and timestamps must survive restore intact"
+        );
+        assert!(
+            todos.iter().all(|todo| todo.created_at_unix == 100),
+            "created_at must survive restore"
+        );
+
+        assert_eq!(
+            todos[0].link,
+            Some(crate::terminal::todo::TodoLink {
+                pane: Some(target),
+                label: "infra".into(),
+            }),
+            "a live link must follow its target to the new pane id"
+        );
+        assert_eq!(
+            todos[1].link,
+            Some(crate::terminal::todo::TodoLink {
+                pane: None,
+                label: "gone".into(),
+            }),
+            "an unresolvable target must keep its label as a dead link"
+        );
+        assert_eq!(todos[2].link, None);
+        assert_eq!(
+            terminals[&workspace.tabs[1].panes[&target].attached_terminal_id]
+                .todos()
+                .len(),
+            0,
+            "todos must not leak onto the linked pane"
+        );
+
+        let next = terminals
+            .get_mut(&owner_terminal_id)
+            .expect("restored terminal should exist")
+            .add_todo(
+                "after restore",
+                crate::terminal::todo::TodoPriority::Normal,
+                None,
+                200,
+            )
+            .unwrap();
+        assert_eq!(next.id, 7, "the saved id counter must survive restore");
     }
 
     #[cfg(windows)]
@@ -1239,6 +1869,7 @@ mod tests {
             None,
             std::path::Path::new("/a"),
             Some(&history),
+            None,
             &mut agent_restore,
         );
 
@@ -1270,6 +1901,7 @@ mod tests {
             None,
             std::path::Path::new("/a"),
             Some(&history),
+            None,
             &mut agent_restore,
         );
         let duplicate = pane_restore_startup(
@@ -1277,6 +1909,7 @@ mod tests {
             None,
             std::path::Path::new("/a"),
             Some(&history),
+            None,
             &mut agent_restore,
         );
 
@@ -1361,6 +1994,161 @@ mod tests {
     }
 
     #[test]
+    fn claude_pane_restores_with_its_reported_mode_model_and_effort() {
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "4f1c2d3e-aaaa-bbbb-cccc-0123456789ab".into(),
+        };
+        let resume = super::super::snapshot::PaneAgentResumeSnapshot {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            argv: [
+                "claude",
+                "--resume",
+                "4f1c2d3e-aaaa-bbbb-cccc-0123456789ab",
+                "--model",
+                "claude-sonnet-5-5",
+                "--effort",
+                "low",
+                "--allow-dangerously-skip-permissions",
+                "--permission-mode",
+                "auto",
+            ]
+            .map(String::from)
+            .into(),
+        };
+        let mut resumed = HashSet::new();
+        let mut agent_restore = AgentRestoreState {
+            enabled: true,
+            resumed_sessions: &mut resumed,
+        };
+        let startup = pane_restore_startup(
+            Some(&session),
+            Some(&resume),
+            std::path::Path::new("/project"),
+            None,
+            None,
+            &mut agent_restore,
+        );
+        let plan = startup.restore_plan.expect("reported resume plan");
+        assert_eq!(plan.agent, "claude");
+        assert_eq!(plan.argv, resume.argv);
+    }
+
+    fn restore_argv(
+        session: Option<&super::super::snapshot::PaneAgentSessionSnapshot>,
+        resume: Option<&PaneAgentResumeSnapshot>,
+        launch: &[(&str, &[&str])],
+    ) -> Vec<String> {
+        let launch =
+            launch.first().map(
+                |(agent, flags)| super::super::snapshot::PaneAgentLaunchSnapshot {
+                    agent: agent.to_string(),
+                    flags: flags.iter().map(|flag| flag.to_string()).collect(),
+                    started_at_ms: None,
+                },
+            );
+        let mut resumed = HashSet::new();
+        let mut agent_restore = AgentRestoreState {
+            enabled: true,
+            resumed_sessions: &mut resumed,
+        };
+        pane_restore_startup(
+            session,
+            resume,
+            std::path::Path::new("/a"),
+            None,
+            launch.as_ref(),
+            &mut agent_restore,
+        )
+        .restore_plan
+        .expect("the pane restores an agent")
+        .argv
+    }
+
+    #[test]
+    fn a_gpt_claude_pane_restores_with_its_settings_file() {
+        let settings = crate::agent_resume::test_settings_file("restore-gpt.json");
+        let resume = PaneAgentResumeSnapshot {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            argv: ["claude", "--resume", "s1", "--model", "gpt-6-astra"]
+                .map(String::from)
+                .to_vec(),
+        };
+        assert_eq!(
+            restore_argv(
+                None,
+                Some(&resume),
+                &[(
+                    "claude",
+                    &["--settings", &settings, "--model", "gpt-6-astra"]
+                )],
+            ),
+            [
+                "claude",
+                "--resume",
+                "s1",
+                "--model",
+                "gpt-6-astra",
+                "--settings",
+                &settings
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hand_started_codex_pane_restores_with_its_flags() {
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "t1".into(),
+        };
+        assert_eq!(
+            restore_argv(
+                Some(&session),
+                None,
+                &[(
+                    "codex",
+                    &["-m", "gpt-6-astra", "-s", "read-only", "-c", "a=1"]
+                )],
+            ),
+            [
+                "codex",
+                "resume",
+                "t1",
+                "-m",
+                "gpt-6-astra",
+                "-s",
+                "read-only",
+                "-c",
+                "a=1"
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_flags_of_another_agent_are_not_added() {
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "t1".into(),
+        };
+        assert_eq!(
+            restore_argv(
+                Some(&session),
+                None,
+                &[("claude", &["--settings", "/u/x.json"])]
+            ),
+            ["codex", "resume", "t1"]
+        );
+    }
+
+    #[test]
     fn pane_restore_startup_keeps_history_without_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:pi".into(),
@@ -1383,6 +2171,7 @@ mod tests {
             None,
             std::path::Path::new("/a"),
             Some(&history),
+            None,
             &mut agent_restore,
         );
 
@@ -1532,6 +2321,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1553,7 +2343,14 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             agent_resume: None,
+                            agent_resume: None,
+                            agent_launch: None,
                             launch_argv: None,
+                            todos: Vec::new(),
+                            next_todo_id: 1,
+                            last_input_at_ms: None,
+                            pin_order: None,
+                            former_public_ids: Vec::new(),
                         },
                     )]),
                     zoomed: false,
@@ -1567,6 +2364,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1604,6 +2402,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hand_started_agents_name_survives_a_restore_that_resumes_its_session() {
+        let cwd = std::env::current_dir().unwrap();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                pin_order: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: Some("cchv-helper".into()),
+                            managed_agent_kind: None,
+                            agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                                source: "herdr:claude".into(),
+                                agent: "claude".into(),
+                                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                                value: "d10d1698-e95a-45a1-a81b-c49313db53a9".into(),
+                            }),
+                            agent_resume: None,
+                            agent_launch: None,
+                            launch_argv: None,
+                            todos: Vec::new(),
+                            next_todo_id: 1,
+                            last_input_at_ms: None,
+                            pin_order: None,
+                            former_public_ids: Vec::new(),
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            last_client_size: None,
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (_workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let terminal = terminals
+            .values()
+            .next()
+            .expect("restored terminal should exist");
+        // Fork issue 136: the herdr name came back with the resumed session.
+        assert_eq!(terminal.agent_name.as_deref(), Some("cchv-helper"));
+        assert_eq!(terminal.managed_agent_kind(), None);
+    }
+
+    #[tokio::test]
     async fn restore_preserves_public_id_mapping_after_pane_id_remap() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
@@ -1613,6 +2490,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::from([(10, 1), (20, 3)]),
                 next_public_pane_number: 4,
                 public_tab_numbers: vec![5],
@@ -1635,7 +2513,14 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                agent_resume: None,
+                                agent_launch: None,
                                 launch_argv: None,
+                                todos: Vec::new(),
+                                next_todo_id: 1,
+                                last_input_at_ms: None,
+                                pin_order: None,
+                                former_public_ids: Vec::new(),
                             },
                         ),
                         (
@@ -1647,7 +2532,14 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                agent_resume: None,
+                                agent_launch: None,
                                 launch_argv: None,
+                                todos: Vec::new(),
+                                next_todo_id: 1,
+                                last_input_at_ms: None,
+                                pin_order: None,
+                                former_public_ids: Vec::new(),
                             },
                         ),
                     ]),
@@ -1662,6 +2554,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1689,6 +2582,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_moved_panes_former_ids_survive_a_restore_that_remaps_pane_ids() {
+        let cwd = std::env::current_dir().unwrap();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                pin_order: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 3)]),
+                next_public_pane_number: 4,
+                public_tab_numbers: vec![5],
+                next_public_tab_number: 6,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(10)),
+                        second: Box::new(LayoutSnapshot::Pane(20)),
+                    },
+                    panes: HashMap::from([
+                        (
+                            10,
+                            super::super::snapshot::PaneSnapshot {
+                                agent_resume: None,
+                                agent_launch: None,
+                                cwd: cwd.clone(),
+                                label: None,
+                                agent_name: None,
+                                managed_agent_kind: None,
+                                agent_session: None,
+                                launch_argv: None,
+                                todos: Vec::new(),
+                                next_todo_id: 1,
+                                last_input_at_ms: None,
+                                pin_order: None,
+                                former_public_ids: Vec::new(),
+                            },
+                        ),
+                        (
+                            20,
+                            super::super::snapshot::PaneSnapshot {
+                                agent_resume: None,
+                                agent_launch: None,
+                                cwd: cwd.clone(),
+                                label: None,
+                                agent_name: None,
+                                managed_agent_kind: None,
+                                agent_session: None,
+                                launch_argv: None,
+                                todos: Vec::new(),
+                                next_todo_id: 1,
+                                last_input_at_ms: None,
+                                pin_order: None,
+                                former_public_ids: vec!["w1:p1".into(), "w9:p7".into()],
+                            },
+                        ),
+                    ]),
+                    zoomed: false,
+                    focused: Some(10),
+                    root_pane: Some(10),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            last_client_size: None,
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        // #111: pane 20 came from space w9 as `w9:p7`, and its shell still
+        // reports under that id. After the restore renumbers the panes, the
+        // id finds the pane that sits where 20 sat. `w1:p1` is the live id of
+        // the other pane, so it is not kept as a former id: a live id wins.
+        let aliases = restored_former_public_ids(&snapshot, &workspaces);
+        let second = workspaces[0].tabs[0].layout.pane_ids()[1];
+        assert_eq!(aliases.get("w9:p7"), Some(&second));
+        assert_eq!(aliases.get("w1:p1"), None);
+        assert_eq!(aliases.len(), 1);
+    }
+
+    #[tokio::test]
     async fn cold_restore_with_gapped_public_tab_numbers_drops_unmanaged_agent_name() {
         let cwd = std::env::current_dir().unwrap();
         let pane_snap = |id: &str| {
@@ -1701,7 +2695,14 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     agent_resume: None,
+                    agent_resume: None,
+                    agent_launch: None,
                     launch_argv: None,
+                    todos: Vec::new(),
+                    next_todo_id: 1,
+                    last_input_at_ms: None,
+                    pin_order: None,
+                    former_public_ids: Vec::new(),
                 },
             )
         };
@@ -1717,7 +2718,14 @@ mod tests {
                 value: "codex-session".into(),
             }),
             agent_resume: None,
+            agent_resume: None,
+            agent_launch: None,
             launch_argv: None,
+            todos: Vec::new(),
+            next_todo_id: 1,
+            last_input_at_ms: None,
+            pin_order: None,
+            former_public_ids: Vec::new(),
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1726,6 +2734,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::from([(10, 1), (11, 2), (12, 3), (13, 4)]),
                 next_public_pane_number: 5,
                 public_tab_numbers: vec![1, 3, 4, 5],
@@ -1771,6 +2780,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1809,6 +2819,7 @@ mod tests {
             custom_name: None,
             identity_cwd: cwd,
             worktree_space: None,
+            pin_order: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -1848,6 +2859,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1869,7 +2881,14 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             agent_resume: None,
+                            agent_resume: None,
+                            agent_launch: None,
                             launch_argv: None,
+                            todos: Vec::new(),
+                            next_todo_id: 1,
+                            last_input_at_ms: None,
+                            pin_order: None,
+                            former_public_ids: Vec::new(),
                         },
                     )]),
                     zoomed: false,
@@ -1883,6 +2902,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2045,6 +3065,214 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn live_handoff_preserves_hook_status_until_next_report() {
+        for state_before_handoff in [AgentState::Working, AgentState::Blocked] {
+            let (snapshot, _) = snapshot_with_saved_pane_history();
+            let (events, _events_rx) = mpsc::channel(32);
+            let (workspaces, mut terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                4096,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events.clone(),
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let terminal = terminals.values_mut().next().unwrap();
+            terminal
+                .set_detected_agent_process_at(crate::detect::Agent::Pi, std::time::Instant::now());
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:pi".into(),
+                agent: "pi".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::path(
+                    "/var/tmp/handoff-test.jsonl",
+                )
+                .unwrap(),
+            });
+            terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                state_before_handoff,
+                None,
+                Some(
+                    crate::agent_resume::AgentSessionRef::path("/var/tmp/handoff-test.jsonl")
+                        .unwrap(),
+                ),
+                Some(1),
+            );
+            assert_eq!(terminal.state, state_before_handoff);
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let snapshot = crate::persist::capture(
+                &workspaces,
+                &terminals,
+                &runtimes,
+                Some(0),
+                0,
+                26,
+                0.5,
+                Default::default(),
+                None,
+            );
+            let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
+            let runtime = runtimes.values().next().unwrap();
+            runtime
+                .pause_handoff_reader(std::time::Duration::from_secs(2))
+                .unwrap();
+            let mut state = runtime.handoff_runtime_state(pane_id.raw());
+            state.hook_agent_state = terminals.values().next().unwrap().handoff_agent_state();
+            let state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+            let mut imports = HashMap::from([(
+                pane_id.raw(),
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: runtime.duplicate_handoff_fd().unwrap(),
+                    state,
+                },
+            )]);
+            let (_, mut restored_terminals, restored_runtimes) = restore_handoff(
+                &snapshot,
+                4096,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                &mut imports,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            drop(restored_runtimes);
+            drop(runtimes);
+            let idle_report = |terminal: &mut crate::terminal::TerminalState| {
+                terminal.set_hook_authority_with_session_ref(
+                    "herdr:pi".into(),
+                    "pi".into(),
+                    AgentState::Idle,
+                    None,
+                    Some(
+                        crate::agent_resume::AgentSessionRef::path("/var/tmp/handoff-test.jsonl")
+                            .unwrap(),
+                    ),
+                    Some(2),
+                );
+            };
+            let terminal = restored_terminals.values_mut().next().unwrap();
+            assert_eq!(terminal.state, state_before_handoff);
+            terminal.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
+            assert_eq!(
+                terminal.state, state_before_handoff,
+                "screen fallback must not erase the transferred hook status"
+            );
+            idle_report(terminal);
+            assert_eq!(
+                terminal.state,
+                AgentState::Idle,
+                "the next hook report must take effect immediately"
+            );
+            // The acquisition flag travels with the status: the restored pane
+            // ends acquisition exactly as the pane that never moved does.
+            let original = terminals.values_mut().next().unwrap();
+            original.set_detected_state(Some(crate::detect::Agent::Pi), AgentState::Idle);
+            idle_report(original);
+            assert_eq!(
+                terminal.finish_agent_process_acquisition(),
+                original.finish_agent_process_acquisition()
+            );
+        }
+    }
+
+    /// Fork issue 128: a pane that was done (finished, not yet looked at)
+    /// before a live handoff is still done after it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_handoff_keeps_an_unseen_pane_unseen() {
+        for unseen in [true, false] {
+            let (snapshot, _) = snapshot_with_saved_pane_history();
+            let (events, _events_rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                4096,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events.clone(),
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let snapshot = crate::persist::capture(
+                &workspaces,
+                &terminals,
+                &runtimes,
+                Some(0),
+                0,
+                26,
+                0.5,
+                Default::default(),
+                None,
+            );
+            let pane_id = workspaces[0].tabs[0].panes.keys().next().copied().unwrap();
+            let runtime = runtimes.values().next().unwrap();
+            runtime
+                .pause_handoff_reader(std::time::Duration::from_secs(2))
+                .unwrap();
+            let mut state = runtime.handoff_runtime_state(pane_id.raw());
+            state.unseen = unseen;
+            let state = serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+            let mut imports = HashMap::from([(
+                pane_id.raw(),
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: runtime.duplicate_handoff_fd().unwrap(),
+                    state,
+                },
+            )]);
+            let (restored_workspaces, _, restored_runtimes) = restore_handoff(
+                &snapshot,
+                4096,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                &mut imports,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            drop(restored_runtimes);
+            drop(runtimes);
+            let pane = restored_workspaces[0].tabs[0]
+                .panes
+                .values()
+                .next()
+                .unwrap();
+            assert_eq!(pane.seen, !unseen, "unseen before the handoff: {unseen}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_seen_pane_writes_no_unseen_field() {
+        let mut state: crate::handoff_runtime::HandoffRuntimeState =
+            serde_json::from_value(serde_json::json!({
+                "pane_id": 1, "child_pid": 2, "rows": 3, "cols": 4,
+                "cell_width_px": 0, "cell_height_px": 0
+            }))
+            .unwrap();
+        assert!(!state.unseen, "manifests from older servers read as seen");
+        assert!(serde_json::to_value(&state)
+            .unwrap()
+            .get("unseen")
+            .is_none());
+        state.unseen = true;
+        assert_eq!(serde_json::to_value(&state).unwrap()["unseen"], true);
+    }
+
+    #[tokio::test]
     async fn restore_seeds_saved_pane_history_into_runtime() {
         let (snapshot, history) = snapshot_with_saved_pane_history();
         let (events, _events_rx) = mpsc::channel(8);
@@ -2175,7 +3403,14 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                agent_resume: None,
+                agent_launch: None,
                 launch_argv: None,
+                todos: Vec::new(),
+                next_todo_id: 1,
+                last_input_at_ms: None,
+                pin_order: None,
+                former_public_ids: Vec::new(),
             },
         );
         let mut history = SessionHistorySnapshot {
@@ -2204,6 +3439,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd,
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -2223,6 +3459,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         };
         history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
         (snapshot, history)

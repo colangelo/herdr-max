@@ -30,8 +30,12 @@ const NONINTERACTIVE_SSH_STDERR_LIMIT: usize = 16 * 1024;
 const BRIDGE_FAILURE_REPORT_TIMEOUT: Duration = Duration::from_secs(1);
 const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
+// Fork-aware update check: point at this fork's own manifests via raw GitHub,
+// not upstream herdr.dev. Keep in sync with `src/update.rs`.
+const STABLE_UPDATE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/latest.json";
+const PREVIEW_UPDATE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
 const REMOTE_OUTPUT_READY_MARKER: &str = "herdr-remote-output-ready:1";
 const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
@@ -451,6 +455,41 @@ impl RemoteExecutable {
     }
 }
 
+/// Canonical remote binary name, and the fallback probed for every client so
+/// an existing managed `herdr` install is still reused by other channels.
+const DEFAULT_REMOTE_BINARY_NAME: &str = "herdr";
+
+/// Binary names to look for on the remote, most specific first: the name this
+/// client was invoked as (so `herdr-beta` finds a remote `herdr-beta` rather
+/// than a same-machine stable `herdr` of a different version), then `herdr`.
+fn remote_binary_names() -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(name) = invoked_binary_name() {
+        names.push(name);
+    }
+    if !names.iter().any(|name| name == DEFAULT_REMOTE_BINARY_NAME) {
+        names.push(DEFAULT_REMOTE_BINARY_NAME.to_string());
+    }
+    names
+}
+
+fn invoked_binary_name() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    sanitized_binary_name(exe.file_name()?.to_str()?)
+}
+
+/// Names are interpolated into remote shell commands, so only plain names are
+/// accepted; anything else falls back to the canonical `herdr`.
+fn sanitized_binary_name(name: &str) -> Option<String> {
+    let plain = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    plain.then(|| name.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RemoteHerdr {
     install_suffix: String,
@@ -470,14 +509,25 @@ impl RemoteHerdr {
         metadata.is_valid().then_some(metadata)
     }
 
+    /// Managed install under the canonical name. Production resolves the name
+    /// from the invoked binary instead (see `prepare_remote_herdr`), so this
+    /// stays a test convenience.
+    #[cfg(test)]
     fn for_platform(platform: RemotePlatform) -> Self {
+        Self::for_platform_named(platform, DEFAULT_REMOTE_BINARY_NAME)
+    }
+
+    /// Managed install for a specific binary name, so a client invoked as
+    /// `herdr-beta` installs and probes `~/.local/bin/herdr-beta` instead of
+    /// colliding with a stable `herdr` on the same machine.
+    fn for_platform_named(platform: RemotePlatform, binary_name: &str) -> Self {
         let (install_suffix, executable) = if platform.is_windows() {
             (
                 String::new(),
-                RemoteExecutable::WindowsPath("herdr.exe".to_string()),
+                RemoteExecutable::WindowsPath(format!("{binary_name}.exe")),
             )
         } else {
-            let install_suffix = ".local/bin/herdr".to_string();
+            let install_suffix = format!(".local/bin/{binary_name}");
             let shell_path = format!("\"$HOME/{install_suffix}\"");
             (install_suffix, RemoteExecutable::PosixShellPath(shell_path))
         };
@@ -1295,7 +1345,13 @@ pub(super) fn prepare_remote_herdr(
     require_surface_interest: bool,
 ) -> io::Result<PreparedRemoteHerdr> {
     let platform = detect_remote_platform(ssh)?.into_setup_platform();
-    let remote_herdr = RemoteHerdr::for_platform(platform);
+    // Install under the name this client was invoked as, so a `herdr-beta`
+    // client never overwrites (or gets confused by) a stable `herdr`.
+    let install_name = remote_binary_names()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_REMOTE_BINARY_NAME.to_string());
+    let remote_herdr = RemoteHerdr::for_platform_named(platform, &install_name);
     let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
     prepare_discovered_remote_herdr(
         ssh,
@@ -1625,13 +1681,17 @@ fn remote_binary_candidates(
     }
 
     let mut candidates = Vec::new();
+    let names = remote_binary_names();
 
-    if let Some(path_candidate) = remote_binary_on_path_any(ssh, remote_herdr)? {
-        push_if_new_remote_binary_candidate(&mut candidates, path_candidate);
+    for name in &names {
+        if let Some(path_candidate) = remote_binary_on_path_any(ssh, remote_herdr, name)? {
+            push_if_new_remote_binary_candidate(&mut candidates, path_candidate);
+        }
     }
 
     let output = ssh.sh_output(&known_remote_binary_candidate_script(
         &remote_herdr.platform,
+        &names,
     ))?;
     if !output.status.success() {
         return Err(command_failed("remote binary discovery failed", &output));
@@ -1674,7 +1734,7 @@ fn push_if_new_remote_binary_candidate(candidates: &mut Vec<RemoteHerdr>, candid
     }
 }
 
-fn known_remote_binary_candidate_script(platform: &RemotePlatform) -> String {
+fn known_remote_binary_candidate_script(platform: &RemotePlatform, names: &[String]) -> String {
     let mut script = String::from(
         r#"home=${HOME:-}
 user=${USER:-}
@@ -1689,37 +1749,44 @@ emit() {
         printf '%s\n' "$path"
     fi
 }
-if [ -n "$home" ]; then
-    emit "$home/.local/bin/herdr"
-fi
 "#,
     );
-    if platform.os == "macos" {
-        script.push_str(
-            r#"    emit "/opt/homebrew/bin/herdr"
-    emit "/usr/local/bin/herdr"
-"#,
-        );
-    } else if platform.os == "linux" {
-        script.push_str(
-            r#"    emit "/home/linuxbrew/.linuxbrew/bin/herdr"
-"#,
-        );
-    }
-    script.push_str(
-        r#"if [ -n "$home" ]; then
-    emit "$home/.local/share/mise/installs/herdr/$version/bin/herdr"
-    emit "$home/.local/share/mise/installs/herdr/$version/herdr"
-    emit "$home/.local/share/mise/installs/github-ogulcancelik-herdr/$version/herdr"
-    emit "$home/.nix-profile/bin/herdr"
+    // Names are sanitized to plain [A-Za-z0-9._-], so interpolating them into
+    // the double-quoted paths below cannot inject shell syntax.
+    for name in names {
+        script.push_str(&format!(
+            r#"if [ -n "$home" ]; then
+    emit "$home/.local/bin/{name}"
+fi
+"#
+        ));
+        if platform.os == "macos" {
+            script.push_str(&format!(
+                r#"    emit "/opt/homebrew/bin/{name}"
+    emit "/usr/local/bin/{name}"
+"#
+            ));
+        } else if platform.os == "linux" {
+            script.push_str(&format!(
+                r#"    emit "/home/linuxbrew/.linuxbrew/bin/{name}"
+"#
+            ));
+        }
+        script.push_str(&format!(
+            r#"if [ -n "$home" ]; then
+    emit "$home/.local/share/mise/installs/{name}/$version/bin/{name}"
+    emit "$home/.local/share/mise/installs/{name}/$version/{name}"
+    emit "$home/.local/share/mise/installs/github-ogulcancelik-{name}/$version/{name}"
+    emit "$home/.nix-profile/bin/{name}"
 fi
 if [ -n "$user" ]; then
-    emit "/etc/profiles/per-user/$user/bin/herdr"
+    emit "/etc/profiles/per-user/$user/bin/{name}"
 fi
-emit "/nix/var/nix/profiles/default/bin/herdr"
-emit "/run/current-system/sw/bin/herdr"
-"#,
-    );
+emit "/nix/var/nix/profiles/default/bin/{name}"
+emit "/run/current-system/sw/bin/{name}"
+"#
+        ));
+    }
 
     script
 }
@@ -1727,8 +1794,9 @@ emit "/run/current-system/sw/bin/herdr"
 fn remote_binary_on_path_any(
     ssh: &RemoteSsh,
     remote_herdr: &RemoteHerdr,
+    binary_name: &str,
 ) -> io::Result<Option<RemoteHerdr>> {
-    let output = ssh.posix_user_shell_output("command -v herdr")?;
+    let output = ssh.posix_user_shell_output(&format!("command -v {binary_name}"))?;
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(candidate) = remote_herdr_from_path_discovery(remote_herdr, &stdout) {
@@ -1738,7 +1806,7 @@ fn remote_binary_on_path_any(
 
     // Non-POSIX login shells such as xonsh reject `command -v`; retry through
     // /bin/sh while retaining the login-shell probe for shell-initialized PATHs.
-    let output = ssh.sh_output("command -v herdr\n")?;
+    let output = ssh.sh_output(&format!("command -v {binary_name}\n"))?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -5115,10 +5183,13 @@ function Get-Process {
 
     #[test]
     fn known_remote_binary_candidate_script_includes_mise_and_nix_paths() {
-        let script = known_remote_binary_candidate_script(&RemotePlatform {
-            os: "linux",
-            arch: "x86_64",
-        });
+        let script = known_remote_binary_candidate_script(
+            &RemotePlatform {
+                os: "linux",
+                arch: "x86_64",
+            },
+            &["herdr".to_string()],
+        );
 
         assert!(script.contains("emit \"$home/.local/bin/herdr\""));
         assert!(!script.contains("mise/shims/herdr"));
@@ -5139,14 +5210,80 @@ function Get-Process {
 
     #[test]
     fn known_remote_binary_candidate_script_includes_macos_homebrew_paths() {
-        let script = known_remote_binary_candidate_script(&RemotePlatform {
-            os: "macos",
-            arch: "aarch64",
-        });
+        let script = known_remote_binary_candidate_script(
+            &RemotePlatform {
+                os: "macos",
+                arch: "aarch64",
+            },
+            &["herdr".to_string()],
+        );
 
         assert!(script.contains("emit \"/opt/homebrew/bin/herdr\""));
         assert!(script.contains("emit \"/usr/local/bin/herdr\""));
         assert!(!script.contains("emit \"/home/linuxbrew/.linuxbrew/bin/herdr\""));
+    }
+
+    #[test]
+    fn known_remote_binary_candidate_script_probes_every_requested_name() {
+        // A `herdr-beta` client must find a remote `herdr-beta` (the beta
+        // install) as well as a managed `herdr`, or it reinstalls over a
+        // perfectly current remote — see AC-forks/herdr#22.
+        let script = known_remote_binary_candidate_script(
+            &RemotePlatform {
+                os: "macos",
+                arch: "aarch64",
+            },
+            &["herdr-beta".to_string(), "herdr".to_string()],
+        );
+
+        assert!(script.contains("emit \"/opt/homebrew/bin/herdr-beta\""));
+        assert!(script.contains("emit \"$home/.local/bin/herdr-beta\""));
+        assert!(script.contains("emit \"/opt/homebrew/bin/herdr\""));
+        assert!(script.contains("emit \"$home/.local/bin/herdr\""));
+    }
+
+    #[test]
+    fn remote_binary_names_always_include_canonical_herdr() {
+        let names = remote_binary_names();
+        assert!(
+            names.iter().any(|name| name == "herdr"),
+            "canonical name must stay probed: {names:?}"
+        );
+        assert_eq!(
+            names.len(),
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            "names must be deduped: {names:?}"
+        );
+    }
+
+    #[test]
+    fn sanitized_binary_name_rejects_shell_metacharacters() {
+        assert_eq!(sanitized_binary_name("herdr"), Some("herdr".to_string()));
+        assert_eq!(
+            sanitized_binary_name("herdr-beta"),
+            Some("herdr-beta".to_string())
+        );
+        assert_eq!(sanitized_binary_name("herdr; rm -rf /"), None);
+        assert_eq!(sanitized_binary_name("herdr$(id)"), None);
+        assert_eq!(sanitized_binary_name("herdr\"x"), None);
+        assert_eq!(sanitized_binary_name(""), None);
+        assert_eq!(sanitized_binary_name("-herdr"), None);
+    }
+
+    #[test]
+    fn managed_install_path_follows_the_binary_name() {
+        let platform = || RemotePlatform {
+            os: "macos",
+            arch: "aarch64",
+        };
+        assert_eq!(
+            RemoteHerdr::for_platform_named(platform(), "herdr-beta").install_suffix,
+            ".local/bin/herdr-beta"
+        );
+        assert_eq!(
+            RemoteHerdr::for_platform(platform()).install_suffix,
+            ".local/bin/herdr"
+        );
     }
 
     #[test]

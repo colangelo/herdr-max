@@ -38,6 +38,7 @@ mod spec;
 mod status;
 mod tab;
 mod target;
+mod todo;
 mod workspace;
 mod worktree;
 
@@ -83,19 +84,42 @@ pub enum CommandOutcome {
     NotCli,
 }
 
-pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Result<i32> {
+pub(super) fn print_read_response(
+    response: &serde_json::Value,
+    requested_lines: Option<u32>,
+) -> std::io::Result<i32> {
     if response.get("error").is_some() {
         eprintln!("{response}");
         return Ok(1);
     }
     if let Some(text) = response["result"]["read"]["text"].as_str() {
         print!("{text}");
+        if let Some(note) = short_read_note(
+            text,
+            response["result"]["read"]["truncated"].as_bool() == Some(true),
+            requested_lines,
+        ) {
+            eprintln!("{note}");
+        }
     }
     Ok(0)
 }
 
 pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
     target::maybe_run(args)
+}
+
+/// A read that came back shorter than asked and truncated stopped before the
+/// top of the history: say so on stderr, so a caller that asked for N lines
+/// does not take fewer for everything there is. stdout is left as it was.
+fn short_read_note(text: &str, truncated: bool, requested_lines: Option<u32>) -> Option<String> {
+    let requested = usize::try_from(requested_lines?).ok()?;
+    let returned = text.lines().count();
+    (truncated && returned < requested).then(|| {
+        format!(
+            "herdr: partial read: {returned} of {requested} requested lines; the rest of the history could not be read this time, so retry for more"
+        )
+    })
 }
 
 pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
@@ -124,6 +148,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
+        "todo" => todo::run_todo_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
@@ -299,7 +324,9 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    let diagnostics = crate::config::Config::load().diagnostics;
+    let loaded = crate::config::Config::load();
+    let diagnostics = loaded.diagnostics;
+    let warnings = loaded.config.keybind_warnings();
     if diagnostics.is_empty() {
         println!("config: ok");
     } else {
@@ -307,6 +334,11 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
         for diagnostic in &diagnostics {
             println!("{diagnostic}");
         }
+    }
+    // Warnings describe a configuration that applies as written but is
+    // probably not what was meant; they do not fail the check.
+    for warning in &warnings {
+        println!("warning: {warning}");
     }
 
     Ok(i32::from(!diagnostics.is_empty()))
@@ -861,8 +893,23 @@ pub(super) fn normalize_workspace_id(value: &str) -> String {
     value.to_string()
 }
 
+/// The sync mode a `--toggle` / `--on` / `--off` flag names (without dashes).
+pub(super) fn sync_mode(name: &str) -> crate::api::schema::SyncMode {
+    match name {
+        "on" => crate::api::schema::SyncMode::On,
+        "off" => crate::api::schema::SyncMode::Off,
+        _ => crate::api::schema::SyncMode::Toggle,
+    }
+}
+
 pub(super) fn normalize_tab_id(value: &str) -> String {
     value.to_string()
+}
+
+/// Splits `--force` out of a close command's arguments.
+pub(super) fn take_force_flag(args: &[String]) -> (Vec<&String>, bool) {
+    let force = args.iter().any(|arg| arg == "--force");
+    (args.iter().filter(|arg| *arg != "--force").collect(), force)
 }
 
 pub(super) fn normalize_pane_id(value: &str) -> String {
@@ -1059,6 +1106,22 @@ fn _print_json<T: Serialize>(value: &T) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn close_commands_take_force_anywhere() {
+        let args = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        };
+        let with = args(&["w1:p2", "--force"]);
+        assert_eq!(super::take_force_flag(&with), (vec![&with[0]], true));
+        let before = args(&["--force", "w1:p2"]);
+        assert_eq!(super::take_force_flag(&before), (vec![&before[1]], true));
+        let without = args(&["w1:p2"]);
+        assert_eq!(super::take_force_flag(&without), (vec![&without[0]], false));
+    }
+
+    #[test]
     fn parses_channel_set_argument() {
         assert_eq!(
             super::parse_channel_set_arg(&["preview".to_string()]),
@@ -1162,6 +1225,28 @@ mod tests {
             &client,
         );
         assert!(!super::server_not_running::was_reported(&mapped));
+    }
+
+    #[test]
+    fn short_truncated_read_is_reported_on_stderr_only_when_short() {
+        let text = "a\nb\nc\n";
+        let note = super::short_read_note(text, true, Some(400)).expect("short truncated read");
+        assert!(note.contains("3 of 400"), "{note}");
+        assert_eq!(
+            super::short_read_note(text, false, Some(400)),
+            None,
+            "complete history"
+        );
+        assert_eq!(
+            super::short_read_note(text, true, Some(3)),
+            None,
+            "got what was asked"
+        );
+        assert_eq!(
+            super::short_read_note(text, true, None),
+            None,
+            "no line count asked"
+        );
     }
 
     #[test]

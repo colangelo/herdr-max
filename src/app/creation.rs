@@ -1,9 +1,6 @@
 use std::path::PathBuf;
 
-use super::{
-    api_helpers::{pane_agent_status, tab_attention_priority},
-    App, Mode,
-};
+use super::{api_helpers::pane_agent_status, App, Mode};
 use crate::api::schema::{EventData, EventEnvelope, EventKind};
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
 
@@ -206,17 +203,7 @@ impl App {
     ) -> Option<crate::api::schema::TabInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
-        let (agg_state, seen) = tab
-            .panes
-            .values()
-            .filter_map(|pane| {
-                self.state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .map(|terminal| (terminal.state, pane.seen))
-            })
-            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
-            .unwrap_or((crate::detect::AgentState::Unknown, true));
+        let (agg_state, seen) = tab.display_state(&self.state.terminals);
         Some(crate::api::schema::TabInfo {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             workspace_id: self.public_workspace_id(ws_idx),
@@ -225,6 +212,7 @@ impl App {
             focused: self.state.active == Some(ws_idx) && ws.active_tab == tab_idx,
             pane_count: tab.panes.len(),
             agent_status: pane_agent_status(agg_state, seen),
+            sync: tab.is_syncing(),
         })
     }
 
@@ -304,6 +292,50 @@ impl App {
         self.pane_info(ws_idx, tab.root_pane)
     }
 
+    /// Sizes for splitting `target`: the new pane's, and the share `target`
+    /// keeps when it has to be resized now. With a client attached the next
+    /// frame lays both out, so the usual estimate does. With none, nothing
+    /// will, so the split divides the target's real size instead.
+    pub(super) fn split_sizes(
+        &self,
+        ws_idx: usize,
+        target: crate::layout::PaneId,
+        direction: ratatui::layout::Direction,
+        ratio: f32,
+    ) -> ((u16, u16), Option<(u16, u16)>) {
+        let estimate = self.state.estimate_pane_size();
+        if self.state.detached_pane_size.is_none() {
+            return (estimate, None);
+        }
+        let Some(size) = self
+            .state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, target)
+            .map(|runtime| runtime.current_size())
+        else {
+            return (estimate, None);
+        };
+        let (kept, new) = split_shares(size, direction, ratio);
+        (new, Some(kept))
+    }
+
+    /// Shrink a split's target to the share it kept (see `split_sizes`).
+    pub(super) fn resize_split_target(
+        &self,
+        ws_idx: usize,
+        target: crate::layout::PaneId,
+        kept: Option<(u16, u16)>,
+    ) {
+        let Some((rows, cols)) = kept else {
+            return;
+        };
+        if let Some(runtime) =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, target)
+        {
+            runtime.resize(rows, cols, 0, 0);
+        }
+    }
+
     pub(super) fn pane_info(
         &self,
         ws_idx: usize,
@@ -357,9 +389,25 @@ impl App {
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status(terminal.state, pane.seen),
+            pinned: terminal.pin_order.is_some(),
+            synced: ws.tabs[tab_idx].pane_synced(pane_id),
+            blocked_reason: terminal.blocked_reason(),
+            blocked_since: terminal.blocked_since_unix_ms(),
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
-            agent_session: terminal_agent_session_info(terminal),
+            agent_session: terminal_agent_session_info(
+                terminal,
+                (terminal.effective_agent_label() == Some("claude"))
+                    .then(|| self.terminal_runtimes.get(&terminal.id))
+                    .flatten()
+                    .map(|runtime| runtime.detection_text())
+                    .unwrap_or_default(),
+            ),
+            last_input_at_unix: crate::terminal::pane_last_input_at_ms(
+                terminal,
+                self.terminal_runtimes.get(&terminal.id),
+            )
+            .map(|stamp| stamp / 1000),
             scroll: None,
             revision: terminal.revision,
         })
@@ -387,7 +435,7 @@ impl App {
 
     pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
-        let (agg_state, seen) = ws.aggregate_state(&self.state.terminals);
+        let (agg_state, seen) = ws.display_state(&self.state.terminals);
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
@@ -409,13 +457,20 @@ impl App {
                     checkout_path: space.checkout_path.display().to_string(),
                     is_linked_worktree: space.is_linked_worktree,
                 }),
+            pinned: ws.pin_order.is_some(),
         }
     }
 }
 
+/// `footer` is the bottom of a Claude pane's buffer (fork issue 144): the
+/// model and effort it shows replace an older record's in the restore command.
 fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
+    footer: String,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
+    let restore_argv = terminal
+        .restore_plan_preview()
+        .map(|plan| crate::agent_resume::argv_with_live_footer(&plan.agent, &plan.argv, &footer));
     if let Some(authority) = terminal.hook_authority.as_ref() {
         if let Some(session_ref) = authority.session_ref.as_ref() {
             return Some(crate::api::schema::AgentSessionInfo {
@@ -423,6 +478,7 @@ fn terminal_agent_session_info(
                 agent: authority.agent_label.clone(),
                 kind: session_ref.kind,
                 value: session_ref.value.clone(),
+                restore_argv,
             });
         }
     }
@@ -435,5 +491,88 @@ fn terminal_agent_session_info(
             agent: session.agent.clone(),
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
+            restore_argv,
         })
+}
+
+/// Split a pane's size between the part it keeps and the new pane, the way the
+/// layout splits its slot: `ratio` is the kept (left or top) share.
+pub(crate) fn split_shares(
+    (rows, cols): (u16, u16),
+    direction: ratatui::layout::Direction,
+    ratio: f32,
+) -> ((u16, u16), (u16, u16)) {
+    let share = |total: u16| {
+        let kept = (f32::from(total) * ratio.clamp(0.0, 1.0)).round() as u16;
+        let kept = kept.clamp(1, total.saturating_sub(1).max(1));
+        (kept, total.saturating_sub(kept).max(1))
+    };
+    match direction {
+        ratatui::layout::Direction::Vertical => {
+            let (kept, new) = share(rows);
+            ((kept, cols), (new, cols))
+        }
+        ratatui::layout::Direction::Horizontal => {
+            let (kept, new) = share(cols);
+            ((rows, kept), (rows, new))
+        }
+    }
+}
+
+#[cfg(test)]
+mod split_share_tests {
+    use super::split_shares;
+    use ratatui::layout::Direction;
+
+    #[test]
+    fn a_down_split_divides_rows_by_the_ratio() {
+        assert_eq!(
+            split_shares((39, 91), Direction::Vertical, 0.65),
+            ((25, 91), (14, 91))
+        );
+    }
+
+    #[test]
+    fn a_right_split_divides_columns() {
+        assert_eq!(
+            split_shares((40, 120), Direction::Horizontal, 0.3),
+            ((40, 36), (40, 84))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_split_while_detached_divides_the_target_at_a_remembered_size() {
+        let config = crate::config::Config::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app =
+            crate::app::App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.last_client_size = Some((310, 56));
+        app.state.detached_pane_size = Some(app.state.no_client_size(None));
+        let mut workspace = crate::workspace::Workspace::test_new("detached");
+        let target = workspace.tabs[0].root_pane;
+        workspace.insert_test_runtime(
+            target,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(120, 40, b""),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+
+        assert_eq!(
+            app.split_sizes(0, target, Direction::Vertical, 0.65),
+            ((14, 120), Some((26, 120))),
+            "the target's real size, not the remembered one"
+        );
+    }
+
+    #[test]
+    fn neither_side_collapses_to_nothing() {
+        assert_eq!(
+            split_shares((10, 80), Direction::Vertical, 0.0),
+            ((1, 80), (9, 80))
+        );
+        assert_eq!(
+            split_shares((10, 80), Direction::Vertical, 1.0),
+            ((9, 80), (1, 80))
+        );
+    }
 }

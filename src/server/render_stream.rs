@@ -861,5 +861,9 @@ mod tests {
         ));
         state.commit_sent_frame(prepared);
         assert_eq!(state.last_pane_surface().unwrap().surface_revision, 2);
+        print_profiles(
+            "active panes (one workspace), inactive_pane_dim = 20",
+            profile_cardinalities(app_with_active_panes_dimmed),
+        );
     }
 }

@@ -19,6 +19,13 @@ use serde::{Deserialize, Serialize};
 /// Current protocol version. Bumped when wire format changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 22;
 
+/// The `ServerShutdown` reason a server sends its clients when it hands off to
+/// a new server. A client that sees it reconnects instead of exiting. The text
+/// is unchanged from earlier releases, so clients recognise it from older
+/// servers too.
+pub const LIVE_HANDOFF_SHUTDOWN_REASON: &str =
+    "live update in progress; reconnect after handoff completes";
+
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
 pub const MAX_FRAME_SIZE: usize = 2 * 1024 * 1024;

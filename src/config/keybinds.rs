@@ -18,6 +18,9 @@ pub struct LiveKeybindConfig {
     /// Every configured prefix key. The first entry is the primary prefix used
     /// for compact display; all entries enter prefix mode.
     pub prefix: Vec<KeyCombo>,
+    /// Further keys that also enter prefix mode (`keys.prefix` given as a
+    /// list), after the primary one.
+    pub extra_prefixes: Vec<KeyCombo>,
     pub keybinds: Keybinds,
 }
 
@@ -39,6 +42,20 @@ impl LiveKeybindConfig {
         self.primary_prefix()
             .map(format_key_combo)
             .unwrap_or_else(|| format_key_combo(DEFAULT_PREFIX))
+    }
+}
+
+impl LiveKeybindConfig {
+    /// Restores the server's own `[[keys.command]]` bindings on a profile that
+    /// came from a client. Every other binding is the client's choice, but a
+    /// custom command runs a shell command on the server host, so its text may
+    /// only ever come from the server's config: the client's copy is dropped
+    /// on arrival and the server's is put back here. Without this a client on
+    /// local keybindings silently loses commands the server has configured —
+    /// they never fire and never show in the keybinding help.
+    pub fn with_server_custom_commands(mut self, server: &Keybinds) -> Self {
+        self.keybinds.custom_commands = server.custom_commands.clone();
+        self
     }
 }
 
@@ -311,17 +328,56 @@ impl IndexedKeybind {
     pub fn matched_index(&self, key: &TerminalKey) -> Option<usize> {
         let combo = self.trigger.combo();
         let (expected_code, _) = normalize_key_combo(combo);
-        let KeyCode::Char(key_number @ '1'..='9') = expected_code else {
+        let KeyCode::Char(key_symbol @ ('1'..='9' | 'a'..='z')) = expected_code else {
             return None;
         };
         let legacy_shifted_number = matches!(key.code, KeyCode::Char(c)
-            if shifted_number_symbol(c) == Some(key_number)
-                && indexed_shifted_number_matches(key, combo, key_number));
+            if shifted_number_symbol(c) == Some(key_symbol)
+                && indexed_shifted_number_matches(key, combo, key_symbol));
         if terminal_key_matches_combo(key, combo) || legacy_shifted_number {
-            Some((key_number as usize) - ('1' as usize))
+            index_for_jump_symbol(key_symbol)
         } else {
             None
         }
+    }
+}
+
+/// Letters macOS Latin keyboard layouts consume as Option dead keys for
+/// combining diacriticals, so `alt+<letter>` never reaches the application.
+/// Measured on ABC: option+e emits U+00B4 (´) and option+i / option+u emit
+/// nothing at all, arming a pending accent instead — even with Ghostty's
+/// `macos-option-as-alt`, which defeats the plain Option translation but not
+/// dead-key composition. Advertising these as jump letters promises a shortcut
+/// that cannot be pressed, so they are skipped in the sequence entirely.
+const MACOS_DEAD_KEY_LETTERS: [char; 4] = ['e', 'i', 'n', 'u'];
+
+/// The letters used for indexed jump entries, in order. Pure cross-platform
+/// policy — both branches compile everywhere — so this is one of the cases
+/// `cfg!` is preferred over a `#[cfg]` split.
+fn jump_letters() -> impl Iterator<Item = char> {
+    ('a'..='z')
+        .filter(|letter| !(cfg!(target_os = "macos") && MACOS_DEAD_KEY_LETTERS.contains(letter)))
+}
+
+/// Jump symbol for an indexed entry: rows 1-9 use digits, then rows continue
+/// with [`jump_letters`]. Beyond that there is no symbol. Single source of
+/// truth for indexed keybind matching and the sidebar jump labels — both
+/// directions derive from `jump_letters`, so a label can never advertise a
+/// letter that matching does not accept.
+pub fn jump_symbol(index: usize) -> Option<char> {
+    match index {
+        0..=8 => char::from_digit(index as u32 + 1, 10),
+        _ => jump_letters().nth(index - 9),
+    }
+}
+
+fn index_for_jump_symbol(symbol: char) -> Option<usize> {
+    match symbol {
+        '1'..='9' => Some(symbol as usize - '1' as usize),
+        'a'..='z' => jump_letters()
+            .position(|letter| letter == symbol)
+            .map(|pos| 9 + pos),
+        _ => None,
     }
 }
 
@@ -358,12 +414,20 @@ pub struct Keybinds {
     pub open_worktree: ActionKeybinds,
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
+    pub toggle_pin_workspace: ActionKeybinds,
+    pub toggle_sync_panes: ActionKeybinds,
+    pub toggle_pin_agent: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
+    pub open_notification_center: ActionKeybinds,
+    pub open_pane_todos: ActionKeybinds,
+    pub add_pane_todo: ActionKeybinds,
+    pub open_todo_board: ActionKeybinds,
+    pub display_panes: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -379,9 +443,20 @@ pub struct Keybinds {
     pub switch_workspace: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
     pub rename_pane: ActionKeybinds,
+    pub break_pane: ActionKeybinds,
+    pub move_pane_to_tab: ActionKeybinds,
+    pub move_pane_next_tab: ActionKeybinds,
+    pub move_pane_prev_tab: ActionKeybinds,
     pub edit_scrollback: ActionKeybinds,
     pub clear_pane: ActionKeybinds,
+    pub clear_scrollback: ActionKeybinds,
     pub copy_mode: ActionKeybinds,
+    pub copy_mode_page_up: ActionKeybinds,
+    pub copy_mode_half_page_up: ActionKeybinds,
+    pub copy_mode_line_up: ActionKeybinds,
+    pub copy_mode_page_down: ActionKeybinds,
+    pub copy_mode_half_page_down: ActionKeybinds,
+    pub copy_mode_line_down: ActionKeybinds,
     pub focus_pane_left: ActionKeybinds,
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
@@ -396,12 +471,15 @@ pub struct Keybinds {
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
     pub close_pane: ActionKeybinds,
+    pub respawn_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub resize_pane_left: ActionKeybinds,
     pub resize_pane_down: ActionKeybinds,
     pub resize_pane_up: ActionKeybinds,
     pub resize_pane_right: ActionKeybinds,
+    pub balance_panes: ActionKeybinds,
+    pub next_layout: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
@@ -434,6 +512,10 @@ struct BindingRegistry {
     prefix_source: BindingSource,
     direct: std::collections::HashMap<KeyCombo, RegisteredBinding>,
     prefix: std::collections::HashMap<KeyCombo, RegisteredBinding>,
+    /// Actions left with no key because user bindings took all their default
+    /// keys. Warnings, not diagnostics: the configuration still applies as
+    /// written, so they must not turn a reload into a partial one.
+    unbound_warnings: Vec<String>,
 }
 
 impl BindingRegistry {
@@ -446,6 +528,7 @@ impl BindingRegistry {
             prefix_source,
             direct: std::collections::HashMap::new(),
             prefix: std::collections::HashMap::new(),
+            unbound_warnings: Vec::new(),
         }
     }
 
@@ -506,6 +589,7 @@ impl Config {
         for diag in &diagnostics {
             warn!(message = %diag, "config diagnostic");
         }
+        diagnostics.extend(prefix_extra_diags);
 
         let prefix_source = if self.keys.key_field_is_user_configured("prefix") {
             BindingSource::User
@@ -541,12 +625,20 @@ impl Config {
             open_worktree: empty_action!(),
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
+            toggle_pin_workspace: empty_action!(),
+            toggle_sync_panes: empty_action!(),
+            toggle_pin_agent: empty_action!(),
             close_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
+            open_notification_center: empty_action!(),
+            open_pane_todos: empty_action!(),
+            add_pane_todo: empty_action!(),
+            open_todo_board: empty_action!(),
+            display_panes: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -562,9 +654,20 @@ impl Config {
             switch_workspace: Vec::new(),
             close_tab: empty_action!(),
             rename_pane: empty_action!(),
+            break_pane: empty_action!(),
+            move_pane_to_tab: empty_action!(),
+            move_pane_next_tab: empty_action!(),
+            move_pane_prev_tab: empty_action!(),
             edit_scrollback: empty_action!(),
             clear_pane: empty_action!(),
+            clear_scrollback: empty_action!(),
             copy_mode: empty_action!(),
+            copy_mode_page_up: empty_action!(),
+            copy_mode_half_page_up: empty_action!(),
+            copy_mode_line_up: empty_action!(),
+            copy_mode_page_down: empty_action!(),
+            copy_mode_half_page_down: empty_action!(),
+            copy_mode_line_down: empty_action!(),
             focus_pane_left: empty_action!(),
             focus_pane_down: empty_action!(),
             focus_pane_up: empty_action!(),
@@ -579,12 +682,15 @@ impl Config {
             split_vertical: empty_action!(),
             split_horizontal: empty_action!(),
             close_pane: empty_action!(),
+            respawn_pane: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
             resize_pane_left: empty_action!(),
             resize_pane_down: empty_action!(),
             resize_pane_up: empty_action!(),
             resize_pane_right: empty_action!(),
+            balance_panes: empty_action!(),
+            next_layout: empty_action!(),
             toggle_sidebar: empty_action!(),
             custom_commands: Vec::new(),
         };
@@ -670,6 +776,9 @@ impl Config {
             apply_action!(keybinds.open_worktree, open_worktree, source);
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
+            apply_action!(keybinds.toggle_pin_workspace, toggle_pin_workspace, source);
+            apply_action!(keybinds.toggle_sync_panes, toggle_sync_panes, source);
+            apply_action!(keybinds.toggle_pin_agent, toggle_pin_agent, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
@@ -680,6 +789,15 @@ impl Config {
                 open_notification_target,
                 source
             );
+            apply_action!(
+                keybinds.open_notification_center,
+                open_notification_center,
+                source
+            );
+            apply_action!(keybinds.open_pane_todos, open_pane_todos, source);
+            apply_action!(keybinds.add_pane_todo, add_pane_todo, source);
+            apply_action!(keybinds.open_todo_board, open_todo_board, source);
+            apply_action!(keybinds.display_panes, display_panes, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -710,9 +828,28 @@ impl Config {
             );
             apply_action!(keybinds.close_tab, close_tab, source);
             apply_action!(keybinds.rename_pane, rename_pane, source);
+            apply_action!(keybinds.break_pane, break_pane, source);
+            apply_action!(keybinds.move_pane_to_tab, move_pane_to_tab, source);
+            apply_action!(keybinds.move_pane_next_tab, move_pane_next_tab, source);
+            apply_action!(keybinds.move_pane_prev_tab, move_pane_prev_tab, source);
             apply_action!(keybinds.edit_scrollback, edit_scrollback, source);
             apply_action!(keybinds.clear_pane, clear_pane, source);
+            apply_action!(keybinds.clear_scrollback, clear_scrollback, source);
             apply_action!(keybinds.copy_mode, copy_mode, source);
+            apply_action!(keybinds.copy_mode_page_up, copy_mode_page_up, source);
+            apply_action!(
+                keybinds.copy_mode_half_page_up,
+                copy_mode_half_page_up,
+                source
+            );
+            apply_action!(keybinds.copy_mode_line_up, copy_mode_line_up, source);
+            apply_action!(keybinds.copy_mode_page_down, copy_mode_page_down, source);
+            apply_action!(
+                keybinds.copy_mode_half_page_down,
+                copy_mode_half_page_down,
+                source
+            );
+            apply_action!(keybinds.copy_mode_line_down, copy_mode_line_down, source);
             apply_action!(keybinds.focus_pane_left, focus_pane_left, source);
             apply_action!(keybinds.focus_pane_down, focus_pane_down, source);
             apply_action!(keybinds.focus_pane_up, focus_pane_up, source);
@@ -727,12 +864,15 @@ impl Config {
             apply_action!(keybinds.split_vertical, split_vertical, source);
             apply_action!(keybinds.split_horizontal, split_horizontal, source);
             apply_action!(keybinds.close_pane, close_pane, source);
+            apply_action!(keybinds.respawn_pane, respawn_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.resize_pane_left, resize_pane_left, source);
             apply_action!(keybinds.resize_pane_down, resize_pane_down, source);
             apply_action!(keybinds.resize_pane_up, resize_pane_up, source);
             apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
+            apply_action!(keybinds.balance_panes, balance_panes, source);
+            apply_action!(keybinds.next_layout, next_layout, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
 
             if source == field_source!(indexed) {
@@ -772,7 +912,12 @@ impl Config {
             }
         }
 
-        (prefix_diag, prefix, diagnostics, keybinds)
+        let warnings = registry
+            .unbound_warnings
+            .into_iter()
+            .chain(navigate_registry.unbound_warnings)
+            .collect();
+        (prefix_diag, prefix, diagnostics, keybinds, warnings)
     }
 }
 
@@ -865,6 +1010,7 @@ fn parse_action_bindings(
     source: BindingSource,
 ) -> ActionKeybinds {
     let mut bindings = Vec::new();
+    let mut displaced = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -872,7 +1018,9 @@ fn parse_action_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
+                let taken_by = displaced_by(&binding, registry, source);
                 if reject_binding(field, &binding, registry, diagnostics, source) {
+                    displaced.extend(taken_by.map(|by| (binding.label.clone(), by)));
                     continue;
                 }
                 registry.register(&binding, field, source);
@@ -890,7 +1038,51 @@ fn parse_action_bindings(
             }
         }
     }
+    warn_if_left_unbound(field, &bindings, &displaced, registry);
     ActionKeybinds { bindings }
+}
+
+/// A default binding that a user binding already holds is dropped without a
+/// diagnostic, because the user chose that key. Name the user binding that took
+/// it, so an action left with no key at all can be reported.
+fn displaced_by(
+    binding: &ResolvedBinding,
+    registry: &BindingRegistry,
+    source: BindingSource,
+) -> Option<String> {
+    if source != BindingSource::Default {
+        return None;
+    }
+    if binding.trigger.is_prefix() && registry.prefix_rhs_is_reserved(binding.trigger.combo()) {
+        return (registry.prefix_source == BindingSource::User).then(|| "keys.prefix".into());
+    }
+    registry
+        .conflict(binding)
+        .filter(|first| first.source == BindingSource::User)
+        .map(|first| first.field.clone())
+}
+
+/// Warn when every default binding of an action was taken by user bindings, so
+/// the action silently ended up with no key.
+fn warn_if_left_unbound(
+    field: &str,
+    bindings: &[ResolvedBinding],
+    displaced: &[(String, String)],
+    registry: &mut BindingRegistry,
+) {
+    if !bindings.is_empty() || displaced.is_empty() {
+        return;
+    }
+    let taken = displaced
+        .iter()
+        .map(|(label, by)| format!("{label} is taken by {by}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let diag = format!(
+        "{field} has no keybinding: its default {taken}; bind {field} to another key, or set it to \"\" to leave it unbound"
+    );
+    warn!(message = %diag, "config warning");
+    registry.unbound_warnings.push(diag);
 }
 
 fn parse_navigate_bindings(
@@ -901,6 +1093,7 @@ fn parse_navigate_bindings(
     source: BindingSource,
 ) -> ActionKeybinds {
     let mut bindings = Vec::new();
+    let mut displaced = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -908,7 +1101,9 @@ fn parse_navigate_bindings(
         }
         match parse_binding_string(raw) {
             Some(ParsedBinding::Single(binding)) => {
+                let taken_by = displaced_by(&binding, registry, source);
                 if reject_navigate_binding(field, &binding, registry, diagnostics, source) {
+                    displaced.extend(taken_by.map(|by| (binding.label.clone(), by)));
                     continue;
                 }
                 registry.register(&binding, field, source);
@@ -926,6 +1121,7 @@ fn parse_navigate_bindings(
             }
         }
     }
+    warn_if_left_unbound(field, &bindings, &displaced, registry);
     ActionKeybinds { bindings }
 }
 
@@ -976,9 +1172,12 @@ fn push_indexed_binding(
     source: BindingSource,
     bindings: &mut Vec<IndexedKeybind>,
 ) {
-    if !matches!(binding.trigger.combo().0, KeyCode::Char('1'..='9')) {
+    if !matches!(
+        binding.trigger.combo().0,
+        KeyCode::Char('1'..='9' | 'a'..='z')
+    ) {
         let diag = format!(
-            "indexed keybinding must use 1..9: {field} = {:?}; disabling binding",
+            "indexed keybinding must use 1..9 or a..z: {field} = {:?}; disabling binding",
             binding.label
         );
         warn!(message = %diag, "config diagnostic");
@@ -1129,13 +1328,11 @@ fn parse_binding_string(raw: &str) -> Option<ParsedBinding> {
         (false, trimmed)
     };
 
-    if let Some(range_modifiers) = parse_range_modifiers(body) {
-        let bindings = (1..=9)
-            .map(|idx| {
-                let combo = (
-                    KeyCode::Char(char::from_digit(idx, 10).unwrap_or('1')),
-                    range_modifiers,
-                );
+    if let Some((range_chars, range_modifiers)) = parse_range_modifiers(body) {
+        let bindings = range_chars
+            .chars()
+            .map(|c| {
+                let combo = (KeyCode::Char(c), range_modifiers);
                 let key_label = format_key_combo(combo);
                 ResolvedBinding {
                     trigger: if trigger_prefix {
@@ -1204,6 +1401,8 @@ pub fn format_key_combo(binding: KeyCombo) -> String {
         KeyCode::Right => "right".to_string(),
         KeyCode::Up => "up".to_string(),
         KeyCode::Down => "down".to_string(),
+        KeyCode::PageUp => "pageup".to_string(),
+        KeyCode::PageDown => "pagedown".to_string(),
         KeyCode::F(n) => format!("f{n}"),
         _ => format!("{:?}", code).to_lowercase(),
     };
@@ -1239,21 +1438,41 @@ fn parse_modifier_token(token: &str) -> Option<KeyModifiers> {
     }
 }
 
-fn parse_range_modifiers(s: &str) -> Option<KeyModifiers> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeChars {
+    Digits,
+    Letters,
+}
+
+impl RangeChars {
+    fn chars(self) -> std::ops::RangeInclusive<char> {
+        match self {
+            Self::Digits => '1'..='9',
+            Self::Letters => 'a'..='z',
+        }
+    }
+}
+
+fn parse_range_modifiers(s: &str) -> Option<(RangeChars, KeyModifiers)> {
     let mut modifiers = KeyModifiers::empty();
-    let mut saw_range = false;
+    let mut range = None;
     for part in s.split('+') {
         let trimmed = part.trim();
-        if trimmed == "1..9" {
-            if saw_range {
+        let range_chars = match trimmed {
+            "1..9" => Some(RangeChars::Digits),
+            "a..z" => Some(RangeChars::Letters),
+            _ => None,
+        };
+        if let Some(range_chars) = range_chars {
+            if range.is_some() {
                 return None;
             }
-            saw_range = true;
+            range = Some(range_chars);
         } else {
             modifiers |= parse_modifier_token(trimmed)?;
         }
     }
-    saw_range.then_some(modifiers)
+    range.map(|range| (range, modifiers))
 }
 
 fn parse_modifier_combo(s: &str) -> Option<KeyModifiers> {
@@ -1323,6 +1542,8 @@ pub(crate) fn parse_key_combo(s: &str) -> Option<KeyCombo> {
         "right" => KeyCode::Right,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
+        "pageup" | "page_up" => KeyCode::PageUp,
+        "pagedown" | "page_down" => KeyCode::PageDown,
         "minus" => KeyCode::Char('-'),
         "comma" => KeyCode::Char(','),
         "period" => KeyCode::Char('.'),
@@ -1621,6 +1842,86 @@ prefix = "ö"
     }
 
     #[test]
+    fn a_prefix_list_gives_a_primary_and_extra_prefixes() {
+        // A plain string still parses as before.
+        let config: Config = toml::from_str("[keys]\nprefix = \"ctrl+a\"").unwrap();
+        assert_eq!(
+            config.prefix_key(),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL)
+        );
+        assert!(config.extra_prefix_keys().is_empty());
+
+        let config: Config = toml::from_str(
+            "[keys]\nprefix = [\"ctrl+s\", \"ctrl+;\", \"ctrl+semicolon\", \"f12\"]",
+        )
+        .unwrap();
+        assert_eq!(
+            config.prefix_key(),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL)
+        );
+        // ";" and "semicolon" are the same key, so the repeat is dropped.
+        assert_eq!(
+            config.extra_prefix_keys(),
+            vec![
+                (KeyCode::Char(';'), KeyModifiers::CONTROL),
+                (KeyCode::F(12), KeyModifiers::empty()),
+            ]
+        );
+        assert_eq!(
+            config.collect_diagnostics(),
+            vec!["keys.prefix lists \"ctrl+semicolon\" twice; ignoring the repeat"]
+        );
+        let (live, _) = config.live_keybinds_with_diagnostics().expect("valid");
+        assert_eq!(live.prefix, (KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(live.extra_prefixes.len(), 2);
+
+        // An invalid extra entry is dropped with a diagnostic, not an error.
+        let config: Config =
+            toml::from_str("[keys]\nprefix = [\"ctrl+s\", \"hyper-nope\"]").unwrap();
+        assert!(config.extra_prefix_keys().is_empty());
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("keys.prefix") && diag.contains("hyper-nope")));
+        assert!(config.live_keybinds_with_diagnostics().is_ok());
+
+        // An invalid primary is an error, as it always was.
+        let config: Config = toml::from_str("[keys]\nprefix = [\"nope\", \"ctrl+s\"]").unwrap();
+        assert!(config.live_keybinds_with_diagnostics().is_err());
+        let config: Config = toml::from_str("[keys]\nprefix = []").unwrap();
+        assert!(config.live_keybinds_with_diagnostics().is_err());
+        assert!(toml::from_str::<Config>("[keys]\nprefix = 5").is_err());
+    }
+
+    #[test]
+    fn prefix_rhs_equal_to_any_listed_prefix_is_rejected() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+prefix = ["ctrl+a", "ctrl+;"]
+help = "prefix+ctrl+;"
+settings = "prefix+ctrl+b"
+"#,
+        )
+        .unwrap();
+        let diagnostics = config.collect_diagnostics();
+        assert!(config.keybinds().help.bindings.is_empty());
+        assert!(diagnostics
+            .iter()
+            .any(|diag| diag.contains("reserved keybinding") && diag.contains("keys.help")));
+        assert!(!config.keybinds().settings.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_prefix_list_round_trips_through_the_local_keybindings_profile() {
+        let config: Config = toml::from_str("[keys]\nprefix = [\"ctrl+s\", \"ctrl+;\"]").unwrap();
+        let toml = config.local_keybindings_profile_toml().expect("profile");
+        let round: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(round.prefix_key(), config.prefix_key());
+        assert_eq!(round.extra_prefix_keys(), config.extra_prefix_keys());
+    }
+
+    #[test]
     fn parse_shift_tab_as_backtab() {
         assert_eq!(
             parse_key_combo("shift+tab"),
@@ -1676,6 +1977,48 @@ next_tab = "prefix+n"
     }
 
     #[test]
+    fn open_pane_todos_defaults_to_prefix_ctrl_t() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.open_pane_todos),
+            // `KeyCombo` is the bare `(KeyCode, KeyModifiers)` tuple, not a
+            // `TerminalKey` — see `new_worktree_defaults_to_prefix_shift_g`.
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert!(
+            Config::default().collect_diagnostics().is_empty(),
+            "prefix+ctrl+t must not collide with an existing default"
+        );
+    }
+
+    #[test]
+    fn add_pane_todo_is_unset_by_default_and_maps_when_bound() {
+        assert!(Config::default()
+            .keybinds()
+            .add_pane_todo
+            .bindings
+            .is_empty());
+
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+add_pane_todo = "prefix+ctrl+y"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            binding_triggers(&config.keybinds().add_pane_todo),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('y'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+    }
+
+    #[test]
     fn goto_defaults_to_prefix_g() {
         let kb = Config::default().keybinds();
         assert_eq!(
@@ -1702,6 +2045,32 @@ next_tab = "prefix+n"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('['),
                 KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn copy_mode_scroll_entry_defaults() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.copy_mode_page_up),
+            vec![BindingTrigger::Prefix((
+                KeyCode::PageUp,
+                KeyModifiers::empty()
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.copy_mode_half_page_up),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.copy_mode_line_up),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL
             ))]
         );
     }
@@ -2256,6 +2625,99 @@ switch_workspace = "prefix+shift+1..9"
     }
 
     #[test]
+    fn letter_range_extends_indexed_bindings_past_nine() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+focus_agent = ["prefix+alt+1..9", "prefix+alt+a..z"]
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert_eq!(kb.focus_agent.len(), 9 + 26);
+        assert_eq!(
+            kb.focus_agent[9].trigger,
+            BindingTrigger::Prefix((KeyCode::Char('a'), KeyModifiers::ALT))
+        );
+        assert_eq!(kb.focus_agent[9].label, "prefix+alt+a");
+
+        // `a..z` still expands to all 26 bindings, so a binding's position in
+        // this vec is NOT its resolved jump index — the index comes from the
+        // pressed letter's place in `jump_letters()`, which skips the letters
+        // macOS cannot deliver.
+        let alt_key = |c| TerminalKey::new(KeyCode::Char(c), KeyModifiers::ALT);
+        assert_eq!(kb.focus_agent[9].matched_index(&alt_key('a')), Some(9));
+        assert_eq!(kb.focus_agent[10].matched_index(&alt_key('b')), Some(10));
+
+        // `z` is the last letter binding either way; only the index it resolves
+        // to moves (34 with all 26 letters, 30 on macOS with four skipped).
+        let last_index = 9 + jump_letters().count() - 1;
+        assert_eq!(
+            kb.focus_agent[9 + 25].matched_index(&alt_key('z')),
+            Some(last_index)
+        );
+        assert_eq!(kb.focus_agent[9].matched_index(&alt_key('b')), None);
+
+        // A dead-key binding still exists but is inert: nothing can resolve it,
+        // which is honest, because the keypress never arrives.
+        if cfg!(target_os = "macos") {
+            assert_eq!(kb.focus_agent[9 + 4].label, "prefix+alt+e");
+            assert_eq!(kb.focus_agent[9 + 4].matched_index(&alt_key('e')), None);
+        }
+    }
+
+    #[test]
+    fn jump_symbol_covers_digits_then_letters() {
+        assert_eq!(jump_symbol(0), Some('1'));
+        assert_eq!(jump_symbol(8), Some('9'));
+        assert_eq!(jump_symbol(9), Some('a'));
+
+        // `z` always closes the sequence; only its index moves.
+        let last = 9 + jump_letters().count() - 1;
+        assert_eq!(jump_symbol(last), Some('z'));
+        assert_eq!(jump_symbol(last + 1), None);
+    }
+
+    /// The label and the matcher must agree for every index, or the sidebar
+    /// advertises a letter that the keypress path refuses.
+    #[test]
+    fn jump_symbol_round_trips_through_index_for_every_entry() {
+        for index in 0..(9 + jump_letters().count()) {
+            let symbol = jump_symbol(index).expect("every in-range index has a symbol");
+            assert_eq!(
+                index_for_jump_symbol(symbol),
+                Some(index),
+                "symbol {symbol:?} for index {index} did not round-trip"
+            );
+        }
+    }
+
+    /// macOS Option dead keys never arrive, so they must not appear as labels
+    /// and must not resolve to an index.
+    #[test]
+    fn macos_dead_key_letters_are_absent_from_the_jump_sequence() {
+        let letters: Vec<char> = jump_letters().collect();
+        for dead in MACOS_DEAD_KEY_LETTERS {
+            if cfg!(target_os = "macos") {
+                assert!(
+                    !letters.contains(&dead),
+                    "{dead:?} is an Option dead key and must be skipped on macOS"
+                );
+                assert_eq!(
+                    index_for_jump_symbol(dead),
+                    None,
+                    "{dead:?} must not resolve to a jump index on macOS"
+                );
+            } else {
+                assert!(
+                    letters.contains(&dead),
+                    "{dead:?} is reachable off macOS and must be kept"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn legacy_indexed_user_bindings_displace_modern_defaults() {
         let config: Config = toml::from_str(
             r#"
@@ -2401,7 +2863,7 @@ new_workspace = "prefix+n"
     }
 
     #[test]
-    fn user_binding_silently_displaces_default_binding() {
+    fn user_binding_that_takes_an_actions_only_key_warns() {
         let config: Config = toml::from_str(
             r#"
 [keys]
@@ -2415,6 +2877,13 @@ previous_workspace = "prefix+shift+l"
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
+            config.keybind_warnings(),
+            vec![
+                "keys.swap_pane_right has no keybinding: its default prefix+shift+l is taken by keys.previous_workspace; bind keys.swap_pane_right to another key, or set it to \"\" to leave it unbound"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
             binding_triggers(&kb.previous_workspace),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('l'),
@@ -2425,7 +2894,7 @@ previous_workspace = "prefix+shift+l"
     }
 
     #[test]
-    fn user_prefix_silently_displaces_default_prefix_rhs_binding() {
+    fn user_prefix_that_takes_an_actions_only_key_warns() {
         let config: Config = toml::from_str(
             r#"
 [keys]
@@ -2439,6 +2908,70 @@ prefix = "n"
 
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert!(kb.next_tab.bindings.is_empty());
+        let warnings = config.keybind_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.starts_with("keys.next_tab has no keybinding:")
+                    && w.contains("is taken by keys.prefix")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn letter_workspace_jumps_warn_about_every_action_they_leave_without_a_key() {
+        // The shape of a real config: letter jumps took prefix+b, prefix+c and
+        // prefix+g, the only keys of toggle_sidebar, new_tab and goto.
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_workspace = ["prefix+1..9", "prefix+a", "prefix+b", "prefix+c", "prefix+d", "prefix+f", "prefix+g"]
+"#,
+        )
+        .unwrap();
+
+        assert!(config.collect_diagnostics().is_empty());
+        let warnings = config.keybind_warnings();
+        for field in ["keys.new_tab", "keys.toggle_sidebar", "keys.goto"] {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.starts_with(&format!("{field} has no keybinding:"))
+                        && w.contains("is taken by keys.switch_workspace")),
+                "missing warning for {field}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_unbound_warning_when_the_action_keeps_a_key_or_is_cleared_on_purpose() {
+        let moved: Config = toml::from_str(
+            r#"
+[keys]
+switch_workspace = ["prefix+c"]
+new_tab = "prefix+ctrl+c"
+"#,
+        )
+        .unwrap();
+        assert!(
+            moved.keybind_warnings().is_empty(),
+            "{:?}",
+            moved.keybind_warnings()
+        );
+
+        let cleared: Config = toml::from_str(
+            r#"
+[keys]
+switch_workspace = ["prefix+c"]
+new_tab = ""
+"#,
+        )
+        .unwrap();
+        assert!(
+            cleared.keybind_warnings().is_empty(),
+            "{:?}",
+            cleared.keybind_warnings()
+        );
     }
 
     #[test]
@@ -2536,5 +3069,33 @@ width = "80%"
             .collect_diagnostics()
             .iter()
             .any(|diag| diag.contains("popup size on non-popup custom command")));
+    }
+    #[test]
+    fn server_custom_commands_survive_a_client_keybind_profile() {
+        // A client profile arrives with no custom commands: the transport
+        // clears whatever it sent, because the text runs on the server host.
+        let client = LiveKeybindConfig {
+            prefix: (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            extra_prefixes: Vec::new(),
+            keybinds: Keybinds::default(),
+        };
+        assert!(client.keybinds.custom_commands.is_empty());
+
+        let mut server = Keybinds::default();
+        server.custom_commands.push(CustomCommandKeybind {
+            bindings: ActionKeybinds::default(),
+            label: "git".into(),
+            command: "lazygit".into(),
+            action: CustomCommandAction::Popup,
+            description: None,
+            width: None,
+            height: None,
+        });
+
+        let merged = client.with_server_custom_commands(&server);
+        assert_eq!(merged.keybinds.custom_commands.len(), 1);
+        assert_eq!(merged.keybinds.custom_commands[0].command, "lazygit");
+        // The client still owns its prefix and every other binding.
+        assert_eq!(merged.prefix.0, KeyCode::Char('a'));
     }
 }

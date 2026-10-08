@@ -47,6 +47,15 @@ pub enum ResponseResult {
         protocol: u32,
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
+        /// Short host name of the machine running the server. Absent when the
+        /// OS lookup fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        /// Path of the binary the server runs, so an attached client left on
+        /// an older build can re-exec onto it after a live update. Absent when
+        /// the OS lookup fails or on an older server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exe: Option<String>,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
@@ -147,6 +156,12 @@ pub enum ResponseResult {
     LayoutSplitRatioSet {
         layout: LayoutDescription,
     },
+    LayoutBalanced {
+        layout: LayoutDescription,
+    },
+    LayoutPresetApplied {
+        layout: LayoutDescription,
+    },
     PaneNeighbor {
         neighbor: PaneNeighborResult,
     },
@@ -197,6 +212,36 @@ pub enum ResponseResult {
     NotificationShow {
         shown: bool,
         reason: NotificationShowReason,
+    },
+    NotificationList {
+        notifications: Vec<super::notifications::NotificationInfo>,
+        unread_count: u64,
+    },
+    NotificationMarkSeen {
+        changed: bool,
+        unread_count: u64,
+    },
+    NotificationCleared {
+        cleared: u64,
+    },
+    TodoList {
+        todos: Vec<super::todos::TodoInfo>,
+    },
+    Todo {
+        todo: super::todos::TodoInfo,
+    },
+    TodoCleared {
+        removed: u32,
+    },
+    /// A forced close: the open todos of every pane it closed.
+    Closed {
+        closed_todos: Vec<super::todos::ClosedPaneTodos>,
+    },
+    /// A forced respawn: the process it stopped, if one was running, and the
+    /// open todos the pane still carries.
+    Respawned {
+        stopped_process: Option<super::todos::StoppedProcess>,
+        open_todos: Vec<super::todos::TodoInfo>,
     },
     ClientWindowTitle {
         changed: bool,

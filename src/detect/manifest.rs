@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::{
     agent_label, manifest_update::ManifestVersion, parse_agent_label, Agent, AgentDetection,
-    AgentState,
+    AgentState, BlockedReason,
 };
 
 pub const DEFAULT_KNOWN_AGENT_IDLE_FALLBACK: &str = "default_known_agent_idle_fallback";
@@ -34,6 +34,9 @@ pub struct DetectionExplain {
     pub visible_idle: bool,
     pub visible_blocker: bool,
     pub visible_working: bool,
+    /// Why the state is Blocked (the matched rule's `blocked_reason`, else
+    /// `Other`); `None` when the state is not Blocked.
+    pub blocked_reason: Option<BlockedReason>,
     pub skip_state_update: bool,
     pub skipped_update_reason: Option<String>,
     pub fallback_reason: Option<String>,
@@ -146,6 +149,12 @@ pub(crate) struct AgentManifest {
     _updated_at: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
+    /// Set on a bundled manifest that carries this fork's own rules (fork
+    /// issue 139): a downloaded manifest for the same agent never shadows it,
+    /// however new its version. Read from the bundled manifest only; a remote
+    /// file that sets it changes nothing.
+    #[serde(default)]
+    fork: bool,
     #[serde(default)]
     rules: Vec<ManifestRule>,
 }
@@ -165,6 +174,9 @@ struct ManifestRule {
     visible_blocker: bool,
     #[serde(default)]
     visible_working: bool,
+    /// Why the agent is blocked when this rule matches (fork issue 137).
+    /// Only valid on a `state = "blocked"` rule; unset reads as `other`.
+    blocked_reason: Option<BlockedReason>,
     #[serde(default)]
     skip_state_update: bool,
     #[serde(default)]
@@ -401,6 +413,7 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            blocked_reason: None,
             skip_state_update: false,
             skipped_update_reason: None,
             fallback_reason: Some("unknown_agent".to_string()),
@@ -418,14 +431,30 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
 
 impl DetectionExplain {
     fn into_detection(self) -> AgentDetection {
+        let background_work = self.state == AgentState::Working
+            && self
+                .matched_rule
+                .as_ref()
+                .is_some_and(|rule| is_background_work_rule(&rule.id));
         AgentDetection {
             state: self.state,
             skip_state_update: self.skip_state_update,
             visible_idle: self.visible_idle,
             visible_blocker: self.visible_blocker,
             visible_working: self.visible_working,
+            background_work,
+            blocked_reason: self.blocked_reason,
         }
     }
+}
+
+/// Rules that report work the agent launched rather than work it is doing:
+/// the manifests name them `background_shell_working`,
+/// `background_agents_working`, `background_mcp_task_working`. Matching on the
+/// prefix keeps new siblings working without a code change; a manifest that
+/// renames them only costs the distinct icon, never correctness.
+fn is_background_work_rule(rule_id: &str) -> bool {
+    rule_id.starts_with("background_")
 }
 
 fn evaluate_loaded_manifest(
@@ -501,6 +530,8 @@ fn evaluate_loaded_manifest(
         visible_idle: rule.visible_idle && state == AgentState::Idle,
         visible_blocker: rule.visible_blocker && state == AgentState::Blocked,
         visible_working: rule.visible_working && state == AgentState::Working,
+        blocked_reason: (state == AgentState::Blocked)
+            .then(|| rule.blocked_reason.unwrap_or(BlockedReason::Other)),
         skip_state_update: rule.skip_state_update,
         skipped_update_reason,
         fallback_reason: None,
@@ -558,6 +589,7 @@ fn fallback_explain(
         visible_idle: false,
         visible_blocker: false,
         visible_working: false,
+        blocked_reason: None,
         skip_state_update: false,
         skipped_update_reason: None,
         fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),
@@ -725,6 +757,13 @@ fn bundled_loaded_manifest(
     })
 }
 
+/// Whether the bundled manifest for `agent` carries fork rules, so no
+/// downloaded one may replace it.
+#[cfg(test)]
+pub(crate) fn bundled_manifest_is_fork_owned(agent: Agent) -> bool {
+    bundled_manifest(agent).is_some_and(|manifest| manifest.fork)
+}
+
 fn bundled_manifest(agent: Agent) -> Option<AgentManifest> {
     let id = agent_label(agent);
     BUNDLED_MANIFESTS
@@ -757,6 +796,18 @@ fn read_remote_manifest(agent: Agent, bundled: &AgentManifest) -> Option<LoadedM
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "unknown".to_string());
+            if bundled.fork {
+                return Some(bundled_loaded_manifest(
+                    agent,
+                    bundled.clone(),
+                    Some(format!(
+                        "fork-owned bundled manifest wins: cached remote manifest {} (version {version}) is not used because the bundled one carries fork rules",
+                        path.display()
+                    )),
+                    Some(version),
+                    false,
+                ));
+            }
             if let (Some(remote_version), Some(bundled_version)) =
                 (manifest.version.as_ref(), bundled.version.as_ref())
             {
@@ -863,6 +914,7 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
         "matched_rule": matched_rule,
         "visible_idle": explain.visible_idle,
         "visible_blocker": explain.visible_blocker,
+        "blocked_reason": explain.blocked_reason,
         "visible_working": explain.visible_working,
         "screen_detection_skipped": explain.screen_detection_skipped,
         "skip_state_update": explain.skip_state_update,
@@ -939,6 +991,23 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
                 return Err(format!(
                     "rule {} uses skip_state_update with visible state evidence",
                     rule.id
+                ));
+            }
+        }
+        if rule.blocked_reason.is_some() {
+            if rule.state != Some(ManifestState::Blocked) {
+                return Err(format!(
+                    "rule {} uses blocked_reason without state = \"blocked\"",
+                    rule.id
+                ));
+            }
+            if manifest
+                .min_engine_version
+                .is_some_and(|version| version < BLOCKED_REASON_ENGINE_VERSION)
+            {
+                return Err(format!(
+                    "rule {} uses blocked_reason but min_engine_version is below {}",
+                    rule.id, BLOCKED_REASON_ENGINE_VERSION
                 ));
             }
         }
@@ -1321,6 +1390,7 @@ fn region_count(spec: &str, name: &str) -> Option<usize> {
 }
 
 const TOP_NON_EMPTY_LINES_ENGINE_VERSION: u32 = 3;
+const BLOCKED_REASON_ENGINE_VERSION: u32 = 4;
 const MAX_TOP_REGION_LINE_COUNT: usize = u16::MAX as usize;
 
 fn top_region_count(spec: &str) -> Option<usize> {
@@ -1372,7 +1442,7 @@ fn top_non_empty_lines(content: &str, count: usize) -> &str {
         return "";
     };
     let byte_offset = line_start_offset(content, &lines, end_index + 1);
-    &content[..byte_offset]
+    content.get(..byte_offset).unwrap_or("")
 }
 
 fn after_last_prompt_marker(content: &str) -> &str {
@@ -1392,7 +1462,7 @@ fn before_current_prompt_marker(content: &str) -> &str {
         .iter()
         .map(|line| line.len() + 1)
         .sum::<usize>();
-    &content[..byte_offset.min(content.len())]
+    content.get(..byte_offset.min(content.len())).unwrap_or("")
 }
 
 fn whole_recent_without_current_prompt_marker(content: &str) -> &str {
@@ -1452,7 +1522,42 @@ fn prompt_box_body(content: &str) -> Option<&str> {
         .map(|relative| top + 1 + relative)
         .unwrap_or(lines.len());
     let end = line_start_offset(content, &lines, end_index);
-    Some(&content[start.min(content.len())..end.min(content.len())])
+    content.get(start.min(content.len())..end.min(content.len()))
+}
+
+/// The grey Claude Code draws a command's argument hint in (`/compact
+/// <optional custom summarization instructions>`): a fixed true-colour
+/// foreground, not SGR 2 (measured on a real pane, fork issue 146).
+const CLAUDE_HINT_FG: [u8; 3] = [153, 153, 153];
+
+/// What is typed in a Claude Code input box (fork issue 146), from the
+/// detection buffer with its styling: the faint runs (the grey reply
+/// suggestion, the `/compact` argument hint) are not text, `[Pasted text #N]`
+/// is. The box body is `prompt_box_body`, the region the `live_prompt_box`
+/// rule reads. The leading `❯` goes, continuation lines lose the box's
+/// two-column indent, the ends are trimmed and a multi-line draft stays
+/// multi-line. `None` when the screen has no prompt box; `Some("")` for an
+/// empty one.
+pub(crate) fn claude_input_box_text(detection_ansi: &str) -> Option<String> {
+    // The styled snapshot ends its rows with CRLF; the region helpers count one
+    // byte per line break, so work on LF text.
+    let text = crate::api::dim::drop_runs(detection_ansi, false, Some(CLAUDE_HINT_FG))
+        .replace("\r\n", "\n");
+    let body = prompt_box_body(&text)?;
+    let lines: Vec<&str> = body.lines().collect();
+    let mut draft = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let line = line.trim_end();
+        let line = if index == 0 {
+            let line = line.trim_start();
+            let line = line.strip_prefix('❯').unwrap_or(line);
+            line.strip_prefix(' ').unwrap_or(line)
+        } else {
+            line.strip_prefix("  ").unwrap_or(line)
+        };
+        draft.push(line);
+    }
+    Some(draft.join("\n").trim().to_string())
 }
 
 fn above_prompt_box(content: &str) -> &str {
@@ -1461,20 +1566,43 @@ fn above_prompt_box(content: &str) -> &str {
         return content;
     };
     let end = line_start_offset(content, &lines, top);
-    &content[..end.min(content.len())]
+    content.get(..end.min(content.len())).unwrap_or(content)
 }
 
+/// Everything after the last horizontal rule. A labelled rule
+/// (`──── gestore-lab ─`) with nothing but blank lines after it is skipped:
+/// a named Claude Code session draws its name in such a rule under a
+/// dialog's footer, and taking it as the boundary would leave the region
+/// empty and the dialog unseen (fork issue 137). Every other rule, labelled
+/// ones followed by text included, is a boundary as before.
 fn after_last_horizontal_rule(content: &str) -> &str {
     let mut last_rule_end = 0usize;
+    // The boundary before a labelled rule, in case nothing follows it.
+    let mut before_trailing_label: Option<usize> = None;
     let mut offset = 0usize;
     for line in content.lines() {
         let next_offset = offset + line.len() + 1;
         if is_horizontal_rule(line) {
+            before_trailing_label = is_labelled_rule(line).then_some(last_rule_end);
             last_rule_end = next_offset.min(content.len());
+        } else if !line.trim().is_empty() {
+            before_trailing_label = None;
         }
         offset = next_offset;
     }
-    &content[last_rule_end..]
+    content
+        .get(before_trailing_label.unwrap_or(last_rule_end)..)
+        .unwrap_or("")
+}
+
+/// A horizontal rule carrying text after its run of `─`.
+fn is_labelled_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    let rule_end = trimmed
+        .char_indices()
+        .find(|&(_, ch)| ch != '─')
+        .map_or(trimmed.len(), |(index, _)| index);
+    !trimmed[rule_end..].trim().is_empty()
 }
 
 fn last_non_empty_line(content: &str) -> &str {
@@ -1521,7 +1649,7 @@ fn is_horizontal_rule(line: &str) -> bool {
 
 fn slice_from_line_index<'a>(content: &'a str, lines: &[&str], index: usize) -> &'a str {
     let byte_offset = line_start_offset(content, lines, index);
-    &content[byte_offset.min(content.len())..]
+    content.get(byte_offset.min(content.len())..).unwrap_or("")
 }
 
 fn line_start_offset(content: &str, lines: &[&str], index: usize) -> usize {

@@ -38,6 +38,7 @@ herdr api schema --output herdr-api.schema.json
 - ペインの一覧、調査、分割、入れ替え、フォーカス、リサイズ、名前変更、読み取り、クローズ、入力送信
 - CLI ヘルパーを通じたエージェントの一覧、調査、読み取り、プロンプト、待機、名前変更、フォーカス、起動、アタッチ
 - フックやプラグインからのカスタムエージェント状態の報告
+- ペインごとの todo の追加、一覧、編集、削除、全消去
 - イベントの購読と、出力や状態変化の待機
 - 組み込みインテグレーションのインストールとアンインストール
 - サーバーの停止と設定のリロード
@@ -94,6 +95,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | --- | --- |
 | サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
 | 通知 | `notification.show` |
+| Todo | `todo.list`、`todo.add`、`todo.update`、`todo.remove`、`todo.clear` |
 | クライアント | `client.window_title.set`、`client.window_title.clear` |
 | セッション | `session.snapshot` |
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
@@ -254,6 +256,55 @@ herdr notification show "build failed" --body "api workspace" --position top-lef
 ```
 
 reason の候補は `shown`、`disabled`、`rate_limited`、`no_foreground_client`、`busy` です。`disabled` は `ui.toast.delivery = "off"` を意味します。`busy` は既存のアプリ内トーストが置き換えられなかったことを意味します。terminal と system の配信は、現在フォアグラウンドでアタッチしている Herdr クライアントを通じたベストエフォートです。
+
+todo は永続する対になる仕組みです。各ペインが次の一手のリストを持ち、サーバー再起動やライブハンドオフをまたいで残ります。メソッドは `todo.list`、`todo.add`、`todo.update`、`todo.remove`、`todo.clear` で、`herdr todo` は同じメソッドの CLI ラッパーです。
+
+1 つのペインの todo を一覧します。`pane_id` を省略するとすべてのペインの todo を返します:
+
+```json
+{"id":"req_tlist","method":"todo.list","params":{"pane_id":"w1:p2"}}
+```
+
+```json
+{"id":"req_tlist","result":{"type":"todo_list","todos":[{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000100}]}}
+```
+
+todo は表示順 (未完了が先 → 優先度の高い順 `high`、`normal`、`low` → 作成順) で返ります。各エントリは自分の `pane_id` を持つため、セッション全体の一覧でも曖昧になりません。`link_pane_id` と `link_label` はリンク付きの todo にのみ現れます。リンク先のペインがなくなると `link_alive` は `false` になり、ラベルは残るので切れたリンクでも意味が読み取れます。別のペインに解決されることはありません。
+
+ペインに todo を追加します:
+
+```json
+{"id":"req_tadd","method":"todo.add","params":{"pane_id":"w1:p2","text":"rerun the deploy","priority":"high","link_pane_id":"w1:p1"}}
+```
+
+```json
+{"id":"req_tadd","result":{"type":"todo","todo":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000000}}}
+```
+
+`priority` は任意でデフォルトは `normal` です。`link_pane_id` は任意で、実在するペインに解決される必要があります。リンクラベルは、そのペインのラベル、エージェント名、渡した ID の順に取り込まれます。テキストは前後の空白が除去され、空にはできません。1 件あたり 500 文字、1 ペインあたり 50 件が上限です。黙って切り詰めることはなく、上限超過や不正な書き込みは `todo_text_empty`、`todo_text_too_long`、`todo_limit_reached`、`todo_link_unresolved`、`pane_not_found` で失敗します。
+
+1 件の todo を更新します。省略したフィールドは現在の値を保ち、`clear_link` はリンクを外し `link_pane_id` より優先されます:
+
+```json
+{"id":"req_tupd","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"done":true}}
+{"id":"req_tunlink","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy after review","priority":"normal","clear_link":true}}
+```
+
+レスポンスは `type: "todo"` で、保存されたレコードを含みます。そのペインに存在しない id は `todo_not_found` で失敗し、拒否された更新は todo をそのまま残します。
+
+1 件の todo を削除するか、ペインのリストを一括で消します。`done_only` は未完了の todo を残します:
+
+```json
+{"id":"req_trm","method":"todo.remove","params":{"pane_id":"w1:p2","id":3}}
+{"id":"req_tclear","method":"todo.clear","params":{"pane_id":"w1:p2","done_only":true}}
+```
+
+```json
+{"id":"req_trm","result":{"type":"ok"}}
+{"id":"req_tclear","result":{"type":"todo_cleared","removed":2}}
+```
+
+ペインのリストを変更した呼び出しは、そのペインについて `todo.changed` を発行します。何も削除しなかった clear は何も変更しないため、イベントも発行しません。
 
 フォアグラウンドクライアントの外側ターミナルウィンドウタイトルを設定またはクリアします:
 
@@ -658,6 +709,8 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 タブのイベント購読には `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed`、`tab.moved` があります。`tab.moved` は、移動した `tab_id`、`workspace_id`、要求された `insert_index`、そのワークスペースの更新済みの順序付き `tabs` リストを含みます。
 ペインのイベント購読には `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed`、`pane.scroll_changed` があります。`pane.focused` は、このサーバーに接続した任意のクライアントでの手動ペイン選択も報告します。他のクライアントの表示は移動させず、ペイロードにクライアントの識別情報は含みません。選択済みのペインを再度選んでも発行しません。ターミナルタイトルの変更は `pane.updated` を発行することがありますが、生のタイトルでスピナーだけが変化し、`terminal_title_stripped` が変わらない場合は発行しません。`pane.scroll_changed` は 1 つの `pane_id` を対象とし、Herdr がスクロールスナップショットの変化を検出するたびに `pane_id`、`workspace_id`、現在の `scroll` 情報を発行します。
 レイアウトのイベント購読には `layout.updated` があります。このイベントは 1 つのタブについて更新済みの `PaneLayoutSnapshot` を運びます。`session.snapshot` でキャッシュを管理するクライアントは、このイベントを契機にサーバーから対象のレイアウトを再取得してください。遅れて届いたペイロードは、最新のスナップショットより古い可能性があります。
+
+todo のイベント購読には `todo.changed` があります。ペインのリストを変更した `todo.*` の呼び出しごとに 1 回発行され、対象の `pane_id` だけを運びます。リストは `todo.list` で読み直してください。そうすればコンシューマーが見る形は常に 1 つです。
 
 worktree のイベント購読には `worktree.created`、`worktree.opened`、`worktree.removed` があります。worktree イベントは Git チェックアウトのライフサイクルを記述します。`worktree.created` は開かれた `workspace` と作成された `worktree` を含みます。`worktree.opened` は対象の `workspace`、開かれた `worktree`、`already_open` を含みます。`worktree.removed` は `workspace_id`、削除された `worktree`、`forced` を含みます。
 

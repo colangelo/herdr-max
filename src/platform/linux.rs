@@ -342,8 +342,16 @@ fn shell_quote(value: &str) -> String {
 }
 
 /// Collect the foreground terminal job for a given child PID.
-pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
-    super::available_pane_shell_from_job(child_pid, foreground_job(child_pid)?)
+pub(crate) fn available_pane_shell(
+    child_pid: u32,
+    is_wrapper: impl Fn(&super::ForegroundProcess) -> bool,
+) -> Option<String> {
+    super::available_pane_shell_behind_wrapper(
+        child_pid,
+        foreground_job(child_pid)?,
+        is_wrapper,
+        nested_foreground_job_with_owner,
+    )
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -353,6 +361,67 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
             .flatten()
     })?;
     foreground_job_for_group(child_pid, process_group_id)
+}
+
+/// The foreground job of the PTY this process owns, or `None` when it owns no
+/// PTY of its own.
+pub fn nested_foreground_job(pid: u32) -> Option<ForegroundJob> {
+    nested_foreground_job_with_owner(pid).map(|(_, job)| job)
+}
+
+/// `nested_foreground_job`, also naming the child that owns the nested PTY.
+pub fn nested_foreground_job_with_owner(pid: u32) -> Option<(u32, ForegroundJob)> {
+    if pid == 0 {
+        return None;
+    }
+
+    let parent_terminal = controlling_terminal(pid)?;
+    let children = process_task_ids(pid)
+        .into_iter()
+        .flat_map(|tid| process_task_children(pid, tid))
+        .map(|child| (child, controlling_terminal(child)));
+    super::nested_foreground_job_from_children(parent_terminal, children, foreground_job)
+}
+
+/// Device id of a process's controlling terminal, or `None` when it has none.
+fn controlling_terminal(pid: u32) -> Option<u64> {
+    controlling_terminal_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// When a process started, in unix ms.
+pub fn process_started_at_ms(pid: u32) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let boot = std::fs::read_to_string("/proc/stat").ok()?;
+    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    started_at_ms_from_stat(&stat, &boot, i64::from(i32::try_from(ticks_per_sec).ok()?))
+}
+
+fn started_at_ms_from_stat(stat: &str, proc_stat: &str, ticks_per_sec: i64) -> Option<i64> {
+    // After (comm): state(0) ... starttime(19), in clock ticks since boot.
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let ticks: i64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    let boot_secs: i64 = proc_stat
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    if ticks_per_sec <= 0 {
+        return None;
+    }
+    Some(
+        boot_secs
+            .saturating_mul(1000)
+            .saturating_add(ticks.saturating_mul(1000) / ticks_per_sec),
+    )
+}
+
+fn controlling_terminal_from_stat(stat: &str) -> Option<u64> {
+    // After (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4). The kernel
+    // reports "no controlling terminal" as 0.
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let tty_nr: i32 = rest.split_whitespace().nth(4)?.parse().ok()?;
+    (tty_nr != 0).then_some(u64::from(tty_nr as u32))
 }
 
 fn foreground_job_for_group(child_pid: u32, process_group_id: u32) -> Option<ForegroundJob> {
@@ -1234,6 +1303,20 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// This process's physical memory footprint in bytes, for tests that must see
+/// memory actually given back to the OS. On Linux that is RSS:
+/// `MADV_DONTNEED` drops released pages from it at once.
+#[cfg(test)]
+pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: sysconf has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    u64::try_from(page_size)
+        .ok()
+        .map(|page_size| resident_pages * page_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1745,6 +1828,36 @@ mod tests {
         for state in ['R', 'S', 'I', 'T', 't'] {
             assert!(process_state_allows_remote_memory_read(state));
         }
+    }
+
+    #[test]
+    fn proc_stat_parsing_reads_the_controlling_terminal() {
+        // "pid (comm) state ppid pgrp session tty_nr tpgid ...", with a comm
+        // that contains both a space and a close paren.
+        assert_eq!(
+            controlling_terminal_from_stat("123 (name with ) paren) S 1 456 789 34816 456"),
+            Some(34816)
+        );
+    }
+
+    #[test]
+    fn proc_stat_parsing_reads_the_start_time() {
+        // starttime is the 22nd field: 250 ticks at 100 per second is 2.5 s
+        // after a boot at unix second 1000.
+        let stat = "7 (co) dex) S 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 250 0 0";
+        assert_eq!(
+            started_at_ms_from_stat(stat, "cpu 1 2 3\nbtime 1000\nprocesses 9\n", 100),
+            Some(1_002_500)
+        );
+        assert_eq!(started_at_ms_from_stat(stat, "cpu 1 2 3\n", 100), None);
+    }
+
+    #[test]
+    fn proc_stat_parsing_reports_no_controlling_terminal_as_none() {
+        assert_eq!(
+            controlling_terminal_from_stat("123 (daemon) S 1 456 789 0 -1"),
+            None
+        );
     }
 
     #[test]

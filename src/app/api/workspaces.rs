@@ -101,6 +101,32 @@ impl App {
         )
     }
 
+    pub(super) fn handle_workspace_pin(
+        &mut self,
+        id: String,
+        target: WorkspaceTarget,
+        pin: bool,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
+            return workspace_not_found(id, &target.workspace_id);
+        };
+        if self.state.workspaces.get(index).is_none() {
+            return workspace_not_found(id, &target.workspace_id);
+        }
+        if pin {
+            self.state.pin_workspace(index);
+        } else {
+            self.state.unpin_workspace(index);
+        }
+
+        encode_success(
+            id,
+            ResponseResult::WorkspaceInfo {
+                workspace: self.workspace_info(index),
+            },
+        )
+    }
+
     pub(super) fn handle_workspace_rename(
         &mut self,
         id: String,
@@ -334,6 +360,21 @@ impl App {
                 "workspace has linked worktree workspaces; use --group (close_group=true in the API) to close the group",
             );
         }
+        let panes = close_indices
+            .iter()
+            .flat_map(|index| {
+                self.state.workspaces[*index]
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.layout.pane_ids())
+                    .map(move |pane_id| (*index, pane_id))
+            })
+            .collect::<Vec<_>>();
+        let dropped = self.open_todos_in(panes);
+        // Only the TUI's own close skips this; it never asked about todos.
+        if !self.tui_request_in_flight && !params.force && !dropped.is_empty() {
+            return super::panes::open_todos_refusal(id, "this workspace", &dropped);
+        }
         let closed_workspaces = close_indices
             .iter()
             .map(|index| {
@@ -356,7 +397,8 @@ impl App {
             });
         }
 
-        encode_success(id, ResponseResult::Ok {})
+        self.state.drop_stale_close_confirmation();
+        super::panes::closed_response(id, params.force, dropped)
     }
 
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {
@@ -831,6 +873,7 @@ mod tests {
             WorkspaceCloseParams {
                 workspace_id: parent_id,
                 close_group: true,
+                force: false,
             },
         );
 
@@ -870,6 +913,7 @@ mod tests {
             WorkspaceCloseParams {
                 workspace_id: linked_id,
                 close_group: true,
+                force: false,
             },
         );
 
@@ -898,6 +942,7 @@ mod tests {
             WorkspaceCloseParams {
                 workspace_id: workspace_id.clone(),
                 close_group: false,
+                force: false,
             },
         );
 

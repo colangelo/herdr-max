@@ -185,6 +185,28 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            EventData::TodoChanged { pane_id } => self
+                .plugin_context_for_public_pane_id(pane_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.focused_pane_id = Some(pane_id.clone());
+                    context
+                }),
+            EventData::NotificationPosted { notification } => notification
+                .pane_id
+                .as_ref()
+                .and_then(|pane_id| self.plugin_context_for_public_pane_id(pane_id, correlation_id))
+                .or_else(|| {
+                    notification.workspace_id.as_ref().and_then(|workspace_id| {
+                        self.plugin_context_for_workspace_id(workspace_id, correlation_id)
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = notification.workspace_id.clone();
+                    context.focused_pane_id = notification.pane_id.clone();
+                    context
+                }),
         }
     }
 

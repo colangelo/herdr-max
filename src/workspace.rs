@@ -20,14 +20,21 @@ mod git;
 mod tab;
 
 use self::git::git_status_cache_key_for_space;
+#[cfg(test)]
+pub(crate) use self::tab::SYNC_GRACE;
 pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
 pub use self::{
     git::{
-        derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
+        derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_detached_head,
+        git_space_metadata, git_status_cache_key, DetachedHead, GitSpaceMetadata,
+        GitStatusCacheEntry, GitStatusRefreshDemand,
     },
     tab::{NewPane, Tab},
 };
+// Production code only reads the operation through `DetachedHead::label`;
+// tests build the fact directly.
+#[cfg(test)]
+pub use self::git::GitOperation;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeSpaceMembership {
@@ -46,6 +53,8 @@ pub struct WorkspaceGitStatus {
     pub demand: GitStatusRefreshDemand,
     pub auto_label: String,
     pub branch: Option<String>,
+    /// Refreshed together with `branch`, under the same demand.
+    pub detached_head: Option<DetachedHead>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
 }
@@ -54,6 +63,7 @@ pub struct WorkspaceGitStatus {
 pub struct WorkspaceGitStatusSnapshot {
     pub auto_label: String,
     pub branch: Option<String>,
+    pub detached_head: Option<DetachedHead>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
 }
@@ -95,6 +105,7 @@ impl WorkspaceGitStatusSnapshot {
             demand,
             auto_label,
             branch: self.branch,
+            detached_head: self.detached_head,
             ahead_behind: self.ahead_behind,
             space: self.space,
         }
@@ -188,12 +199,18 @@ pub struct Workspace {
     pub(crate) cached_git_status_key: PathBuf,
     /// Cached current git branch for the workspace repo.
     pub(crate) cached_git_branch: Option<String>,
+    /// Cached detached-HEAD fact for the workspace repo; `Some` only when
+    /// `cached_git_branch` is `None` because the checkout is on no branch.
+    pub(crate) cached_git_detached_head: Option<DetachedHead>,
     /// Cached ahead/behind counts for the workspace repo's current branch upstream.
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
+    /// Where this space sits among the pinned ones (fork issue 148): pinned
+    /// spaces are listed first by ascending value. `None` is not pinned.
+    pub pin_order: Option<u64>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -257,9 +274,11 @@ impl Workspace {
             cached_auto_label,
             cached_git_status_key,
             cached_git_branch: git_branch(&identity_cwd),
+            cached_git_detached_head: git_detached_head(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space: None,
+            pin_order: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -409,9 +428,11 @@ impl Workspace {
                 cached_auto_label,
                 cached_git_status_key,
                 cached_git_branch: git_branch(&initial_cwd),
+                cached_git_detached_head: git_detached_head(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space,
                 worktree_space: None,
+                pin_order: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1068,8 +1089,21 @@ impl Workspace {
         }
     }
 
+    /// The branch name alone; rendering goes through [`Self::head_label`].
+    #[cfg(test)]
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
+    }
+
+    /// What the sidebar's branch slot shows: the branch name, or where a
+    /// detached checkout is (`@a620c06`, `rebase @a620c06`) so the entry keeps
+    /// its row instead of quietly losing it. `None` outside a git repo.
+    pub fn head_label(&self) -> Option<String> {
+        self.cached_git_branch.clone().or_else(|| {
+            self.cached_git_detached_head
+                .as_ref()
+                .map(DetachedHead::label)
+        })
     }
 
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
@@ -1184,6 +1218,7 @@ impl Workspace {
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
+            sync: None,
             events,
             render_notify,
             render_dirty,
@@ -1198,9 +1233,11 @@ impl Workspace {
             cached_auto_label: fallback_label_from_cwd(&identity_cwd),
             cached_git_status_key: identity_cwd.clone(),
             cached_git_branch: git_branch(&identity_cwd),
+            cached_git_detached_head: git_detached_head(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: None,
+            pin_order: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -1221,6 +1258,7 @@ impl Workspace {
         let new_id = tab.layout.split_focused(direction);
         tab.panes
             .insert(new_id, PaneState::new(TerminalId::alloc()));
+        tab.sync_pane_added(new_id);
         self.register_new_pane(new_id);
         new_id
     }
@@ -1240,6 +1278,7 @@ impl Workspace {
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
+            sync: None,
             events,
             render_notify,
             render_dirty,

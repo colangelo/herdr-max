@@ -76,26 +76,12 @@ fn test_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not appear at {}", path.display());
+fn wait_for_socket(path: &Path) {
+    support::wait_for_socket(path);
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() && UnixStream::connect(path).is_ok() {
-            return;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    panic!("socket did not accept connections at {}", path.display());
+fn wait_for_file(path: &Path) {
+    support::wait_for_socket(path);
 }
 
 fn spawn_server(
@@ -124,6 +110,7 @@ fn spawn_server(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -170,8 +157,8 @@ fn server_creates_both_sockets() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for both sockets to appear.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Verify the client socket is a socket file.
     let metadata = fs::metadata(&client_socket).unwrap();
@@ -203,7 +190,7 @@ fn server_starts_without_terminal() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
 
     // Wait for the API socket to appear — proves the server started.
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     // The server process should be running.
     if let Some(pid) = spawned.child.process_id() {
@@ -224,7 +211,7 @@ fn server_api_responds_to_ping() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     // Ping the API socket.
     let response = ping_socket(&api_socket);
@@ -246,8 +233,8 @@ fn server_removes_client_socket_on_exit() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Stop the server.
     support::stop_spawned_herdr(&mut *spawned.child);
@@ -289,7 +276,7 @@ fn server_cleans_up_stale_client_socket() {
 
     // Now start the server — it should clean up the stale socket.
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     // The API should work.
     let response = ping_socket(&api_socket);
@@ -311,8 +298,8 @@ fn server_persists_after_client_disconnect() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Connect to the client socket and then immediately disconnect.
     {
@@ -344,7 +331,7 @@ fn duplicate_server_start_fails_gracefully() {
 
     // Start the first server.
     let spawned1 = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     // Try to start a second server — it should fail.
     let pair = native_pty_system()
@@ -358,6 +345,7 @@ fn duplicate_server_start_fails_gracefully() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -390,8 +378,8 @@ fn client_handshake_succeeds() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Connect to the client socket and perform a handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -423,8 +411,8 @@ fn client_handshake_rejects_incompatible_version() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Connect to the client socket and send Hello with version 0 (pre-persistence).
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -454,8 +442,8 @@ fn client_handshake_clamps_small_terminal_size() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Send Hello with 0x0 terminal size — should be clamped.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
@@ -486,8 +474,8 @@ fn no_hello_client_closed_within_five_seconds() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_file(&client_socket);
 
     // Connect but don't send Hello — just a raw connection.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");

@@ -90,6 +90,13 @@ pub enum TerminalCompressionResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalCompressionResult {
+    Unsupported,
+    Pending,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowSelection {
     pub start_x: u16,
     pub end_x: u16,
@@ -766,7 +773,7 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<DecodedPng> {
         png::ColorType::Rgba => frame.to_vec(),
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
-            for rgb in frame.chunks_exact(3) {
+            for rgb in frame.as_chunks::<3>().0 {
                 out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
             out
@@ -780,7 +787,7 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<DecodedPng> {
         }
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
-            for ga in frame.chunks_exact(2) {
+            for ga in frame.as_chunks::<2>().0 {
                 out.extend_from_slice(&[ga[0], ga[0], ga[0], ga[1]]);
             }
             out
@@ -895,6 +902,16 @@ impl Terminal {
         };
         let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
             Some(clipboard_write_trampoline);
+        let terminfo_name = ffi::GhosttyString {
+            ptr: crate::pane::PANE_TERM.as_ptr().cast(),
+            len: crate::pane::PANE_TERM.len(),
+        };
+        let grapheme_default = ffi::GhosttyTerminalModeConfig {
+            mode: MODE_GRAPHEME_CLUSTER,
+            value: true,
+        };
+        let clipboard_callback: ffi::GhosttyTerminalClipboardWriteFn =
+            Some(clipboard_write_trampoline);
         unsafe {
             ffi::ghostty_terminal_set(
                 terminal.raw,
@@ -987,6 +1004,41 @@ impl Terminal {
     }
 
     pub fn compress_incremental(&mut self) -> Result<TerminalCompressionResult, Error> {
+        let mut result =
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
+        // SAFETY: self.raw is a live terminal handle and result is a valid out pointer.
+        unsafe {
+            ffi::ghostty_terminal_compress(
+                self.raw,
+                ffi::GhosttyTerminalCompressionMode_GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+                &mut result,
+            )
+            .into_result()?;
+        }
+        match result {
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED => {
+                Ok(TerminalCompressionResult::Unsupported)
+            }
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING => {
+                Ok(TerminalCompressionResult::Pending)
+            }
+            ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_COMPLETE => {
+                Ok(TerminalCompressionResult::Complete)
+            }
+            _ => Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE)),
+        }
+    }
+
+    pub(crate) fn compression_activity(&self) -> Result<u64, Error> {
+        let mut activity = 0;
+        // SAFETY: self.raw is a live terminal handle and activity is a valid out pointer.
+        unsafe {
+            ffi::ghostty_terminal_compression_activity(self.raw, &mut activity).into_result()?;
+        }
+        Ok(activity)
+    }
+
+    pub(crate) fn compress_incremental(&mut self) -> Result<TerminalCompressionResult, Error> {
         let mut result =
             ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
         // SAFETY: self.raw is a live terminal handle and result is a valid out pointer.
@@ -1753,6 +1805,11 @@ impl Terminal {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_ROWS)
     }
 
+    pub fn cursor_y(&self) -> Result<u16, Error> {
+        self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)
+    }
+
+    #[cfg(test)]
     pub fn cursor_y(&self) -> Result<u16, Error> {
         self.get_u16(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_CURSOR_Y)
     }
@@ -3831,6 +3888,69 @@ mod tests {
             .unwrap();
         }
         out
+    }
+
+    /// Fails unless compression really runs: libghostty must not report it
+    /// unsupported, and the process footprint must drop by at least a quarter
+    /// of what the scrollback added. nextest runs each test in its own
+    /// process, so the footprint change is this terminal's.
+    #[test]
+    fn incremental_compression_preserves_cold_scrollback() {
+        const LINES: usize = 50_000;
+        let baseline = crate::platform::process_memory_footprint_bytes();
+        let mut terminal = Terminal::new(80, 24, 200_000_000).unwrap();
+        let initial_activity = terminal.compression_activity().unwrap();
+        // Varied text, as a real log looks, so the pages hold more than one
+        // repeated byte.
+        let words = [
+            "build",
+            "error",
+            "warning",
+            "compiling",
+            "finished",
+            "test",
+            "ok",
+        ];
+        for line in 1..=LINES {
+            let word = words[line % words.len()];
+            let pad = "=".repeat(line % 37);
+            terminal.write(format!("{line:06} {word} {pad} {}\r\n", line * 7919).as_bytes());
+        }
+        assert_ne!(terminal.compression_activity().unwrap(), initial_activity);
+        let filled = crate::platform::process_memory_footprint_bytes();
+
+        let mut complete = false;
+        for _ in 0..1_000_000 {
+            match terminal.compress_incremental().unwrap() {
+                TerminalCompressionResult::Unsupported => {
+                    panic!("libghostty reports scrollback compression unsupported on this target")
+                }
+                TerminalCompressionResult::Pending => {}
+                TerminalCompressionResult::Complete => {
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        assert!(complete, "incremental compression did not converge");
+        let compressed = crate::platform::process_memory_footprint_bytes();
+
+        if let (Some(baseline), Some(filled), Some(compressed)) = (baseline, filled, compressed) {
+            let added = filled.saturating_sub(baseline);
+            let freed = filled.saturating_sub(compressed);
+            assert!(
+                freed >= added / 4,
+                "compression freed {freed} bytes of the {added} the scrollback added"
+            );
+        }
+
+        let oldest = terminal.read_text_screen((0, 0), (79, 0), false).unwrap();
+        assert!(oldest.starts_with("000001 "));
+        let last_row = terminal.total_rows().unwrap() as u32 - 1;
+        let newest = terminal
+            .read_text_screen((0, last_row - 1), (79, last_row), false)
+            .unwrap();
+        assert!(newest.contains(&format!("{LINES:06}")));
     }
 
     #[test]

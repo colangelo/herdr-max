@@ -367,4 +367,46 @@ mod tests {
         assert_eq!(line_text(&lines[1].1), "▏ ");
         assert_eq!(line_text(&lines[2].1), "▏ second");
     }
+
+    #[test]
+    fn snapshot_release_notes() {
+        crate::ui::test_support::overlay_snapshot_of(|app| {
+            app.open_overlay(crate::app::state::Overlay::ReleaseNotes(
+                crate::app::state::ReleaseNotesState {
+                    version: "0.9.9".to_string(),
+                    body: "- one thing changed\n- another thing changed".to_string(),
+                    scroll: 0,
+                    preview: false,
+                },
+            ));
+        })
+        .assert(
+            Rect::new(2, 1, 76, 23),
+            &[
+                "┌──────────────────────────────────────────────────────────────────────────┐",
+                "│ v0.9.9                                                         esc close │",
+                "│ what's new in this release                                               │",
+                "│                                                                          │",
+                "│ • one thing changed                                                      │",
+                "│ • another thing changed                                                  │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│                                                                          │",
+                "│ scroll wheel ↑↓  ·  close esc / enter                                    │",
+                "└──────────────────────────────────────────────────────────────────────────┘",
+            ],
+        );
+    }
 }

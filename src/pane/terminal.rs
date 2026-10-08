@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -193,6 +194,20 @@ pub(crate) struct GhosttyPaneTerminal {
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
 }
 
+/// How long an open synchronized update (DEC mode 2026) may hold a client's
+/// frame before herdr draws the pane as it is (fork issue 126).
+pub(crate) const SYNC_HOLD_MAX: Duration = Duration::from_millis(200);
+
+/// Counts synchronized-update begins and ends across every pane. Each pane
+/// keeps the count of its own last one, so a frame that read the count before
+/// it was built can tell a pane that began or ended a block while it was built.
+static SYNC_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
+
+/// The synchronized-update count now; read it before building a frame.
+pub(crate) fn sync_transition_seq() -> u64 {
+    SYNC_TRANSITIONS.load(Ordering::Acquire)
+}
+
 pub(crate) struct GhosttyPaneCore {
     #[cfg(test)]
     pub dirty_collection_hook: Option<Box<dyn FnOnce() + Send>>,
@@ -216,6 +231,10 @@ pub(crate) struct GhosttyPaneCore {
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
+    /// When the open synchronized update began; `None` outside one.
+    sync_began_at: Option<Instant>,
+    /// [`SYNC_TRANSITIONS`] at this pane's last begin or end.
+    sync_transition_seq: u64,
 }
 
 pub(crate) struct PaneTerminal {
@@ -263,6 +282,10 @@ impl PaneTerminal {
 
     pub fn clear_screen(&self) -> Result<(), String> {
         self.ghostty.clear_screen()
+    }
+
+    pub fn clear_scrollback(&self) {
+        self.ghostty.clear_scrollback();
     }
 
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
@@ -489,6 +512,10 @@ impl PaneTerminal {
         self.ghostty.synchronized_output_state()
     }
 
+    pub fn synchronized_frame_held(&self, since: u64, now: Instant) -> bool {
+        self.ghostty.synchronized_frame_held(since, now)
+    }
+
     pub fn visible_text(&self) -> String {
         self.ghostty.visible_text()
     }
@@ -499,6 +526,23 @@ impl PaneTerminal {
 
     pub fn detection_text(&self) -> String {
         self.ghostty.detection_text()
+    }
+
+    pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
+        self.ghostty.try_compression_activity()
+    }
+
+    pub(crate) fn try_compress_incremental_if_activity(
+        &self,
+        expected_activity: u64,
+    ) -> Result<TerminalCompressionStep, crate::ghostty::Error> {
+        self.ghostty
+            .try_compress_incremental_if_activity(expected_activity)
+    }
+
+    /// The detection buffer with its styling, for a read that drops faint cells.
+    pub fn detection_ansi(&self) -> String {
+        self.ghostty.detection_ansi()
     }
 
     pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
@@ -1195,6 +1239,8 @@ impl GhosttyPaneTerminal {
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
+                sync_began_at: None,
+                sync_transition_seq: 0,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -1439,6 +1485,8 @@ impl GhosttyPaneTerminal {
         }
         // Intermediate synchronized-frame positions must not become settled cursors.
         if CURSOR_POSITION_SETTLE_ENABLED && !synchronized_output {
+        let synchronized_output_began =
+            observe_synchronized_output(&mut core, synchronized_output, filtered_bytes.as_ref());
             let cursor_started = crate::render_prof::timer();
             let cursor_after_write = current_cursor_state(&mut core);
             crate::render_prof::duration_since("pty.cursor_state_update", cursor_started);
@@ -1455,6 +1503,7 @@ impl GhosttyPaneTerminal {
         let request_render = !synchronized_output;
         let render_delay = render_delay_after_pty_write(
             synchronized_output,
+            synchronized_output_began,
             has_kitty_graphics_sequence,
             core.cursor_settle_state.render_delay(),
             CURSOR_POSITION_SETTLE_ENABLED,
@@ -1796,6 +1845,17 @@ impl GhosttyPaneTerminal {
         Ok(())
     }
 
+    /// Purge the saved scrollback by feeding `CSI 3J` straight to the
+    /// emulator. This intentionally bypasses `process_pty_bytes`, so the
+    /// droid-compat `CSI 3J` strip never applies to herdr-originated clears.
+    /// The visible screen and emulator modes are untouched; a no-op when
+    /// scrollback is already empty.
+    pub fn clear_scrollback(&self) {
+        if let Ok(mut core) = self.core.lock() {
+            core.terminal.write(b"\x1b[3J");
+        }
+    }
+
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
         if let Ok(mut core) = self.core.lock() {
             #[cfg(windows)]
@@ -1996,6 +2056,19 @@ impl GhosttyPaneTerminal {
         effective_cursor_state(&mut core, current)
     }
 
+    /// Whether a frame whose build started at transition count `since` must
+    /// not show this pane: its synchronized update is open and younger than
+    /// [`SYNC_HOLD_MAX`], or it began or ended one after `since` (fork issue
+    /// 126). One lock, no allocation.
+    pub fn synchronized_frame_held(&self, since: u64, now: Instant) -> bool {
+        self.core.lock().is_ok_and(|core| {
+            core.sync_transition_seq > since
+                || core
+                    .sync_began_at
+                    .is_some_and(|began| now < began + SYNC_HOLD_MAX)
+        })
+    }
+
     pub fn synchronized_output_active(&self) -> bool {
         self.core
             .lock()
@@ -2171,6 +2244,53 @@ impl GhosttyPaneTerminal {
             .lock()
             .ok()
             .and_then(|mut core| ghostty_detection_text(&mut core).ok())
+            .unwrap_or_default()
+    }
+
+    fn try_lock_core(&self) -> Option<std::sync::MutexGuard<'_, GhosttyPaneCore>> {
+        match self.core.try_lock() {
+            Ok(core) => Some(core),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        }
+    }
+
+    pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
+        let Some(core) = self.try_lock_core() else {
+            return Ok(None);
+        };
+        core.terminal.compression_activity().map(Some)
+    }
+
+    pub(crate) fn try_compress_incremental_if_activity(
+        &self,
+        expected_activity: u64,
+    ) -> Result<TerminalCompressionStep, crate::ghostty::Error> {
+        let Some(mut core) = self.try_lock_core() else {
+            return Ok(TerminalCompressionStep::Busy);
+        };
+        let activity = core.terminal.compression_activity()?;
+        if activity != expected_activity {
+            return Ok(TerminalCompressionStep::ActivityChanged(activity));
+        }
+        core.terminal
+            .compress_incremental()
+            .map(TerminalCompressionStep::Compressed)
+    }
+
+    pub fn detection_ansi(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|mut core| {
+                let lines = core
+                    .terminal
+                    .rows()
+                    .ok()
+                    .map(|rows| usize::from(rows).max(1))
+                    .unwrap_or(DEFAULT_DETECTION_ROWS);
+                ghostty_recent_ansi(&mut core, lines, false).ok()
+            })
             .unwrap_or_default()
     }
 
@@ -2533,14 +2653,43 @@ fn effective_cursor_state(
         .reported_cursor(current, Instant::now())
 }
 
+/// Tracks this pane's synchronized updates after a write: when the open one
+/// began, and the transition count at each begin or end. A begin and its end
+/// inside one write are atomic under the core lock and change nothing; an end
+/// followed by a new begin in one write starts the hold clock again. Returns
+/// whether a block began, so the write can ask for a render at
+/// [`SYNC_HOLD_MAX`]: a stuck block stops holding with no input.
+fn observe_synchronized_output(core: &mut GhosttyPaneCore, active: bool, bytes: &[u8]) -> bool {
+    let began = match (core.sync_began_at.is_some(), active) {
+        (false, true) => true,
+        (true, true) => contains_synchronized_output_begin(bytes),
+        (true, false) => {
+            core.sync_began_at = None;
+            core.sync_transition_seq = SYNC_TRANSITIONS.fetch_add(1, Ordering::AcqRel) + 1;
+            return false;
+        }
+        (false, false) => false,
+    };
+    if began {
+        core.sync_began_at = Some(Instant::now());
+        core.sync_transition_seq = SYNC_TRANSITIONS.fetch_add(1, Ordering::AcqRel) + 1;
+    }
+    began
+}
+
+fn contains_synchronized_output_begin(bytes: &[u8]) -> bool {
+    bytes.windows(8).any(|window| window == b"\x1b[?2026h")
+}
+
 fn render_delay_after_pty_write(
     synchronized_output: bool,
+    synchronized_output_began: bool,
     has_kitty_graphics_sequence: bool,
     cursor_position_settle_delay: Option<Duration>,
     cursor_position_settle_enabled: bool,
 ) -> Option<Duration> {
     if synchronized_output {
-        None
+        synchronized_output_began.then_some(SYNC_HOLD_MAX)
     } else {
         let cursor_delay = cursor_position_settle_enabled
             .then_some(cursor_position_settle_delay)
@@ -4591,21 +4740,28 @@ mod tests {
     fn cursor_settle_policy_controls_render_delay() {
         let delay = Some(CURSOR_POSITION_SETTLE);
         assert_eq!(
-            render_delay_after_pty_write(false, false, delay, true),
+            render_delay_after_pty_write(false, false, false, delay, true),
             delay
         );
         assert_eq!(
-            render_delay_after_pty_write(false, false, delay, false),
+            render_delay_after_pty_write(false, false, false, delay, false),
             None
         );
         assert_eq!(
-            render_delay_after_pty_write(false, true, delay, false),
+            render_delay_after_pty_write(false, false, true, delay, false),
             Some(KITTY_GRAPHICS_REDRAW_SETTLE)
         );
-        assert_eq!(render_delay_after_pty_write(true, false, delay, true), None);
+        assert_eq!(
+            render_delay_after_pty_write(true, false, false, delay, true),
+            None
+        );
+        assert_eq!(
+            render_delay_after_pty_write(true, true, false, delay, true),
+            Some(SYNC_HOLD_MAX)
+        );
         let jump_delay = Some(Duration::from_millis(100));
         assert_eq!(
-            render_delay_after_pty_write(false, true, jump_delay, true),
+            render_delay_after_pty_write(false, false, true, jump_delay, true),
             jump_delay
         );
     }
@@ -5313,6 +5469,111 @@ mod tests {
     }
 
     #[test]
+    fn clear_scrollback_purges_saved_lines_and_preserves_screen() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 5, 1_000_000).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let lines = (0..20)
+            .map(|i| format!("line {i:02}\r\n"))
+            .collect::<String>();
+        pane.process_pty_bytes(pane_id, 0, lines.as_bytes(), &tx);
+
+        let before = pane.scroll_metrics().expect("metrics");
+        assert!(
+            before.max_offset_from_bottom > 0,
+            "expected saved scrollback"
+        );
+        let visible_before = pane.visible_text();
+
+        pane.clear_scrollback();
+
+        let after = pane.scroll_metrics().expect("metrics");
+        assert_eq!(
+            after.max_offset_from_bottom, 0,
+            "scrollback should be purged"
+        );
+        assert_eq!(
+            pane.visible_text(),
+            visible_before,
+            "visible screen must be preserved"
+        );
+    }
+
+    #[test]
+    fn clear_scrollback_is_a_safe_noop_on_empty_scrollback_and_alt_screen() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 5, 1_000_000).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+
+        // Empty scrollback: nothing to purge, nothing disturbed.
+        pane.process_pty_bytes(pane_id, 0, b"prompt", &tx);
+        let visible_before = pane.visible_text();
+        pane.clear_scrollback();
+        assert_eq!(
+            pane.scroll_metrics()
+                .expect("metrics")
+                .max_offset_from_bottom,
+            0
+        );
+        assert_eq!(pane.visible_text(), visible_before);
+
+        // Alternate screen: the visible alt content must stay intact.
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?1049halt content", &tx);
+        let alt_visible = pane.visible_text();
+        pane.clear_scrollback();
+        assert_eq!(pane.visible_text(), alt_visible);
+    }
+
+    #[test]
+    fn herdr_clear_scrollback_bypasses_droid_program_byte_strip() {
+        let droid_job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![crate::platform::ForegroundProcess {
+                pid: 42,
+                name: "droid".to_string(),
+                argv0: Some("droid".to_string()),
+                argv: Some(vec!["droid".to_string()]),
+                cmdline: Some("droid".to_string()),
+            }],
+        };
+        // The program-byte path strips CSI 3J for a droid foreground job...
+        let filtered =
+            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J", false, Some(&droid_job));
+        assert!(
+            filtered.as_ref().is_empty(),
+            "droid strip should drop program-emitted 3J"
+        );
+
+        // ...while the herdr-originated clear feeds the emulator directly and
+        // still purges the scrollback.
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 5, 1_000_000).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let lines = (0..20)
+            .map(|i| format!("line {i:02}\r\n"))
+            .collect::<String>();
+        pane.process_pty_bytes(pane_id, 0, lines.as_bytes(), &tx);
+        assert!(
+            pane.scroll_metrics()
+                .expect("metrics")
+                .max_offset_from_bottom
+                > 0
+        );
+
+        pane.clear_scrollback();
+
+        assert_eq!(
+            pane.scroll_metrics()
+                .expect("metrics")
+                .max_offset_from_bottom,
+            0
+        );
+    }
+
+    #[test]
     fn ghostty_kitty_pane_encodes_shift_enter_as_csi_u() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
@@ -5966,6 +6227,31 @@ mod tests {
         assert!(ansi.contains("\x1b["));
     }
 
+    /// Fork issue 146: a real faint cell (Claude Code's grey suggestion) is
+    /// dropped from every source, detection included, and typed text stays.
+    #[test]
+    fn dim_runs_are_dropped_from_the_real_snapshots_of_every_source() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(30, 3, 100).unwrap();
+        terminal.write(b"\x1b[1m\xe2\x9d\xaf\x1b[0m typed \x1b[2mA/B as is\x1b[0m");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+        let drop = |ansi: String| crate::api::dim::drop_dim_runs(&ansi, false);
+
+        for text in [
+            drop(pane.visible_ansi()),
+            drop(pane.recent_ansi_snapshot(3).text),
+            drop(pane.detection_ansi()),
+        ] {
+            assert!(text.contains("typed"), "{text:?}");
+            assert!(!text.contains("A/B"), "{text:?}");
+            assert!(!text.contains('\x1b'), "{text:?}");
+        }
+        assert!(
+            pane.detection_text().contains("A/B as is"),
+            "plain keeps it"
+        );
+    }
+
     #[test]
     fn recent_ansi_can_read_styled_scrollback() {
         let (tx, _rx) = mpsc::channel(4);
@@ -6190,6 +6476,56 @@ mod tests {
         let end = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
         assert!(end.request_render);
         assert_eq!(pane_terminal.synchronized_output_state(), (false, 2));
+    }
+
+    // Fork issue 126: the hold state a frame reads.
+    #[test]
+    fn synchronized_output_holds_frames_until_it_ends_or_times_out() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        let since = sync_transition_seq();
+        assert!(!pane_terminal.synchronized_frame_held(since, Instant::now()));
+
+        let begin = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
+        assert_eq!(begin.render_delay, Some(SYNC_HOLD_MAX), "timeout render");
+        let now = Instant::now();
+        let after_begin = sync_transition_seq();
+        assert!(after_begin > since);
+        assert!(pane_terminal.synchronized_frame_held(since, now));
+        assert!(
+            pane_terminal.synchronized_frame_held(after_begin, now),
+            "mid-block holds whatever the count"
+        );
+        assert!(
+            !pane_terminal.synchronized_frame_held(after_begin, now + SYNC_HOLD_MAX),
+            "a stuck block stops holding"
+        );
+
+        let body = pane_terminal.process_pty_bytes(pane_id, 0, b"hello", &tx);
+        assert_eq!(body.render_delay, None, "one timeout render per block");
+        let mid = sync_transition_seq();
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
+        let now = Instant::now();
+        assert!(
+            pane_terminal.synchronized_frame_held(mid, now),
+            "an end during the build voids the frame"
+        );
+        let after_end = sync_transition_seq();
+        assert!(!pane_terminal.synchronized_frame_held(after_end, now));
+
+        pane_terminal.process_pty_bytes(pane_id, 0, b"plain output", &tx);
+        assert!(
+            !pane_terminal.synchronized_frame_held(after_end, Instant::now()),
+            "plain output is no transition"
+        );
+        pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026hwhole\x1b[?2026l", &tx);
+        assert!(
+            !pane_terminal.synchronized_frame_held(after_end, Instant::now()),
+            "a block inside one write is atomic"
+        );
     }
 
     #[test]

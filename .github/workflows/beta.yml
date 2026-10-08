@@ -1,0 +1,237 @@
+name: Beta
+
+# Fork: rolling -ac-beta channel. Manual dispatch builds macOS binaries from the
+# chosen ref, publishes a single rolling `beta` prerelease, and updates the
+# separate colangelo/homebrew-tap `herdr-beta` formula so it can be installed
+# alongside stable herdr. See .claude/skills/herdr-release/SKILL.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit to build (default: master)"
+        required: false
+        default: "master"
+        type: string
+      codename:
+        description: "Pin the build codename (default: derived from the run number)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Must match rust-toolchain.toml so the cross target's std is installed for the
+  # pinned toolchain (otherwise the build fails with "can't find crate for core").
+  RUST_TOOLCHAIN_VERSION: 1.96.1
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build_id: ${{ steps.compute.outputs.build_id }}
+      version: ${{ steps.compute.outputs.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref || 'master' }}
+          persist-credentials: false
+
+      - name: Compute shared beta build id and version
+        id: compute
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          CODENAME: ${{ inputs.codename }}
+        run: |
+          BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          # Beta build id = a monotonic run number (keeps `brew upgrade` ordering
+          # intact — Homebrew compares the number first) plus a mnemonic codename:
+          # the surname of a Juventus player from 2012 to today, chosen
+          # deterministically from the run number so each build reads like
+          # "0.7.5-ac-beta.7-pirlo" instead of an opaque timestamp.
+          NAMES=(pirlo vidal pogba marchisio tevez llorente chiellini bonucci barzagli lichtsteiner asamoah giovinco vucinic buffon evra dybala higuain mandzukic khedira pjanic cuadrado benatia rugani sturaro alves douglascosta bernardeschi matuidi szczesny ronaldo ramsey rabiot deligt demiral danilo alexsandro kulusevski mckennie morata chiesa bentancur arthur vlahovic locatelli kean zakaria gatti bremer paredes kostic milik fagioli miretti perin thuram koopmeiners cambiaso yildiz weah conceicao kalulu kelly digregorio douglasluiz mbangula)
+          NAME=${NAMES[$(( RUN_NUMBER % ${#NAMES[@]} ))]}
+          # A pinned codename keeps a run of builds reading the same while the
+          # run number still increments, so `brew upgrade` ordering is untouched.
+          # Checked against the pool: a typo would otherwise mint a version token
+          # nothing else in the channel shares.
+          if [ -n "${CODENAME}" ]; then
+            case " ${NAMES[*]} " in
+              *" ${CODENAME} "*) NAME="${CODENAME}" ;;
+              *)
+                echo "codename '${CODENAME}' is not in the pool" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          BUILD_ID="${RUN_NUMBER}-${NAME}"
+          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE}-ac-beta.${BUILD_ID}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prep
+    name: Build ${{ matrix.name }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            name: herdr-macos-x86_64
+          - target: aarch64-apple-darwin
+            name: herdr-macos-aarch64
+    runs-on: macos-latest
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: "true"
+      HERDR_BUILD_CHANNEL: ac-beta
+      HERDR_BUILD_ID: ${{ needs.prep.outputs.build_id }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref || 'master' }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Install macOS build tools
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: beta-${{ matrix.target }}
+
+      - name: Remove Zig caches
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  publish:
+    needs: [prep, build]
+    name: Publish rolling beta prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref || 'master' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+
+      - name: Publish rolling beta prerelease
+        # Publishes to a staging tag first and only then moves `beta`, so a
+        # refused publish leaves the previous beta release downloadable.
+        # Order and failure modes: scripts/beta_publish.sh.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BETA_VERSION: ${{ needs.prep.outputs.version }}
+          SOURCE_REF: ${{ inputs.ref || 'master' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          BETA_NOTES="Rolling \`-ac-beta\` build (\`${BETA_VERSION}\`) from \`${SOURCE_REF}\`."$'\n\n'"Install: \`brew install colangelo/tap/herdr-beta\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-beta\`"
+          export BETA_NOTES
+          TARGET_SHA=$(git rev-parse HEAD) scripts/beta_publish.sh \
+            herdr-macos-aarch64/herdr-macos-aarch64 \
+            herdr-macos-x86_64/herdr-macos-x86_64
+
+  update-homebrew:
+    needs: [prep, publish]
+    name: Update Homebrew Formula (beta)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BETA_VERSION: ${{ needs.prep.outputs.version }}
+    steps:
+      - name: Calculate checksums
+        run: |
+          BASE_URL="https://github.com/colangelo/herdr-max/releases/download/beta"
+          # Give the freshly uploaded release assets a moment to propagate.
+          sleep 5
+          curl -fsSL "${BASE_URL}/herdr-macos-aarch64" | sha256sum | cut -d' ' -f1 > darwin-arm64.sha
+          curl -fsSL "${BASE_URL}/herdr-macos-x86_64" | sha256sum | cut -d' ' -f1 > darwin-amd64.sha
+
+      - name: Update homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          DARWIN_ARM64=$(cat darwin-arm64.sha)
+          DARWIN_AMD64=$(cat darwin-amd64.sha)
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/colangelo/homebrew-tap.git"
+          cd homebrew-tap
+
+          cat > Formula/herdr-beta.rb << FORMULA
+          class HerdrBeta < Formula
+            desc "Terminal workspace manager for AI coding agents (beta channel)"
+            homepage "https://github.com/colangelo/herdr-max"
+            version "${BETA_VERSION}"
+            license "AGPL-3.0-or-later"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/colangelo/herdr-max/releases/download/beta/herdr-macos-aarch64"
+                sha256 "${DARWIN_ARM64}"
+              else
+                url "https://github.com/colangelo/herdr-max/releases/download/beta/herdr-macos-x86_64"
+                sha256 "${DARWIN_AMD64}"
+              end
+            end
+
+            def install
+              binary = Dir["herdr-*"].first || "herdr"
+              bin.install binary => "herdr-beta"
+            end
+
+            def caveats
+              <<~EOS
+                herdr runs a persistent background server. To upgrade without killing
+                your running panes, migrate the server onto the new binary after upgrading:
+
+                  brew upgrade herdr-beta
+                  herdr-beta server live-handoff --import-exe "#{opt_bin}/herdr-beta"
+
+                (self-update is disabled for Homebrew installs; use brew upgrade.)
+              EOS
+            end
+
+            test do
+              assert_match "herdr #{version}", shell_output("#{bin}/herdr-beta --version")
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/herdr-beta.rb
+          git diff --staged --quiet || git commit -m "Update herdr-beta to ${BETA_VERSION}"
+          git push

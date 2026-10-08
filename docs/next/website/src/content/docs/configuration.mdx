@@ -54,7 +54,9 @@ Themes, sidebar layouts, copy behavior, and other presentation settings come fro
 
 ## Headless terminal size
 
-When no client is attached, the server uses a 120×40 virtual terminal for layout and newly created panes. Change that fallback for headless orchestration with:
+When no client is attached, the server lays out panes at the size of the last client that was attached, so agents keep the width you use. It remembers that size in the session file, so panes restored after a server restart come back at it too. A client smaller than 80×24, such as a quick look from a phone, is used while attached but not remembered.
+
+Before any client has attached, and with remembering turned off, the server uses a 120×40 virtual terminal. Change that fallback for headless orchestration with:
 
 ```toml
 [server]
@@ -63,6 +65,17 @@ headless_rows = 50
 ```
 
 With one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
+
+A size carried over a live handoff comes first, then the remembered client size, then the fallback above.
+
+If you set a headless size on purpose and want it used every time no client is attached, turn remembering off:
+
+```toml
+[server]
+remember_client_size = false
+```
+
+`reload-config` applies it without a restart.
 
 ## Terminal defaults
 
@@ -127,6 +140,8 @@ For a guided introduction to the prefix and a vetted prefix-free setup, see [Key
 
 Herdr has a prefix mode similar to tmux. The default prefix is `ctrl+b`. Keybinding strings are explicit: `prefix+n` means press the configured prefix and then `n`; `ctrl+alt+n` is a direct terminal-mode shortcut.
 
+`prefix` may also be a list of keys, such as `prefix = ["ctrl+b", "ctrl+;"]`: any of them enters prefix mode, and every `prefix+X` binding works after any of them. See [Keyboard](/docs/keyboard/) for the details and the terminals that can send `ctrl+;`.
+
 A small keybinding override looks like this:
 
 ```toml
@@ -172,6 +187,10 @@ resize_pane_right = "ctrl+shift+alt+right"
 
 Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 
+A value herdr does not know, such as an enum variant from a newer build or a typo, costs only that key: it falls back to its default, the rest of the file applies, and `herdr config check` and `herdr reload-config` report it as `invalid value for <key> at line <n>`. A key herdr does not know, such as one a newer build added, is skipped with one `unknown config key <path>; ignoring key` line, and everything else applies. That includes keys inside a sidebar row token style (`{ token = "$asks", italic = true }` on a build without `italic` keeps the token and drops only `italic`) and inside a `tab_bar_right` entry; the path names the row or entry, for example `ui.sidebar.spaces.rows.1.2.italic`. A known style key with an invalid value (`bold = "yes"`) is dropped on its own and reported by position, such as `ui.sidebar.spaces.rows[1][0] has an invalid `bold``, so the token keeps its other keys and the other rows apply. A `tab_bar_right` entry that cannot be read (a wrong value type, a missing or unknown `type`, a key that belongs to another entry type) is hidden and reported as `ui.tab_bar_right[<n>] ...; hiding entry`, while the other entries apply. Only a TOML syntax error, or a sidebar token whose `token` name is wrong, rejects the whole file.
+
+A key you bind yourself takes precedence over a default binding that uses the same key, and that default is dropped. When this leaves an action with no key at all, for example `switch_workspace = ["prefix+c"]` taking `new_tab`'s only default, `herdr config check` prints a warning that names the action and the binding that took its key. Bind the action to another key, or set it to `""` to leave it unbound on purpose and silence the warning. The check still passes.
+
 If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
 
 ## Indexed jumps
@@ -184,6 +203,17 @@ switch_tab = "prefix+1..9"
 switch_workspace = "prefix+shift+1..9"
 focus_agent = "prefix+alt+1..9"
 ```
+
+A range can also continue past nine with letters, so lists longer than nine entries stay reachable:
+
+```toml
+[keys]
+focus_agent = ["prefix+alt+1..9", "prefix+alt+a..z"]
+```
+
+Entries 1–9 take the digits, then the letters continue from entry 10.
+
+On **macOS**, the letters `e`, `i`, `n`, and `u` are **skipped**. Those are Option dead keys on ABC and most Latin layouts — Option+e produces `´` and Option+i produces a pending `ˆ` rather than `alt+e` or `alt+i`, so the keypress never reaches Herdr. Ghostty's `macos-option-as-alt` does not change this: it defeats the plain Option translation but not dead-key composition. Skipping them means every jump letter Herdr shows is one you can actually press, at the cost of the entry-to-letter mapping differing from Linux and Windows, which keep the full `a..z`. So on macOS entry 14 is `alt+f`, not `alt+e`.
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
@@ -315,6 +345,21 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
+### Hidden rows
+
+When the Spaces list or the Agents panel has more rows than fit, `sidebar_overflow` says what is scrolled out of view:
+
+```toml
+[ui]
+sidebar_overflow = "both"   # "both" (default), "rows", "fog", or "off"
+```
+
+- `rows` puts a dim summary row at each edge that has rows hidden past it: `↑ 2 pinned · 3 more` at the top, with an arrow in the colour of each hidden pin, and `↓ 5 more · ● 1 blocked` at the bottom, with the dot in the colour of the most urgent hidden state (a blocked or finished agent). Click the row to scroll a page toward it. The row takes one row of the list only while rows are hidden on that side, so a list that fits has none.
+- `fog` lifts the background of the two rows next to an edge with hidden rows, the nearest by about 17% and the next by about 7%, from the sidebar background (the terminal's own background when the sidebar has none of its own) toward the text colour. The text colour does not change, so contrast drops without dimming the text. When a hidden row is blocked or finished, the lift takes a faint tint of that state. The focused or selected row is never fogged.
+- `sidebar_fog = [17, 7]` sets the lift per row, nearest first, in percent of the way from the background to the text colour: 0 to 2 entries, each 0 to 60, and 0 (or a missing entry) means no fog on that row. `sidebar_fog_tint = 70` sets how much of the hidden state's colour the fog takes, 0 to 100 (0 keeps it neutral). An out-of-range value is clamped and reported. The background it lifts from is the sidebar's own, else the host terminal's, else the theme's panel background.
+- `sidebar_fog_style = "lift"` picks how the fog shows: `lift` (the default) is the lighter background above, `dim` leaves the background and fades the text of those rows toward it instead (as a plain colour change, not the terminal's dim attribute; the strength is `sidebar_fade`), and `both` does both. An unknown value is reported and uses `lift`. `sidebar_fade = [85, 55]` sets how far the text moves toward the fog base for `dim` and `both`, nearest row first, in percent: 0 to 2 entries, each 0 to 95 (clamped and reported), 0 or a missing entry means no fade on that row. At 85 the nearest row is almost the background colour.
+- `both` does both and `off` neither. Both lists follow the one setting, and `herdr server reload-config` applies it live.
+
 Configure an ordered tmux-style status area at the right edge of the tab row:
 
 ```toml
@@ -334,6 +379,10 @@ The status area is empty by default. Add `zoom` to show a fixed `ZOOM` pill whil
 Command entries run immediately and then at `interval_seconds` without blocking rendering or overlapping a previous run. The interval can be 1–31,536,000 seconds and the timeout can be 1–3,600 seconds. Herdr uses the last line of successful output, removes ESC-prefixed terminal control sequences instead of interpreting styles, clears the entry after failure, empty output, or `timeout_seconds`, and provides the same active workspace, tab, pane, socket, binary, and working-directory context as custom command keybindings. Commands are supported on Linux, macOS, and Windows, using `/bin/sh -lc` on Linux and macOS and `cmd.exe /d /c` on Windows.
 
 Separators appear only between visible entries. Set `tab_bar_right_separator = ""` for direct concatenation. On a narrow tab row, the complete status area yields to the tabs and their controls.
+
+### Dimming unfocused panes
+
+`dim_inactive_panes = true` adds the terminal's faint attribute to unfocused panes, the same faint that Prefix and Navigate mode use, so how strong it is belongs to the host terminal (Ghostty's `faint-opacity`, for one). To get a lighter dim that stays different from Prefix mode, set `inactive_pane_dim = 20` under `[ui]`: how far the text colour of an unfocused pane moves toward the colour behind it, in percent, 0 to 90 (0 is off, an out-of-range value is clamped and reported). It recolours the cells, so the amount is the same in every terminal. The colour behind the text is the cell's own background when an app painted one, else `pane_inactive_bg` when set, else the terminal's background. Default text uses the terminal's foreground, and named or indexed colours use the terminal's palette. Prefix and Navigate mode keep their faint on top, so the two states stay apart. `herdr server reload-config` applies it live, and a layout with a single pane is never dimmed.
 
 ### Outer terminal window title
 
@@ -357,7 +406,19 @@ Agent status uses compact colored dots by default. To distinguish blocked, worki
 status_indicators = "symbols"
 ```
 
-The symbols are static, so this option does not enable spinner animation.
+An agent that is working only because of work it *launched* — a background shell, a background agent, an MCP task still running — is drawn apart from an agent mid-turn: it turns slowly between `■` and `◆`, a square and the same square turned 45° (one swap per eight spinner ticks, so about one and a half seconds at the default rate) instead of spinning, because the agent itself is parked at its prompt and will wake when that work finishes. Both frames are overridable as `background` and `background_alt` in `[ui.state_symbols]`, and the icon and its state text take `[ui.state_colors] background`, which follows `working` until it is set.
+
+The symbols themselves are static. In the sidebar's agent rows the working icon still moves: with `status_spinner = "on"` (the default) every working agent's icon steps through a spinner on one shared tick, `status_spinner_ms` apart (default 200, clamped to 50–2000). The tick is armed only while an agent is working, so an idle session never wakes for it, and the agent's own terminal title is not involved — agents freeze their title spinner when a pane is unfocused, so the title cannot clock the rows that are not focused. Space rows keep the static working glyph. Set `status_spinner = "off"` to keep every working icon static.
+
+`display_panes_ms` (default 3000, clamped to 500–60000) is how long the `prefix+i` labels stay up, and the same for the size labels that show while you resize a pane or the herdr window. One value sets both; `server reload-config` applies it live.
+
+The symbols style draws `×` blocked, `◐` working, `□` done (finished, not looked at yet), `✓` idle (finished and seen), and `·` unknown. Either style can be adjusted per state with `[ui.state_symbols]`; unset states keep the style's glyph. A value must be exactly one terminal cell wide so the icon column stays aligned — wider or empty values are reported as a config diagnostic and ignored.
+
+```toml
+[ui.state_symbols]
+done = "●"
+idle = "✔"
+```
 
 ### Sidebar row layouts
 
@@ -397,7 +458,7 @@ Space rows accept these built-in tokens:
 - `state_icon` — colored icon for the space's rolled-up agent state.
 - `state_text` — text for the rolled-up agent state.
 - `workspace` — workspace name.
-- `branch` — Git branch when available.
+- `branch` — Git branch when available. A checkout on no branch shows where it is instead — `@a620c06`, or `rebase @a620c06` / `bisect @a620c06` while that operation runs — so the row stays; outside a repository the token is empty.
 - `git_status` — Git ahead and behind counts when nonzero.
 - `$name` — custom workspace metadata named `name`.
 
@@ -409,11 +470,11 @@ A token entry can also be an inline style table:
 [ui.sidebar.agents]
 rows = [
   ["state_icon", { token = "workspace", bold = false }, "tab"],
-  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false }],
+  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false, italic = true, keep = true, truncate = "start" }],
 ]
 ```
 
-`fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
+`fg` accepts strict `#RGB` or `#RRGGBB`. `bold`, `dim`, and `italic` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds. Two options shape the row fit rather than the look. `keep = true` gives the token its full width first: when the row is too narrow the other flexible tokens shrink, and are dropped, before it does, and it is dropped last. `truncate = "start"` cuts a token that must shrink from its beginning, with an ellipsis on the left (`…L:20 A:0`), so the end stays visible; the default `"end"` keeps the beginning. For example `[{ token = "branch", dim = false }, "git_status", { token = "$asks", keep = true, truncate = "start" }]` eats the branch first, then the front of `$asks`. With neither option the row fits as before. An unrecognized `truncate` value is reported and treated as `"end"`.
 
 Text-valued tokens also accept up to 16 ordered `rules`. Each rule contains exactly one condition—`equals`, `contains`, `starts_with`, `gt`, or `lt`—and optional `fg`, `bold`, and `dim` overrides:
 
@@ -494,6 +555,8 @@ position = "bottom-right"
 
 Choose `herdr` for an in-app toast, `terminal` for an outer-terminal notification that also works over SSH, `system` for the local OS notification service, or `off` to disable popups. Herdr suppresses popups for the active tab. Search `ui.toast` in the [Config reference](/docs/config-reference/) for positions, delay behavior, and clipboard feedback settings.
 
+Feedback about one pane can be drawn in that pane instead of a fixed spot. `ui.toast.clipboard.position = "pane"` centers the copied-to-clipboard box in the pane the text came from, whether herdr copied it (a mouse selection, a double-click, copy mode) or an app wrote the clipboard with OSC 52. `ui.toast.herdr.pane_feedback = "pane"` does the same for the notes a pane action leaves, such as a refused pane move or a failed clear scrollback, centered in the pane that was focused. Both fall back to their usual spot when the pane is not in view or is too small for the box. Agent notifications keep `ui.toast.herdr.position`, since they are about panes elsewhere.
+
 On macOS, `system` tries `terminal-notifier` first and falls back to `/usr/bin/osascript` when it is unavailable or fails. The fallback appears as Script Editor in Notification Center and cannot activate the hosting terminal. Install `terminal-notifier` with `brew install terminal-notifier`. For a supported, detected terminal, it can activate the terminal app when you click the notification. Alternatively, choose `terminal` to let a supported outer terminal own the notification.
 
 On Windows, `system` notifications remain in Notification Center. Clicking one selects its originating pane in the running Herdr client and brings its terminal window forward when Windows exposes that window. A click cannot reopen a closed client or select a pane from a restarted server. Windows Terminal can bring the owning window forward, but cannot reliably select a different outer terminal tab.
@@ -561,6 +624,23 @@ startup_per_agent_delay_ms = 100
 Automatic restores start one agent at a time, 100 milliseconds apart by default, to reduce startup contention. The first eligible agent starts immediately. Set `startup_per_agent_delay_ms = 0` to disable spacing. Manual launches and explicit terminal attaches are unaffected. Restart the Herdr server to apply changes.
 
 Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
+
+## Codex on the shared app-server daemon
+
+Tools that message Codex sessions from outside, such as agent-bell, can reach only threads that live on the shared Codex app-server daemon. Herdr can start and resume Codex panes there:
+
+```toml
+[agents.codex]
+app_server = true
+# app_server_socket = "~/.codex/app-server-control/app-server-control.sock"
+name_threads = true
+```
+
+With `app_server = true`, `herdr agent start --kind codex` and the restore of a Codex pane add `--remote unix://<app_server_socket>` and `-C <pane cwd>`. The cwd matters: on the daemon, a thread started without `-C` takes the daemon's directory. Arguments you pass after `--` win, so a `--remote` or `-C` of your own is kept.
+
+With `name_threads = true` as well, herdr names the pane's daemon thread after the pane's agent name, so other tools can address it by that name, and renames the thread when you rename the agent. A new pane's thread is found as the only unnamed thread in the pane's directory created since the launch. When two Codex panes start in the same directory at once, herdr names neither until Codex reports each session at its first turn. Ephemeral threads cannot take a name and are skipped. Naming runs in the background and never blocks or fails a launch; results go to the server log.
+
+Both switches are off by default, apply to the next launch after a config reload, and do nothing on Windows. Turning `name_threads` off leaves `app_server` working exactly as before.
 
 ## IME cursor tracking
 

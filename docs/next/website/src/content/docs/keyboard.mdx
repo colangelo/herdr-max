@@ -36,10 +36,23 @@ Panes:
 | Action | Key |
 | --- | --- |
 | Zoom the focused pane | `prefix+z` |
+| Sync input across the tab's panes | `prefix+shift+s` (or right-click a pane, "Sync input", for just that pane and the focused one) |
+| Show pane numbers, names and sizes | `prefix+i` |
 | Close pane | `prefix+x` |
+| Respawn pane (restart its process in place) | `prefix+ctrl+x` |
+| Break pane into a new tab | `prefix+!` |
+| Move pane to a chosen tab or space | `prefix+m` |
+| Move pane to next / previous tab | `prefix+>` / `prefix+<` |
 | Swap panes | `prefix+shift+h/j/k/l` |
 | Resize mode | `prefix+r` |
+| Balance panes (even split per axis) | `prefix+=` |
+| Cycle layout preset (even-h → even-v → tiled) | `prefix+space` |
 | Copy mode | `prefix+[` |
+| Copy mode, scrolled up a page / half page / line | `prefix+PageUp` / `prefix+ctrl+u` / `prefix+ctrl+k` |
+| Scroll back down a page / half page / line | `prefix+PageDown` / `prefix+ctrl+d` / `prefix+ctrl+j` |
+| Pane todos | `prefix+ctrl+t` |
+| Add a pane todo | unset |
+| Session todo board | unset |
 
 Tabs:
 
@@ -50,6 +63,8 @@ Tabs:
 | Rename tab | `prefix+shift+t` |
 | Close tab | `prefix+shift+x` |
 
+Pane moves preserve the pane's running process and terminal contents. `prefix+m` opens a destination picker listing every place the pane can go: the other tabs of its own space, the tabs of every other space, a new tab in any of them, and a new space created by the move. Destinations are drawn as a tree under their space, with the pane's own space first: each space heading shows its pane count, each tab lists the panes in it, and the line under the list names every pane in the selected tab. The pane's current tab is shown greyed as "you are here"; like the space headings it is not a destination, so the selection steps over it. Picking a destination in another space switches to that space with the moved pane focused. The quick next/previous actions stay within the current space, follow the current tab order and stop at the first or last tab instead of wrapping. Pane moves are unavailable when the source or destination tab is zoomed.
+
 Workspaces and session:
 
 | Action | Key |
@@ -59,6 +74,56 @@ Workspaces and session:
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
 | Toggle sidebar | `prefix+b` |
+| Notification center | `prefix+ctrl+n` |
+| Jump to the current toast's pane | `prefix+o` |
+
+The notification center (`prefix+ctrl+n`, or click the `и` indicator at the top right of the tab bar) lists recent notifications newest-first. Unread entries show a kind-colored dot and a bold title; the `◆` unread count only goes down as you visit them — opening the panel changes nothing. With `ui.notification_center_position = "bottom-right"` the indicator floats in the frame's bottom-right corner instead, and the panel opens above it. Inside it, `Up`/`Down` or `j`/`k` move the selection, `Enter` jumps to the selected notification's pane, marks it read, and closes, `Esc` or `q` closes, and clicking a row does the same as `Enter` for that row. `r` (or the "mark read" button) marks everything read while keeping the history; `c` (or the "clear all" button) empties the log. Notifications without a pane target are not actionable and stay unread.
+
+Every pane that draws a top border carries a `▾` indicator at the right end of it. A pane with outstanding todos shows their count as `▾ τ N`, coloured by the highest priority among them; the sidebar's agent rows repeat that count as `τ N` at the right end of each entry's name row, with the jump label under it on the second row; a pane whose todos are all done shows a bare `▾`; a pane with no todos shows the same `▾` dimmed further still, so the control is in the same place on every pane and an empty pane can be opened by mouse. A pane drawing no top border — a single-pane tab, or `ui.pane_borders = false` — has nowhere to put it, and the keybinding is the route there.
+
+A todo whose text runs to several lines shows only its first in the list, marked `⏎`; selecting it renders the rest in a box above the list (on the board, under the title and above the search row), so every row stays one line and keeps its place while the full text is still readable without leaving the panel.
+
+`prefix+i` is herdr's take on tmux's display-panes (`prefix q`, which is `detach` here). For 3 seconds (`ui.display_panes_ms`), every pane of the current tab carries a label over its centre: a number, the pane's address, its name, and its size in characters, as in `2  w5:p16 · claude  138x27`. The size is the pane's terminal, what its program sees as `tput cols` and `tput lines`, so it can be smaller than the `herdr pane layout` rect by the border and scrollbar gutter. The bar at the bottom shows the whole window size and the area the panes share, as in `window 310x56 · panes 281x55`, and ends with the version of the herdr server you are attached to (`VERSION  0.8.2-ac-beta.105-bentancur`), which a narrow window leaves out before the key hints. While the labels are up the mode is drawn in the theme's red, like the close-space confirmation: the bar, the focused pane's border, and a muted red on the other borders; each sidebar section also shows its own size on its bottom row. The colours go back when the labels close. Press a pane's number to focus it. Any other key, or a click, closes the labels without passing the key on. Only the first nine panes get a number; the rest still show their address, name and size. Rebind it with `keys.display_panes`.
+
+The same labels, in the same colours and without the number, show while you resize panes, so you can stop at the size you want: while you drag a split border, for the whole of resize mode (`prefix+r`), after a single resize key (`keys.resize_pane_left` and the rest, unset by default), and while the herdr window itself is resized. Resizing a pane shows the full `prefix+i` window view, the same as a window resize or a sidebar drag: every pane's size, the window size, the version, and the bottom bar. It stays up for `ui.display_panes_ms` after the last change. They are shared view state, so every attached client shows them. A drag of the sidebar edge or of the edge between sidebar sections, and a window resize, also show the bar at the bottom (`PANES`, the window and panes sizes, and the `VERSION`, without the key hints) and each sidebar section's size, as `prefix+i` does; a drag or a single key shows the pane labels only. They stay as long as `prefix+i` does (3 seconds, `ui.display_panes_ms`) after the last step; any other key or a click takes them away at once, and the key still does what it normally does. They are drawn over the panes and never take the keyboard: resize mode keeps its own bar, and the pane borders keep their usual colours, since resizing is not the red labels mode.
+
+`prefix+ctrl+t`, or a click on the indicator, opens that pane's todo panel. Inside it, `Up`/`Down` or `j`/`k` move the selection, `a` adds a todo, `Enter` (or a row click) opens the todo for editing, `Space` toggles done, `g` (or the footer's `go` button, or a click on the link chip) follows a linked todo to its pane, `d` removes the selected todo, `c` clears the completed ones, and `Esc` or `q` closes. The `go` button appears only while the selected todo's link still resolves, since a dead link is inert. The add action is offered even when the pane holds no todos. A todo linked to a pane that no longer exists renders dimmed and does nothing when followed.
+
+In the edit view, `Tab` cycles the priority, `ctrl+l` opens the link picker, `ctrl+t` toggles done (the panel's `Space`, which the edit view's text field owns), `ctrl+s` saves, `ctrl+g` saves and then follows the link, and `Esc` cancels. Terminals that report the enhanced keyboard protocol can save with `alt+Enter` too. Clicking the priority, link, or done row does the same as its shortcut. The done row is absent while composing a new todo, which is never already done. `keys.add_pane_todo` is unset by default and opens the edit view on a new todo. Set `ui.show_pane_todo_indicator = false` to hide the indicator, and `ui.pane_todo_color` to override its color.
+
+`keys.open_todo_board` is unset by default and opens a board listing every pane's todos in one place — the view for triage across the session, where the pane panel is the view for the pane in front of you. Todos are grouped by their owning pane in space, tab, then pane order, each group headed by the pane's space and label; panes holding no todos are omitted. Todos are not interleaved into one priority-ordered list, so a pane's todos stay contiguous and you can skip whole panes by eye.
+
+Its keys are the panel's, with one difference. `Enter` (or a row click) focuses the pane that *owns* the selected todo and closes the board, which is what the board offers over `herdr todo list --all`; editing therefore moves to `e`. `Space` toggles done, `g` (or the link chip) still follows a linked todo to its *linked* pane rather than its owner, `d` removes, `c` clears the completed todos of every pane the board is showing, and `Esc` or `q` closes. Group headings are never selectable and the selection steps over them. The board opens even when nothing is outstanding, showing an empty state rather than refusing. Both surfaces read the same store, so a todo looks and sorts the same in either and a change made on one shows on the other.
+
+The board, the move-pane picker (`prefix+m`) and the session navigator (`prefix+g`) share one search. Press `/` to search: typing filters the list and selects the first match, every word you type has to appear somewhere in a row (case is ignored), and the arrow keys, `ctrl+j`/`ctrl+k`, `ctrl+n`/`ctrl+p`, `Home` and `End` still move the selection. `Enter` accepts the selected row. `Esc` leaves the search and keeps the filter; from the list, `Esc` clears a filter before it closes the dialog, so a filtered dialog takes two presses to close. While the search has the keyboard its letters are text: the board's `e`, `d`, `c` and the rest act only from the list. In the move picker a query matches space names, tab numbers and labels, the names of a tab's panes, and the `new tab` and `new space` rows; a space's heading stays while any of its destinations match. On the board it matches a todo's text, its `#id` and its pane heading. A query that matches nothing says so and leaves `Enter` doing nothing. The three dialogs open centred, as wide as what they list, up to 120 columns, and keep their size while you type.
+
+The text field has an insertion point, so typing and pasting land where the cursor is rather than at the end, and a click in the text puts the cursor there. The readline chords all work:
+
+| Action | Keys |
+| --- | --- |
+| Line start / end | `ctrl+a` / `ctrl+e` |
+| Character back / forward | `ctrl+b` / `ctrl+f`, `Left` / `Right` |
+| Word back / forward | `alt+b` / `alt+f`, `ctrl+Left` / `ctrl+Right` |
+| Line up / down | `Up` / `Down` |
+| Delete backward / forward | `Backspace` / `ctrl+d`, `Delete` |
+| Kill to line end / start | `ctrl+k` / `ctrl+u` |
+| Kill the word behind the cursor | `ctrl+w`, `alt+Backspace` |
+| Yank the last kill | `ctrl+y` |
+| Undo | `ctrl+_`, `ctrl+-`, `ctrl+/` |
+
+The kill ring is Herdr's own and holds one entry; `ctrl+y` puts back what `ctrl+k`, `ctrl+u`, or `ctrl+w` last took, and has nothing to do with the system clipboard. System paste stays on the usual paste chord, and now keeps the newlines in what you paste while still dropping other control characters.
+
+A todo can hold more than one line: `Enter` inserts a newline. That is why `Enter` no longer saves and `ctrl+d` no longer toggles done — the field needs both. The edit view shows three lines at a time and scrolls to follow the cursor. In the panel, a multi-line todo still occupies one row, showing its first line with a `⏎` marker. Whenever a todo's row hides text — a second line, or a first line cut to fit — the panel and the board show the selected todo's full text in a box of its own under the list. The box keeps one height as the selection moves, so the panel does not jump, and on a todo that already shows all of its text it says so.
+
+The link picker is the session navigator in a selection mode: it lists every pane in every workspace, searchable and filterable, named the way the navigator names them, so a pane running a plain shell is identified by the command it launched. Each pane row shows the public pane identifier it would stage, like `w2:pC`. Choosing a pane row stages it as the target; a `no link` entry at the top clears the link instead. Workspace and tab rows are context only — activating a workspace expands or collapses it, and neither ends the selection. The todo's own pane is not offered. `Esc` leaves the picker with the link exactly as it was.
+
+`ctrl+j` and `ctrl+k` move the selection anywhere in the picker, including while its search is focused, alongside the arrow keys and `ctrl+n`/`ctrl+p`. The same chords work in the ordinary goto picker (`prefix+g`), which is the same surface.
+
+A live link is shown as `→ w2:pC · claude` — the pane's public identifier first, because that is the part you can act on with `herdr pane`, `herdr agent read`, or a sibling agent's prompt, and the captured label after it, because that is the part you recognise. The identifier is resolved from the live target every time it is drawn, so it follows a pane that moves. A dead link has no identifier to show and keeps its label alone.
+
+`ctrl+g` in the edit view is `ctrl+s` then `g` in one keystroke: it commits what you typed and moves focus to the linked pane. The link row shows a `^g go` hint whenever it has somewhere to go — including a target staged in the picker but not yet saved. With no link, a cleared one, or a target that has gone, the chord is inert and saves nothing either, so it never commits an edit and then fails to travel. A save the store refuses (empty text, over the cap) leaves the modal open with the reason on screen rather than travelling away from it.
+
+Closing a pane that still has outstanding todos asks for confirmation first; a pane whose todos are all done closes without a prompt.
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
 
@@ -84,7 +149,11 @@ Typing and paste insert at the cursor. Movement and deletion respect Unicode gra
 
 ## Copy mode
 
-Press `prefix+[` to enter copy mode for the focused pane. Use `h/j/k/l`, tmux-style `w/b/e` and big-word `W/B/E`, `{`/`}`, `PageUp`/`PageDown`, `ctrl+b`/`ctrl+f`, and `ctrl+u`/`ctrl+d` to move. Press `/` or `?` for forward or backward literal search, then `n` or `N` to repeat in the same or opposite direction. Search is case-insensitive unless the query contains an uppercase letter. Use `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying. Esc clears an active selection or search before exiting. Copy mode does not pause the pane process: output remains live, follows at the bottom, and stays pinned when you navigate into history. The configured prefix keeps its normal meaning in copy mode; with the default prefix, `ctrl+b` enters prefix mode instead of paging up, so use a different prefix if you want `ctrl+b` for copy-mode page-up. Mouse drag-select copies without entering copy mode at all.
+Press `prefix+[` to enter copy mode for the focused pane. You can also enter it in one gesture, already scrolled up: `prefix+PageUp` (page), `prefix+ctrl+u` (half page), or `prefix+ctrl+k` (one line), like tmux `copy-mode -u`; repeating a gesture scrolls further, and leaving copy mode still restores the position from before the first gesture. Each gesture has a downward mirror — `prefix+PageDown`, `prefix+ctrl+d`, `prefix+ctrl+j` — that scrolls an open copy mode back down; on a pane sitting at the bottom with copy mode closed they do nothing, since there is nothing below the live viewport. (With a prefix other than the default `ctrl+b`, you can bind `keys.copy_mode_page_up` to `prefix+ctrl+b` too; with the default prefix that chord stays send-prefix.) Use `h/j/k/l`, tmux-style `w/b/e` and big-word `W/B/E`, `{`/`}`, `PageUp`/`PageDown`, `ctrl+b`/`ctrl+f`, and `ctrl+u`/`ctrl+d` to move, and `ctrl+k`/`ctrl+j` to scroll the viewport one line up or down without moving the cursor relative to the text (vim `ctrl+y`/`ctrl+e`). `g` jumps to the top of the history and `G` (or `ctrl+g`) to the bottom, staying in copy mode. Held motions repeat: keeping `ctrl+u`/`ctrl+d` or `ctrl+k`/`ctrl+j` pressed keeps scrolling. Press `/` or `?` for forward or backward literal search, then `n` or `N` to repeat in the same or opposite direction. Search is case-insensitive unless the query contains an uppercase letter. Use `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying. Esc clears an active selection or search before exiting. Copy mode does not pause the pane process: output remains live, follows at the bottom, and stays pinned when you navigate into history. The configured prefix keeps its normal meaning in copy mode; with the default prefix, `ctrl+b` enters prefix mode instead of paging up, so use a different prefix if you want `ctrl+b` for copy-mode page-up. Mouse drag-select copies without entering copy mode at all.
+
+### Scrolling fullscreen apps
+
+A fullscreen application — one that owns the alternate screen, like `vim`, `htop`, or Claude Code's fullscreen renderer — keeps the pane's scrollback empty and scrolls itself, so there is no history for copy mode to enter. On such a pane the scroll gestures (`prefix+PageUp`, `prefix+ctrl+u`, `prefix+ctrl+k`, and their downward mirrors `prefix+PageDown`, `prefix+ctrl+d`, `prefix+ctrl+j`) switch to a scroll passthrough mode instead: Herdr forwards paging keys to the app so you can keep scrolling from the home row. `ctrl+u`/`ctrl+d` (or `PageUp`/`PageDown`) page up and down, `ctrl+k`/`ctrl+j` (also `k`/`j` or the arrow keys) scroll a few lines at a time, `g`/`G` (or `Home`/`End`) jump to the top or bottom, and `ctrl+g` does what `G` does (a pane running Claude Code gets `ctrl+Home`/`ctrl+End` for these, because its fullscreen view scrolls on those and uses plain `Home`/`End` to move the prompt cursor), and `q`, Esc, or Enter return your keys to the app. Line scrolling rides on synthesized wheel events — Herdr encodes them exactly like a physical wheel over the pane, so the arrows never type into the app's prompt history. A `SCROLL` bar at the bottom shows while the mode is active. The prefix chord ends the mode, so switching space and coming back leaves the app scrolled where it was with the mode closed — the downward gestures re-enter it going down, so you never have to scroll up to get back to the bottom. Plain `prefix+[` still enters ordinary copy mode over the visible screen, for selecting text with the keyboard.
 
 Mouse drag selections and selections started with `v`, Space, or `V` remain active during output and redraws, including when part of the selected range is outside the viewport. Copy reads the current text in that range, not a frozen snapshot. Resizing the pane or switching between its normal and alternate screens still clears the selection. Search results and double-click word selections retain their content-change checks.
 
@@ -97,11 +166,24 @@ Every binding is configurable, including the prefix itself:
 prefix = "ctrl+a"
 ```
 
+### A second prefix
+
+`prefix` also takes a list, so each hand can have a prefix. Any listed key enters prefix mode, and every `prefix+X` binding works after any of them. The first entry is the primary one, shown in the help panel and the prefix bar; the help panel lists them all.
+
+```toml
+[keys]
+prefix = ["ctrl+s", "ctrl+;"]
+```
+
+`ctrl+;` only reaches Herdr through the kitty keyboard protocol, which Ghostty, kitty, WezTerm and recent iTerm2 speak. In a legacy terminal it is a no-op, so keep a letter prefix first. Avoid `ctrl+/`: a legacy terminal sends it as `ctrl+_`, which a shell uses for undo. Either spelling works for punctuation, `ctrl+;` or `ctrl+semicolon`. Binding `prefix+X` to one of the listed prefix keys is rejected, since pressing a prefix inside prefix mode sends it on to the pane. `herdr server reload-config` applies a changed list live.
+
 ## Going prefix-free
 
 You can bind Herdr actions to direct chords that need no prefix at all. The hard part is knowing which chords are safe, because terminals, shells, and desktop environments already own most of the keyboard.
 
 Any chord works as a binding: `ctrl+j`, `alt+k`, whatever fits your hands. But a chord has to survive three layers before Herdr sees it: your operating system, your outer terminal (Ghostty, iTerm2, and others ship their own defaults), and the programs running inside the pane. `ctrl+j` reaches Herdr fine, but shells and editors treat it as enter. `alt+k` is free on Linux, but macOS composes it into a special character in most terminals. If you pick chords from these families, double-check them against your own terminal and OS shortcuts.
+
+On macOS specifically, `alt+e`, `alt+i`, `alt+n`, and `alt+u` are worth avoiding entirely. On ABC and most Latin layouts those are Option dead keys for combining accents: Option+e emits `´`, and Option+i emits nothing at all while it waits for a letter to accent. Neither arrives as `alt+e` or `alt+i`, so Herdr cannot bind them. Setting Ghostty's `macos-option-as-alt` does not help — it changes how plain Option is translated, not dead-key composition, so `alt+d` gets through while `alt+e` still does not. Indexed jump ranges skip these four letters on macOS for exactly this reason (see [indexed jumps](/docs/configuration/#indexed-jumps)).
 
 We mapped the default keybindings of Ghostty, iTerm2, Terminal.app, kitty, WezTerm, Alacritty, Warp, Windows Terminal, GNOME Terminal, and Konsole, plus the global shortcuts of GNOME and KDE. One modifier family is almost untouched everywhere: `ctrl+alt`. Terminals leave it free, it is not affected by the macOS option-key composing behavior that blocks plain `alt` chords, and it transmits even in terminals without a modern keyboard protocol. It is a safe default, but the choice is yours.
 
@@ -119,6 +201,7 @@ new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
+toggle_sync_panes = ["prefix+shift+s"]
 ```
 
 A few `ctrl+alt` chords are taken elsewhere. Avoid these:

@@ -95,6 +95,24 @@ An older server can survive logout while losing user lookup and DNS. Symptoms in
 
 If a newly started server still has this problem, check `herdr-server.log` for `could not select persistent user service context`. Herdr keeps the inherited context if the required macOS APIs are unavailable. See [Herdr issue #4100](https://github.com/herdrdev/herdr/issues/4100).
 
+## Panes look like they are in an SSH session
+
+The server outlives the connection that started it: it runs in the background, keeps going after an SSH session closes, and carries the same environment across live handoffs. A server first started over SSH therefore handed `SSH_CLIENT`, `SSH_CONNECTION`, and `SSH_TTY` to every pane it spawned afterwards, describing a connection that no longer existed, so prompts, shell rc files, and anything else that branches on SSH treated a local pane as remote. Those variables never described the pane's own client either, since any number of local and remote clients may be attached.
+
+Herdr no longer passes the three into panes. `SSH_AUTH_SOCK` is left alone, so forwarded agents stay usable. A pane that is already running keeps the environment it started with, because a running process's environment cannot be changed from outside: open a new pane, or run `unset SSH_CLIENT SSH_CONNECTION SSH_TTY` in the existing shell.
+
+## An agent pane is missing from the agents sidebar
+
+Herdr identifies the agent in a pane by reading the foreground job of that pane's own PTY. A shell wrapper that allocates a PTY of its own defeats that: the pane's PTY carries only the wrapper, and the agent runs one PTY down where the scan cannot reach. The pane then looks like a plain shell that happens to be printing an agent's interface — absent from the agents sidebar and from `agent.list`, unresolvable by `herdr agent read`, `send`, `wait`, and `explain`, and reporting the wrapper's working directory rather than its own.
+
+[Atuin](https://atuin.sh)'s `pty-proxy` is the wrapper this happens with in practice. It ships in Atuin v18.13, its init snippet enables it by default, and it wraps every interactive shell so it can read OSC 133 marks and capture each command's output. Check for it with:
+
+```bash
+ps -eo pid,tty,command | grep "atuin pty-proxy"
+```
+
+Herdr looks behind an explicit set of wrapper process names, currently `atuin` alone, and identifies the agent from the PTY the wrapper owns. Everything the pane reports — the agent, its process name, and its working directory — then comes from that job. A wrapper not in the set is left alone, so the pane reports no agent rather than the wrong one. If you use a PTY wrapper Herdr does not recognise, open an issue naming its process name.
+
 ## The `herdr` command is not found
 
 Restart the terminal so it reloads its environment, then confirm the Herdr install directory is on `PATH`. For package-manager installs, use that package manager to update Herdr and expose it on `PATH`. See [Install Herdr](/docs/install/#verify).

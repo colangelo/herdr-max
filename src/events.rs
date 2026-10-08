@@ -88,6 +88,18 @@ pub enum AppEvent {
         pane_id: PaneId,
         agent: Agent,
         observed_at: Instant,
+        /// A new process of the agent the pane already had, not the first
+        /// sighting of one: a restart, seen as an exit followed by the new
+        /// process or as the agent's process group changing between polls.
+        replaced_process: bool,
+    },
+    /// The command line of the agent process detection identified in a pane,
+    /// read once per agent process so a restore can give it back its launch
+    /// flags (fork issues 123, 127). `None` when the OS would not say.
+    AgentLaunchObserved {
+        pane_id: PaneId,
+        agent: Agent,
+        launch: Option<crate::agent_resume::AgentLaunchArgv>,
     },
     /// The current Codex input screen is visible during managed startup.
     CodexPromptObserved { pane_id: PaneId, ready: bool },
@@ -98,6 +110,12 @@ pub enum AppEvent {
         state: AgentState,
         visible_blocker: bool,
         visible_working: bool,
+        /// Working because of work the agent launched, not work it is doing;
+        /// see `crate::detect::AgentDetection::background_work`.
+        background_work: bool,
+        /// Why the state is Blocked, from the matched detection rule; see
+        /// `crate::detect::AgentDetection::blocked_reason`.
+        blocked_reason: Option<crate::detect::BlockedReason>,
         process_exited: bool,
         observed_at: Instant,
     },
@@ -111,6 +129,10 @@ pub enum AppEvent {
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
     },
+    /// A Codex naming job resolved the daemon thread a pane runs (naming
+    /// runs on unix only).
+    #[cfg(unix)]
+    CodexThreadResolved { pane_id: PaneId, thread_id: String },
     /// Agent session identity was reported without state authority.
     AgentSessionReported {
         pane_id: PaneId,
@@ -148,6 +170,17 @@ pub enum AppEvent {
         seq: Option<u64>,
         ttl: Option<std::time::Duration>,
     },
+    /// A source reported (or ended) a hint that the agent waits on the user.
+    AgentHintReported {
+        pane_id: PaneId,
+        report: crate::terminal::AgentHintReport,
+    },
+    /// A pane's hint is due to be dropped (its time is up, or the screen no
+    /// longer backs it).
+    AgentHintExpired {
+        pane_id: PaneId,
+        now: std::time::Instant,
+    },
     /// Hook authority was explicitly cleared for a pane.
     HookAuthorityCleared {
         pane_id: PaneId,
@@ -176,9 +209,14 @@ pub enum AppEvent {
     /// A pane child emitted one or more executable BEL characters.
     /// The host-facing process forwards them to its outer terminal.
     TerminalBell { pane_id: PaneId, count: u16 },
-    /// A pane child emitted a valid OSC 52 clipboard write. The main loop
-    /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    /// A pane child emitted a valid OSC 52 clipboard write, or herdr copied
+    /// text itself. The main loop re-emits it through herdr's own clipboard
+    /// writer. `source_pane` is the pane the text came from, when there is
+    /// one, so the feedback can show there (fork issue 129).
+    ClipboardWrite {
+        content: Vec<u8>,
+        source_pane: Option<PaneId>,
+    },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {

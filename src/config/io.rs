@@ -6,6 +6,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
+    "agents",
     "experimental",
     "keys",
     "onboarding",
@@ -149,10 +150,15 @@ impl Config {
             }
         };
 
+        // A value this build does not know (a newer build's enum variant, a
+        // typo) costs that one key, not the file (fork issue 133).
+        let (content, mut repair_diagnostics) = repair_invalid_values(&content);
+
         match deserialize_with_ignored::<Config, _>(toml::Deserializer::new(&content)) {
             Ok((config, ignored_keys)) => {
                 let (unknown_sections, mut diagnostics) =
                     unknown_top_level_sections_from_str(&content);
+                diagnostics.append(&mut repair_diagnostics);
                 diagnostics.extend(unknown_config_key_diagnostics(
                     ignored_keys
                         .into_iter()
@@ -263,6 +269,8 @@ pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
 }
 
 fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>> {
+    let (content, repair_diagnostics) = repair_invalid_values(content);
+    let content = content.as_str();
     let value = content
         .parse::<toml::Value>()
         .map_err(|err| vec![format!("config parse error: {err}; keeping current config")])?;
@@ -274,7 +282,8 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     })?;
 
     let mut config = Config::default();
-    let mut diagnostics = unknown_top_level_section_diagnostics(table);
+    let mut diagnostics = repair_diagnostics;
+    diagnostics.extend(unknown_top_level_section_diagnostics(table));
     diagnostics.extend(unknown_top_level_config_key_diagnostics(table));
     let mut invalid_sections = Vec::new();
 
@@ -375,6 +384,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.remote = section,
     );
+    load_live_section(
+        table,
+        "agents",
+        "agents config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.agents = section,
+    );
 
     diagnostics.extend(config.theme.diagnostics());
 
@@ -382,6 +399,76 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         config,
         diagnostics,
         invalid_sections,
+    })
+}
+
+/// How many bad values one file may lose before the repair gives up.
+const MAX_VALUE_REPAIRS: usize = 64;
+
+/// Turn each value of valid TOML that the config model rejects (an unknown
+/// enum variant, a wrong type) into a per-key warning, so that key falls back
+/// to its default and the rest of the file applies (fork issue 133). The
+/// offending `key = value` line is blanked, never deleted, so the line
+/// numbers of the other findings stay true. Real TOML syntax errors, and
+/// errors that do not point at a single `key = value` line, are left for the
+/// normal parse to report and reject as before.
+fn repair_invalid_values(content: &str) -> (String, Vec<String>) {
+    if content.parse::<toml::Table>().is_err() {
+        return (content.to_string(), Vec::new());
+    }
+    let mut text = content.to_string();
+    let mut diagnostics = Vec::new();
+    for _ in 0..MAX_VALUE_REPAIRS {
+        let Err(err) = deserialize_with_ignored::<Config, _>(toml::Deserializer::new(&text)) else {
+            break;
+        };
+        let Some(span) = err.span() else { break };
+        let Some((line_start, line_end)) = blank_target_line(&text, span.start) else {
+            break;
+        };
+        let line = &text[line_start..line_end];
+        let Some((key, _)) = line.split_once('=') else {
+            break;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            break;
+        }
+        let path = match table_header_before(&text, line_start) {
+            Some(header) => format!("{header}.{key}"),
+            None => key.to_string(),
+        };
+        let line_number = text[..line_start].matches('\n').count() + 1;
+        diagnostics.push(format!(
+            "invalid value for {path} at line {line_number}: {}; using the default for this key",
+            err.message()
+        ));
+        // Same byte length, so no later span moves.
+        text.replace_range(line_start..line_end, &" ".repeat(line_end - line_start));
+    }
+    (text, diagnostics)
+}
+
+/// The byte range of the line that holds `offset`, when that line is one
+/// `key = value` pair (not a table header or a comment).
+fn blank_target_line(text: &str, offset: usize) -> Option<(usize, usize)> {
+    if offset > text.len() {
+        return None;
+    }
+    let start = text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |at| offset + at);
+    let line = text[start..end].trim_start();
+    (line.contains('=') && !line.starts_with('[') && !line.starts_with('#')).then_some((start, end))
+}
+
+/// The dotted name of the last `[table]` header above `offset`, if any.
+fn table_header_before(text: &str, offset: usize) -> Option<String> {
+    text[..offset].lines().rev().find_map(|line| {
+        let line = line.trim();
+        let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+        Some(inner.trim_matches(['[', ']']).trim().to_string())
     })
 }
 
@@ -751,6 +838,110 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 mod tests {
     use super::*;
 
+    // Fork issue 133: one value this build does not know costs that key only.
+    const CONFIG_WITH_ONE_BAD_VALUE: &str = "\
+[keys]
+prefix = \"ctrl+a\"
+
+[theme]
+name = \"nord\"
+
+[ui]
+sidebar_width = 31
+workspace_sort = \"from-a-newer-build\"
+agent_panel_sort = \"priority\"
+";
+
+    #[test]
+    fn an_unknown_enum_value_is_a_per_key_warning_with_its_line() {
+        let (repaired, diagnostics) = repair_invalid_values(CONFIG_WITH_ONE_BAD_VALUE);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("ui.workspace_sort"),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics[0].contains("line 9"), "{diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("from-a-newer-build"),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics[0].contains("default"), "{diagnostics:?}");
+        // The rest of the file is untouched and still parses.
+        let config: Config = toml::from_str(&repaired).expect("repaired file parses");
+        assert_eq!(config.ui.sidebar_width, 31);
+        assert_eq!(config.theme.name.as_deref(), Some("nord"));
+        assert_eq!(
+            repaired.len(),
+            CONFIG_WITH_ONE_BAD_VALUE.len(),
+            "lines keep their place"
+        );
+    }
+
+    #[test]
+    fn a_live_reload_keeps_every_other_key_and_section_when_one_value_is_bad() {
+        let loaded = load_live_config_from_str(CONFIG_WITH_ONE_BAD_VALUE).expect("loads");
+        assert_eq!(loaded.config.ui.sidebar_width, 31);
+        assert_eq!(loaded.config.theme.name.as_deref(), Some("nord"));
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("ui.workspace_sort") && d.contains("line 9")),
+            "{:?}",
+            loaded.diagnostics
+        );
+        assert!(loaded.invalid_sections.is_empty(), "no section was dropped");
+    }
+
+    #[test]
+    fn several_bad_values_are_each_reported_and_the_default_applies() {
+        let content =
+            "[ui]\nworkspace_sort = \"x\"\nsidebar_width = 31\nagent_panel_sort = \"y\"\n";
+        let (repaired, diagnostics) = repair_invalid_values(content);
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        let config: Config = toml::from_str(&repaired).unwrap();
+        assert_eq!(config.ui.sidebar_width, 31);
+    }
+
+    // The report that opened fork issue 133: a newer build's variant in a
+    // nested table dropped every keybinding, the theme and all of [ui].
+    #[test]
+    fn a_newer_builds_variant_in_a_nested_table_keeps_keys_theme_and_ui() {
+        let content = "[keys]\nprefix = \"ctrl+a\"\n\n[theme]\nname = \"nord\"\n\n[ui]\nsidebar_width = 31\n\n[ui.toast.clipboard]\nenabled = true\nposition = \"from-a-newer-build\"\n";
+        let loaded = load_live_config_from_str(content).expect("loads");
+        assert_eq!(loaded.config.ui.sidebar_width, 31);
+        assert_eq!(loaded.config.theme.name.as_deref(), Some("nord"));
+        assert!(
+            loaded.config.ui.toast.clipboard.enabled,
+            "its sibling key applies"
+        );
+        assert!(
+            loaded
+                .diagnostics
+                .iter()
+                .any(|d| { d.contains("ui.toast.clipboard.position") && d.contains("line 12") }),
+            "{:?}",
+            loaded.diagnostics
+        );
+    }
+
+    #[test]
+    fn broken_toml_syntax_is_still_rejected_whole() {
+        let content = "[ui\nworkspace_sort = \"x\"\n";
+        let (repaired, diagnostics) = repair_invalid_values(content);
+        assert_eq!(repaired, content);
+        assert!(diagnostics.is_empty());
+        assert!(load_live_config_from_str(content).is_err());
+    }
+
+    #[test]
+    fn a_clean_file_has_nothing_to_repair() {
+        let content = "[ui]\nsidebar_width = 31\n";
+        let (repaired, diagnostics) = repair_invalid_values(content);
+        assert_eq!(repaired, content);
+        assert!(diagnostics.is_empty());
+    }
+
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {
         let content = "onboarding = true\n[keys]\nprefix = \"ctrl+b\"\n";
@@ -802,6 +993,50 @@ mod tests {
         assert_eq!(
             config_diagnostic_summary(&diagnostics).as_deref(),
             Some("config.toml has unknown keys; herdr config check")
+        );
+    }
+
+    /// `KeysConfig` (serialize) and `KeysConfigOverlay` (deserialize) are
+    /// separate structs, so an action wired into one but not the other fails
+    /// silently: it appears in `--default-config` yet is rejected as an unknown
+    /// key when a user actually sets it. This regressed for `next_layout` and
+    /// `balance_panes` and stayed invisible until v0.7.5 added unknown-key
+    /// reporting. Guard the two structs against drift: every `[keys]` action
+    /// must deserialize through the overlay without an unknown-key diagnostic.
+    #[test]
+    fn every_keybinding_action_is_accepted_by_the_keys_overlay() {
+        const MODEL_SRC: &str = include_str!("model.rs");
+        let mut body = String::from("[keys]\n");
+        let mut actions = Vec::new();
+        for line in MODEL_SRC.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            if ty.trim().trim_end_matches(',') != "BindingConfig" {
+                continue;
+            }
+            let name = name.trim();
+            body.push_str(&format!("{name} = \"prefix+f1\"\n"));
+            actions.push(name.to_string());
+        }
+        assert!(
+            !actions.is_empty(),
+            "no `pub <field>: BindingConfig` actions found in config/model.rs"
+        );
+
+        let (_config, ignored) =
+            deserialize_with_ignored::<Config, _>(toml::Deserializer::new(&body))
+                .expect("a [keys] config of every action should deserialize");
+        let unknown = unknown_config_key_diagnostics(ignored, None);
+
+        assert!(
+            unknown.is_empty(),
+            "keybind actions rejected by KeysConfigOverlay \
+             (add them to the overlay struct + apply_field! + local_profile): {unknown:?}"
         );
     }
 
@@ -897,6 +1132,36 @@ resume_agents_on_restore = true
 
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn agents_is_a_known_top_level_section() {
+        let (keys, diagnostics) = unknown_top_level_sections_from_str(
+            r#"
+[agents.codex]
+app_server = true
+"#,
+        );
+
+        assert!(keys.is_empty(), "{keys:?}");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn load_live_config_keeps_the_codex_agent_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[agents.codex]
+app_server = true
+name_threads = true
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.config.agents.codex.app_server);
+        assert!(loaded.config.agents.codex.name_threads);
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert!(loaded.invalid_sections.is_empty());
     }
 
@@ -1024,7 +1289,7 @@ agent_panel_sort = "priority"
     }
 
     #[test]
-    fn load_live_config_discards_ignored_keys_from_an_invalid_section() {
+    fn load_live_config_reports_a_bad_value_and_an_unknown_key_separately() {
         let loaded = load_live_config_from_str(
             r#"
 [ui]
@@ -1034,10 +1299,12 @@ mouse_captur = true
         )
         .unwrap();
 
-        assert_eq!(loaded.diagnostics.len(), 1);
-        assert!(loaded.diagnostics[0].contains("invalid ui config"));
-        assert!(!loaded.diagnostics[0].starts_with("unknown config key"));
-        assert_eq!(loaded.invalid_sections, vec!["ui"]);
+        // The bad value is one warning with its line; the unknown key next to
+        // it is another; the section is not dropped (fork issue 133).
+        assert_eq!(loaded.diagnostics.len(), 2, "{:?}", loaded.diagnostics);
+        assert!(loaded.diagnostics[0].contains("invalid value for ui.mouse_capture at line 3"));
+        assert!(loaded.diagnostics[1].starts_with("unknown config key ui.mouse_captur"));
+        assert!(loaded.invalid_sections.is_empty());
     }
 
     #[test]
@@ -1197,5 +1464,268 @@ mouse_capture = false
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert_eq!(loaded.config.terminal.default_shell, "pwsh.exe");
+    }
+
+    /// The beta-133 italic case (fork issue 162): a sidebar token style with a
+    /// key this build does not know. It used to fail the whole parse, because
+    /// `RawSidebarToken` is untagged and the error lost the key.
+    const UNKNOWN_STYLE_KEY_CONFIG: &str = r##"
+[theme.custom]
+accent = "#112233"
+
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "branch", dim = false }, "git_status", { token = "$asks", fg = "#FFD60A", bold = true, wobble = true }],
+]
+"##;
+
+    fn startup_load(content: &str, tag: &str) -> LoadedConfig {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("herdr-config-{tag}-{}.toml", std::process::id()));
+        std::fs::write(&path, content).unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+        let loaded = Config::load();
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+        loaded
+    }
+
+    fn assert_unknown_style_key_is_forgiven(loaded: &LoadedConfig) {
+        assert_eq!(
+            loaded.diagnostics.len(),
+            1,
+            "exactly one diagnostic: {:?}",
+            loaded.diagnostics
+        );
+        let diagnostic = &loaded.diagnostics[0];
+        assert!(diagnostic.contains("wobble"), "names the key: {diagnostic}");
+        assert!(
+            diagnostic.contains("ui.sidebar.spaces.rows"),
+            "names the row: {diagnostic}"
+        );
+        // The rest of the config applies.
+        assert!(!loaded.config.ui.mouse_capture);
+        assert!(loaded.config.theme.custom.is_some());
+        // Both rows survive, and the token keeps its known fields.
+        let rows = &loaded.config.ui.sidebar.spaces.rows;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let (token, style) = rows[1][2].parts();
+        assert_eq!(
+            token,
+            &crate::config::SpaceSidebarToken::Custom("asks".into())
+        );
+        assert_eq!(style.bold, Some(true));
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn startup_forgives_an_unknown_sidebar_token_style_key() {
+        let loaded = startup_load(UNKNOWN_STYLE_KEY_CONFIG, "unknown-style-key");
+        assert_unknown_style_key_is_forgiven(&loaded);
+    }
+
+    #[test]
+    fn reload_forgives_an_unknown_sidebar_token_style_key() {
+        let loaded = load_live_config_from_str(UNKNOWN_STYLE_KEY_CONFIG).unwrap();
+        assert_unknown_style_key_is_forgiven(&loaded);
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_value_type_in_a_style_key_drops_only_that_value_with_a_diagnostic() {
+        // A multi-line rows array, so a one-line value repair could not blank
+        // it: the bad `bold` is dropped and the rest of the file applies, at
+        // startup as on reload (fork issue 163).
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace"],
+  [
+    { token = "$asks", bold = "yes", italic = true, fg = 5, keep = 1, dim = [1] },
+    { token = "branch", truncate = 7 },
+  ],
+]
+
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "agent", bold = "nope", keep = true }],
+]
+"##;
+        let startup = startup_load(content, "bad-style-type");
+        let reload = load_live_config_from_str(content).unwrap();
+        for loaded in [&startup, &reload] {
+            assert!(!loaded.config.ui.mouse_capture, "the rest of [ui] applied");
+            // The other rows survive.
+            assert_eq!(loaded.config.ui.sidebar.spaces.rows.len(), 2);
+            assert_eq!(loaded.config.ui.sidebar.spaces.rows[0].len(), 1);
+            // The valid keys of the bad token survive; the bad ones are unset.
+            let (_, style) = loaded.config.ui.sidebar.spaces.rows[1][0].parts();
+            assert_eq!(style.italic, Some(true));
+            assert_eq!(
+                (style.bold, style.fg, style.keep, style.dim),
+                (None, None, None, None)
+            );
+            let (_, agent) = loaded.config.ui.sidebar.agents.rows[0][1].parts();
+            assert_eq!((agent.bold, agent.keep), (None, Some(true)));
+        }
+        // `Config::load` reports through `collect_diagnostics`; the reload path
+        // reports through the same `sidebar_style_diagnostics` in the app.
+        let diagnostics = crate::config::sidebar_style_diagnostics(&startup.config.ui.sidebar);
+        assert_eq!(
+            diagnostics,
+            vec![
+                "ui.sidebar.agents.rows[0][1] has an invalid `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `fg` (expected a #RGB or #RRGGBB colour); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `bold` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `dim` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][0] has an invalid `keep` (expected true or false); ignoring it",
+                "ui.sidebar.spaces.rows[1][1] has an invalid `truncate` (expected \"start\" or \"end\"); ignoring it",
+            ]
+        );
+        for diagnostic in &diagnostics {
+            assert!(
+                startup.diagnostics.contains(diagnostic),
+                "startup reports it: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_style_file_has_no_diagnostics_and_no_invalid_keys() {
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace", { token = "$asks", fg = "#ff0000", bold = true, dim = false, italic = true, keep = true, truncate = "start" }],
+]
+"##;
+        let startup = startup_load(content, "valid-style");
+        assert!(startup.diagnostics.is_empty(), "{:?}", startup.diagnostics);
+        let (_, style) = startup.config.ui.sidebar.spaces.rows[0][1].parts();
+        assert_eq!(style.invalid, 0);
+        assert_eq!(style.bold, Some(true));
+        assert_eq!(
+            style.truncate,
+            Some(crate::config::SidebarTokenTruncate::Start)
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_truncate_value_is_forgiven_on_startup_and_reload() {
+        let content = r##"
+[ui]
+mouse_capture = false
+
+[ui.sidebar.spaces]
+rows = [
+  ["workspace"],
+  [{ token = "$asks", keep = true, truncate = "middle" }],
+]
+"##;
+        let startup = startup_load(content, "truncate-unrecognized");
+        let reload = load_live_config_from_str(content).unwrap();
+        assert_eq!(
+            startup.diagnostics,
+            vec![
+                "ui.sidebar.spaces.rows[1][0] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\""
+            ]
+        );
+        // The reload path reports it through the app (`sidebar_style_diagnostics`
+        // in `apply_live_config`); here the config itself carries the value.
+        assert!(!startup.config.ui.mouse_capture && !reload.config.ui.mouse_capture);
+        for loaded in [&startup, &reload] {
+            let (_, style) = loaded.config.ui.sidebar.spaces.rows[1][0].parts();
+            assert_eq!(style.keep, Some(true));
+        }
+    }
+
+    #[test]
+    fn an_unknown_tab_bar_right_key_is_forgiven_with_one_diagnostic() {
+        let content = r##"
+[ui]
+mouse_capture = false
+tab_bar_right = [
+  { type = "text", text = "hi", wobble = 1 },
+  { type = "zoom" },
+]
+"##;
+        for loaded in [
+            startup_load(content, "tab-bar-unknown"),
+            load_live_config_from_str(content).unwrap(),
+        ] {
+            assert_eq!(
+                loaded.diagnostics,
+                vec!["unknown config key ui.tab_bar_right.0.wobble; ignoring key"]
+            );
+            assert!(!loaded.config.ui.mouse_capture);
+            assert_eq!(loaded.config.ui.tab_bar_right.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_bad_tab_bar_right_entry_is_hidden_with_a_diagnostic_and_the_rest_applies() {
+        // Multi-line, with every kind of bad entry between good ones.
+        let content = r##"
+[ui]
+mouse_capture = false
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "zoom", text = "x" },
+  { type = "datetime", format = 5 },
+  { type = "command", command = "status.sh", interval_seconds = "often" },
+  { type = "text" },
+  { type = "wobble" },
+  { type = 3 },
+  { text = "no type" },
+  { type = "hostname" },
+]
+"##;
+        for loaded in [
+            startup_load(content, "tab-bar-bad-entries"),
+            load_live_config_from_str(content).unwrap(),
+        ] {
+            assert!(!loaded.config.ui.mouse_capture, "the rest of [ui] applied");
+            let entries = &loaded.config.ui.tab_bar_right;
+            assert_eq!(entries.len(), 9);
+            assert!(matches!(
+                entries[0],
+                crate::config::TabBarRightEntryConfig::Zoom
+            ));
+            assert!(matches!(
+                entries[8],
+                crate::config::TabBarRightEntryConfig::Hostname
+            ));
+            assert!(entries[1..8].iter().all(|entry| matches!(
+                entry,
+                crate::config::TabBarRightEntryConfig::Invalid { .. }
+            )));
+            assert_eq!(
+                crate::config::tab_bar_right_diagnostics(entries),
+                vec![
+                    "ui.tab_bar_right[1] has `text`, which does not belong to type `zoom`; hiding entry",
+                    "ui.tab_bar_right[2] has a wrong value type for `format` (expected a string); hiding entry",
+                    "ui.tab_bar_right[3] has a wrong value type for `interval_seconds` (expected a whole number); hiding entry",
+                    "ui.tab_bar_right[4] is missing `text`; hiding entry",
+                    "ui.tab_bar_right[5] has an unknown type `wobble` (expected zoom, hostname, datetime, text or command); hiding entry",
+                    "ui.tab_bar_right[6] has a wrong value type for `type` (expected a string); hiding entry",
+                    "ui.tab_bar_right[7] is missing `type`; hiding entry",
+                ]
+            );
+        }
+        let startup = startup_load(content, "tab-bar-bad-entries-diag");
+        assert!(startup
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("ui.tab_bar_right[2] has a wrong value type for `format`")));
     }
 }

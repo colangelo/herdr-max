@@ -32,7 +32,7 @@ fn agent_wait_accepts_repeated_until_and_exits_when_one_status_matches() {
         Some(Path::new(&path_override)),
     );
 
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let created = send_request(
         &socket_path,

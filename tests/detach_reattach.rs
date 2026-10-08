@@ -34,6 +34,22 @@ hide_tab_bar_when_single_tab = true
 pane_scrollbars = false
 "#;
 
+/// The headless size with `server.remember_client_size` off: what a pane
+/// created with no client attached got before the last client size was kept.
+const FORGETFUL_HEADLESS_SIZE_CONFIG: &str = r#"onboarding = false
+
+[server]
+headless_cols = 132
+headless_rows = 41
+remember_client_size = false
+
+[ui]
+sidebar_start_collapsed = true
+sidebar_collapsed_mode = "hidden"
+hide_tab_bar_when_single_tab = true
+pane_scrollbars = false
+"#;
+
 fn unique_test_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -122,6 +138,7 @@ fn spawn_server_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     support::isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -295,8 +312,8 @@ fn explicit_detach_message_causes_clean_disconnect() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
@@ -354,8 +371,8 @@ fn reattach_after_detach_shows_current_state() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     // --- Client A ---
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");
@@ -445,8 +462,8 @@ fn processes_survive_during_and_after_detach() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     // Verify server starts with a workspace (session restore or fresh state).
     let response = ping_socket(&api_socket);
@@ -532,8 +549,8 @@ fn server_persists_after_client_connection_drop() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     // Connect and handshake.
     let mut stream = UnixStream::connect(&client_socket).expect("should connect");
@@ -588,7 +605,7 @@ fn pane_created_without_client_uses_configured_headless_size() {
         &client_socket,
         CUSTOM_HEADLESS_SIZE_CONFIG,
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     let create = workspace_create(&api_socket, "headless-size");
     let pane_id = create["result"]["root_pane"]["pane_id"]
@@ -625,10 +642,10 @@ fn pane_created_after_detach_uses_configured_headless_size() {
         &runtime_dir,
         &api_socket,
         &client_socket,
-        CUSTOM_HEADLESS_SIZE_CONFIG,
+        FORGETFUL_HEADLESS_SIZE_CONFIG,
     );
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 160, 50)
@@ -683,6 +700,76 @@ fn pane_created_after_detach_uses_configured_headless_size() {
 }
 
 #[test]
+fn pane_created_after_detach_uses_the_last_client_size() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        CUSTOM_HEADLESS_SIZE_CONFIG,
+    );
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
+
+    let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
+    let (version, error) =
+        client_handshake(&mut stream, CURRENT_PROTOCOL, 160, 50).expect("handshake should succeed");
+    assert_eq!(version, CURRENT_PROTOCOL);
+    assert!(error.is_none(), "{error:?}");
+    drain_messages(&mut stream);
+
+    let first = workspace_create(&api_socket, "attached-size");
+    let first_pane_id = first["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("first root pane id")
+        .to_string();
+    let attached_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "ATTACHED_SIZE",
+        Duration::from_secs(5),
+    );
+    assert_eq!(attached_size, (50, 160));
+
+    send_detach(&mut stream).expect("send detach");
+    assert!(
+        wait_for_disconnect(&mut stream, Duration::from_secs(2)).expect("wait for detach"),
+        "detached client connection should close"
+    );
+    drop(stream);
+
+    let second = workspace_create(&api_socket, "headless-size");
+    let second_pane_id = second["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("second root pane id")
+        .to_string();
+    let detached_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &second_pane_id,
+        "HEADLESS_SIZE_AFTER_DETACH",
+        Duration::from_secs(5),
+    );
+    let preserved_size = read_pane_tty_size_after_marker(
+        &api_socket,
+        &first_pane_id,
+        "PRESERVED_SIZE_AFTER_DETACH",
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(detached_size, (50, 160), "the last client size, not 132x41");
+    assert_eq!(preserved_size, attached_size);
+
+    cleanup_spawned_herdr(spawned, base);
+}
+
+#[test]
 fn detached_output_preserves_last_attached_pty_size() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -692,8 +779,8 @@ fn detached_output_preserves_last_attached_pty_size() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     let mut stream = UnixStream::connect(&client_socket).expect("client should connect");
     let (version, error) = client_shell_handshake(&mut stream, CURRENT_PROTOCOL, 120, 40)
@@ -760,8 +847,8 @@ fn output_accumulated_while_detached_visible_on_reattach() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    wait_for_socket(&client_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
+    wait_for_socket(&client_socket);
 
     // Connect and handshake client A.
     let mut stream_a = UnixStream::connect(&client_socket).expect("client A should connect");

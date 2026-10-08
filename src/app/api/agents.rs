@@ -33,11 +33,24 @@ fn append_codex_paste_boundary(runtime: &crate::terminal::TerminalRuntime, text:
 }
 
 impl App {
-    pub(super) fn handle_agent_list(&mut self, id: String) -> String {
+    pub(super) fn handle_agent_list(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentListParams,
+    ) -> String {
+        // The input box reads each Claude pane's screen: only when asked.
+        let agents = self.collect_agent_infos();
         encode_success(
             id,
             ResponseResult::AgentList {
-                agents: self.collect_agent_infos(),
+                agents: if params.input_box {
+                    agents
+                        .into_iter()
+                        .map(|agent| self.with_input_box(agent))
+                        .collect()
+                } else {
+                    agents
+                },
             },
         )
     }
@@ -45,6 +58,36 @@ impl App {
     pub(super) fn handle_agent_get(&mut self, id: String, target: AgentTarget) -> String {
         self.reconcile_managed_agent_target(&target.target);
         let agent = match self.agent_info_for_target(&target.target) {
+            Ok(agent) => self.with_input_box(agent),
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    /// The agent with its input box draft (fork issue 146), read from the
+    /// bottom of the pane's buffer. Only a Claude Code agent has one, and only
+    /// these two calls ask: detection, rendering and the other agent answers
+    /// never do.
+    fn with_input_box(
+        &self,
+        mut agent: crate::api::schema::AgentInfo,
+    ) -> crate::api::schema::AgentInfo {
+        if agent.agent.as_deref() != Some("claude") {
+            return agent;
+        }
+        agent.input_box = self
+            .parse_pane_id(&agent.pane_id)
+            .and_then(|(ws_idx, pane_id)| self.lookup_runtime(ws_idx, pane_id))
+            .and_then(|(runtime, _)| {
+                crate::detect::manifest::claude_input_box_text(&runtime.detection_ansi())
+            })
+            .map(|text| crate::api::schema::AgentInputBox { text });
+        agent
+    }
+
+    pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
+        let agent = match self.focus_agent_target(&target.target) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
@@ -52,8 +95,13 @@ impl App {
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
-    pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
-        let agent = match self.focus_agent_target(&target.target) {
+    pub(super) fn handle_agent_pin(
+        &mut self,
+        id: String,
+        target: AgentTarget,
+        pin: bool,
+    ) -> String {
+        let agent = match self.pin_agent_target(&target.target, pin) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
@@ -286,6 +334,7 @@ impl App {
             params.source,
             params.format,
             params.lines,
+            params.strip_dim,
         );
 
         encode_success(
@@ -343,6 +392,7 @@ impl App {
                 "visible_idle": false,
                 "visible_blocker": false,
                 "visible_working": false,
+                "blocked_reason": terminal.blocked_reason(),
                 "screen_detection_skipped": true,
                 "screen_detection_skip_reason": "full_lifecycle_hook_authority",
                 "skip_state_update": false,
@@ -574,6 +624,71 @@ mod tests {
             pane_id,
             agent: Agent::Pi,
             observed_at: observed_at + std::time::Duration::from_secs(1),
+        });
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.detected_agent,
+            Some(Agent::Pi),
+            "the agent process is still there"
+        );
+
+        let after = app.handle_agent_get(
+            "req:after".into(),
+            AgentTarget {
+                target: "reviewer".into(),
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&after).is_ok(),
+            "a live agent must stay reachable by its assigned name: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_false_process_exit_makes_a_named_live_agent_unreachable_by_name() {
+        // Reproduces the registration loss reported on #3225 by rszrszrsz:
+        // a live agent pane with an assigned name stops resolving by that name
+        // while its process keeps running, and renaming is the only recovery.
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let observed_at = std::time::Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        terminal.set_agent_name("reviewer".into());
+
+        let found = app.handle_agent_get(
+            "req:before".into(),
+            AgentTarget {
+                target: "reviewer".into(),
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&found).is_ok(),
+            "the assigned name must resolve while the agent is running: {found}"
+        );
+
+        // One process-exit observation, then the same agent is observed alive
+        // again on the next probe - the process never actually went away.
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            background_work: false,
+            blocked_reason: None,
+            process_exited: true,
+            observed_at,
+        });
+        app.handle_internal_event(crate::events::AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Pi,
+            observed_at: observed_at + std::time::Duration::from_secs(1),
+            replaced_process: false,
         });
 
         let terminal = &app.state.terminals[&terminal_id];
@@ -919,6 +1034,179 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+    }
+
+    // Fork issue 130: an unnamed agent answers to its name-like title.
+    #[test]
+    fn an_unnamed_agent_is_listed_and_targeted_by_its_title_name() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_terminal_title(Some("\u{2733} jev-astra".into()));
+
+        let listed: SuccessResponse =
+            serde_json::from_str(&app.handle_agent_list("req".into(), Default::default())).unwrap();
+        let ResponseResult::AgentList { agents } = listed.result else {
+            panic!("expected agent list");
+        };
+        assert_eq!(agents[0].name.as_deref(), Some("jev-astra"));
+        assert_eq!(
+            agents[0].name_source,
+            Some(crate::api::schema::AgentNameSource::Title)
+        );
+        let json = serde_json::to_value(&agents[0]).unwrap();
+        assert_eq!(json["name_source"], "title");
+
+        let got: SuccessResponse = serde_json::from_str(&app.handle_agent_get(
+            "req".into(),
+            AgentTarget {
+                target: "jev-astra".into(),
+            },
+        ))
+        .unwrap();
+        let ResponseResult::AgentInfo { agent } = got.result else {
+            panic!("the title name resolves as a target");
+        };
+        assert_eq!(agent.terminal_id, terminal_id.to_string());
+
+        // An explicit name takes over and carries no source marker.
+        let renamed: SuccessResponse = serde_json::from_str(&app.handle_agent_rename(
+            "req".into(),
+            AgentRenameParams {
+                target: "jev-astra".into(),
+                name: Some("reviewer".into()),
+            },
+        ))
+        .unwrap();
+        let ResponseResult::AgentInfo { agent } = renamed.result else {
+            panic!("expected agent info");
+        };
+        assert_eq!(agent.name.as_deref(), Some("reviewer"));
+        assert_eq!(agent.name_source, None);
+    }
+
+    // Fork issue 148: agent.pin / agent.unpin report `pinned` and keep it
+    // on the terminal.
+    #[test]
+    fn agent_pin_and_unpin_set_pinned_on_the_agent_and_its_pane() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let target = || AgentTarget {
+            target: app.public_pane_id(0, pane_id).unwrap(),
+        };
+        let pin_target = target();
+        let unpin_target = target();
+        let info = |response: String| {
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentInfo { agent } = success.result else {
+                panic!("expected agent info");
+            };
+            agent
+        };
+
+        let pinned = info(app.handle_agent_pin("req".into(), pin_target, true));
+        assert!(pinned.pinned);
+        let json = serde_json::to_value(&pinned).unwrap();
+        assert_eq!(json["pinned"], true);
+        assert!(app.pane_info(0, pane_id).unwrap().pinned);
+
+        let unpinned = info(app.handle_agent_pin("req".into(), unpin_target, false));
+        assert!(!unpinned.pinned);
+        assert!(serde_json::to_value(&unpinned)
+            .unwrap()
+            .get("pinned")
+            .is_none());
+    }
+
+    // Fork issue 137: a watcher reads why and since when an agent is blocked
+    // from the API instead of scraping its screen.
+    #[test]
+    fn agent_list_reports_blocked_reason_and_since_only_while_blocked() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let list_json = |app: &mut App| {
+            let listed: SuccessResponse =
+                serde_json::from_str(&app.handle_agent_list("req".into(), Default::default()))
+                    .unwrap();
+            let ResponseResult::AgentList { agents } = listed.result else {
+                panic!("expected agent list");
+            };
+            serde_json::to_value(&agents[0]).unwrap()
+        };
+        let now = std::time::Instant::now();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_screen_state_at(
+                Some(Agent::Claude),
+                AgentState::Idle,
+                false,
+                None,
+                false,
+                false,
+                now,
+            );
+        let idle = list_json(&mut app);
+        assert!(idle.get("blocked_reason").is_none(), "{idle}");
+        assert!(idle.get("blocked_since").is_none(), "{idle}");
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_screen_state_at(
+                Some(Agent::Claude),
+                AgentState::Blocked,
+                true,
+                Some(crate::detect::BlockedReason::Question),
+                false,
+                false,
+                now,
+            );
+        let blocked = list_json(&mut app);
+        assert_eq!(blocked["agent_status"], "blocked");
+        assert_eq!(blocked["blocked_reason"], "question");
+        let since = blocked["blocked_since"].as_i64().expect("unix ms");
+        assert!(since > 1_700_000_000_000, "{since}");
+        let pane = app.pane_info(0, pane_id).expect("pane info");
+        assert_eq!(
+            pane.blocked_reason,
+            Some(crate::detect::BlockedReason::Question)
+        );
+        assert_eq!(pane.blocked_since, Some(since));
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_screen_state_at(
+                Some(Agent::Claude),
+                AgentState::Idle,
+                false,
+                None,
+                false,
+                false,
+                now,
+            );
+        let done = list_json(&mut app);
+        assert!(done.get("blocked_reason").is_none(), "{done}");
+        assert!(done.get("blocked_since").is_none(), "{done}");
     }
 
     #[test]

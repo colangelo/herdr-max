@@ -183,6 +183,78 @@ pub(super) fn read_git_ref_file(path: &Path) -> Option<String> {
     }
 }
 
+/// A git operation that leaves HEAD detached while it runs. Named so the
+/// sidebar can say *why* a workspace is off its branch, which is when a
+/// detached HEAD is most often seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOperation {
+    Rebase,
+    Bisect,
+}
+
+/// Where a workspace is checked out when it is on no branch: the short commit
+/// id, plus the operation holding it there when one is in progress. Kept apart
+/// from `git_branch` so `branch` stays exactly that — a branch name — for
+/// everything that reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedHead {
+    pub short_oid: String,
+    pub operation: Option<GitOperation>,
+}
+
+impl DetachedHead {
+    /// What the sidebar prints in the branch slot: `@a620c06`, or
+    /// `rebase @a620c06` / `bisect @a620c06` while that operation runs.
+    pub fn label(&self) -> String {
+        match self.operation {
+            Some(GitOperation::Rebase) => format!("rebase @{}", self.short_oid),
+            Some(GitOperation::Bisect) => format!("bisect @{}", self.short_oid),
+            None => format!("@{}", self.short_oid),
+        }
+    }
+}
+
+const SHORT_OID_LEN: usize = 7;
+
+pub(super) fn short_oid(oid: &str) -> String {
+    oid.chars().take(SHORT_OID_LEN).collect()
+}
+
+/// The operation that detached HEAD, read from the marker paths git itself
+/// leaves in the worktree's git dir.
+pub(super) fn git_operation_in_progress(git_dir: &Path) -> Option<GitOperation> {
+    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+        Some(GitOperation::Rebase)
+    } else if git_dir.join("BISECT_LOG").is_file() {
+        Some(GitOperation::Bisect)
+    } else {
+        None
+    }
+}
+
+pub fn git_detached_head(cwd: &Path) -> Option<DetachedHead> {
+    let repo_root = git_repo_root(cwd)?;
+    let git_dir = git_dir_for_repo_root(&repo_root)?;
+    let git_common_dir = git_common_dir_for_git_dir(&git_dir);
+    let oid = if git_ref_storage_is_reftable(&git_common_dir) {
+        if git_symbolic_head_short(&repo_root).is_some() {
+            return None;
+        }
+        git_rev_parse_verify(&repo_root, "HEAD")?
+    } else {
+        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        let head = head.trim();
+        if head.starts_with("ref: ") || head.is_empty() {
+            return None;
+        }
+        head.to_string()
+    };
+    Some(DetachedHead {
+        short_oid: short_oid(&oid),
+        operation: git_operation_in_progress(&git_dir),
+    })
+}
+
 pub fn git_branch(cwd: &Path) -> Option<String> {
     let repo_root = git_repo_root(cwd)?;
     let git_dir = git_dir_for_repo_root(&repo_root)?;
@@ -611,6 +683,44 @@ mod tests {
         std::fs::write(root.join(".git/HEAD"), "3e1b9a8d\n").unwrap();
 
         assert_eq!(git_branch(&root), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_detached_head_reports_the_short_oid_and_the_operation_holding_it() {
+        let root = temp_test_dir("detached-head-label");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        // On a branch: no detached fact at all.
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(git_detached_head(&root), None);
+
+        // Plain detached checkout: the short id alone.
+        std::fs::write(
+            root.join(".git/HEAD"),
+            "3e1b9a8d0c4f2a7b9e1d5c6f7a8b9c0d1e2f3a4b\n",
+        )
+        .unwrap();
+        let head = git_detached_head(&root).expect("detached");
+        assert_eq!(head.short_oid, "3e1b9a8");
+        assert_eq!(head.operation, None);
+        assert_eq!(head.label(), "@3e1b9a8");
+        assert_eq!(git_branch(&root), None, "branch stays a branch name");
+
+        // A rebase in flight names itself.
+        std::fs::create_dir_all(root.join(".git/rebase-merge")).unwrap();
+        assert_eq!(
+            git_detached_head(&root).map(|head| head.label()),
+            Some("rebase @3e1b9a8".to_string())
+        );
+        std::fs::remove_dir_all(root.join(".git/rebase-merge")).unwrap();
+
+        std::fs::write(root.join(".git/BISECT_LOG"), "").unwrap();
+        assert_eq!(
+            git_detached_head(&root).map(|head| head.label()),
+            Some("bisect @3e1b9a8".to_string())
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

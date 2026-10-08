@@ -9,14 +9,8 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
     let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
     let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
 
-    wait_for_socket(
-        &named_session_socket(&config_home, "alpha"),
-        Duration::from_secs(5),
-    );
-    wait_for_socket(
-        &named_session_socket(&config_home, "beta"),
-        Duration::from_secs(5),
-    );
+    wait_for_socket(&named_session_socket(&config_home, "alpha"));
+    wait_for_socket(&named_session_socket(&config_home, "beta"));
 
     run_named_cli_json(
         &config_home,
@@ -374,7 +368,7 @@ fn status_commands_report_client_and_server_versions() {
     let socket_path = runtime_dir.join("herdr.sock");
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let full = run_cli(&socket_path, &["status"]);
     assert!(
@@ -537,8 +531,8 @@ fn server_stop_command_shuts_down_running_server() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-    wait_for_socket(&client_socket, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
+    wait_for_socket(&client_socket);
 
     let stopped = run_cli(&socket_path, &["server", "stop"]);
     assert!(
@@ -578,8 +572,8 @@ fn server_stop_then_restart_restores_pane_history() {
     let marker = "PERSISTED_HISTORY_AFTER_STOP";
 
     let mut herdr = spawn_herdr_with_pane_history(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-    wait_for_socket(&client_socket, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
+    wait_for_socket(&client_socket);
 
     let created = run_cli_json(
         &socket_path,
@@ -626,8 +620,8 @@ fn server_stop_then_restart_restores_pane_history() {
     drop(herdr);
 
     let restarted = spawn_herdr_with_pane_history(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-    wait_for_socket(&client_socket, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
+    wait_for_socket(&client_socket);
 
     let workspaces = run_cli_json(&socket_path, &["workspace", "list"]);
     let workspace_id = workspaces["result"]["workspaces"]
@@ -754,8 +748,8 @@ fn server_start_restores_legacy_session_through_api_identity() {
     fs::write(data_dir.join("session.json"), legacy_session).unwrap();
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
-    wait_for_socket(&client_socket, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
+    wait_for_socket(&client_socket);
 
     let workspaces = run_cli_json(&socket_path, &["workspace", "list"]);
     let restored_workspace = workspaces["result"]["workspaces"]

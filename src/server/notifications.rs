@@ -38,6 +38,11 @@ pub(crate) fn toast_message_from_state_change(
                     .get(&pane.attached_terminal_id)
                     .and_then(|terminal| terminal.effective_agent_label())?;
                 let kind = app::actions::notification_toast_for_state_change(
+                let agent_name = app::actions::notification_agent_name(
+                    state,
+                    &pane.attached_terminal_id,
+                    agent_label,
+                );
                     suppress_active_tab_notifications,
                     prev_state,
                     new_state,
@@ -45,7 +50,7 @@ pub(crate) fn toast_message_from_state_change(
                 let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
                 Some(format!(
                     "{} {}: {}",
-                    agent_label,
+                    agent_name,
                     toast_event_text(kind),
                     app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
                 ))

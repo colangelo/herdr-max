@@ -34,6 +34,8 @@ These instructions are layered.
 - **Detection is decoupled.** The detector reads a screen snapshot, never touches the parser or viewport state.
 - **Screen detection is evidence-based.** When changing `src/detect/manifests/`, first capture the relevant bottom-buffer state with `herdr agent read <pane> --source detection --format text` and, when styling or alternate screen behavior matters, `--format ansi`. Decide which visible controls are invariant, which are alternatives, and encode them as explicit AND/OR gates. Do not match whole-pane incidental text, and do not use the user-visible viewport for agent status because users can scroll it.
 - **UI patterns should be reused.** Herdr is a mouse-first TUI. New dialogs, onboarding, settings, and post-update flows should follow the existing UI/UX language and interaction patterns instead of inventing one-off screens. Prefer reusing existing modal/screen structure, affordances, and close actions so the app feels consistent.
+- **New keybindings must be discoverable in the help panel.** Whenever you add a keybinding/`KeysConfig` action, add a matching `help_entry` in `src/ui/keybind_help.rs` (usually the `panes` or `workspaces / tabs` group) so it shows in the `prefix+?` help. This applies even when the action is unbound by default — the panel renders `unset` until the user binds it, which is how they discover it exists. Not exempt: a shortcut that works but is absent from the help panel is treated as incomplete. For an *overlay* this is no longer something to remember: `overlay_help` in `src/ui/keybind_help.rs` matches exhaustively over `OverlayKind`, so a new overlay does not build until it declares its entries or says why it has no keybinding to document.
+- **Overlays are built on the kit, not copy-adapted.** A panel, modal, or picker takes its placement from `AnchoredPanelSpec` (`src/ui/overlay/geometry.rs`), its footer from `ButtonRow` (`button_row.rs`), its selection from `ListCursor` (`list_cursor.rs`), its movement chords from `list_chord` (`src/app/input/list_keys.rs`), and its text input from `TextField` plus `apply_text_key` (`src/ui/text_field.rs`, `src/app/input/text_keys.rs`). What an overlay measures — how wide its own rows are, which key does what inside it — stays its own; placement, drop-priority, windowing, and the editing set do not. Add it to the `overlays!` list in `src/app/state.rs` so its mode, its input-source answer, and its help entries come from one declaration, and give it a rendered-layout test next to the others.
 
 ### Multiplicative performance paths
 
@@ -125,7 +127,7 @@ When the current pull request head is green and both bot reviews are complete, r
 
 If the current session is already inside an isolated task worktree, keep using it. Do not create nested worktrees.
 
-Before committing, propose the commit message and get alignment.
+State the commit message(s) you are using, then commit without waiting for approval (see Commit Style).
 
 After Can confirms the change is integrated, update the shared checkout, remove the task worktree, and delete the task branch locally and remotely.
 
@@ -151,6 +153,29 @@ use this configuration automatically. To use another SDK, set
 Setup accepts `--accept-license` for explicit noninteractive license acceptance;
 normal checks never download the SDK. Native Windows builds auto-detect their
 installed SDK. Native Linux/macOS builds do not need the Windows SDK.
+
+Windows MSVC cross-compilation from Unix requires SDK/CRT headers and libraries.
+Install `xwin` with `cargo install xwin --locked`, then run
+`just setup-windows-cross` once and accept Microsoft's SDK license when prompted.
+This downloads the SDK directly from Microsoft; no Windows machine is required.
+The SDK and Zig libc configuration live at `~/.local/share/herdr/windows-cross/`,
+shared by worktrees. `just windows-lint` and the Windows stage of `just check`
+use this configuration automatically. To use another SDK, set
+`LIBGHOSTTY_VT_WINDOWS_LIBC` to its Zig libc configuration file.
+Setup accepts `--accept-license` for explicit noninteractive license acceptance;
+normal checks never download the SDK. Native Windows builds auto-detect their
+installed SDK. Native Linux/macOS builds do not need the Windows SDK.
+
+Fork: on macOS, `just windows-lint` (and so the Windows stage of `just check`)
+is skipped with a notice, because zig applies the Windows libc configuration to
+the native helper tools it builds on the host, which then cannot find
+libSystem. Set `HERDR_WINDOWS_LINT=1` to run it anyway
+(https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/83).
+
+Fork: the `justfile` exports `ZIG` as the env `ZIG` if set, else
+`/opt/homebrew/opt/zig@0.16/bin/zig` when it exists (the keg-only `brew install
+zig@0.16`), else `zig`, because the vendored libghostty-vt needs zig 0.16 and the
+global zig can be newer.
 
 Unit tests live next to the code (`#[cfg(test)] mod tests`). New `AppState` or `Workspace` behavior should be testable with `AppState::test_new()` and `Workspace::test_new()` without PTYs.
 
@@ -230,13 +255,45 @@ Normal feature and fix work must not edit `docs/next/CHANGELOG.md`; this keeps l
 
 Normal feature/fix work should not edit root `README.md`, root `CHANGELOG.md`, published version docs, or `distribution/latest.json` unless it is a focused correction to already-published documentation or explicitly requested.
 
-Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled.
+Put throwaway scratch notes under `.local/prd/`; `.local/` is ignored and locally controlled. Anything that shapes an implementation does not belong there — see Planning below.
+
+## Planning
+
+**OpenSpec is the house workflow for everything between "we agreed to build it" and "we start writing code."** Any change big enough to need a written plan gets an OpenSpec change at `openspec/changes/<change-name>/`, committed before implementation starts: `proposal.md`, `design.md`, `specs/<capability>/spec.md`, `tasks.md`, and the step-by-step implementation plan. Validate with `openspec validate <change-name> --strict`.
+
+The point is structure we can rely on and review later. A plan in a gitignored scratch directory is invisible in worktrees, absent on other machines, and unreviewable in a diff, so it does not count as planned work.
+
+Exploratory conversation before that point is unconstrained — the Superpowers brainstorming skill is fine for working out what to build. But its outputs get written into the OpenSpec change, not into `docs/superpowers/`, `.local/prd/`, or any other parallel location. Do not invent a second home for planning artifacts.
+
+## Fork: every fix, bug and feature gets a Gitea issue
+
+Fork only (AC-forks/herdr-max). Every piece of fork work gets an issue on the fork's Gitea tracker,
+https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues, **opened when the work is approved or
+found, before it starts**. That covers a bug found, a fix, a feature, an upstream cherry-pick
+batch or port, and a follow-up spotted during other work. Don't file a closed record after the
+fact. On 2026-09-27/28, five jobs (the scroll-read fix, the unbound-key warning, cherry-pick
+batch A, the 9a2a7af5 port, and the display-panes overlay) shipped with no issue in progress,
+so nothing showed the requests while they ran.
+
+- **Title:** `[fork] <what is wrong or wanted>`. **Body:** current vs expected behaviour, the
+  repro or the ask, who asked, and the evidence (logs, timings, a video path).
+- **Hand-off:** a brief to another session links the issue. The implementer comments on it with
+  the SHAs, the beta version and, for anything non-trivial, implementation notes (files, key
+  types, tests, known limits); #96 is the model.
+- **Close** only after the change is verified in a running beta (`herdr-dogfood`), with a
+  closing comment on how it was checked. Reference the issue by its full URL in commit bodies:
+  a bare `#N` means GitHub here.
+- An OpenSpec change does not replace the issue: the issue tracks the request, and the change
+  holds the plan.
+- API, labels and token: the `herdr-fork-tracking` skill.
 
 ## Commit Style
 
 Use lowercase conventional commits, no emojis, and no AI co-author lines. Commit subjects feed preview release notes, so keep them descriptive.
 
-Before committing, propose the commit message and get alignment.
+Prefer granular commits that each cover one coherent concern. When practical, separate implementation, documentation, planning artifacts, and workflow or instruction updates instead of bundling them into one commit.
+
+Do not block on commit-message approval: state the messages you chose (with the granularity above) in your progress output and proceed to commit them autonomously. Only pause for alignment when the split or wording is genuinely ambiguous or the commit would be hard to reverse.
 
 When a normal feature or fix commit relates to a GitHub issue, add a commit body line `refs #<issue-number>` after the subject:
 

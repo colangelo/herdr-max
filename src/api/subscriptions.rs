@@ -159,6 +159,10 @@ impl ActiveSubscription {
                 Ok(event_subscription(EventKind::PaneAgentDetected))
             }
             Subscription::LayoutUpdated {} => Ok(event_subscription(EventKind::LayoutUpdated)),
+            Subscription::NotificationPosted {} => {
+                Ok(event_subscription(EventKind::NotificationPosted))
+            }
+            Subscription::TodoChanged {} => Ok(event_subscription(EventKind::TodoChanged)),
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
@@ -588,6 +592,7 @@ fn pane_read(
                 lines,
                 format: crate::api::schema::ReadFormat::Text,
                 strip_ansi,
+                strip_dim: false,
                 intent: crate::api::schema::ReadIntent::Passive,
             }),
         },
@@ -709,9 +714,14 @@ mod tests {
             terminal_title_stripped: None,
             display_agent: None,
             agent_status: AgentStatus::Unknown,
+            pinned: false,
+            synced: false,
+            blocked_reason: None,
+            blocked_since: None,
             state_labels: HashMap::new(),
             tokens: HashMap::new(),
             agent_session: None,
+            last_input_at_unix: None,
             scroll,
             revision: 0,
         }

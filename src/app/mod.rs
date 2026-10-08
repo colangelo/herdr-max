@@ -4,6 +4,8 @@
 //! - `actions.rs` — state mutations (testable without PTYs/async)
 
 pub(crate) mod actions;
+mod agent_hints;
+mod agent_names;
 mod agent_resume;
 #[cfg(test)]
 mod agent_suspend_tests;
@@ -17,12 +19,14 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
+pub(crate) mod display_panes;
 mod git_refresh;
 mod ids;
 mod popup;
 mod runtime;
 mod session;
 pub mod state;
+mod sync_panes;
 mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
@@ -142,7 +146,14 @@ pub struct App {
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
+    startup_per_agent_delay: Duration,
+    next_agent_resume_at: Option<Instant>,
+    /// How Codex panes are launched and named (`[agents.codex]`).
+    pub(crate) codex_app_server: crate::codex_app_server::CodexAppServer,
     pub(crate) session_save_deadline: Option<Instant>,
+    /// When the working spinner last stepped; the next step is due one
+    /// `status_spinner_interval` later while `AppState::spinner_active`.
+    pub(crate) last_spinner_tick: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_pending: bool,
@@ -162,6 +173,16 @@ pub struct App {
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
+    /// Panes whose live runtime was deliberately replaced by a respawn. The
+    /// replaced process still reports its exit, and that `PaneDied` names only
+    /// the pane, so without this the exit-action path would close a pane that
+    /// is already running its replacement. Each entry absorbs exactly one
+    /// event, because a runtime reports its death exactly once.
+    pub(crate) respawn_replaced_runtimes: std::collections::HashSet<crate::layout::PaneId>,
+    /// True while the TUI's own request runs (`dispatch_runtime_mutation`).
+    /// Only those may open a confirmation modal; a request from a script or
+    /// another client is answered instead (fork issue 120).
+    pub(crate) tui_request_in_flight: bool,
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
@@ -180,6 +201,29 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 fn auto_updates_enabled(background_updates: bool) -> bool {
     background_updates && !cfg!(debug_assertions)
+    /// Copy mode holds a stable non-terminal context so held keys repeat
+    /// viewport/cursor motions; leaving copy mode changes the context and
+    /// stops the repeats (same transition guard as `Pane`/`Popup`).
+    Copy,
+    /// The alt-screen scroll passthrough mode holds its own stable
+    /// non-terminal context for the same reason, and a distinct one from
+    /// `Copy` so a transition between the two modes still stops the repeats.
+    AppScroll,
+    /// Every other mode — the overlays, prefix, onboarding — holds a context
+    /// keyed by the mode itself, so a held key repeats inside an overlay (list
+    /// motion, text-field typing) exactly as it does in a pane, and the press
+    /// that moves between overlays changes the context and stops the repeats.
+    /// Without this the lease table saw no context at all for an overlay and
+    /// suppressed every repeat: the first press worked, holding did nothing.
+    Ui(Mode),
+}
+
+impl TerminalInputContext {
+    /// Whether keys in this context dispatch through the terminal-key path
+    /// (toward a pane) rather than the app-level key path.
+    pub(crate) fn routes_to_terminal(&self) -> bool {
+        matches!(self, Self::Pane | Self::Popup(_))
+    }
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -212,6 +256,77 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+    }
+}
+
+fn workspace_sort_from_config(sort: crate::config::WorkspaceSortConfig) -> state::WorkspaceSort {
+    match sort {
+        crate::config::WorkspaceSortConfig::Manual => state::WorkspaceSort::Manual,
+        crate::config::WorkspaceSortConfig::Priority => state::WorkspaceSort::Priority,
+    }
+}
+
+fn sort_motion_bubble_from_config(motion: crate::config::SortMotionConfig) -> bool {
+    matches!(motion, crate::config::SortMotionConfig::Bubble)
+}
+
+fn display_panes_duration_from_config(ms: u64) -> Duration {
+    Duration::from_millis(crate::config::clamp_display_panes_ms(ms))
+}
+
+fn status_spinner_interval_from_config(ms: u64) -> Duration {
+    Duration::from_millis(ms.clamp(
+        crate::config::MIN_STATUS_SPINNER_MS,
+        crate::config::MAX_STATUS_SPINNER_MS,
+    ))
+}
+
+fn state_symbol_overrides_from_config(
+    symbols: &crate::config::StateSymbolsConfig,
+) -> state::StateSymbolOverrides {
+    let valid =
+        |value: &Option<String>| crate::config::StateSymbolsConfig::valid(value).map(str::to_owned);
+    state::StateSymbolOverrides {
+        working: valid(&symbols.working),
+        idle: valid(&symbols.idle),
+        done: valid(&symbols.done),
+        blocked: valid(&symbols.blocked),
+        unknown: valid(&symbols.unknown),
+        background: valid(&symbols.background),
+        background_alt: valid(&symbols.background_alt),
+    }
+}
+
+fn state_color_overrides_from_config(
+    colors: &crate::config::StateColorsConfig,
+) -> state::StateColorOverrides {
+    let parse = |value: &Option<String>| value.as_deref().map(crate::config::parse_color);
+    state::StateColorOverrides {
+        working: parse(&colors.working),
+        idle: parse(&colors.idle),
+        done: parse(&colors.done),
+        blocked: parse(&colors.blocked),
+        unknown: parse(&colors.unknown),
+        background: parse(&colors.background),
+    }
+}
+
+fn sort_motion_timing_from_config(
+    settle_ms: u64,
+    step_ms: u64,
+    easing: crate::config::SortMotionEasingConfig,
+) -> crate::ui::list_motion::ListMotionTiming {
+    crate::ui::list_motion::ListMotionTiming {
+        settle: std::time::Duration::from_millis(settle_ms),
+        step: std::time::Duration::from_millis(step_ms.max(1)),
+        easing: match easing {
+            crate::config::SortMotionEasingConfig::Linear => {
+                crate::ui::list_motion::ListMotionEasing::Linear
+            }
+            crate::config::SortMotionEasingConfig::Bubble => {
+                crate::ui::list_motion::ListMotionEasing::Bubble
+            }
+        },
     }
 }
 
@@ -423,6 +538,8 @@ impl App {
             policy.restore_session && snapshot.is_none(),
         )));
         let (workspaces, active, selected) = if let Some(snap) = snapshot {
+        let mut restored_last_client_size = None;
+        let mut restored_former_public_ids = std::collections::HashMap::new();
             let history = config
                 .experimental
                 .pane_history
@@ -443,6 +560,8 @@ impl App {
             );
             restored_terminals = terminals;
             restored_terminal_runtimes = terminal_runtimes.into();
+            restored_last_client_size = snap.remembered_client_size();
+            restored_former_public_ids = crate::persist::restored_former_public_ids(&snap, &ws);
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
                 (Vec::new(), None, 0)
@@ -457,6 +576,7 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let workspace_sort = workspace_sort_from_config(config.ui.workspace_sort);
 
         let worktree_directory =
             crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
@@ -491,11 +611,25 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
+        // The announcement is the one overlay that can be open before the
+        // first frame, so it is built with the state rather than opened later.
+        let overlay = startup_product_announcement.map(|announcement| {
+            state::Overlay::ProductAnnouncement(state::ProductAnnouncementState {
+                version: announcement.version,
+                id: announcement.id,
+                title: announcement.title,
+                body: announcement.body,
+                scroll: 0,
+                preview: announcement.preview,
+            })
+        });
+
         let mut state = AppState {
+            overlay,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
-            public_pane_id_aliases: std::collections::HashMap::new(),
+            public_pane_id_aliases: restored_former_public_ids,
             workspaces,
             active,
             previous_pane_focus: None,
@@ -516,6 +650,8 @@ impl App {
                 }
             }),
             view: state::ViewState {
+                todo_hit_area: Rect::default(),
+                notification_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
                 pane_infos: Vec::new(),
             },
@@ -525,14 +661,35 @@ impl App {
             update_dismissed: false,
             config_diagnostic,
             toast: None,
+            notification_log: state::NotificationLog::default(),
             pending_agent_notifications: std::collections::HashMap::new(),
             outer_terminal_focus: None,
             prefix_keys,
+            extra_prefixes: config.extra_prefix_keys(),
             headless_size: config.headless_size(),
             agent_panel_sort,
+            status_spinner: config.ui.status_spinner,
+            status_spinner_interval: status_spinner_interval_from_config(
+                config.ui.status_spinner_ms,
+            ),
+            display_panes_duration: display_panes_duration_from_config(config.ui.display_panes_ms),
+            spinner_frame: 0,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            workspace_sort,
+            sort_motion_bubble: sort_motion_bubble_from_config(config.ui.sort_motion),
+            sort_motion_timing: sort_motion_timing_from_config(
+                config.ui.sort_motion_settle_ms,
+                config.ui.sort_motion_step_ms,
+                config.ui.sort_motion_easing,
+            ),
+            workspace_list_motion: crate::ui::list_motion::ListMotion::new(),
+            agent_panel_motion: crate::ui::list_motion::ListMotion::new(),
+            sidebar_style: config.ui.sidebar_style,
+            state_color_overrides: state_color_overrides_from_config(&config.ui.state_colors),
+            state_symbol_overrides: state_symbol_overrides_from_config(&config.ui.state_symbols),
+            notification_center_position: config.ui.notification_center_position,
             next_agent_state_change_seq: 0,
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
@@ -540,8 +697,13 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            show_pane_todo_indicator: config.ui.show_pane_todo_indicator,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
+            show_workspace_numbers: config.ui.show_workspace_numbers,
+            show_agent_numbers: config.ui.show_agent_numbers,
+            show_host: config.ui.show_host,
+            host_label: crate::platform::short_hostname(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
             cjk_ime_agents: parse_cjk_ime_agents(&config.experimental.cjk_ime_agents),
@@ -551,6 +713,62 @@ impl App {
             shell_mode: config.terminal.shell_mode,
             new_terminal_cwd: config.terminal.new_cwd.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
+            workspace_number_color: config
+                .ui
+                .workspace_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            agent_number_color: config
+                .ui
+                .agent_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            workspace_number_prefix: config.ui.workspace_number_prefix.clone(),
+            agent_number_prefix: config.ui.agent_number_prefix.clone(),
+            pane_border_active_color: config
+                .ui
+                .pane_border_active_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            pane_border_inactive_color: config
+                .ui
+                .pane_border_inactive_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            pane_border_active_style: config.ui.pane_border_active_style,
+            pane_title_active_color: config
+                .ui
+                .pane_title_active_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            pane_title_inactive_color: config
+                .ui
+                .pane_title_inactive_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            pane_todo_color: config
+                .ui
+                .pane_todo_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            sidebar_active_border: config.ui.sidebar_active_border,
+            sidebar_overflow: config.ui.sidebar_overflow,
+            sidebar_fog: config.sidebar_fog().0,
+            sidebar_fog_tint: config.sidebar_fog().1,
+            sidebar_fog_style: config.sidebar_fog_style(),
+            sidebar_fade: config.sidebar_fade(),
+            pane_active_bg: config
+                .ui
+                .pane_active_bg
+                .as_deref()
+                .map(crate::config::parse_color),
+            pane_inactive_bg: config
+                .ui
+                .pane_inactive_bg
+                .as_deref()
+                .map(crate::config::parse_color),
+            dim_inactive_panes: config.ui.dim_inactive_panes,
+            inactive_pane_dim: config.inactive_pane_dim(),
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),
@@ -574,6 +792,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
+            session_save_urgent: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -655,7 +874,15 @@ impl App {
                 config.session.startup_per_agent_delay_ms.into(),
             ),
             next_agent_resume_at: None,
+            startup_per_agent_delay: Duration::from_millis(
+                config.session.startup_per_agent_delay_ms.into(),
+            ),
+            next_agent_resume_at: None,
+            codex_app_server: crate::codex_app_server::CodexAppServer::from_config(
+                &config.agents.codex,
+            ),
             session_save_deadline: None,
+            last_spinner_tick: None,
             session_save_thread: None,
             session_writer,
             pane_exit_checkpoint_pending: false,
@@ -676,6 +903,8 @@ impl App {
             render_dirty,
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
+            respawn_replaced_runtimes: std::collections::HashSet::new(),
+            tui_request_in_flight: false,
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
@@ -723,8 +952,10 @@ impl App {
             app.render_dirty.clone(),
         )?;
         let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
+        let former_public_ids = crate::persist::restored_former_public_ids(snapshot, &workspaces);
 
         app.state.pane_id_aliases = pane_id_aliases;
+        app.state.public_pane_id_aliases = former_public_ids;
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
@@ -795,7 +1026,7 @@ impl App {
     }
 
     pub(crate) fn dismiss_product_announcement(&mut self) {
-        if let Some(announcement) = self.state.product_announcement.take() {
+        if let Some(announcement) = self.state.take_product_announcement() {
             if !announcement.preview {
                 if let Err(err) =
                     crate::product_announcements::mark_seen(&announcement.version, &announcement.id)
@@ -863,6 +1094,7 @@ impl App {
             match config.live_keybinds_with_diagnostics() {
                 Ok((live, keybind_diagnostics)) => {
                     self.state.prefix_keys = live.prefix;
+                    self.state.extra_prefixes = live.extra_prefixes;
                     self.state.keybinds = live.keybinds;
                     match config.local_keybindings_profile_toml() {
                         Ok(profile) => self.client_shell_keybindings_profile = Some(profile),
@@ -891,9 +1123,13 @@ impl App {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 diagnostics.extend(config.ui.sound.diagnostics());
+                diagnostics.extend(config.ui.state_symbols.diagnostics());
                 diagnostics.extend(crate::config::tab_bar_right_diagnostics(
                     &config.ui.tab_bar_right,
                 ));
+                diagnostics.extend(crate::config::sidebar_style_diagnostics(&config.ui.sidebar));
+                diagnostics.extend(config.sidebar_fog_diagnostics());
+                diagnostics.extend(config.inactive_pane_dim_diagnostics());
                 diagnostics.extend(crate::config::window_title_diagnostics(
                     &config.ui.window_title,
                 ));
@@ -906,13 +1142,24 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.show_pane_todo_indicator = config.ui.show_pane_todo_indicator;
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,
                 );
                 self.configure_window_title(&config.ui.window_title);
+                self.state.show_workspace_numbers = config.ui.show_workspace_numbers;
+                self.state.show_agent_numbers = config.ui.show_agent_numbers;
+                // `host_label` is intentionally not re-read here: the host is
+                // stable for the server's lifetime, so only the toggle reloads.
+                self.state.show_host = config.ui.show_host;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.status_spinner = config.ui.status_spinner;
+                self.state.status_spinner_interval =
+                    status_spinner_interval_from_config(config.ui.status_spinner_ms);
+                self.state.display_panes_duration =
+                    display_panes_duration_from_config(config.ui.display_panes_ms);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();
@@ -941,6 +1188,20 @@ impl App {
             );
         }
 
+        if !invalid_section("agents") {
+            self.codex_app_server =
+                crate::codex_app_server::CodexAppServer::from_config(&config.agents.codex);
+        }
+        if !invalid_section("session")
+            && Duration::from_millis(config.session.startup_per_agent_delay_ms.into())
+                != self.startup_per_agent_delay
+        {
+            diagnostics.push(
+                "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
+                    .into(),
+            );
+        }
+
         if !invalid_section("experimental") {
             self.state.reveal_hidden_cursor_for_cjk_ime =
                 config.experimental.reveal_hidden_cursor_for_cjk_ime;
@@ -956,6 +1217,7 @@ impl App {
         }
 
         if !invalid_section("server") {
+            self.state.remember_client_size = config.server.remember_client_size;
             if let Some(diagnostic) = config.invalid_headless_size_diagnostic() {
                 diagnostics.push(format!("{diagnostic}; keeping current [server] settings"));
             } else {
@@ -1024,25 +1286,29 @@ impl App {
             self.state.config_diagnostic = None;
             self.config_diagnostic_deadline = None;
             if notify_success {
-                self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: crate::app::state::ToastKind::UpdateInstalled,
-                    title: "reloaded config".to_string(),
-                    context: "using config.toml".to_string(),
-                    position: None,
-                    target: None,
-                });
+                self.state
+                    .post_notification(crate::app::state::ToastNotification {
+                        kind: crate::app::state::ToastKind::UpdateInstalled,
+                        title: "reloaded config".to_string(),
+                        context: "using config.toml".to_string(),
+                        position: None,
+                        target: None,
+                        anchor_pane: None,
+                    });
             }
         } else {
             self.state.config_diagnostic = crate::config::config_diagnostic_summary(&diagnostics);
             self.config_diagnostic_deadline = None;
             if notify_success {
-                self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: crate::app::state::ToastKind::UpdateInstalled,
-                    title: "reloaded config".to_string(),
-                    context: "with warnings".to_string(),
-                    position: None,
-                    target: None,
-                });
+                self.state
+                    .post_notification(crate::app::state::ToastNotification {
+                        kind: crate::app::state::ToastKind::UpdateInstalled,
+                        title: "reloaded config".to_string(),
+                        context: "with warnings".to_string(),
+                        position: None,
+                        target: None,
+                        anchor_pane: None,
+                    });
             }
         }
 
@@ -1193,6 +1459,7 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand::ALL,
                 auto_label: "one".into(),
                 branch: Some("render-dirty-test".into()),
+                detached_head: None,
                 ahead_behind: Some((1, 0)),
                 space: None,
             }],
@@ -1304,6 +1571,230 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.title.as_str()),
             Some("pi needs attention")
         );
+    }
+
+    fn test_notification_toast(
+        title: &str,
+        target: Option<crate::app::state::ToastTarget>,
+    ) -> crate::app::state::ToastNotification {
+        crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::Finished,
+            title: title.to_string(),
+            context: "ctx".to_string(),
+            position: None,
+            target,
+            anchor_pane: None,
+        }
+    }
+
+    #[test]
+    fn notification_list_reports_newest_first_and_unread() {
+        let mut app = test_app();
+        app.state
+            .post_notification(test_notification_toast("one", None));
+        let _ = app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+            id: "seen".into(),
+            method: crate::api::schema::Method::NotificationMarkSeen(
+                crate::api::schema::NotificationMarkSeenParams::default(),
+            ),
+        });
+        app.state
+            .post_notification(test_notification_toast("two", None));
+        app.state
+            .post_notification(test_notification_toast("three", None));
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "list".into(),
+                method: crate::api::schema::Method::NotificationList(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        let crate::api::schema::ResponseResult::NotificationList {
+            notifications,
+            unread_count,
+        } = parsed.result
+        else {
+            panic!("expected NotificationList result");
+        };
+        let titles: Vec<&str> = notifications
+            .iter()
+            .map(|notification| notification.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["three", "two", "one"]);
+        assert_eq!(unread_count, 2);
+        let read_flags: Vec<bool> = notifications
+            .iter()
+            .map(|notification| notification.read)
+            .collect();
+        assert_eq!(
+            read_flags,
+            vec![false, false, true],
+            "only the marked-seen entry is read"
+        );
+    }
+
+    #[test]
+    fn notification_mark_seen_is_idempotent_via_api() {
+        let mut app = test_app();
+        app.state
+            .post_notification(test_notification_toast("one", None));
+        app.state
+            .post_notification(test_notification_toast("two", None));
+
+        let mark_seen = |app: &mut App, id: &str, entry_id: Option<u64>| {
+            let response =
+                app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                    id: id.into(),
+                    method: crate::api::schema::Method::NotificationMarkSeen(
+                        crate::api::schema::NotificationMarkSeenParams { id: entry_id },
+                    ),
+                });
+            let parsed: crate::api::schema::SuccessResponse =
+                serde_json::from_str(&response).unwrap();
+            match parsed.result {
+                crate::api::schema::ResponseResult::NotificationMarkSeen {
+                    changed,
+                    unread_count,
+                } => (changed, unread_count),
+                other => panic!("expected NotificationMarkSeen result, got {other:?}"),
+            }
+        };
+
+        // Marking one entry read decrements unread by one; repeating it is a
+        // no-op. Marking all reads the rest, and repeating that is a no-op too.
+        assert_eq!(mark_seen(&mut app, "one", Some(1)), (true, 1));
+        assert_eq!(mark_seen(&mut app, "one-again", Some(1)), (false, 1));
+        assert_eq!(mark_seen(&mut app, "all", None), (true, 0));
+        assert_eq!(mark_seen(&mut app, "all-again", None), (false, 0));
+        assert_eq!(app.state.notification_log.unread_count(), 0);
+    }
+
+    #[test]
+    fn notification_clear_empties_log_via_api() {
+        let mut app = test_app();
+        app.state
+            .post_notification(test_notification_toast("one", None));
+        app.state
+            .post_notification(test_notification_toast("two", None));
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "clear".into(),
+                method: crate::api::schema::Method::NotificationClear(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            crate::api::schema::ResponseResult::NotificationCleared { cleared: 2 }
+        );
+        assert!(app.state.notification_log.is_empty());
+        assert_eq!(app.state.notification_log.unread_count(), 0);
+    }
+
+    #[test]
+    fn notification_list_exposes_public_target_ids() {
+        let mut app = test_app();
+        let ws = crate::workspace::Workspace::test_new("one");
+        let ws_id = ws.id.clone();
+        let pane_id = ws.tabs[0].root_pane;
+        app.state.workspaces.push(ws);
+        app.state.active = Some(0);
+        app.state.post_notification(test_notification_toast(
+            "claude finished",
+            Some(crate::app::state::ToastTarget {
+                workspace_id: ws_id.clone(),
+                pane_id,
+            }),
+        ));
+
+        let response =
+            app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+                id: "list".into(),
+                method: crate::api::schema::Method::NotificationList(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            });
+
+        let parsed: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        let crate::api::schema::ResponseResult::NotificationList { notifications, .. } =
+            parsed.result
+        else {
+            panic!("expected NotificationList result");
+        };
+        assert_eq!(notifications[0].workspace_id.as_ref(), Some(&ws_id));
+        assert_eq!(
+            notifications[0].pane_id.as_deref(),
+            Some(crate::workspace::public_pane_id_for_number(&ws_id, 1).as_str())
+        );
+    }
+
+    #[test]
+    fn notification_show_appends_to_log_and_emits_posted_event() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let _ = app.handle_api_request_after_internal_events_drained(crate::api::schema::Request {
+            id: "notify".into(),
+            method: crate::api::schema::Method::NotificationShow(
+                crate::api::schema::NotificationShowParams {
+                    title: "build failed".into(),
+                    body: Some("api workspace".into()),
+                    position: None,
+                    sound: crate::api::schema::NotificationShowSound::None,
+                },
+            ),
+        });
+
+        let entry = app
+            .state
+            .notification_log
+            .entries_newest_first()
+            .next()
+            .expect("injection logged");
+        assert_eq!(entry.title, "build failed");
+        assert_eq!(entry.context, "api workspace");
+
+        let posted = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .find_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::NotificationPosted { notification } => {
+                    Some(notification)
+                }
+                _ => None,
+            });
+        let posted = posted.expect("notification.posted event emitted");
+        assert_eq!(posted.title, "build failed");
+        assert_eq!(
+            posted.kind,
+            crate::api::schema::NotificationKind::UpdateInstalled
+        );
+    }
+
+    #[test]
+    fn update_ready_emits_notification_posted_event() {
+        let mut app = test_app();
+        app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        app.handle_internal_event(AppEvent::UpdateReady {
+            version: "9.9.9".into(),
+            install_command: "brew upgrade herdr".into(),
+        });
+
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::NotificationPosted { notification }
+                    if notification.title == "v9.9.9 available"
+            )
+        }));
     }
 
     #[test]
@@ -1738,8 +2229,7 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Navigate);
         assert_eq!(
             app.state
-                .product_announcement
-                .as_ref()
+                .product_announcement()
                 .map(|announcement| announcement.id.as_str()),
             Some("startup-announcement")
         );
@@ -1756,7 +2246,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\n[ui]\nagent_panel_sort = \"priority\"\n[ui.toast]\ndelivery = \"herdr\"\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[server]\nheadless_cols = 160\nheadless_rows = 50\nremember_client_size = false\n[ui]\nagent_panel_sort = \"priority\"\nworkspace_sort = \"priority\"\n[ui.toast]\ndelivery = \"herdr\"\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -1772,6 +2262,7 @@ mod tests {
             app.state.prefix_keys,
             vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]
         );
+        assert!(!app.state.remember_client_size);
         assert!(app
             .state
             .keybinds
@@ -1782,6 +2273,7 @@ mod tests {
             crate::config::ToastDelivery::Herdr
         );
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+        assert_eq!(app.state.workspace_sort, state::WorkspaceSort::Priority);
         let report = app.reload_config();
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert!(app.state.request_client_config_reload);
@@ -1810,6 +2302,204 @@ mod tests {
 
     #[test]
     fn reload_config_keeps_kitty_graphics_until_restart() {
+    fn reload_config_applies_display_panes_ms_live() {
+        let mut app = test_app();
+        assert_eq!(
+            app.state.display_panes_duration,
+            Duration::from_millis(3000)
+        );
+
+        let mut config = Config::default();
+        config.ui.display_panes_ms = 5000;
+        let report = app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(
+            app.state.display_panes_duration,
+            Duration::from_millis(5000)
+        );
+
+        config.ui.display_panes_ms = 1;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn every_listed_prefix_enters_prefix_mode_in_every_mode() {
+        // ctrl+a primary, ctrl+; extra: the kitty CSI u form of ctrl+; and the
+        // legacy byte of ctrl+a both open prefix mode, and a prefix+X binding
+        // works after either (fork issue 169).
+        let semicolon: &[u8] = b"\x1b[59;5u";
+        let primary: &[u8] = b"\x01";
+        for (name, first) in [("primary", primary), ("extra", semicolon)] {
+            let mut app = test_app();
+            app.state.workspaces = vec![Workspace::test_new("test")];
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.prefix_code = KeyCode::Char('a');
+            app.state.prefix_mods = KeyModifiers::CONTROL;
+            app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+            app.state.mode = Mode::Terminal;
+
+            app.route_client_input(first.to_vec());
+            assert_eq!(app.state.mode, Mode::Prefix, "{name}: terminal mode");
+            // prefix+? is the default help binding.
+            app.route_client_input(b"?".to_vec());
+            assert_eq!(app.state.mode, Mode::KeybindHelp, "{name}: a binding");
+        }
+        // Copy mode: a listed prefix opens prefix mode too.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Copy;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Prefix, "copy mode");
+        // In navigate mode a listed prefix leaves it, like the primary.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Navigate;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        // Pressing the extra prefix inside prefix mode sends it on to the pane
+        // and leaves prefix mode, like pressing the primary twice.
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.extra_prefixes = vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)];
+        app.state.mode = Mode::Prefix;
+        app.route_client_input(semicolon.to_vec());
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn reload_config_applies_a_prefix_list_live_and_drops_it_on_a_plain_string() {
+        let mut app = test_app();
+        assert!(app.state.extra_prefixes.is_empty());
+        let mut config = crate::config::Config::default();
+        config.keys.prefix =
+            crate::config::BindingConfig::Many(vec!["ctrl+s".to_string(), "ctrl+;".to_string()]);
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.prefix_code, KeyCode::Char('s'));
+        assert_eq!(
+            app.state.extra_prefixes,
+            vec![(KeyCode::Char(';'), KeyModifiers::CONTROL)]
+        );
+        assert_eq!(app.state.prefix_label(), "ctrl+s / ctrl+;");
+        config.keys.prefix = crate::config::BindingConfig::one("ctrl+a");
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.prefix_code, KeyCode::Char('a'));
+        assert!(app.state.extra_prefixes.is_empty());
+        assert_eq!(app.state.prefix_label(), "ctrl+a");
+    }
+
+    #[test]
+    fn reload_config_applies_inactive_pane_dim_live_and_clamps() {
+        let mut app = test_app();
+        assert_eq!(app.state.inactive_pane_dim, 0);
+        let mut config = crate::config::Config::default();
+        config.ui.inactive_pane_dim = 20;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 20);
+        config.ui.inactive_pane_dim = 500;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 90);
+        config.ui.inactive_pane_dim = 0;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.inactive_pane_dim, 0);
+    }
+
+    #[test]
+    fn reload_config_applies_sidebar_fade_live_and_clamps_with_diagnostics() {
+        let mut app = test_app();
+        assert_eq!(app.state.sidebar_fade, [85, 55]);
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar_fade = vec![60, 20];
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fade, [60, 20]);
+        config.ui.sidebar_fade = vec![200];
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fade, [95, 0]);
+    }
+
+    #[test]
+    fn reload_config_applies_the_fog_style_live_and_reports_an_unknown_one() {
+        let mut app = test_app();
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Lift
+        );
+        let mut config = crate::config::Config::default();
+        config.ui.sidebar_fog_style = "both".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Both
+        );
+        config.ui.sidebar_fog_style = "dim".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Dim
+        );
+        config.ui.sidebar_fog_style = "blur".to_string();
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.state.sidebar_fog_style,
+            crate::config::SidebarFogStyle::Lift
+        );
+    }
+
+    #[test]
+    fn reload_config_applies_sidebar_fog_live_and_clamps_with_diagnostics() {
+        let mut app = test_app();
+        assert_eq!(app.state.sidebar_fog, [17, 7]);
+        assert_eq!(app.state.sidebar_fog_tint, 70);
+
+        let mut config = Config::default();
+        config.ui.sidebar_fog = vec![30, 0];
+        config.ui.sidebar_fog_tint = 20;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        assert_eq!(app.state.sidebar_fog, [30, 0]);
+        assert_eq!(app.state.sidebar_fog_tint, 20);
+
+        // Out of range: clamped, one diagnostic each; a short list means no
+        // fog on the missing row.
+        config.ui.sidebar_fog = vec![99];
+        config.ui.sidebar_fog_tint = -5;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.sidebar_fog, [60, 0]);
+        assert_eq!(app.state.sidebar_fog_tint, 0);
+        let text = report.diagnostics.join("\n");
+        assert!(text.contains("ui.sidebar_fog[0] (99)"), "{text}");
+        assert!(text.contains("ui.sidebar_fog_tint (-5)"), "{text}");
+    }
+
+    #[test]
+    fn reload_config_reports_startup_delay_requires_restart() {
+        let mut app = test_app();
+        let mut config = Config::default();
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+
+        config.session.startup_per_agent_delay_ms = 250;
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+        assert_eq!(report.diagnostics, vec![
+            "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
+        ]);
+
+        let report = app.apply_live_config(&config, &[], &["session".into()], false);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+    }
+
+    #[test]
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-kitty-graphics");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2076,6 +2766,37 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_applies_state_symbol_overrides_and_drops_wide_ones() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-state-symbols");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        assert_eq!(app.state.state_icon_symbols().done, "●");
+        std::fs::write(
+            &path,
+            "[ui]\nstatus_indicators = \"symbols\"\n[ui.state_symbols]\ndone = \"◆\"\nworking = \"⠋⠙\"\n",
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            report.diagnostics,
+            vec!["ui.state_symbols.working = \"⠋⠙\" must be exactly one terminal cell wide; ignoring"]
+        );
+        let symbols = app.state.state_icon_symbols();
+        assert_eq!(symbols.done, "◆");
+        assert_eq!(symbols.working, "◐");
+        assert_eq!(symbols.idle, "✓");
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_user_binding_displaces_default_without_rejecting_prefix() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-user-binding-displaces-default");
@@ -2108,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_config_preserves_invalid_ui_section_but_applies_valid_keys() {
+    fn reload_config_drops_one_invalid_ui_key_to_its_default_and_applies_valid_keys() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-invalid-ui-section");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2127,22 +2848,25 @@ mod tests {
         assert!(report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("invalid ui config")));
+            .any(|diagnostic| diagnostic.contains("ui.toast.delivery")
+                && diagnostic.contains("line 4")));
         assert!(app
             .state
             .keybinds
             .new_workspace
             .matches_prefix(&KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        // The bad key falls back to its default, not to the running value
+        // (fork issue 133).
         assert_eq!(
             app.state.toast_config.delivery,
-            crate::config::ToastDelivery::Herdr
+            crate::config::ToastConfig::default().delivery
         );
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn reload_config_preserves_invalid_terminal_section_but_applies_valid_ui() {
+    fn reload_config_drops_one_invalid_terminal_key_and_applies_its_siblings_and_ui() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-invalid-terminal-section");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2163,10 +2887,13 @@ mod tests {
         assert!(report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.contains("invalid terminal config")));
-        assert_eq!(app.state.default_shell, original_default_shell);
+            .any(|diagnostic| diagnostic.contains("terminal.shell_mode")
+                && diagnostic.contains("line 3")));
+        // Only the bad key is lost: its siblings apply, it takes its default.
+        assert_ne!(app.state.default_shell, original_default_shell);
+        assert_eq!(app.state.default_shell, "nu");
         assert_eq!(app.state.shell_mode, original_shell_mode);
-        assert_eq!(app.state.new_terminal_cwd, original_new_cwd);
+        assert_ne!(app.state.new_terminal_cwd, original_new_cwd);
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
@@ -3080,8 +3807,9 @@ mod tests {
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req_pane_close".into(),
-            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
                 pane_id: target_pane_id,
+                force: false,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3106,8 +3834,9 @@ mod tests {
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req_pane_close_last".into(),
-            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
                 pane_id: target_pane_id,
+                force: false,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3117,7 +3846,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_close_request_requires_confirmation_before_closing_parent_worktree_group() {
+    fn pane_close_request_is_refused_without_a_modal_before_closing_parent_worktree_group() {
         let mut app = test_app();
         let mut parent = Workspace::test_new("api-pane-close-parent");
         parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -3145,8 +3874,9 @@ mod tests {
 
         let response = app.handle_api_request(crate::api::schema::Request {
             id: "req_pane_close_parent_group".into(),
-            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
                 pane_id: target_pane_id,
+                force: false,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3166,6 +3896,117 @@ mod tests {
 
         assert!(!app.state.session_dirty);
         assert!(app.session_save_deadline.is_some());
+    }
+
+    #[test]
+    fn urgent_session_dirty_flag_schedules_an_immediate_save() {
+        let mut app = test_app();
+        app.no_session = false;
+        let before = Instant::now();
+        app.state.mark_session_dirty_urgent();
+
+        app.sync_session_save_schedule();
+
+        assert!(!app.state.session_dirty);
+        assert!(!app.state.session_save_urgent);
+        let deadline = app.session_save_deadline.expect("a save is scheduled");
+        assert!(
+            deadline <= Instant::now() && deadline >= before,
+            "an urgent save is due now, not after the debounce"
+        );
+
+        // The flag is consumed: the next ordinary mutation debounces again.
+        app.state.mark_session_dirty();
+        app.sync_session_save_schedule();
+        let deadline = app.session_save_deadline.expect("a save is scheduled");
+        assert!(deadline > Instant::now() + SESSION_SAVE_DEBOUNCE / 2);
+    }
+
+    fn app_with_working_agent() -> App {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = crate::detect::AgentState::Working;
+        app
+    }
+
+    #[test]
+    fn spinner_ticks_only_while_an_agent_is_working_and_the_spinner_is_on() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        let now = Instant::now();
+
+        // Nothing working: no deadline, no tick, no frame.
+        assert_eq!(app.spinner_next_due(), None);
+        assert!(!app.advance_spinner(now));
+        assert_eq!(app.state.spinner_frame, 0);
+
+        let mut app = app_with_working_agent();
+        let interval = app.state.status_spinner_interval;
+        // First tick is immediate so a freshly working agent moves at once.
+        assert!(app
+            .spinner_next_due()
+            .is_some_and(|due| due <= Instant::now()));
+        assert!(app.advance_spinner(now));
+        assert_eq!(app.state.spinner_frame, 1);
+        // Then one frame per interval, not per loop pass.
+        assert!(!app.advance_spinner(now + interval / 2));
+        assert_eq!(app.spinner_next_due(), Some(now + interval));
+        assert!(app.advance_spinner(now + interval));
+        assert_eq!(app.state.spinner_frame, 2);
+
+        // Off: no tick even with a working agent, and the rows get no frame.
+        app.state.status_spinner = crate::config::StatusSpinnerConfig::Off;
+        assert_eq!(app.spinner_next_due(), None);
+        assert!(!app.advance_spinner(now + interval * 2));
+        assert_eq!(app.state.working_spinner_frame(), None);
+        app.state.status_spinner = crate::config::StatusSpinnerConfig::On;
+        assert_eq!(app.state.working_spinner_frame(), Some(2));
+    }
+
+    #[test]
+    fn spinner_frame_wraps_and_the_interval_is_clamped_from_config() {
+        let mut app = app_with_working_agent();
+        app.state.spinner_frame = u8::MAX;
+        assert!(app.advance_spinner(Instant::now()));
+        assert_eq!(app.state.spinner_frame, 0);
+
+        assert_eq!(
+            status_spinner_interval_from_config(1),
+            Duration::from_millis(crate::config::MIN_STATUS_SPINNER_MS)
+        );
+        assert_eq!(
+            status_spinner_interval_from_config(10_000),
+            Duration::from_millis(crate::config::MAX_STATUS_SPINNER_MS)
+        );
+        assert_eq!(
+            status_spinner_interval_from_config(333),
+            Duration::from_millis(333)
+        );
+    }
+
+    #[test]
+    fn next_loop_deadline_includes_the_spinner_tick() {
+        let mut app = app_with_working_agent();
+        let now = Instant::now();
+        app.last_spinner_tick = Some(now);
+        app.next_resize_poll = now + Duration::from_secs(5);
+        app.next_auto_update_check = Some(now + Duration::from_secs(6));
+        app.next_agent_manifest_update_check = None;
+        // A populated session has a git refresh due at once; park it.
+        app.git_refresh_in_flight = true;
+
+        assert_eq!(
+            app.next_loop_deadline(now, false),
+            Some(now + app.state.status_spinner_interval)
+        );
     }
 
     #[test]
@@ -3396,6 +4237,8 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -3420,6 +4263,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });

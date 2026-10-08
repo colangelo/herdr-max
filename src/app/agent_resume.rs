@@ -238,7 +238,20 @@ impl App {
             return false;
         }
 
-        let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
+        let session_name = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .and_then(|terminal| terminal.agent_name.clone());
+        let argv = with_session_name(
+            resume_argv(&plan, &self.codex_app_server, &cwd),
+            &plan.agent,
+            session_name.as_deref(),
+        );
+        let codex_thread = (plan.agent == "codex")
+            .then(|| codex_resume_thread_id(&plan.argv))
+            .flatten();
+        let Some(resume_command) = shell_command_from_argv(&argv) else {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -297,7 +310,8 @@ impl App {
 
         let mut input = resume_command;
         input.push('\r');
-        if let Err(err) = runtime.try_send_bytes(Bytes::from(input)) {
+        // Restore relaunches the agent; that is not activity in the pane.
+        if let Err(err) = runtime.try_send_bytes_untracked(Bytes::from(input)) {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -310,9 +324,26 @@ impl App {
         }
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let mut agent_name = None;
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.pending_agent_resume_plan = None;
             terminal.respawn_shell_on_exit = false;
+            agent_name = terminal.agent_name.clone();
+        }
+        if let (Some(socket), Some(thread_id), Some(name)) = (
+            self.codex_app_server.naming_socket(),
+            codex_thread,
+            agent_name,
+        ) {
+            crate::codex_app_server::spawn_name_job(
+                socket.to_path_buf(),
+                crate::codex_app_server::NameJob::Known {
+                    thread_id,
+                    name,
+                    only_if_unnamed: false,
+                },
+                None,
+            );
         }
         true
     }
@@ -378,6 +409,114 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The argv a deferred resume runs: the plan's, plus for Codex the
+/// shared-daemon arguments when enabled.
+///
+/// The daemon's socket does not survive a reboot (fork issue 134): a restore
+/// that typed `--remote unix://<socket>` for a socket that is not there made
+/// Codex fail with "failed to connect to remote app server". With the socket
+/// missing, the daemon arguments are left off, and a `--remote unix://` the
+/// plan itself carried to a missing socket is dropped, so Codex resumes
+/// locally.
+fn resume_argv(
+    plan: &crate::agent_resume::AgentResumePlan,
+    codex_app_server: &crate::codex_app_server::CodexAppServer,
+    cwd: &std::path::Path,
+) -> Vec<String> {
+    resume_argv_with(plan, codex_app_server, cwd, std::path::Path::exists)
+}
+
+fn resume_argv_with(
+    plan: &crate::agent_resume::AgentResumePlan,
+    codex_app_server: &crate::codex_app_server::CodexAppServer,
+    cwd: &std::path::Path,
+    socket_exists: impl Fn(&std::path::Path) -> bool,
+) -> Vec<String> {
+    let mut argv = plan.argv.clone();
+    if plan.agent != "codex" {
+        return argv;
+    }
+    argv = without_missing_remote(&argv, &socket_exists);
+    let daemon_up = codex_app_server.socket().is_some_and(&socket_exists);
+    if daemon_up {
+        let extra = codex_app_server.launch_args(cwd, argv.get(1..).unwrap_or_default());
+        argv.extend(extra);
+    } else if codex_app_server.socket().is_some() {
+        tracing::warn!("codex app-server socket is not there; resuming locally");
+    }
+    argv
+}
+
+/// `argv` without a `--remote unix://<path>` whose socket is gone, in either
+/// spelling. Another kind of remote (`ws://`) is left alone.
+fn without_missing_remote(
+    argv: &[String],
+    socket_exists: &impl Fn(&std::path::Path) -> bool,
+) -> Vec<String> {
+    let missing = |value: &str| {
+        value
+            .strip_prefix("unix://")
+            .is_some_and(|path| !socket_exists(std::path::Path::new(path)))
+    };
+    let mut kept = Vec::with_capacity(argv.len());
+    let mut index = 0;
+    while index < argv.len() {
+        let word = &argv[index];
+        if let Some(value) = word.strip_prefix("--remote=") {
+            if missing(value) {
+                index += 1;
+                continue;
+            }
+        } else if word == "--remote" {
+            if let Some(value) = argv.get(index + 1) {
+                if missing(value) {
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        kept.push(word.clone());
+        index += 1;
+    }
+    kept
+}
+
+/// A Claude resume command with the pane's agent name as the session's display
+/// name (`--name`), so Claude Code shows it again after a restore (fork issue
+/// 136). Left alone when the command already names the session, and when the
+/// name is not a plain word restore can type safely.
+fn with_session_name(mut argv: Vec<String>, agent: &str, name: Option<&str>) -> Vec<String> {
+    let Some(name) = name.filter(|name| {
+        agent == "claude"
+            && !name.is_empty()
+            && name.len() <= 100
+            && name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+            })
+    }) else {
+        return argv;
+    };
+    let named = argv
+        .iter()
+        .any(|arg| arg == "-n" || arg == "--name" || arg.starts_with("--name="));
+    if !named {
+        argv.push("--name".to_string());
+        argv.push(name.to_string());
+    }
+    argv
+}
+
+/// The thread a `codex resume <id>` plan reopens: Codex thread ids are its
+/// session ids.
+fn codex_resume_thread_id(argv: &[String]) -> Option<String> {
+    match argv {
+        [program, subcommand, id, ..] if program == "codex" && subcommand == "resume" => {
+            Some(id.clone())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -474,6 +613,65 @@ mod tests {
                     .count(),
                 4
             );
+        }
+    }
+
+    // Upstream (46a50918) drives this with restores that fail on a missing cwd,
+    // because there a failed restore counts as progress. In the fork a failed
+    // start does not, so the fork's version restores a harmless long-running
+    // command and counts started runtimes instead.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_agent_resume_spacing_survives_events_and_late_wakeups() {
+        for delay_ms in [100, 250, 0] {
+            let config: crate::config::Config = toml::from_str(&format!(
+                "[session]\nstartup_per_agent_delay_ms = {delay_ms}"
+            ))
+            .unwrap();
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+            app.state.workspaces = (0..4)
+                .map(|_| crate::workspace::Workspace::test_new("restore"))
+                .collect();
+            app.state.active = Some(0);
+            app.state.view.terminal_area = Rect::new(0, 0, 100, 30);
+            app.state.ensure_test_terminals();
+            let cwd = std::env::temp_dir();
+            for terminal in app.state.terminals.values_mut() {
+                terminal.cwd = cwd.clone();
+                terminal.pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+                    agent: "codex".into(),
+                    argv: long_running_test_argv(),
+                    dedupe_key: terminal.id.to_string(),
+                });
+            }
+            let now = Instant::now();
+            app.sync_pending_agent_resume_deadline(now);
+            assert!(!app.start_pending_agent_resumes(now, false));
+            assert!(app.start_pending_agent_resumes(now, true));
+            if delay_ms != 0 {
+                let next = now + std::time::Duration::from_millis(delay_ms);
+                assert_eq!(app.terminal_runtimes.len(), 1);
+                // Geometry changes clear the wakeup, but must preserve the launch gap.
+                app.pending_agent_resume_deadline = None;
+                app.sync_pending_agent_resume_deadline(now);
+                assert_eq!(app.pending_agent_resume_deadline, Some(next));
+                assert!(!app
+                    .start_pending_agent_resumes(next - std::time::Duration::from_millis(1), true));
+                // A late wakeup must not release every overdue agent in a burst.
+                for processed in 2..=4 {
+                    let late = now + std::time::Duration::from_secs(processed * 10);
+                    assert!(app.start_pending_agent_resumes(late, true));
+                    assert_eq!(app.terminal_runtimes.len(), processed as usize);
+                }
+            }
+            assert!(!app.has_pending_agent_resumes());
+            assert!(app.pending_agent_resume_deadline.is_none());
+            assert!(app.next_agent_resume_at.is_none());
+            assert_eq!(app.terminal_runtimes.len(), 4);
+            for (_, runtime) in app.terminal_runtimes.drain() {
+                runtime.shutdown();
+            }
         }
     }
 
@@ -951,6 +1149,188 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_resume_goes_to_the_daemon_with_the_pane_cwd() {
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["codex".into(), "resume".into(), "thread-1".into()],
+            dedupe_key: "k".into(),
+        };
+        let on = crate::codex_app_server::CodexAppServer::from_config(
+            &crate::config::CodexAgentConfig {
+                app_server: true,
+                app_server_socket: "/run/codex.sock".into(),
+                name_threads: true,
+            },
+        );
+        assert_eq!(
+            super::resume_argv_with(&plan, &on, std::path::Path::new("/repo"), |_| true),
+            [
+                "codex",
+                "resume",
+                "thread-1",
+                "--remote",
+                "unix:///run/codex.sock",
+                "-C",
+                "/repo"
+            ]
+        );
+        assert_eq!(
+            super::resume_argv(&plan, &Default::default(), std::path::Path::new("/repo")),
+            ["codex", "resume", "thread-1"]
+        );
+        assert_eq!(
+            super::codex_resume_thread_id(&plan.argv).as_deref(),
+            Some("thread-1")
+        );
+    }
+
+    /// Fork issue 134: the daemon socket is gone after a reboot, so the resume
+    /// must not type `--remote` for it.
+    #[cfg(unix)]
+    #[test]
+    fn codex_resume_drops_the_daemon_arguments_when_the_socket_is_gone() {
+        let on = crate::codex_app_server::CodexAppServer::from_config(
+            &crate::config::CodexAgentConfig {
+                app_server: true,
+                app_server_socket: "/run/codex.sock".into(),
+                name_threads: true,
+            },
+        );
+        let plan = |argv: &[&str]| crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: argv.iter().map(|word| word.to_string()).collect(),
+            dedupe_key: "k".into(),
+        };
+        let repo = std::path::Path::new("/repo");
+        let gone = |_: &std::path::Path| false;
+        let up = |path: &std::path::Path| path == std::path::Path::new("/run/codex.sock");
+
+        // The socket missing: a plain local resume.
+        assert_eq!(
+            super::resume_argv_with(&plan(&["codex", "resume", "t1"]), &on, repo, gone),
+            ["codex", "resume", "t1"]
+        );
+        // The socket there: the daemon arguments, as before.
+        assert_eq!(
+            super::resume_argv_with(&plan(&["codex", "resume", "t1"]), &on, repo, up),
+            [
+                "codex",
+                "resume",
+                "t1",
+                "--remote",
+                "unix:///run/codex.sock",
+                "-C",
+                "/repo"
+            ]
+        );
+        // A `--remote` the plan carried to a missing socket goes, in both
+        // spellings; a daemon-less remote and the rest of the flags stay.
+        assert_eq!(
+            super::resume_argv_with(
+                &plan(&[
+                    "codex",
+                    "resume",
+                    "t1",
+                    "--remote",
+                    "unix:///old.sock",
+                    "-m",
+                    "x"
+                ]),
+                &Default::default(),
+                repo,
+                gone
+            ),
+            ["codex", "resume", "t1", "-m", "x"]
+        );
+        assert_eq!(
+            super::resume_argv_with(
+                &plan(&["codex", "--remote=unix:///old.sock", "resume", "t1"]),
+                &Default::default(),
+                repo,
+                gone
+            ),
+            ["codex", "resume", "t1"]
+        );
+        assert_eq!(
+            super::resume_argv_with(
+                &plan(&["codex", "resume", "t1", "--remote", "ws://host:1"]),
+                &Default::default(),
+                repo,
+                gone
+            ),
+            ["codex", "resume", "t1", "--remote", "ws://host:1"]
+        );
+    }
+
+    /// Fork issue 136: Claude Code shows the session name again after a restore.
+    #[test]
+    fn a_claude_resume_carries_the_pane_name_as_the_session_name() {
+        let base: Vec<String> = ["claude", "--resume", "s1"].map(String::from).to_vec();
+        assert_eq!(
+            with_session_name(base.clone(), "claude", Some("cchv-helper")),
+            ["claude", "--resume", "s1", "--name", "cchv-helper"]
+        );
+        assert_eq!(with_session_name(base.clone(), "claude", None), base);
+        assert_eq!(
+            with_session_name(base.clone(), "claude", Some("it's odd")),
+            base,
+            "a name restore cannot type safely is left out"
+        );
+        assert_eq!(with_session_name(base.clone(), "codex", Some("x")), base);
+        let named: Vec<String> = ["claude", "--resume", "s1", "--name", "mine"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(with_session_name(named.clone(), "claude", Some("x")), named);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_agents_resume_without_codex_arguments() {
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "claude".into(),
+            argv: vec!["claude".into(), "--resume".into(), "s".into()],
+            dedupe_key: "k".into(),
+        };
+        let on = crate::codex_app_server::CodexAppServer::from_config(
+            &crate::config::CodexAgentConfig {
+                app_server: true,
+                app_server_socket: "/run/codex.sock".into(),
+                name_threads: true,
+            },
+        );
+        assert_eq!(
+            super::resume_argv(&plan, &on, std::path::Path::new("/repo")),
+            ["claude", "--resume", "s"]
+        );
+    }
+
+    #[test]
+    fn claude_reported_resume_is_typed_with_its_mode_model_and_effort() {
+        let argv: Vec<String> = [
+            "claude",
+            "--resume",
+            "4f1c2d3e-aaaa-bbbb-cccc-0123456789ab",
+            "--model",
+            "claude-opus-5-5[1m]",
+            "--effort",
+            "xhigh",
+            "--allow-dangerously-skip-permissions",
+            "--permission-mode",
+            "auto",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(
+            shell_command_from_argv(&argv).as_deref(),
+            Some(
+                "claude --resume 4f1c2d3e-aaaa-bbbb-cccc-0123456789ab --model 'claude-opus-5-5[1m]' \
+                 --effort xhigh --allow-dangerously-skip-permissions --permission-mode auto"
+            )
+        );
     }
 
     #[test]

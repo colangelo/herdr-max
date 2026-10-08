@@ -262,6 +262,11 @@ impl TerminalRuntime {
         self.0.nudge_child_redraw_after_handoff();
     }
 
+    #[cfg(unix)]
+    pub fn force_detection_rescan(&self) {
+        self.0.force_detection_rescan();
+    }
+
     pub fn scroll_up(&self, lines: usize) {
         self.0.scroll_up(lines);
     }
@@ -276,6 +281,10 @@ impl TerminalRuntime {
 
     pub fn clear_screen(&self) -> Result<(), String> {
         self.0.clear_screen()
+    }
+
+    pub fn clear_scrollback(&self) {
+        self.0.clear_scrollback();
     }
 
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
@@ -360,6 +369,12 @@ impl TerminalRuntime {
         self.0.synchronized_output_state()
     }
 
+    /// Whether a frame built from `since` must not show this pane (fork issue
+    /// 126); see `SYNC_HOLD_MAX` in `src/pane/terminal.rs`.
+    pub fn synchronized_frame_held(&self, since: u64, now: std::time::Instant) -> bool {
+        self.0.synchronized_frame_held(since, now)
+    }
+
     pub fn visible_text(&self) -> String {
         self.0.visible_text()
     }
@@ -370,6 +385,10 @@ impl TerminalRuntime {
 
     pub fn detection_text(&self) -> String {
         self.0.detection_text()
+    }
+
+    pub fn detection_ansi(&self) -> String {
+        self.0.detection_ansi()
     }
 
     pub fn terminal_title(&self) -> Option<String> {

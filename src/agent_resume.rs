@@ -2,6 +2,16 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+mod claude_transcript;
+mod footer;
+mod launch_flags;
+
+pub use claude_transcript::claude_transcript_resume;
+pub use footer::argv_with_live_footer;
+pub use launch_flags::{
+    compose_resume_argv, without_missing_settings, AgentLaunchArgv, AgentLaunchFlags,
+};
+
 const MAX_SESSION_ID_LEN: usize = 512;
 const MAX_SESSION_PATH_LEN: usize = 4096;
 const MAX_RESUME_ARGS: usize = 64;
@@ -51,6 +61,110 @@ impl ReportedAgentResume {
             ),
         }
     }
+}
+
+/// Restore types the command into the pane's shell, so the executable must be a
+/// bare command name: shells disagree on how to invoke a quoted path.
+pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
+    let Some(command) = argv.first() else {
+        return Err("resume_argv must not be empty".into());
+    };
+    if argv.len() > MAX_RESUME_ARGS {
+        return Err(format!(
+            "resume_argv allows at most {MAX_RESUME_ARGS} arguments"
+        ));
+    }
+    if argv.iter().map(String::len).sum::<usize>() > MAX_RESUME_ARGV_BYTES {
+        return Err(format!(
+            "resume_argv allows at most {MAX_RESUME_ARGV_BYTES} bytes"
+        ));
+    }
+    if argv.iter().any(|arg| arg.chars().any(char::is_control)) {
+        return Err("resume_argv must not contain control characters".into());
+    }
+    // Restore quotes arguments POSIX-style, which PowerShell reads differently
+    // only when an argument itself contains an apostrophe.
+    if argv.iter().any(|arg| arg.contains('\'')) {
+        return Err("resume_argv must not contain apostrophes".into());
+    }
+    let plain_command = !command.is_empty()
+        && !command.starts_with('-')
+        && command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    if !plain_command {
+        return Err("resume_argv must start with a plain command name, not a path".into());
+    }
+    Ok(())
+}
+
+/// A resume command reported by the agent itself, run in the restored pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedAgentResume {
+    pub source: String,
+    pub agent: String,
+    pub argv: Vec<String>,
+}
+
+impl ReportedAgentResume {
+    /// The same command can name different sessions in different directories,
+    /// for example `agent --continue`, so the directory is part of its identity.
+    pub fn plan(&self, cwd: &Path) -> AgentResumePlan {
+        AgentResumePlan {
+            agent: self.agent.clone(),
+            argv: self.argv.clone(),
+            dedupe_key: format!(
+                "{}\u{0}{}\u{0}{}\u{0}argv\u{0}{}",
+                self.source,
+                self.agent,
+                cwd.display(),
+                self.argv.join("\u{0}")
+            ),
+        }
+    }
+}
+
+impl AgentResumePlan {
+    /// For a Claude session herdr resumes with the built-in
+    /// `claude --resume <id>` (no hook report), the command read from its
+    /// transcript instead: the model, effort and mode it runs in now. Only a
+    /// command for the same session, and one restore can type, is taken.
+    pub fn with_claude_transcript(mut self, transcript: Option<Vec<String>>) -> Self {
+        let Some(argv) = transcript else {
+            return self;
+        };
+        let same_session = self.agent == "claude"
+            && argv.len() >= 3
+            && argv[..3] == self.argv[..self.argv.len().min(3)];
+        if same_session && validate_resume_argv(&argv).is_ok() {
+            self.argv = argv;
+        }
+        self
+    }
+
+    /// The plan with the launch flags its agent was started with added
+    /// (`compose_resume_argv`). A record of another agent, or a result restore
+    /// could not type safely, leaves the plan as it was.
+    pub fn with_launch_flags(mut self, launch: Option<&AgentLaunchFlags>) -> Self {
+        let Some(launch) = launch.filter(|launch| launch.agent == self.agent) else {
+            return self;
+        };
+        let flags = without_missing_settings(&self.agent, &launch.flags, Path::exists);
+        let argv = compose_resume_argv(&self.agent, &self.argv, &flags);
+        if validate_resume_argv(&argv).is_ok() {
+            self.argv = argv;
+        }
+        self
+    }
+}
+
+/// An existing settings file for a test, so `--settings` survives the
+/// missing-file check; the path is unique to `name` and the process.
+#[cfg(test)]
+pub(crate) fn test_settings_file(name: &str) -> String {
+    let path = std::env::temp_dir().join(format!("herdr-{}-{name}", std::process::id()));
+    std::fs::write(&path, "{}").expect("write a test settings file");
+    path.display().to_string()
 }
 
 /// Restore types the command into the pane's shell, so the executable must be a
@@ -362,6 +476,78 @@ fn valid_session_path(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_session_without_a_report_takes_its_transcript_command() {
+        let session = AgentSessionRef::id("s1").unwrap();
+        let plan = plan("herdr:claude", "claude", &session).unwrap();
+        let transcript: Vec<String> = [
+            "claude",
+            "--resume",
+            "s1",
+            "--model",
+            "claude-sonnet-5-5",
+            "--effort",
+            "low",
+        ]
+        .map(String::from)
+        .to_vec();
+        let settings = test_settings_file("resume-g.json");
+        let launch = AgentLaunchFlags {
+            agent: "claude".into(),
+            flags: ["--model", "opus", "--settings", &settings]
+                .map(String::from)
+                .to_vec(),
+            started_at_ms: None,
+        };
+
+        let plan = plan
+            .with_claude_transcript(Some(transcript))
+            .with_launch_flags(Some(&launch));
+
+        assert_eq!(
+            plan.argv,
+            [
+                "claude",
+                "--resume",
+                "s1",
+                "--model",
+                "claude-sonnet-5-5",
+                "--effort",
+                "low",
+                "--settings",
+                &settings
+            ],
+            "the transcript's model wins over the launch one; launch-only flags are added"
+        );
+    }
+
+    #[test]
+    fn a_transcript_never_replaces_another_agent_or_session() {
+        let codex = plan("herdr:codex", "codex", &AgentSessionRef::id("t1").unwrap()).unwrap();
+        let other: Vec<String> = ["claude", "--resume", "zzz"].map(String::from).to_vec();
+        assert_eq!(
+            codex
+                .clone()
+                .with_claude_transcript(Some(other.clone()))
+                .argv,
+            codex.argv
+        );
+        let claude = plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("s1").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            claude.clone().with_claude_transcript(Some(other)).argv,
+            claude.argv
+        );
+        assert_eq!(
+            claude.clone().with_claude_transcript(None).argv,
+            claude.argv
+        );
+    }
 
     fn absolute_test_path(name: &str) -> String {
         std::env::current_dir()

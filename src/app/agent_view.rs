@@ -44,6 +44,18 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
 }
 
 pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
+    sort_agent_view(app, entries);
+    // Pinned agents form one block at the top, in pin order, over any sort and
+    // any view sort. The rest keep the order the sort gave them.
+    entries.sort_by_key(|entry| entry.pin_order.is_none());
+    let pinned = entries
+        .iter()
+        .take_while(|entry| entry.pin_order.is_some())
+        .count();
+    entries[..pinned].sort_by_key(|entry| entry.pin_order);
+}
+
+fn sort_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
     if let Some(spec) = app.agent_view_override.as_ref() {
         let context = evaluation_context(app);
         if let Some(filter) = &spec.filter {
@@ -73,7 +85,7 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
     ) {
         entries.sort_by_key(|entry| {
             (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
+                std::cmp::Reverse(crate::agent_priority::attention_priority(
                     entry.state,
                     entry.seen,
                 )),

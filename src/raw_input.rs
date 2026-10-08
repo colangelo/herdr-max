@@ -2002,6 +2002,27 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_g_decodes_the_same_from_legacy_and_kitty_forms() {
+        // A legacy C0 byte, the kitty CSI u form with and without an event
+        // type, and the xterm modifyOtherKeys form all mean Ctrl+G, whatever
+        // keyboard mode the focused pane asked for (fork issue 167).
+        for bytes in [
+            b"\x07".as_slice(),
+            b"\x1b[103;5u",
+            b"\x1b[103;5:1u",
+            b"\x1b[27;5;103~",
+        ] {
+            let (event, consumed) = extract_one_event(bytes).expect("an event");
+            assert_eq!(consumed, bytes.len(), "{bytes:?}");
+            assert_raw_key(event, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        }
+        let mut framer = RawInputByteFramer::for_host_input();
+        framer.host_color_query_sent();
+        framer.enable_host_color_scheme_change_tracking();
+        assert_eq!(framer.push(b"\x07"), vec![b"\x07".to_vec()]);
+    }
+
+    #[test]
     fn raw_input_family_matrix_is_covered() {
         let cases: &[(&[u8], KeyCode, KeyModifiers)] = &[
             (b"\x02", KeyCode::Char('b'), KeyModifiers::CONTROL),

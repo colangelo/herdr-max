@@ -41,6 +41,7 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
+        .subcommand(todo_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())
@@ -210,6 +211,12 @@ fn workspace_command() -> Command {
         )
         .subcommand(id_command("get", "workspace_id", "Show a workspace"))
         .subcommand(id_command("focus", "workspace_id", "Focus a workspace"))
+        .subcommand(id_command(
+            "pin",
+            "workspace_id",
+            "Pin a workspace to the top of the list",
+        ))
+        .subcommand(id_command("unpin", "workspace_id", "Unpin a workspace"))
         .subcommand(
             Command::new("rename")
                 .about("Rename a workspace")
@@ -226,7 +233,11 @@ fn workspace_command() -> Command {
                 .arg(option("seq", "N"))
                 .arg(option("ttl-ms", "N")),
         )
-        .subcommand(id_command("close", "workspace_id", "Close a workspace"))
+        .subcommand(
+            id_command("close", "workspace_id", "Close a workspace")
+                .arg(flag("group"))
+                .arg(flag("force")),
+        )
 }
 
 fn worktree_command() -> Command {
@@ -299,12 +310,32 @@ fn tab_command() -> Command {
                 .arg(required("tab_id", "TAB_ID"))
                 .arg(required("label", "LABEL").num_args(1..)),
         )
-        .subcommand(id_command("close", "tab_id", "Close a tab"))
+        .subcommand(
+            Command::new("sync")
+                .about("Type into every pane of a tab at once, or stop")
+                .arg(Arg::new("tab_id").value_name("TAB_ID"))
+                .arg(option("tab", "ID"))
+                .arg(flag("current"))
+                .arg(flag("toggle"))
+                .arg(flag("on"))
+                .arg(flag("off")),
+        )
+        .subcommand(id_command("close", "tab_id", "Close a tab").arg(flag("force")))
 }
 
 fn notification_command() -> Command {
     Command::new("notification")
-        .about("Show Herdr notifications")
+        .about("Show and list Herdr notifications")
+        .subcommand(
+            Command::new("list")
+                .about("List the notification log")
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("clear")
+                .about("Clear the notification log")
+                .arg(json_flag()),
+        )
         .subcommand(
             Command::new("show")
                 .about("Show a notification")
@@ -315,15 +346,88 @@ fn notification_command() -> Command {
                     "top-right",
                     "bottom-left",
                     "bottom-right",
+                    "center",
                 ]))
                 .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
         )
 }
 
+fn todo_command() -> Command {
+    Command::new("todo")
+        .about("Manage per-pane todo lists")
+        .subcommand(
+            Command::new("add")
+                .about("Add a todo to a pane")
+                .override_usage("herdr todo add <TEXT> [OPTIONS]")
+                .arg(required("text", "TEXT"))
+                .args(current_pane_args())
+                .arg(todo_priority_option())
+                .arg(option("link", "TARGET").help("Link the todo to another pane"))
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("List pane todos")
+                .args(current_pane_args())
+                .arg(flag("all").help("List todos from every pane"))
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("done")
+                .about("Mark a todo done")
+                .arg(required("id", "ID"))
+                .args(current_pane_args())
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("undone")
+                .about("Reopen a done todo")
+                .arg(required("id", "ID"))
+                .args(current_pane_args())
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("edit")
+                .about("Edit a todo")
+                .override_usage("herdr todo edit <ID> [OPTIONS]")
+                .arg(required("id", "ID"))
+                .arg(option("text", "TEXT"))
+                .arg(todo_priority_option())
+                .arg(option("link", "TARGET").help("Link the todo to another pane"))
+                .arg(flag("unlink").help("Drop the todo's pane link"))
+                .args(current_pane_args())
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("rm")
+                .about("Remove a todo")
+                .arg(required("id", "ID"))
+                .args(current_pane_args())
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("clear")
+                .about("Clear a pane's todos")
+                .arg(flag("done").help("Clear only the done todos"))
+                .args(current_pane_args())
+                .arg(json_flag()),
+        )
+        .after_help("Without --pane or --current, every verb acts on the calling pane.")
+}
+
+fn todo_priority_option() -> Arg {
+    option("priority", "PRIORITY").value_parser(["high", "normal", "low"])
+}
+
 fn agent_command() -> Command {
     Command::new("agent")
         .about("Control and inspect agent panes")
-        .subcommand(Command::new("list").about("List agents"))
+        .subcommand(
+            Command::new("list").about("List agents").arg(
+                flag("input-box")
+                    .help("Include each Claude Code agent's input box draft (reads their screens)"),
+            ),
+        )
         .subcommand(id_command("get", "target", "Show an agent"))
         .subcommand(
             Command::new("read")
@@ -333,7 +437,8 @@ fn agent_command() -> Command {
                 .arg(read_source_option(true))
                 .arg(option("lines", "N"))
                 .arg(text_ansi_format_option())
-                .arg(flag("ansi")),
+                .arg(flag("ansi"))
+                .arg(flag("strip-dim").help("Leave out faint (dim) text, such as a grey suggestion")),
         )
         .subcommand(
             Command::new("send-keys")
@@ -382,6 +487,12 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(id_command("focus", "target", "Focus an agent"))
+        .subcommand(id_command(
+            "pin",
+            "target",
+            "Pin an agent to the top of the agent panel",
+        ))
+        .subcommand(id_command("unpin", "target", "Unpin an agent"))
         .subcommand(
             Command::new("wait")
                 .about("Wait until an agent reaches one of the requested states")
@@ -519,6 +630,15 @@ fn pane_command() -> Command {
                 .arg(flag("off")),
         )
         .subcommand(
+            Command::new("sync")
+                .about("Put a pane in or out of its tab's synced input")
+                .arg(Arg::new("pane_id").value_name("PANE_ID"))
+                .args(current_pane_args())
+                .arg(flag("toggle"))
+                .arg(flag("on"))
+                .arg(flag("off")),
+        )
+        .subcommand(
             Command::new("read")
                 .about("Read pane terminal output")
                 .arg(required("pane_id", "PANE_ID"))
@@ -526,7 +646,8 @@ fn pane_command() -> Command {
                 .arg(option("lines", "N"))
                 .arg(text_ansi_format_option())
                 .arg(flag("ansi"))
-                .arg(flag("raw")),
+                .arg(flag("raw"))
+                .arg(flag("strip-dim").help("Leave out faint (dim) text, such as a grey suggestion")),
         )
         .subcommand(
             Command::new("rename")
@@ -583,14 +704,32 @@ fn pane_command() -> Command {
                 .arg(flag("focus"))
                 .arg(flag("no-focus")),
         )
-        .subcommand(id_command("close", "pane_id", "Close a pane"))
+        .subcommand(
+            Command::new("clear")
+                .about("Clear a pane's saved scrollback")
+                .arg(Arg::new("pane_id").value_name("PANE_ID"))
+                .args(current_pane_args()),
+        )
+        .subcommand(id_command("close", "pane_id", "Close a pane").arg(flag("force")))
+        .subcommand(
+            id_command("respawn", "pane_id", "Restart a pane's process in place")
+                .arg(flag("force")),
+        )
         .subcommand(
             Command::new("send-text")
                 .about("Send literal text to a pane")
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(required("text", "TEXT"))
+                .arg(option("chunk", "BYTES").help(
+                    "Send the text in pieces of at most BYTES bytes, never splitting a character",
+                ))
+                .arg(
+                    option("chunk-delay", "MS")
+                        .requires("chunk")
+                        .help("Pause between --chunk pieces in milliseconds [default: 20]"),
+                )
                 .after_help(
-                    "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
+                    "The text is sent as one raw write. A TUI such as Claude Code may treat a large single write (about 1000 bytes or more) as a paste and collapse it into a placeholder like [Pasted text #1]. Use --chunk 300 to send it as separate paced writes that arrive as typed text; the command returns after the last piece is sent. Use -- before text that starts with --chunk.\n\nnext: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
                 ),
         )
         .subcommand(
@@ -639,6 +778,7 @@ fn pane_command() -> Command {
         .subcommand(report_agent_session_command())
         .subcommand(release_agent_command())
         .subcommand(report_metadata_command())
+        .subcommand(report_hint_command())
 }
 
 fn report_agent_command() -> Command {
@@ -682,6 +822,19 @@ fn release_agent_command() -> Command {
         .arg(required("pane_id", "PANE_ID"))
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
+        .arg(option("seq", "N"))
+}
+
+fn report_hint_command() -> Command {
+    Command::new("report-hint")
+        .about("Report that an agent waits on a question or a permission, or that it stopped")
+        .arg(required("pane_id", "PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("agent", "LABEL").required(true))
+        .arg(option("kind", "question|permission"))
+        .arg(option("id", "ID"))
+        .arg(option("ttl-ms", "N"))
+        .arg(flag("clear"))
         .arg(option("seq", "N"))
 }
 
@@ -1184,6 +1337,7 @@ mod tests {
             ),
             (&["pane", "release-agent"][..], &["source", "agent"][..]),
             (&["pane", "report-metadata"][..], &["source"][..]),
+            (&["pane", "report-hint"][..], &["source", "agent"][..]),
         ] {
             let cmd = command_path(&super::command(), path).clone();
             for option in options {
@@ -1383,6 +1537,12 @@ mod tests {
                 "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"
             ),
             "pane send-text is missing its next-step hint: {pane_send_text}"
+        );
+        assert!(
+            pane_send_text.contains("--chunk <BYTES>")
+                && pane_send_text.contains("--chunk-delay <MS>")
+                && pane_send_text.contains("[Pasted text #1]"),
+            "pane send-text help must explain paste collapse and --chunk: {pane_send_text}"
         );
     }
 

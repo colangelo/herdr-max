@@ -20,6 +20,7 @@ pub use self::{
         format_prefix_combos, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
         BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
         IndexedKeybind, KeyCombo, Keybinds, LiveKeybindConfig,
+        jump_symbol,
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
@@ -27,6 +28,7 @@ pub use self::{
         ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
         UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        clamp_display_panes_ms, CodexAgentConfig, NotificationCenterPositionConfig, PaneBorderActiveStyleConfig, SidebarActiveBorderConfig, SidebarFogStyle, SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig, StateColorsConfig, StateSymbolsConfig, StatusSpinnerConfig, ToastHerdrSize, ToastPaneFeedback, WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS, MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -40,8 +42,22 @@ pub use self::{
 
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
+// `AppState::test_new` seeds the spinner interval from the default; production
+// construction reads the value from `Config` instead.
+#[cfg(test)]
+pub use self::model::{DEFAULT_DISPLAY_PANES_MS, DEFAULT_STATUS_SPINNER_MS};
+#[cfg(test)]
+pub(crate) use self::sidebar::SidebarTokenTruncate;
+
+/// The fog colours this many rows next to a hidden edge.
+pub(crate) const SIDEBAR_FOG_ROWS: usize = 2;
+pub(crate) const SIDEBAR_FOG_MAX_PERCENT: i64 = 60;
+pub(crate) const SIDEBAR_FOG_TINT_MAX: i64 = 100;
+pub(crate) const SIDEBAR_FADE_MAX_PERCENT: i64 = 95;
+pub(crate) const INACTIVE_PANE_DIM_MAX_PERCENT: i64 = 90;
 pub(crate) use self::{
     io::upsert_top_level_bool,
+    sidebar::sidebar_style_diagnostics,
     tab_bar::{
         parse_tab_bar_datetime_format, tab_bar_right_diagnostics,
         MAX_TAB_BAR_COMMAND_INTERVAL_SECONDS, MAX_TAB_BAR_COMMAND_TIMEOUT_SECONDS,
@@ -106,6 +122,12 @@ impl Config {
         self.validated_keybinds().1
     }
 
+    /// The keys after the primary one that also enter prefix mode
+    /// (`keys.prefix` given as a list).
+    pub fn extra_prefix_keys(&self) -> Vec<(KeyCode, KeyModifiers)> {
+        self.parsed_prefixes().0.into_iter().skip(1).collect()
+    }
+
     /// Parsed keybinds for Herdr actions.
     pub fn keybinds(&self) -> Keybinds {
         self.validated_keybinds().3
@@ -119,10 +141,15 @@ impl Config {
             .chain(self.remote_image_paste_key().err())
             .chain(self.theme.diagnostics())
             .chain(self.ui.sound.diagnostics())
+            .chain(self.ui.state_symbols.diagnostics())
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
+            .chain(sidebar_style_diagnostics(&self.ui.sidebar))
             .chain(window_title_diagnostics(&self.ui.window_title))
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
+            .chain(self.display_panes_diagnostic())
+            .chain(self.sidebar_fog_diagnostics())
+            .chain(self.inactive_pane_dim_diagnostics())
             .collect()
     }
 
@@ -139,6 +166,123 @@ impl Config {
             format!(
                 "server.headless_cols and server.headless_rows must be greater than zero (got {}x{})",
                 self.server.headless_cols, self.server.headless_rows
+            )
+        })
+    }
+
+    /// The fog strengths in effect: the percent for the nearest and the next
+    /// row (a missing entry is 0, no fog), and the tint share. Out-of-range
+    /// values are clamped; [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fog(&self) -> ([u32; SIDEBAR_FOG_ROWS], u32) {
+        let mut percent = [0u32; SIDEBAR_FOG_ROWS];
+        for (slot, value) in percent.iter_mut().zip(&self.ui.sidebar_fog) {
+            *slot = (*value).clamp(0, SIDEBAR_FOG_MAX_PERCENT) as u32;
+        }
+        (
+            percent,
+            self.ui.sidebar_fog_tint.clamp(0, SIDEBAR_FOG_TINT_MAX) as u32,
+        )
+    }
+
+    /// The text fade per fogged row, in percent toward the fog base (a missing
+    /// entry is 0, no fade). Out-of-range values are clamped;
+    /// [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fade(&self) -> [u32; SIDEBAR_FOG_ROWS] {
+        let mut percent = [0u32; SIDEBAR_FOG_ROWS];
+        for (slot, value) in percent.iter_mut().zip(&self.ui.sidebar_fade) {
+            *slot = (*value).clamp(0, SIDEBAR_FADE_MAX_PERCENT) as u32;
+        }
+        percent
+    }
+
+    /// The unfocused-pane text fade in percent, clamped; see
+    /// [`Self::inactive_pane_dim_diagnostics`].
+    pub(crate) fn inactive_pane_dim(&self) -> u32 {
+        self.ui
+            .inactive_pane_dim
+            .clamp(0, INACTIVE_PANE_DIM_MAX_PERCENT) as u32
+    }
+
+    pub(crate) fn inactive_pane_dim_diagnostics(&self) -> Option<String> {
+        let value = self.ui.inactive_pane_dim;
+        (!(0..=INACTIVE_PANE_DIM_MAX_PERCENT).contains(&value)).then(|| {
+            format!(
+                "ui.inactive_pane_dim ({value}) is outside 0..={INACTIVE_PANE_DIM_MAX_PERCENT}; using {}",
+                value.clamp(0, INACTIVE_PANE_DIM_MAX_PERCENT)
+            )
+        })
+    }
+
+    /// The fog style in effect; an unknown value is "lift" and
+    /// [`Self::sidebar_fog_diagnostics`] says so.
+    pub(crate) fn sidebar_fog_style(&self) -> SidebarFogStyle {
+        SidebarFogStyle::parse(&self.ui.sidebar_fog_style).unwrap_or_default()
+    }
+
+    pub(crate) fn sidebar_fog_diagnostics(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if SidebarFogStyle::parse(&self.ui.sidebar_fog_style).is_none() {
+            out.push(format!(
+                "ui.sidebar_fog_style (\"{}\") is not lift, dim or both; using lift",
+                self.ui.sidebar_fog_style
+            ));
+        }
+        if self.ui.sidebar_fog.len() > SIDEBAR_FOG_ROWS {
+            out.push(format!(
+                "ui.sidebar_fog has {} entries; only the first {SIDEBAR_FOG_ROWS} are used",
+                self.ui.sidebar_fog.len()
+            ));
+        }
+        for (index, value) in self
+            .ui
+            .sidebar_fog
+            .iter()
+            .enumerate()
+            .take(SIDEBAR_FOG_ROWS)
+        {
+            if !(0..=SIDEBAR_FOG_MAX_PERCENT).contains(value) {
+                out.push(format!(
+                    "ui.sidebar_fog[{index}] ({value}) is outside 0..={SIDEBAR_FOG_MAX_PERCENT}; using {}",
+                    (*value).clamp(0, SIDEBAR_FOG_MAX_PERCENT)
+                ));
+            }
+        }
+        if self.ui.sidebar_fade.len() > SIDEBAR_FOG_ROWS {
+            out.push(format!(
+                "ui.sidebar_fade has {} entries; only the first {SIDEBAR_FOG_ROWS} are used",
+                self.ui.sidebar_fade.len()
+            ));
+        }
+        for (index, value) in self
+            .ui
+            .sidebar_fade
+            .iter()
+            .enumerate()
+            .take(SIDEBAR_FOG_ROWS)
+        {
+            if !(0..=SIDEBAR_FADE_MAX_PERCENT).contains(value) {
+                out.push(format!(
+                    "ui.sidebar_fade[{index}] ({value}) is outside 0..={SIDEBAR_FADE_MAX_PERCENT}; using {}",
+                    (*value).clamp(0, SIDEBAR_FADE_MAX_PERCENT)
+                ));
+            }
+        }
+        let tint = self.ui.sidebar_fog_tint;
+        if !(0..=SIDEBAR_FOG_TINT_MAX).contains(&tint) {
+            out.push(format!(
+                "ui.sidebar_fog_tint ({tint}) is outside 0..={SIDEBAR_FOG_TINT_MAX}; using {}",
+                tint.clamp(0, SIDEBAR_FOG_TINT_MAX)
+            ));
+        }
+        out
+    }
+
+    fn display_panes_diagnostic(&self) -> Option<String> {
+        let ms = self.ui.display_panes_ms;
+        (clamp_display_panes_ms(ms) != ms).then(|| {
+            format!(
+                "ui.display_panes_ms ({ms}) is outside {MIN_DISPLAY_PANES_MS}..={MAX_DISPLAY_PANES_MS}; using {}",
+                clamp_display_panes_ms(ms)
             )
         })
     }
@@ -171,7 +315,14 @@ impl Config {
         if let Some(prefix_diag) = prefix_diag {
             Err(std::iter::once(prefix_diag).chain(keybind_diags).collect())
         } else {
-            Ok((LiveKeybindConfig { prefix, keybinds }, keybind_diags))
+            Ok((
+                LiveKeybindConfig {
+                    prefix,
+                    extra_prefixes: self.extra_prefix_keys(),
+                    keybinds,
+                },
+                keybind_diags,
+            ))
         }
     }
 

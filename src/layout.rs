@@ -69,6 +69,28 @@ pub enum NavDirection {
     Down,
 }
 
+/// A tmux-style layout preset that rebuilds the pane tree (see
+/// [`TileLayout::apply_preset`]). `NEXT_CYCLE` is the order a "next layout"
+/// action steps through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutPreset {
+    /// One equal-width row of panes.
+    EvenHorizontal,
+    /// One equal-height column of panes.
+    EvenVertical,
+    /// A near-square grid.
+    Tiled,
+}
+
+impl LayoutPreset {
+    /// The cycle order used by a "next layout" action.
+    pub const NEXT_CYCLE: [LayoutPreset; 3] = [
+        LayoutPreset::EvenHorizontal,
+        LayoutPreset::EvenVertical,
+        LayoutPreset::Tiled,
+    ];
+}
+
 /// A node in the BSP tree. Public for serialization.
 pub enum Node {
     Pane(PaneId),
@@ -293,6 +315,37 @@ impl TileLayout {
     /// Set the ratio of a split node at the given path.
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
         set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
+    }
+
+    /// Rebalance every split so all panes end up equally sized, preserving the
+    /// tree shape and each split's orientation (tmux `even-*` semantics for a
+    /// BSP tree). Each split's first-child ratio becomes the share of its own axis
+    /// that the first child needs: a pane counts one, a same-direction split the
+    /// sum of its children, a perpendicular split the larger of its children. So
+    /// `[a | (b / c)]` is 1:1 and `[a | (b | c)]` is 1:2. Ratios are clamped
+    /// to `[0.1, 0.9]`, so a same-direction chain of more than ten panes cannot
+    /// reach a perfect `1/N` on its innermost splits. Returns whether any ratio
+    /// changed.
+    pub fn balance(&mut self) -> bool {
+        let before = split_ratios(&self.root);
+        balance_node(&mut self.root);
+        split_ratios(&self.root) != before
+    }
+
+    /// Rebuild the tree into a tmux-style layout preset, preserving pane ids
+    /// (in their current left-to-right order) and the focused pane. Unlike
+    /// [`balance`](Self::balance), this restructures the tree: `EvenHorizontal`
+    /// becomes one equal-width row, `EvenVertical` one equal-height column, and
+    /// `Tiled` a near-square grid. No-op for a single pane. Returns whether a
+    /// preset was applied.
+    pub fn apply_preset(&mut self, preset: LayoutPreset) -> bool {
+        let ids = self.pane_ids();
+        if ids.len() < 2 {
+            return false;
+        }
+        self.root = build_preset(&ids, preset);
+        // Focus is unchanged: the same pane ids are present, just re-arranged.
+        true
     }
 
     /// Adjust the nearest split in the given direction for the focused pane.
@@ -677,6 +730,92 @@ fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) -> bool {
     }
 }
 
+/// How many equal slots a subtree needs along `axis`: a pane is one, a split
+/// on `axis` is the sum of its children, a split across `axis` is the larger
+/// of its children (they share the same extent along `axis`).
+fn axis_weight(node: &Node, axis: Direction) -> usize {
+    match node {
+        Node::Pane(_) => 1,
+        Node::Split {
+            direction,
+            first,
+            second,
+            ..
+        } => {
+            let (a, b) = (axis_weight(first, axis), axis_weight(second, axis));
+            if *direction == axis {
+                a + b
+            } else {
+                a.max(b)
+            }
+        }
+    }
+}
+
+fn balance_node(node: &mut Node) {
+    if let Node::Split {
+        direction,
+        ratio,
+        first,
+        second,
+    } = node
+    {
+        let first_weight = axis_weight(first, *direction) as f32;
+        let total = first_weight + axis_weight(second, *direction) as f32;
+        *ratio = (first_weight / total).clamp(0.1, 0.9);
+        balance_node(first);
+        balance_node(second);
+    }
+}
+
+fn build_preset(ids: &[PaneId], preset: LayoutPreset) -> Node {
+    match preset {
+        LayoutPreset::EvenHorizontal => build_even_chain(ids, Direction::Horizontal),
+        LayoutPreset::EvenVertical => build_even_chain(ids, Direction::Vertical),
+        LayoutPreset::Tiled => build_tiled(ids),
+    }
+}
+
+/// One equal-sized row/column: a right-leaning chain of `dir` splits whose
+/// ratios give every pane the same fraction.
+fn build_even_chain(ids: &[PaneId], dir: Direction) -> Node {
+    chain_nodes(ids.iter().map(|id| Node::Pane(*id)).collect(), dir)
+}
+
+/// A near-square grid: chunk panes into rows of `ceil(sqrt(n))` columns, make
+/// each row an equal-width horizontal chain, then stack the rows in an
+/// equal-height vertical chain.
+fn build_tiled(ids: &[PaneId]) -> Node {
+    if ids.len() <= 1 {
+        return Node::Pane(ids[0]);
+    }
+    let cols = (ids.len() as f64).sqrt().ceil() as usize;
+    let rows: Vec<Node> = ids
+        .chunks(cols.max(1))
+        .map(|row| build_even_chain(row, Direction::Horizontal))
+        .collect();
+    chain_nodes(rows, Direction::Vertical)
+}
+
+/// Fold pre-built nodes into a right-leaning `dir` chain whose split ratios
+/// give each node an equal share of the axis. Panics only on an empty input,
+/// which callers never pass.
+fn chain_nodes(mut nodes: Vec<Node>, dir: Direction) -> Node {
+    let mut acc = nodes.pop().expect("chain_nodes requires at least one node");
+    let mut count = 1usize;
+    while let Some(node) = nodes.pop() {
+        count += 1;
+        let ratio = (1.0 / count as f32).clamp(0.1, 0.9);
+        acc = Node::Split {
+            direction: dir,
+            ratio,
+            first: Box::new(node),
+            second: Box::new(acc),
+        };
+    }
+    acc
+}
+
 fn get_ratio_at(node: &Node, path: &[bool]) -> Option<f32> {
     if let Node::Split {
         ratio,
@@ -990,6 +1129,201 @@ mod tests {
         assert_eq!(pane_rects(&layout), before_rects);
         assert_eq!(split_snapshot(&layout), before_splits);
         assert_eq!(layout.focused(), before_focus);
+    }
+
+    fn split(direction: Direction, first: Node, second: Node) -> Node {
+        Node::Split {
+            direction,
+            ratio: 0.3,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn balanced(root: Node) -> TileLayout {
+        let mut layout = TileLayout::from_saved(root, pane(1));
+        layout.balance();
+        layout
+    }
+
+    #[test]
+    fn balance_weights_each_split_along_its_own_axis() {
+        let mut layout = sample_layout();
+        let before_focus = layout.focused();
+
+        assert!(layout.balance());
+
+        // Shape and orientations are preserved; only ratios change.
+        let splits = split_snapshot(&layout);
+        assert_eq!(splits.len(), 3);
+        assert_eq!(splits[0].0, Direction::Horizontal);
+        assert_eq!(splits[1].0, Direction::Vertical);
+        assert_eq!(splits[2].0, Direction::Horizontal);
+        // root H: pane(1) needs 1 column, the right side needs 2 (3 | 4) -> 1/3;
+        // nested V: pane(2) is 1 row, the (3 | 4) row is 1 row -> 1/2; inner H -> 1/2.
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        assert!((splits[2].1 - 0.5).abs() < f32::EPSILON);
+
+        assert_eq!(layout.focused(), before_focus);
+        // Balancing an already-balanced layout reports no change.
+        assert!(!layout.balance());
+    }
+
+    #[test]
+    fn balance_one_pane_beside_a_stacked_pair_splits_in_half() {
+        // [a | (b / c)]: the case from #170, 50/50 width and 50/50 height.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Vertical,
+                Node::Pane(pane(2)),
+                Node::Pane(pane(3)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 0.5).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        let rects = pane_rects(&layout);
+        assert_eq!(rects[0].1.width, 50);
+        assert_eq!(rects[0].1.height, 40);
+        assert_eq!(rects[1].1.height, 20);
+        assert_eq!(rects[2].1.height, 20);
+    }
+
+    #[test]
+    fn balance_same_direction_chain_still_gives_equal_columns() {
+        // [a | (b | c)]: three equal columns, as with leaf counts.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Horizontal,
+                Node::Pane(pane(2)),
+                Node::Pane(pane(3)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn balance_pane_beside_a_row_over_a_pane_gives_a_third() {
+        // [a | ((b | c) / d)]: the right side is two columns wide.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Vertical,
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(2)),
+                    Node::Pane(pane(3)),
+                ),
+                Node::Pane(pane(4)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        assert!((splits[2].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn balance_is_idempotent_for_each_shape() {
+        let shapes = [
+            split(
+                Direction::Horizontal,
+                Node::Pane(pane(1)),
+                split(
+                    Direction::Vertical,
+                    Node::Pane(pane(2)),
+                    Node::Pane(pane(3)),
+                ),
+            ),
+            split(
+                Direction::Vertical,
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(1)),
+                    Node::Pane(pane(2)),
+                ),
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(3)),
+                    Node::Pane(pane(4)),
+                ),
+            ),
+        ];
+        for shape in shapes {
+            let mut layout = balanced(shape);
+            let once = split_snapshot(&layout);
+            assert!(!layout.balance());
+            assert_eq!(split_snapshot(&layout), once);
+        }
+    }
+
+    #[test]
+    fn balance_single_pane_is_noop() {
+        let (mut layout, _root) = TileLayout::new();
+        assert!(!layout.balance());
+    }
+
+    #[test]
+    fn preset_even_horizontal_makes_one_equal_width_row() {
+        let mut layout = sample_layout();
+        let before_focus = layout.focused();
+        assert!(layout.apply_preset(LayoutPreset::EvenHorizontal));
+
+        let area = Rect::new(0, 0, 100, 40);
+        let rects = pane_rects(&layout);
+        assert_eq!(rects.len(), 4);
+        for (_, r) in &rects {
+            assert_eq!(r.height, area.height); // full height => single row
+            assert!((r.width as i32 - 25).abs() <= 1, "width {} != ~25", r.width);
+        }
+        // Same pane set, order, and focus preserved.
+        assert_eq!(
+            rects.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![pane(1), pane(2), pane(3), pane(4)]
+        );
+        assert_eq!(layout.focused(), before_focus);
+    }
+
+    #[test]
+    fn preset_even_vertical_makes_one_equal_height_column() {
+        let mut layout = sample_layout();
+        assert!(layout.apply_preset(LayoutPreset::EvenVertical));
+        let area = Rect::new(0, 0, 100, 40);
+        for (_, r) in pane_rects(&layout) {
+            assert_eq!(r.width, area.width); // full width => single column
+            assert!(
+                (r.height as i32 - 10).abs() <= 1,
+                "height {} != ~10",
+                r.height
+            );
+        }
+    }
+
+    #[test]
+    fn preset_tiled_makes_a_grid() {
+        let mut layout = sample_layout(); // 4 panes -> 2x2
+        assert!(layout.apply_preset(LayoutPreset::Tiled));
+        let rects = pane_rects(&layout);
+        assert_eq!(rects.len(), 4);
+        // Every cell is ~half width and ~half height of the 100x40 area.
+        for (_, r) in &rects {
+            assert!((r.width as i32 - 50).abs() <= 1, "width {}", r.width);
+            assert!((r.height as i32 - 20).abs() <= 1, "height {}", r.height);
+        }
+    }
+
+    #[test]
+    fn preset_single_pane_is_noop() {
+        let (mut layout, _root) = TileLayout::new();
+        assert!(!layout.apply_preset(LayoutPreset::Tiled));
     }
 
     #[test]

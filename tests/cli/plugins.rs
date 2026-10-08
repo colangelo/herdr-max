@@ -23,14 +23,8 @@ fn named_sessions_share_live_plugin_registry() {
 
     let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
     let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
-    wait_for_socket(
-        &named_session_socket(&config_home, "alpha"),
-        Duration::from_secs(5),
-    );
-    wait_for_socket(
-        &named_session_socket(&config_home, "beta"),
-        Duration::from_secs(5),
-    );
+    wait_for_socket(&named_session_socket(&config_home, "alpha"));
+    wait_for_socket(&named_session_socket(&config_home, "beta"));
 
     std::thread::scope(|scope| {
         let first = scope.spawn(|| {
@@ -203,10 +197,7 @@ platforms = ["linux", "macos", "windows"]
     .unwrap();
 
     let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
-    wait_for_socket(
-        &named_session_socket(&config_home, "alpha"),
-        Duration::from_secs(5),
-    );
+    wait_for_socket(&named_session_socket(&config_home, "alpha"));
     let install = run_named_cli_with_env(
         &config_home,
         &runtime_dir,
@@ -870,7 +861,7 @@ command = ["sh", "-c", "sleep 5"]
     .unwrap();
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
     let workspace = run_cli_json(
         &socket_path,
         &[

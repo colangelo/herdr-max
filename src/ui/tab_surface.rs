@@ -154,6 +154,30 @@ pub(crate) fn tab_surface_hyperlinks(
     links
 }
 
+/// Whether a frame built from transition count `since` must not be shown: a
+/// pane it draws (the visible tab's panes and the popup) is inside a young
+/// synchronized update, or began or ended one while the frame was built (fork
+/// issue 126). Hidden tabs cost nothing; one core lock per shown pane.
+pub(crate) fn synchronized_output_holds_frame(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    since: u64,
+    now: std::time::Instant,
+) -> bool {
+    let popup_held = app.popup_pane.as_ref().is_some_and(|popup| {
+        terminal_runtimes
+            .get(&popup.terminal_id)
+            .is_some_and(|runtime| runtime.synchronized_frame_held(since, now))
+    });
+    popup_held
+        || app.active.is_some_and(|ws_idx| {
+            app.view.pane_infos.iter().any(|info| {
+                app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
+                    .is_some_and(|runtime| runtime.synchronized_frame_held(since, now))
+            })
+        })
+}
+
 pub(crate) fn tab_surface_cursor(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,

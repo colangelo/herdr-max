@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use ratatui::layout::Direction;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
-    LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
+    EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutBalanceParams, LayoutDescription,
+    LayoutExportParams, LayoutNode, LayoutPane, LayoutPreset, LayoutSetPresetParams,
+    LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
-use crate::layout::{Node, PaneId};
+use crate::layout::{LayoutPreset as CoreLayoutPreset, Node, PaneId};
 use crate::workspace::NewPane;
 
 use super::responses::{encode_error, encode_success};
@@ -259,6 +260,67 @@ impl App {
         encode_success(id, ResponseResult::LayoutSplitRatioSet { layout })
     }
 
+    pub(super) fn handle_layout_balance(
+        &mut self,
+        id: String,
+        params: LayoutBalanceParams,
+    ) -> String {
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&LayoutExportParams {
+            tab_id: params.tab_id,
+            pane_id: params.pane_id,
+        }) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+
+        let changed = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            .is_some_and(|tab| tab.layout.balance());
+        if changed {
+            self.schedule_session_save();
+        }
+
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        encode_success(id, ResponseResult::LayoutBalanced { layout })
+    }
+
+    pub(super) fn handle_layout_set_preset(
+        &mut self,
+        id: String,
+        params: LayoutSetPresetParams,
+    ) -> String {
+        let preset = match params.preset {
+            LayoutPreset::EvenHorizontal => CoreLayoutPreset::EvenHorizontal,
+            LayoutPreset::EvenVertical => CoreLayoutPreset::EvenVertical,
+            LayoutPreset::Tiled => CoreLayoutPreset::Tiled,
+        };
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&LayoutExportParams {
+            tab_id: params.tab_id,
+            pane_id: params.pane_id,
+        }) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+
+        let changed = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| ws.tabs.get_mut(tab_idx))
+            .is_some_and(|tab| tab.layout.apply_preset(preset));
+        if changed {
+            self.schedule_session_save();
+        }
+
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        encode_success(id, ResponseResult::LayoutPresetApplied { layout })
+    }
+
     fn resolve_layout_export_target(&self, params: &LayoutExportParams) -> Option<(usize, usize)> {
         match (params.tab_id.as_deref(), params.pane_id.as_deref()) {
             (Some(_), Some(_)) => None,
@@ -464,6 +526,7 @@ impl App {
             .ok_or_else(|| "pane not found".to_string())?
             .map_err(|err| err.to_string())?;
         let new_pane_id = new_pane.pane_id;
+        self.resize_split_target(ws_idx, target_pane_id, kept_size);
         self.attach_new_layout_pane(new_pane);
         self.apply_layout_pane_label(ws_idx, new_pane_id, pane);
         Ok(new_pane_id)
@@ -773,6 +836,57 @@ mod tests {
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "split_not_found");
+    }
+
+    #[test]
+    fn layout_balance_equalizes_split_ratios() {
+        let mut app = app_with_workspace();
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        // Skew the split, then balance it back to even.
+        app.state.workspaces[0].tabs[0]
+            .layout
+            .set_ratio_at(&[], 0.8);
+
+        let response = app.handle_layout_balance("req".into(), LayoutBalanceParams::default());
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutBalanced { layout } = success.result else {
+            panic!("expected layout balanced response");
+        };
+        let LayoutNode::Split { ratio, .. } = layout.root else {
+            panic!("expected split layout root");
+        };
+        assert!((ratio - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn layout_set_preset_rebuilds_into_requested_preset() {
+        let mut app = app_with_workspace();
+        // Two panes split vertically; even-horizontal must rebuild to a horizontal
+        // (side-by-side) split.
+        app.state.workspaces[0].test_split(Direction::Vertical);
+
+        let response = app.handle_layout_set_preset(
+            "req".into(),
+            LayoutSetPresetParams {
+                tab_id: None,
+                pane_id: None,
+                preset: LayoutPreset::EvenHorizontal,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutPresetApplied { layout } = success.result else {
+            panic!("expected layout preset applied response");
+        };
+        let LayoutNode::Split {
+            direction, ratio, ..
+        } = layout.root
+        else {
+            panic!("expected split layout root");
+        };
+        assert_eq!(direction, SplitDirection::Right); // horizontal row
+        assert!((ratio - 0.5).abs() < f32::EPSILON);
     }
 
     #[tokio::test]

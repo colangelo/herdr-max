@@ -169,7 +169,9 @@ pub(crate) fn write_config_temporary(
     output.sync_all()
 }
 
+// `proc_listpids` selectors from <sys/proc_info.h>.
 const PROC_PGRP_ONLY: u32 = 2;
+const PROC_PPID_ONLY: u32 = 6;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
@@ -413,8 +415,16 @@ fn target_nofile_soft_limit(
     (current < target).then_some(target)
 }
 
-pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
-    super::available_pane_shell_from_job(child_pid, foreground_job(child_pid)?)
+pub(crate) fn available_pane_shell(
+    child_pid: u32,
+    is_wrapper: impl Fn(&super::ForegroundProcess) -> bool,
+) -> Option<String> {
+    super::available_pane_shell_behind_wrapper(
+        child_pid,
+        foreground_job(child_pid)?,
+        is_wrapper,
+        nested_foreground_job_with_owner,
+    )
 }
 
 /// Collect the foreground terminal job for a given child PID.
@@ -477,7 +487,47 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
     })
 }
 
+/// The foreground job of the PTY this process owns, or `None` when it owns no
+/// PTY of its own.
+pub fn nested_foreground_job(pid: u32) -> Option<ForegroundJob> {
+    nested_foreground_job_with_owner(pid).map(|(_, job)| job)
+}
+
+/// `nested_foreground_job`, also naming the child that owns the nested PTY.
+pub fn nested_foreground_job_with_owner(pid: u32) -> Option<(u32, ForegroundJob)> {
+    if pid == 0 {
+        return None;
+    }
+
+    let parent_terminal = controlling_terminal(pid)?;
+    super::nested_foreground_job_from_children(
+        parent_terminal,
+        child_pids(pid)
+            .into_iter()
+            .map(|child| (child, controlling_terminal(child))),
+        foreground_job,
+    )
+}
+
+/// Device id of a process's controlling terminal, or `None` when it has none.
+///
+/// The kernel reports "no controlling terminal" as `NODEV`, i.e. `(dev_t)-1`.
+fn controlling_terminal(pid: u32) -> Option<u64> {
+    let terminal = process_bsdinfo(pid)?.e_tdev;
+    (terminal != u32::MAX).then_some(u64::from(terminal))
+}
+
 fn process_group_pids(process_group_id: u32) -> Vec<u32> {
+    listed_pids(PROC_PGRP_ONLY, process_group_id)
+}
+
+fn child_pids(parent_pid: u32) -> Vec<u32> {
+    listed_pids(PROC_PPID_ONLY, parent_pid)
+}
+
+/// Run `proc_listpids` for one selector, growing the buffer until the kernel
+/// stops filling it completely.
+fn listed_pids(selector: u32, value: u32) -> Vec<u32> {
     let mut capacity = 16usize;
 
     for _ in 0..8 {
@@ -485,8 +535,8 @@ fn process_group_pids(process_group_id: u32) -> Vec<u32> {
         let buffer_bytes = pids.len() * std::mem::size_of::<libc::pid_t>();
         let returned_bytes = unsafe {
             libc::proc_listpids(
-                PROC_PGRP_ONLY,
-                process_group_id,
+                selector,
+                value,
                 pids.as_mut_ptr() as *mut libc::c_void,
                 buffer_bytes as libc::c_int,
             )
@@ -956,6 +1006,14 @@ pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     Some((comm_from_bsdinfo(&info)?, info.pbi_ppid))
 }
 
+/// When a process started, in unix ms.
+pub fn process_started_at_ms(pid: u32) -> Option<i64> {
+    let info = process_bsdinfo(pid)?;
+    let secs = i64::try_from(info.pbi_start_tvsec).ok()?;
+    let micros = i64::try_from(info.pbi_start_tvusec).ok()?;
+    Some(secs.saturating_mul(1000).saturating_add(micros / 1000))
+}
+
 fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
@@ -1190,6 +1248,30 @@ pub fn process_exists(pid: u32) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+/// This process's physical memory footprint in bytes, for tests that must see
+/// memory actually given back to the OS. On macOS that is `phys_footprint`
+/// (what Activity Monitor shows), not RSS: pages released with
+/// `MADV_FREE_REUSABLE` leave the footprint at once but stay in RSS until the
+/// kernel needs them.
+#[cfg(test)]
+pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: proc_pid_rusage writes a rusage_info_v2 into the buffer for
+    // RUSAGE_INFO_V2, and the buffer is exactly that type.
+    let rc = unsafe {
+        libc::proc_pid_rusage(
+            std::process::id() as libc::c_int,
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr().cast(),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: the call succeeded, so the struct is initialised.
+    Some(unsafe { info.assume_init() }.ri_phys_footprint)
 }
 
 #[cfg(test)]

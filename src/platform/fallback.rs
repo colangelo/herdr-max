@@ -198,7 +198,10 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     false
 }
 
-pub(crate) fn available_pane_shell(_child_pid: u32) -> Option<String> {
+pub(crate) fn available_pane_shell(
+    _child_pid: u32,
+    _is_wrapper: impl Fn(&super::ForegroundProcess) -> bool,
+) -> Option<String> {
     None
 }
 
@@ -209,6 +212,21 @@ pub fn foreground_job(_child_pid: u32) -> Option<ForegroundJob> {
 
 /// Unsupported platform stub.
 pub fn foreground_group_leader_job(_process_group_id: u32) -> Option<ForegroundJob> {
+    None
+}
+
+/// Unsupported platform stub.
+pub fn nested_foreground_job(_pid: u32) -> Option<ForegroundJob> {
+    None
+}
+
+/// Unsupported platform stub.
+pub fn nested_foreground_job_with_owner(_pid: u32) -> Option<(u32, ForegroundJob)> {
+    None
+}
+
+/// Unsupported platform stub.
+pub fn process_started_at_ms(_pid: u32) -> Option<i64> {
     None
 }
 
@@ -276,4 +294,11 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
 /// Unsupported platform stub.
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
     Ok(false)
+}
+
+/// This process's physical memory footprint in bytes, for tests that must see
+/// memory actually given back to the OS. Not measured on this platform.
+#[cfg(test)]
+pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
+    None
 }

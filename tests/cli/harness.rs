@@ -105,8 +105,8 @@ pub(super) fn cleanup_spawned_herdr(spawned: SpawnedHerdr, base: PathBuf) {
     cleanup_test_base(&base);
 }
 
-pub(super) fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
+pub(super) fn wait_for_socket(path: &Path) {
+    let deadline = Instant::now() + crate::support::APPEARS_TIMEOUT;
     while Instant::now() < deadline {
         if path.exists() && std::os::unix::net::UnixStream::connect(path).is_ok() {
             return;
@@ -175,6 +175,7 @@ pub(super) fn spawn_named_server(
     .unwrap();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.env_remove("HERDR_STARTUP_CWD");
     command
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
@@ -227,6 +228,7 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
     socket_override: Option<&Path>,
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.env_remove("HERDR_STARTUP_CWD");
     command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
@@ -303,6 +305,7 @@ pub(super) fn spawn_herdr_with_config(
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     isolate_herdr_test_process(&mut cmd);
+    cmd.env_remove("HERDR_STARTUP_CWD");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -324,6 +327,7 @@ pub(super) fn spawn_herdr_with_config(
 
 pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.env_remove("HERDR_STARTUP_CWD");
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
     command.output().unwrap()
@@ -335,6 +339,7 @@ pub(super) fn run_cli_in_dir(
     current_dir: &Path,
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    command.env_remove("HERDR_STARTUP_CWD");
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);

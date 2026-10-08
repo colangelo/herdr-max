@@ -19,6 +19,24 @@ pub enum AgentState {
     Unknown,
 }
 
+/// Why an agent is blocked, as far as herdr can tell (fork issue 137). A
+/// manifest rule names it with `blocked_reason`; a blocked state from a rule
+/// that names none, or from a hook report, is `Other`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedReason {
+    /// The agent asked the user a question and waits for the answer.
+    Question,
+    /// The agent waits for approval to run a tool or command.
+    Permission,
+    /// The agent shows a form or selection that needs input.
+    Form,
+    /// Blocked for a reason herdr cannot name.
+    Other,
+}
+
 /// Screen-derived agent state plus confidence metadata used for source arbitration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentDetection {
@@ -36,6 +54,15 @@ pub struct AgentDetection {
     /// activity is the normal working authority; this remains diagnostic
     /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+    /// True when the working state came from a rule about work the agent
+    /// *launched* rather than work it is doing: a background shell, a
+    /// background agent, an MCP task still running. The agent itself is
+    /// parked at its prompt and will wake when that work finishes, so the
+    /// sidebar draws it apart from an agent mid-turn.
+    pub background_work: bool,
+    /// Why the state is Blocked: the matched rule's `blocked_reason`, or
+    /// `Other` when it names none. `None` whenever the state is not Blocked.
+    pub blocked_reason: Option<BlockedReason>,
 }
 
 /// Which agent we detected running in a pane.
@@ -246,6 +273,103 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     parse_agent_label(process_name)
 }
 
+/// Process names of PTY wrappers identification will look behind.
+///
+/// A wrapper here replaces the pane's shell with itself and re-runs that shell
+/// inside a PTY it allocates, so the pane's own PTY carries only the wrapper
+/// and any agent runs one level down, out of reach of the foreground scan.
+///
+/// - `atuin`: `atuin pty-proxy`, shipped in Atuin v18.13 and enabled by its
+///   init snippet, wraps every interactive shell it initialises so it can read
+///   OSC 133 marks and capture each command's output.
+///
+/// Matching on the bare process name is deliberately loose: a name that matches
+/// something other than the wrapper costs one bounded lookup that finds no
+/// nested PTY and yields nothing, which is the same answer as not matching.
+const NESTED_PTY_WRAPPER_NAMES: [&str; 1] = ["atuin"];
+
+pub(crate) fn is_nested_pty_wrapper(process: &crate::platform::ForegroundProcess) -> bool {
+    let name = normalized_agent_lookup_name(path_basename(
+        process.argv0.as_deref().unwrap_or(&process.name),
+    ));
+    NESTED_PTY_WRAPPER_NAMES.contains(&name.as_str())
+}
+
+/// The process group leader of `job` when it is a recognised PTY wrapper.
+///
+/// Only the leader qualifies: it is the process the pane's PTY handed control
+/// to, so it is the only member that can own a nested PTY on the pane's behalf.
+/// A non-leader member matching the set is a wrapper some other process
+/// started, and following it would be the guesswork the set exists to avoid.
+fn nested_pty_wrapper_leader(job: &crate::platform::ForegroundJob) -> Option<u32> {
+    let leader = job
+        .processes
+        .iter()
+        .find(|process| process.pid == job.process_group_id)?;
+    is_nested_pty_wrapper(leader).then_some(leader.pid)
+}
+
+/// Identify an agent in the PTY a recognised wrapper owns, one level below
+/// `job`, and return that nested job alongside it.
+///
+/// Yields `None` when `job`'s leader is not a recognised wrapper, when it owns
+/// no nested PTY, or when nothing in that PTY is recognisable. The descent is
+/// one level by construction: this never recurses.
+pub fn nested_agent_job(
+    job: &crate::platform::ForegroundJob,
+    nested_foreground_job: impl FnOnce(u32) -> Option<(u32, crate::platform::ForegroundJob)>,
+) -> Option<(crate::platform::ForegroundJob, Agent, String)> {
+    let (_, nested) = wrapped_shell_job(job, nested_foreground_job)?;
+    let (agent, process_name) = identify_agent_in_job(&nested)?;
+    Some((nested, agent, process_name))
+}
+
+/// The PTY a recognised wrapper owns one level below `job`: the wrapper's child
+/// that owns it - the shell the wrapper hosts - and that PTY's foreground job.
+///
+/// Yields `None` when `job`'s leader is not a recognised wrapper or when it owns
+/// no nested PTY. Like `nested_agent_job`, the descent is one level.
+pub fn wrapped_shell_job(
+    job: &crate::platform::ForegroundJob,
+    nested_foreground_job: impl FnOnce(u32) -> Option<(u32, crate::platform::ForegroundJob)>,
+) -> Option<(u32, crate::platform::ForegroundJob)> {
+    nested_foreground_job(nested_pty_wrapper_leader(job)?)
+}
+
+/// The processes in `job` that identify as `agent`, by the same name matching
+/// `identify_agent_in_job` uses.
+pub fn agent_processes_in_job(
+    job: &crate::platform::ForegroundJob,
+    agent: Agent,
+) -> impl Iterator<Item = &crate::platform::ForegroundProcess> {
+    job.processes
+        .iter()
+        .filter(move |process| identify_agent(&normalized_process_name(process)) == Some(agent))
+}
+
+/// The exact command line and working directory `agent` was started with in
+/// the pane whose shell is `pane_pid`: from its foreground job, or one PTY down
+/// behind a recognised wrapper. Read once when the agent appears, never per
+/// frame (fork issues 123, 127).
+pub fn agent_launch(pane_pid: u32, agent: Agent) -> Option<crate::agent_resume::AgentLaunchArgv> {
+    let job = foreground_job(pane_pid)?;
+    let find = |job: &crate::platform::ForegroundJob| {
+        agent_processes_in_job(job, agent)
+            .find(|process| process.argv.is_some())
+            .cloned()
+    };
+    let process = find(&job).or_else(|| {
+        let (_, nested) =
+            wrapped_shell_job(&job, crate::platform::nested_foreground_job_with_owner)?;
+        find(&nested)
+    })?;
+    Some(crate::agent_resume::AgentLaunchArgv {
+        argv: process.argv?,
+        cwd: crate::platform::process_cwd(process.pid),
+        started_at_ms: crate::platform::process_started_at_ms(process.pid),
+    })
+}
+
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
     identify_agent_process_in_job(job).map(|(agent, name, _)| (agent, name))
 }
@@ -315,6 +439,8 @@ pub fn detect_agent_with_osc(
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
         };
     };
     manifest::detect_with_osc(
@@ -376,6 +502,11 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 /// True when the pane's own shell is at its prompt with nothing running in it.
 pub fn pane_shell_is_idle(child_pid: u32) -> bool {
     crate::platform::available_pane_shell(child_pid).is_some()
+}
+
+/// True when the pane's own shell is at its prompt with nothing running in it.
+pub fn pane_shell_is_idle(child_pid: u32) -> bool {
+    crate::platform::available_pane_shell(child_pid, is_nested_pty_wrapper).is_some()
 }
 
 fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {

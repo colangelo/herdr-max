@@ -24,6 +24,9 @@ pub struct WorkspaceCloseParams {
     pub workspace_id: String,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub close_group: bool,
+    /// Close even when panes have open todos; the result lists them.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -67,12 +70,19 @@ pub struct WorkspaceInfo {
     pub pane_count: usize,
     pub tab_count: usize,
     pub active_tab_id: String,
+    /// Aggregated over every pane in the workspace by display ranking, so a
+    /// workspace containing a working agent reports `working` even when a
+    /// sibling pane has finished unseen. Blocked still outranks working. This
+    /// is the state the workspace *is*, not the one that most wants attention.
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[schemars(schema_with = "super::common::metadata_token_values_schema")]
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// Pinned workspaces sit at the top of the workspace list in pin order.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

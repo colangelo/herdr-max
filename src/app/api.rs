@@ -10,6 +10,7 @@ pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
 mod tabs;
+mod todos;
 mod workspaces;
 mod worktrees;
 
@@ -24,6 +25,17 @@ const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_sec
 enum RuntimeExitAction {
     RespawnShell,
     ClosePane,
+}
+
+/// What a respawn should start in the pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RespawnTarget {
+    /// Re-run the pane's recorded launch argv, falling back to the shell when
+    /// the pane has none. What a user-requested respawn asks for.
+    LaunchArgv,
+    /// Always a fresh shell. What the agent-exit path asks for, so a launch
+    /// command that exited on its own leaves a usable shell behind.
+    Shell,
 }
 
 impl App {
@@ -208,6 +220,12 @@ impl App {
 
         let mut worktree_restore_updates = Vec::new();
         if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            // The exit of a runtime a respawn deliberately replaced. The pane is
+            // already running its replacement, so this reports nothing about the
+            // pane's current process.
+            if self.respawn_replaced_runtimes.remove(pane_id) {
+                return Vec::new();
+            }
             if self
                 .state
                 .popup_pane
@@ -581,6 +599,29 @@ impl App {
         pane_id: crate::layout::PaneId,
         focus_pane: bool,
     ) -> bool {
+        self.respawn_pane_runtime_focused(pane_id, RespawnTarget::Shell, focus_pane)
+    }
+
+    /// Replace a pane's process without touching the pane. Keeps the pane id,
+    /// terminal id, cwd, size, launch env, layout position, label, and todos;
+    /// swaps only the runtime behind `terminal_id`.
+    ///
+    /// `RespawnTarget::LaunchArgv` re-runs the pane's recorded launch command,
+    /// `RespawnTarget::Shell` always starts a shell.
+    pub(crate) fn respawn_pane_runtime(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        target: RespawnTarget,
+    ) -> bool {
+        self.respawn_pane_runtime_focused(pane_id, target, false)
+    }
+
+    fn respawn_pane_runtime_focused(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        target: RespawnTarget,
+        focus_pane: bool,
+    ) -> bool {
         let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
             return false;
         };
@@ -589,7 +630,21 @@ impl App {
             return false;
         };
 
-        let cwd = terminal.cwd.clone();
+        // The pane's *current* directory, not the one it was launched in. A
+        // respawn restarts where the pane actually is, and `terminal.cwd` only
+        // tracks that when the shell reports it (OSC 7). Falls back to the
+        // recorded cwd when the runtime cannot answer.
+        let cwd = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.cwd())
+            .unwrap_or_else(|| terminal.cwd.clone());
+        // `None` for a plain shell pane, which is exactly the fallback
+        // condition - no extra bookkeeping needed to tell the two apart.
+        let launch_argv = match target {
+            RespawnTarget::LaunchArgv => terminal.launch_argv.clone(),
+            RespawnTarget::Shell => None,
+        };
         let (rows, cols) = self
             .terminal_runtimes
             .get(&terminal_id)
@@ -604,35 +659,73 @@ impl App {
         let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
             return false;
         };
-        let runtime = match crate::terminal::TerminalRuntime::spawn(
-            pane_id,
-            rows,
-            cols,
-            cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            &launch_env,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        ) {
+        let spawned = match &launch_argv {
+            Some(argv) => crate::terminal::TerminalRuntime::spawn_argv_command(
+                pane_id,
+                rows,
+                cols,
+                cwd.clone(),
+                argv,
+                &launch_env,
+                crate::pane::AgentDetection::Enabled,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                self.state.host_terminal_appearance,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            ),
+            None => crate::terminal::TerminalRuntime::spawn(
+                pane_id,
+                rows,
+                cols,
+                cwd.clone(),
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                self.state.host_terminal_appearance,
+                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+                &launch_env,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            ),
+        };
+        let runtime = match spawned {
             Ok(runtime) => runtime,
             Err(err) => {
                 tracing::warn!(
                     pane = pane_id.raw(),
                     terminal = %terminal_id,
                     err = %err,
-                    "failed to respawn shell after launch command exited"
+                    "failed to respawn pane runtime"
                 );
                 return false;
             }
         };
 
-        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        let replaced = self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        if let Some(replaced) = replaced {
+            // The replaced process is still alive here; killing it makes it
+            // report an exit that names this pane. Absorb that one event so the
+            // exit-action path does not close a pane that is already running
+            // its replacement.
+            if replaced.child_pid().is_some() {
+                self.respawn_replaced_runtimes.insert(pane_id);
+            }
+            replaced.shutdown();
+        }
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            // The pane is genuinely rooted here now, so the recorded cwd
+            // follows it rather than persisting the launch directory.
+            terminal.cwd = cwd;
             terminal.clear_agent_runtime_identity_after_respawn();
+            // The clear drops `launch_argv` because the agent-exit path leaves a
+            // shell behind. Here the command is what came back, so put it
+            // back - otherwise a second respawn would silently degrade to a
+            // shell.
+            if let Some(argv) = launch_argv {
+                terminal.launch_argv = Some(argv);
+            }
         }
         if focus_pane {
             self.state.focus_pane_in_workspace(ws_idx, pane_id);
@@ -737,18 +830,114 @@ impl App {
         }
     }
 
+    /// Emit `notification.posted` for log entries appended since the last
+    /// call. Every `post_notification` site is followed by
+    /// `sync_toast_deadline` (required to arm the toast timer), which calls
+    /// this, so posts cannot go unemitted.
+    pub(crate) fn emit_pending_notification_events(&mut self) {
+        for entry in self.state.notification_log.take_pending_events() {
+            let notification = self.notification_info(&entry);
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::NotificationPosted,
+                data: crate::api::schema::EventData::NotificationPosted { notification },
+            });
+        }
+    }
+
+    fn notification_info(
+        &self,
+        entry: &crate::app::state::NotificationEntry,
+    ) -> crate::api::schema::NotificationInfo {
+        let kind = match entry.kind {
+            ToastKind::NeedsAttention => crate::api::schema::NotificationKind::NeedsAttention,
+            ToastKind::Finished => crate::api::schema::NotificationKind::Finished,
+            ToastKind::UpdateInstalled => crate::api::schema::NotificationKind::UpdateInstalled,
+        };
+        let workspace_id = entry
+            .target
+            .as_ref()
+            .map(|target| target.workspace_id.clone());
+        let pane_id = entry.target.as_ref().and_then(|target| {
+            let ws_idx = self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == target.workspace_id)?;
+            self.public_pane_id(ws_idx, target.pane_id)
+        });
+        crate::api::schema::NotificationInfo {
+            id: entry.id,
+            kind,
+            title: entry.title.clone(),
+            context: entry.context.clone(),
+            workspace_id,
+            pane_id,
+            posted_at_unix: entry.posted_at_unix,
+            read: entry.read,
+        }
+    }
+
+    fn handle_notification_list(&mut self, id: String) -> String {
+        let entries: Vec<crate::app::state::NotificationEntry> = self
+            .state
+            .notification_log
+            .entries_newest_first()
+            .cloned()
+            .collect();
+        let notifications = entries
+            .iter()
+            .map(|entry| self.notification_info(entry))
+            .collect();
+        responses::encode_success(
+            id,
+            crate::api::schema::ResponseResult::NotificationList {
+                notifications,
+                unread_count: self.state.notification_log.unread_count() as u64,
+            },
+        )
+    }
+
+    fn handle_notification_mark_seen(
+        &mut self,
+        id: String,
+        params: crate::api::schema::NotificationMarkSeenParams,
+    ) -> String {
+        let changed = match params.id {
+            Some(entry_id) => self.state.notification_log.mark_read(entry_id),
+            None => self.state.notification_log.mark_all_seen(),
+        };
+        responses::encode_success(
+            id,
+            crate::api::schema::ResponseResult::NotificationMarkSeen {
+                changed,
+                unread_count: self.state.notification_log.unread_count() as u64,
+            },
+        )
+    }
+
+    fn handle_notification_clear(&mut self, id: String) -> String {
+        let cleared = self.state.notification_log.clear() as u64;
+        responses::encode_success(
+            id,
+            crate::api::schema::ResponseResult::NotificationCleared { cleared },
+        )
+    }
+
     pub(crate) fn sync_toast_deadline(
         &mut self,
         previous_toast: Option<crate::app::state::ToastNotification>,
     ) {
+        self.emit_pending_notification_events();
         if self.state.toast != previous_toast {
-            self.toast_deadline = self.state.toast.as_ref().map(|toast| {
-                let duration = match toast.kind {
-                    ToastKind::NeedsAttention => Duration::from_secs(8),
-                    ToastKind::Finished => Duration::from_secs(5),
-                    ToastKind::UpdateInstalled => Duration::from_secs(3),
+            let durations = self.state.toast_config.herdr;
+            self.toast_deadline = self.state.toast.as_ref().and_then(|toast| {
+                let seconds = match toast.kind {
+                    ToastKind::NeedsAttention => durations.needs_attention_seconds,
+                    ToastKind::Finished => durations.finished_seconds,
+                    ToastKind::UpdateInstalled => durations.update_seconds,
                 };
-                Instant::now() + duration
+                // 0 keeps the toast visible until clicked or replaced.
+                (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds))
             });
         }
     }
@@ -1049,6 +1238,30 @@ impl App {
             Method::CommandInvoke(params) => {
                 return self.handle_command_invoke(request.id, params);
             }
+            Method::NotificationList(_) => {
+                return self.handle_notification_list(request.id);
+            }
+            Method::NotificationMarkSeen(params) => {
+                return self.handle_notification_mark_seen(request.id, params);
+            }
+            Method::NotificationClear(_) => {
+                return self.handle_notification_clear(request.id);
+            }
+            Method::TodoList(params) => {
+                return self.handle_todo_list(request.id, params);
+            }
+            Method::TodoAdd(params) => {
+                return self.handle_todo_add(request.id, params);
+            }
+            Method::TodoUpdate(params) => {
+                return self.handle_todo_update(request.id, params);
+            }
+            Method::TodoRemove(params) => {
+                return self.handle_todo_remove(request.id, params);
+            }
+            Method::TodoClear(params) => {
+                return self.handle_todo_clear(request.id, params);
+            }
             Method::ClientWindowTitleSet(_) | Method::ClientWindowTitleClear(_) => {
                 return responses::encode_success(
                     request.id,
@@ -1066,6 +1279,12 @@ impl App {
             }
             Method::WorkspaceFocus(target) => {
                 return self.handle_workspace_focus(request.id, target);
+            }
+            Method::WorkspacePin(target) => {
+                return self.handle_workspace_pin(request.id, target, true);
+            }
+            Method::WorkspaceUnpin(target) => {
+                return self.handle_workspace_pin(request.id, target, false);
             }
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
@@ -1110,11 +1329,15 @@ impl App {
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
+            Method::TabSync(params) => return self.handle_tab_sync(request.id, params),
+            Method::PaneSync(params) => return self.handle_pane_sync(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
-            Method::TabClose(target) => return self.handle_tab_close(request.id, target),
-            Method::AgentList(_) => return self.handle_agent_list(request.id),
+            Method::TabClose(params) => return self.handle_tab_close(request.id, params),
+            Method::AgentList(params) => return self.handle_agent_list(request.id, params),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
+            Method::AgentPin(target) => return self.handle_agent_pin(request.id, target, true),
+            Method::AgentUnpin(target) => return self.handle_agent_pin(request.id, target, false),
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
@@ -1152,6 +1375,12 @@ impl App {
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
             Method::LayoutSetSplitRatio(params) => {
                 return self.handle_layout_set_split_ratio(request.id, params);
+            }
+            Method::LayoutBalance(params) => {
+                return self.handle_layout_balance(request.id, params);
+            }
+            Method::LayoutSetPreset(params) => {
+                return self.handle_layout_set_preset(request.id, params);
             }
             Method::PaneNeighbor(params) => return self.handle_pane_neighbor(request.id, params),
             Method::PaneEdges(params) => return self.handle_pane_edges(request.id, params),
@@ -1195,6 +1424,9 @@ impl App {
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
             }
+            Method::PaneReportHint(params) => {
+                return self.handle_pane_report_hint(request.id, params);
+            }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
             }
@@ -1205,7 +1437,11 @@ impl App {
             Method::PaneSendInput(params) => {
                 return self.handle_pane_send_input(request.id, params);
             }
-            Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
+            Method::PaneClearScrollback(target) => {
+                return self.handle_pane_clear_scrollback(request.id, target)
+            }
+            Method::PaneClose(params) => return self.handle_pane_close(request.id, params),
+            Method::PaneRespawn(target) => return self.handle_pane_respawn(request.id, target),
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})
@@ -1293,13 +1529,15 @@ impl App {
                 } else {
                     let previous_toast = self.state.toast.clone();
                     self.mark_api_notification_shown(Instant::now());
-                    self.state.toast = Some(crate::app::state::ToastNotification {
-                        kind: ToastKind::UpdateInstalled,
-                        title,
-                        context: body.unwrap_or_default(),
-                        position: params.position,
-                        target: None,
-                    });
+                    self.state
+                        .post_notification(crate::app::state::ToastNotification {
+                            kind: ToastKind::UpdateInstalled,
+                            title,
+                            context: body.unwrap_or_default(),
+                            position: params.position,
+                            target: None,
+                            anchor_pane: None,
+                        });
                     self.sync_toast_deadline(previous_toast);
                     NotificationShowReason::Shown
                 }
@@ -1774,6 +2012,11 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "pane_process_info");
         assert_eq!(response["result"]["process_info"]["pane_id"], target);
+        // No process to inspect: never claimed to be at a prompt.
+        assert_eq!(response["result"]["process_info"]["shell_at_prompt"], false);
+        assert!(response["result"]["process_info"]
+            .get("nested_foreground_processes")
+            .is_none());
     }
 
     #[test]
@@ -1880,6 +2123,8 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -1889,6 +2134,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -1973,6 +2220,8 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -1982,6 +2231,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2098,6 +2349,8 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: true,
                 observed_at: std::time::Instant::now(),
             });
@@ -2158,6 +2411,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: true,
             observed_at,
         });
@@ -2316,6 +2571,310 @@ mod tests {
         }
     }
 
+    fn app_with_single_pane_workspace() -> (App, crate::layout::PaneId, crate::terminal::TerminalId)
+    {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("respawn");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane should have a terminal");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        (app, pane_id, terminal_id)
+    }
+
+    fn shutdown_test_runtimes(app: &mut App) {
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn respawn_pane_runtime_reruns_the_recorded_launch_argv() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        let marker = std::env::temp_dir().join(format!(
+            "herdr-respawn-argv-{}-{}",
+            std::process::id(),
+            pane_id.raw()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("printf ok > {}; sleep 30", marker.display()),
+        ];
+
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.launch_argv = Some(argv.clone());
+        terminal.set_manual_label("keep me".into());
+        terminal
+            .add_todo(
+                "unfinished",
+                crate::terminal::todo::TodoPriority::Normal,
+                None,
+                100,
+            )
+            .expect("todo should be added");
+
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            marker.exists(),
+            "respawned pane should have re-run its recorded launch argv"
+        );
+        let _ = std::fs::remove_file(&marker);
+
+        assert!(app.find_pane(pane_id).is_some(), "pane should survive");
+        assert_eq!(
+            app.state
+                .workspaces
+                .first()
+                .and_then(|ws| ws.terminal_id(pane_id)),
+            Some(&terminal_id),
+            "pane should keep its terminal id"
+        );
+        let terminal = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal should survive the respawn");
+        assert_eq!(
+            terminal.launch_argv.as_ref(),
+            Some(&argv),
+            "the launch argv must survive so a second respawn re-runs it too"
+        );
+        assert_eq!(terminal.manual_label.as_deref(), Some("keep me"));
+        assert_eq!(terminal.outstanding_todo_count(), 1);
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn respawn_pane_runtime_falls_back_to_a_shell_without_launch_argv() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.launch_argv.is_none()));
+
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        assert!(
+            app.terminal_runtimes
+                .get(&terminal_id)
+                .and_then(|runtime| runtime.child_pid())
+                .is_some(),
+            "a shell pane should come back with a live child"
+        );
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.launch_argv.is_none()));
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn respawn_pane_runtime_clears_agent_runtime_identity() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.set_agent_name("codex".into());
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
+                .expect("test session id should be valid"),
+        });
+
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        let terminal = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal should survive the respawn");
+        assert!(terminal.agent_name.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn respawn_restarts_in_the_pane_s_current_directory() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        let moved_to = std::env::temp_dir()
+            .join(format!("herdr-respawn-cwd-{}", std::process::id()))
+            .join("deeper");
+        std::fs::create_dir_all(&moved_to).expect("test directory should be creatable");
+        let moved_to =
+            std::fs::canonicalize(&moved_to).expect("test directory should canonicalize");
+        let marker = moved_to.join("pwd");
+
+        // A shell that has been `cd`-ed away from its launch directory without
+        // reporting it, which is what leaves `terminal.cwd` stale.
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.cwd = std::path::PathBuf::from("/");
+        terminal.launch_argv = Some(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "cd {}; pwd > {}; sleep 30",
+                moved_to.display(),
+                marker.display()
+            ),
+        ]);
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(marker.exists(), "the first respawn should have started");
+
+        // The second respawn must land in the directory the pane is in now,
+        // not the stale launch directory.
+        let _ = std::fs::remove_file(&marker);
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.launch_argv = Some(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("pwd > {}; sleep 30", marker.display()),
+        ]);
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let reported = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert_eq!(
+            reported.trim(),
+            moved_to.to_string_lossy(),
+            "the respawn must restart where the pane actually is"
+        );
+        assert_eq!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .map(|terminal| terminal.cwd.clone()),
+            Some(moved_to.clone()),
+            "the recorded cwd follows the pane rather than staying stale"
+        );
+
+        shutdown_test_runtimes(&mut app);
+        let _ = std::fs::remove_dir_all(moved_to.parent().unwrap_or(&moved_to));
+    }
+
+    #[tokio::test]
+    async fn respawn_does_not_pull_focus_to_the_pane_s_workspace() {
+        let (mut app, pane_id, _) = app_with_single_pane_workspace();
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("elsewhere"));
+        app.state.active = Some(1);
+        app.state.selected = 1;
+
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+
+        assert_eq!(
+            app.state.active,
+            Some(1),
+            "a scripted respawn of a background pane must not move the UI"
+        );
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn replaced_runtime_exit_does_not_close_the_respawned_pane() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+
+        // The first respawn installs a runtime; the second replaces a live one,
+        // which is the case that produces a stale exit for this pane.
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.child_pid())
+            .is_some());
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+        assert!(
+            app.respawn_replaced_runtimes.contains(&pane_id),
+            "the replaced runtime's exit is expected and must be absorbed"
+        );
+
+        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+
+        assert!(
+            app.find_pane(pane_id).is_some(),
+            "the pane is already running its replacement, so it must not close"
+        );
+        assert!(
+            !app.respawn_replaced_runtimes.contains(&pane_id),
+            "one entry absorbs exactly one exit"
+        );
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn respawn_pane_runtime_shell_target_ignores_the_launch_argv() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal should exist");
+        terminal.launch_argv = Some(vec!["definitely-not-a-real-command".to_string()]);
+
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::Shell));
+
+        assert!(
+            app.state
+                .terminals
+                .get(&terminal_id)
+                .is_some_and(|terminal| terminal.launch_argv.is_none()),
+            "the agent-exit path leaves a shell behind, so the argv is dropped"
+        );
+
+        shutdown_test_runtimes(&mut app);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_powershell_exit_after_agent_process_exit_respawns_shell() {
@@ -2340,6 +2899,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: true,
             observed_at: std::time::Instant::now(),
         });
@@ -2464,6 +3025,8 @@ mod tests {
             state: AgentState::Working,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });
@@ -2476,6 +3039,7 @@ mod tests {
                 workspace_id,
                 pane_id: root,
             }),
+            anchor_pane: None,
         });
 
         app.handle_internal_event(AppEvent::StateChanged {
@@ -2484,6 +3048,8 @@ mod tests {
             state: AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
             process_exited: false,
             observed_at: std::time::Instant::now(),
         });

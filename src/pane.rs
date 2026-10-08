@@ -45,12 +45,17 @@ use self::background_agent::{AgentJobStatus, AgentJobTracker};
 #[cfg(test)]
 pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
+#[cfg(unix)]
+use self::agent_detection::{should_hold_seeded_detection, BasicDetectionSeedInit};
 pub use self::terminal::InputState;
-use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+#[cfg(test)]
+pub(crate) use self::terminal::SYNC_HOLD_MAX;
 pub(crate) use self::terminal::{
     TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
     TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
+    sync_transition_seq,
 };
+use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub use self::{
     state::PaneState,
     terminal::{ScrollMetrics, TerminalCursorState},
@@ -75,6 +80,30 @@ pub(crate) const MIN_PANE_ROWS: u16 = 2;
 pub(crate) const MIN_PANE_COLS: u16 = 4;
 const PANE_COLORTERM: &str = "truecolor";
 const FISH_HANDLE_REFLOW_ENV_VAR: &str = "fish_handle_reflow";
+
+fn terminal_compression_permits() -> Arc<tokio::sync::Semaphore> {
+    static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    PERMITS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+}
+
+fn spawn_blocking_with_compression_permit<T, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    operation: F,
+) -> tokio::task::JoinHandle<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+}
+
+const TERMINAL_COMPRESSION_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
+const TERMINAL_COMPRESSION_STEP: std::time::Duration = std::time::Duration::from_millis(1);
 
 fn terminal_compression_permits() -> Arc<tokio::sync::Semaphore> {
     static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -181,6 +210,27 @@ impl PaneLaunchEnv {
     }
 }
 
+/// Connection vars describing the ssh session a herdr process was launched from.
+///
+/// The server outlives that session: it daemonizes, keeps running after the ssh
+/// connection closes, and survives handoffs, so by the time a pane spawns these
+/// usually describe a connection that no longer exists. They never described the
+/// pane's own client either, since any number of local or remote clients may be
+/// attached. A pane that inherits them looks remote to every prompt, shell rc,
+/// and tool that branches on ssh. Absent is more accurate than stale.
+const STALE_SSH_CONNECTION_ENV_VARS: [&str; 3] = ["SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"];
+
+/// Atuin's PTY proxy marks the shell it wrapped, so a shell that re-runs its rc
+/// inside the proxy does not wrap itself again.
+///
+/// Same staleness as the ssh vars above: the value describes a proxy between
+/// some *other* shell and its terminal, not one between this pane's shell and
+/// this pane's PTY. A pane that inherits it skips wrapping, and Atuin's OSC 133
+/// output capture silently stops working there — the failure reports nothing,
+/// it just never records. Clearing them lets each pane's shell decide for
+/// itself, which is what Atuin already does per tmux pane.
+const STALE_PTY_PROXY_ENV_VARS: [&str; 2] = ["ATUIN_PTY_PROXY_ACTIVE", "ATUIN_PTY_PROXY_TMUX"];
+
 fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     #[cfg(unix)]
     crate::platform::ssh_agent::apply_pane_env(cmd);
@@ -195,6 +245,12 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
         "CLAUDE_CODE_MESSAGING_TOKEN",
     ] {
         cmd.env_remove(key);
+    }
+    for var in STALE_SSH_CONNECTION_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    for var in STALE_PTY_PROXY_ENV_VARS {
+        cmd.env_remove(var);
     }
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
@@ -260,6 +316,8 @@ async fn publish_state_changed_event(
     state: AgentState,
     visible_blocker: bool,
     visible_working: bool,
+    background_work: bool,
+    blocked_reason: Option<crate::detect::BlockedReason>,
     process_exited: bool,
     observed_at: std::time::Instant,
 ) {
@@ -273,6 +331,8 @@ async fn publish_state_changed_event(
             state,
             visible_blocker,
             visible_working,
+            background_work,
+            blocked_reason,
             process_exited,
             observed_at,
         })
@@ -291,12 +351,14 @@ async fn publish_agent_process_detected_event(
     pane_id: PaneId,
     agent: Agent,
     observed_at: std::time::Instant,
+    replaced_process: bool,
 ) {
     if let Err(e) = state_events
         .send(AppEvent::AgentProcessDetected {
             pane_id,
             agent,
             observed_at,
+            replaced_process,
         })
         .await
     {
@@ -333,13 +395,63 @@ async fn publish_codex_prompt_observation(
     }
 }
 
+/// Reads the command line of the agent a probe identified, once per agent
+/// process: on its first sighting, and for an agent already running when this
+/// task started (a live handoff or restore carries the agent over without a
+/// new sighting). `read_for` remembers which process was read.
+async fn publish_agent_launch_once(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    pane_pid: u32,
+    agent: Option<Agent>,
+    agent_process_group: Option<(Agent, u32)>,
+    read_for: &mut Option<(Agent, Option<(Agent, u32)>)>,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    if pane_pid == 0 || *read_for == Some((agent, agent_process_group)) {
+        return;
+    }
+    *read_for = Some((agent, agent_process_group));
+    let launch = crate::detect::agent_launch(pane_pid, agent);
+    if let Err(e) = state_events
+        .send(AppEvent::AgentLaunchObserved {
+            pane_id,
+            agent,
+            launch,
+        })
+        .await
+    {
+        warn!(
+            pane = pane_id.raw(),
+            err = %e,
+            "failed to deliver AgentLaunchObserved event"
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AgentDetectionPublishUpdate {
     state: AgentState,
     visible_idle: bool,
     visible_blocker: bool,
     visible_working: bool,
+    background_work: bool,
+    blocked_reason: Option<crate::detect::BlockedReason>,
     process_exited: bool,
+}
+
+/// The per-detection-task "last published" trackers that a publish update
+/// mutates together, bundled so `apply_agent_detection_publish_update` stays
+/// under clippy's argument-count lint.
+struct DetectionPublishTrackers<'a> {
+    last_visible_idle: &'a mut bool,
+    last_visible_blocker: &'a mut bool,
+    last_visible_working: &'a mut bool,
+    last_background_work: &'a mut bool,
+    last_blocked_reason: &'a mut Option<crate::detect::BlockedReason>,
+    last_visible_signal_refresh: &'a mut Option<std::time::Instant>,
 }
 
 async fn apply_agent_detection_publish_update(
@@ -349,17 +461,16 @@ async fn apply_agent_detection_publish_update(
     update: AgentDetectionPublishUpdate,
     observed_at: std::time::Instant,
     state: &mut AgentState,
-    last_visible_idle: &mut bool,
-    last_visible_blocker: &mut bool,
-    last_visible_working: &mut bool,
-    last_visible_signal_refresh: &mut Option<std::time::Instant>,
+    trackers: DetectionPublishTrackers<'_>,
     foreground_shell_exit_reported: &mut bool,
 ) {
     *state = update.state;
-    *last_visible_idle = update.visible_idle;
-    *last_visible_blocker = update.visible_blocker;
-    *last_visible_working = update.visible_working;
-    *last_visible_signal_refresh = if update.visible_blocker || update.visible_working {
+    *trackers.last_visible_idle = update.visible_idle;
+    *trackers.last_visible_blocker = update.visible_blocker;
+    *trackers.last_visible_working = update.visible_working;
+    *trackers.last_background_work = update.background_work;
+    *trackers.last_blocked_reason = update.blocked_reason;
+    *trackers.last_visible_signal_refresh = if update.visible_blocker || update.visible_working {
         Some(observed_at)
     } else {
         None
@@ -374,6 +485,8 @@ async fn apply_agent_detection_publish_update(
         update.state,
         update.visible_blocker,
         update.visible_working,
+        update.background_work,
+        update.blocked_reason,
         update.process_exited,
         observed_at,
     )
@@ -425,12 +538,10 @@ struct AgentDetectionPresence {
     consecutive_misses: u8,
 }
 
-#[cfg(unix)]
 fn absolute_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     crate::platform::process_cwd(pid).filter(|cwd| cwd.is_absolute())
 }
 
-#[cfg(unix)]
 fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
     absolute_process_cwd(pid).filter(|cwd| cwd.is_dir())
 }
@@ -455,6 +566,103 @@ fn foreground_member_cwd_different_from_shell(
     None
 }
 
+/// The directory of the shell a pane's user is interacting with.
+///
+/// The pane's own child answers this only when it *is* that shell. A wrapper -
+/// `atuin`, a container shim, an agent runner - re-runs the shell inside a PTY
+/// of its own and then never leaves the directory it was launched in, so the
+/// nested job is consulted first and the direct child is the fallback.
+///
+/// Takes its lookups so the ordering is testable without a real process tree.
+fn resolved_pane_cwd(
+    child_pid: u32,
+    nested_job: impl FnOnce(u32) -> Option<crate::platform::ForegroundJob>,
+    mut cwd_of: impl FnMut(u32) -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if child_pid == 0 {
+        return None;
+    }
+    nested_job(child_pid)
+        .and_then(|job| foreground_job_cwd(&job, &mut cwd_of))
+        .or_else(|| cwd_of(child_pid))
+}
+
+/// `resolved_pane_cwd` against the real process table. `nested_foreground_job`
+/// is a no-op where no wrapper can present a nested PTY, so this degrades to the
+/// direct child's directory rather than needing a platform branch here.
+fn resolved_pane_cwd_now(child_pid: u32) -> Option<std::path::PathBuf> {
+    resolved_pane_cwd(
+        child_pid,
+        crate::platform::nested_foreground_job,
+        usable_process_cwd,
+    )
+}
+
+/// How often a pane re-resolves its working directory.
+///
+/// Deliberately its own cadence rather than the agent probe's: `cd` is a shell
+/// builtin, so it changes no process group and would never trigger a probe. A
+/// pane that is `cd`-ed and then left alone still has to report where it is.
+const RESOLVED_CWD_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Re-resolve the pane's directory when the interval has elapsed, so `cwd` can
+/// stay a lock-and-clone on the render path.
+///
+/// `resolve` runs before the lock is taken: the process walk must never be held
+/// across it. A resolution that comes back empty leaves the last known
+/// directory in place rather than blanking a pane mid-command.
+fn refresh_resolved_cwd(
+    resolve: impl FnOnce() -> Option<std::path::PathBuf>,
+    resolved_cwd: &Arc<Mutex<Option<std::path::PathBuf>>>,
+    last_refresh: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) {
+    if last_refresh
+        .is_some_and(|last| now.saturating_duration_since(last) < RESOLVED_CWD_REFRESH_INTERVAL)
+    {
+        return;
+    }
+    *last_refresh = Some(now);
+
+    let Some(resolved) = resolve() else {
+        return;
+    };
+    if let Ok(mut current) = resolved_cwd.lock() {
+        if current.as_ref() != Some(&resolved) {
+            *current = Some(resolved);
+        }
+    }
+}
+
+/// `refresh_resolved_cwd` against the real process table.
+fn refresh_resolved_cwd_now(
+    child_pid: u32,
+    resolved_cwd: &Arc<Mutex<Option<std::path::PathBuf>>>,
+    last_refresh: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) {
+    refresh_resolved_cwd(
+        || resolved_pane_cwd_now(child_pid),
+        resolved_cwd,
+        last_refresh,
+        now,
+    );
+}
+
+/// The job's directory: its leader's, falling back to any member that can
+/// answer. The leader is the process the user is actually sitting in front of,
+/// so a member that merely inherited a different directory must not win.
+fn foreground_job_cwd(
+    job: &crate::platform::ForegroundJob,
+    mut cwd_of: impl FnMut(u32) -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    job.processes
+        .iter()
+        .filter(|process| process.pid == job.process_group_id)
+        .chain(job.processes.iter())
+        .find_map(|process| cwd_of(process.pid))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForegroundShellAgentAction {
     ObserveProbe,
@@ -462,6 +670,20 @@ enum ForegroundShellAgentAction {
     ReportProcessExit,
     ReportReplacementProcess,
     ClearAgent,
+}
+
+/// Whether two probes a poll apart saw the same agent in different process
+/// groups: a new process of that agent replaced the old one between them, with
+/// the shell's turn in the foreground too short for a probe to catch.
+fn agent_process_group_replaced(
+    previous: Option<(Agent, u32)>,
+    current: Option<(Agent, u32)>,
+) -> bool {
+    matches!(
+        (previous, current),
+        (Some((previous_agent, previous_group)), Some((agent, group)))
+            if previous_agent == agent && previous_group != group
+    )
 }
 
 fn foreground_shell_agent_action(
@@ -795,11 +1017,86 @@ fn sync_content_change_acquisition(
 #[derive(Debug, Clone)]
 struct ProcessProbeResult {
     process_group_id: Option<u32>,
+    /// The process group the agent was identified in, when that was a PTY
+    /// below the pane's own. `None` for every pane that identified normally,
+    /// which is what keeps the reported facts of an unwrapped pane unchanged.
+    /// Unix-only: no Windows wrapper presents a nested PTY to descend into.
+    #[cfg(unix)]
+    nested_process_group_id: Option<u32>,
+    /// The shell a recognised PTY wrapper hosts, when the pane's own job is
+    /// that wrapper. The wrapper keeps the pane's foreground group fixed, so
+    /// the hosted shell's foreground group is the only sign a command started.
+    #[cfg(unix)]
+    wrapped_shell: Option<WrappedShell>,
     foreground_is_pane_shell: bool,
     agent: Option<Agent>,
     /// The process that identified as `agent`, which need not lead its job.
     agent_pid: Option<u32>,
     process_name: Option<String>,
+}
+
+impl ProcessProbeResult {
+    /// The identified agent and the process group it runs in: the nested job
+    /// behind a PTY wrapper, whose own group never changes, else the pane's.
+    fn agent_process_group(&self) -> Option<(Agent, u32)> {
+        #[cfg(unix)]
+        let group = self.nested_process_group_id.or(self.process_group_id);
+        #[cfg(not(unix))]
+        let group = self.process_group_id;
+        self.agent.zip(group)
+    }
+}
+
+/// The shell a PTY wrapper hosts, and its PTY's foreground group when probed.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WrappedShell {
+    pid: u32,
+    foreground_pgid: u32,
+}
+
+/// Watches the foreground group of the shell a PTY wrapper hosts.
+///
+/// An unwrapped pane notices a command starting because its own foreground
+/// group changes. A wrapped pane's foreground group is the wrapper's for good,
+/// so without this an agent launched there is found only if a content-driven
+/// acquisition window happens to cover its start. `poll` costs one foreground
+/// group lookup per tick, and only for a pane whose last probe found a wrapper.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct WrappedShellWatch {
+    shell: Option<WrappedShell>,
+}
+
+#[cfg(unix)]
+impl WrappedShellWatch {
+    /// Take the wrapped shell a fresh probe saw, and the group it saw in front.
+    fn observe(&mut self, probed: Option<WrappedShell>) {
+        self.shell = probed;
+    }
+
+    /// Whether the wrapped shell's foreground group moved since it was last
+    /// seen. A shell that is gone reads as a change, so the pane re-probes.
+    fn poll(&mut self, foreground_pgid: impl FnOnce(u32) -> Option<u32>) -> bool {
+        let Some(shell) = self.shell.as_mut() else {
+            return false;
+        };
+        match foreground_pgid(shell.pid) {
+            Some(pgid) if pgid == shell.foreground_pgid => false,
+            Some(pgid) => {
+                shell.foreground_pgid = pgid;
+                true
+            }
+            None => {
+                self.shell = None;
+                true
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.shell = None;
+    }
 }
 
 fn agent_hint_for_foreground_job_members(
@@ -842,9 +1139,51 @@ fn process_probe_result(
 ) -> ProcessProbeResult {
     ProcessProbeResult {
         process_group_id: Some(job.process_group_id),
+        #[cfg(unix)]
+        nested_process_group_id: None,
+        #[cfg(unix)]
+        wrapped_shell: None,
         foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
         agent: Some(agent),
         agent_pid: Some(agent_pid),
+        process_name: Some(process_name),
+    }
+}
+
+/// Result for an agent identified behind a recognised PTY wrapper.
+///
+/// The agent, its process name and — through `foreground_is_pane_shell` — which
+/// process holds the foreground come from `nested_job`, the job the agent was
+/// actually identified in, and `nested_process_group_id` carries that job on so
+/// the working directory the pane reports follows it too.
+///
+/// The tracked process group stays the pane's own: the nested group never
+/// appears on the pane's PTY, so tracking it would read as a foreground change
+/// on every tick and re-probe the pane continuously.
+fn nested_process_probe_result(
+    job: &crate::platform::ForegroundJob,
+    shell_pid: u32,
+    nested_job: &crate::platform::ForegroundJob,
+    pid: u32,
+    agent: Agent,
+    process_name: String,
+) -> ProcessProbeResult {
+    #[cfg(not(unix))]
+    let _ = shell_pid;
+    ProcessProbeResult {
+        process_group_id: Some(job.process_group_id),
+        #[cfg(unix)]
+        nested_process_group_id: Some(nested_job.process_group_id),
+        #[cfg(unix)]
+        wrapped_shell: Some(WrappedShell {
+            pid: shell_pid,
+            foreground_pgid: nested_job.process_group_id,
+        }),
+        foreground_is_pane_shell: nested_job
+            .processes
+            .iter()
+            .any(|process| process.pid == pid),
+        agent: Some(agent),
         process_name: Some(process_name),
     }
 }
@@ -870,6 +1209,7 @@ fn probe_foreground_process_from_jobs(
     foreground_pgid: Option<u32>,
     leader_job: Option<crate::platform::ForegroundJob>,
     foreground_job: impl FnOnce() -> Option<crate::platform::ForegroundJob>,
+    nested_foreground_job: impl FnOnce(u32) -> Option<(u32, crate::platform::ForegroundJob)>,
     read_hint: impl Fn(u32) -> Option<Agent> + Copy,
 ) -> ProcessProbeResult {
     if let Some(job) = leader_job.as_ref() {
@@ -895,8 +1235,40 @@ fn probe_foreground_process_from_jobs(
         if let Some(identified) = crate::detect::identify_agent_process_in_job(job) {
             return process_probe_result(job, pid, identified);
         }
+        #[cfg_attr(not(unix), allow(unused_mut))] // only unix records the wrapped shell
+        let mut wrapped_shell = None;
+        if identified.is_none() {
+            // Only now, with the pane's own job exhausted, is it worth asking
+            // whether a recognised wrapper is hiding the agent one PTY down.
+            if let Some((shell_pid, nested_job)) =
+                crate::detect::wrapped_shell_job(job, nested_foreground_job)
+            {
+                if let Some((agent, process_name)) =
+                    crate::detect::identify_agent_in_job(&nested_job)
+                {
+                    return nested_process_probe_result(
+                        job,
+                        shell_pid,
+                        &nested_job,
+                        pid,
+                        agent,
+                        process_name,
+                    );
+                }
+                wrapped_shell = Some((shell_pid, nested_job.process_group_id));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = wrapped_shell;
         return ProcessProbeResult {
             process_group_id: Some(job.process_group_id),
+            #[cfg(unix)]
+            nested_process_group_id: None,
+            #[cfg(unix)]
+            wrapped_shell: wrapped_shell.map(|(pid, foreground_pgid)| WrappedShell {
+                pid,
+                foreground_pgid,
+            }),
             foreground_is_pane_shell: job.processes.iter().any(|process| process.pid == pid),
             agent: None,
             agent_pid: None,
@@ -906,6 +1278,10 @@ fn probe_foreground_process_from_jobs(
 
     ProcessProbeResult {
         process_group_id: foreground_pgid,
+        #[cfg(unix)]
+        nested_process_group_id: None,
+        #[cfg(unix)]
+        wrapped_shell: None,
         foreground_is_pane_shell: false,
         agent: None,
         agent_pid: None,
@@ -919,19 +1295,35 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
         foreground_pgid,
         foreground_pgid.and_then(crate::detect::foreground_group_leader_job),
         || crate::detect::foreground_job(pid),
+        crate::platform::nested_foreground_job_with_owner,
         crate::platform::process_agent_hint,
     )
+}
+
+/// Publish the process group an agent was identified in below the pane's own
+/// PTY, so the working directory the pane reports follows that job instead of
+/// the wrapper's. Zero means the pane identified from its own foreground job,
+/// or identified nothing.
+#[cfg(unix)]
+fn publish_nested_agent_process_group(cell: &AtomicU32, probe: &ProcessProbeResult) {
+    cell.store(
+        probe.nested_process_group_id.unwrap_or(0),
+        Ordering::Relaxed,
+    );
 }
 
 #[cfg(unix)]
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
+    nested_agent_process_group_id: Arc<AtomicU32>,
+    resolved_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     terminal: Arc<PaneTerminal>,
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     self_reported_agent_active: Arc<AtomicBool>,
     state_events: mpsc::Sender<AppEvent>,
+    agent_seed: Option<(Agent, AgentState)>,
 ) -> (
     tokio::task::AbortHandle,
     Arc<Notify>,
@@ -943,14 +1335,24 @@ fn spawn_basic_detection_task(
     let pending_release_for_task = pending_release.clone();
 
     let handle = tokio::spawn(async move {
-        let mut agent_presence = AgentDetectionPresence::from_agent(None);
-        let mut state = AgentState::Unknown;
-        let mut last_visible_idle = false;
-        let mut last_visible_blocker = false;
-        let mut last_visible_working = false;
+        // Seeding the pre-handoff agent keeps the first process probe from
+        // treating the surviving agent as newly identified, which would
+        // publish Idle over the state restored from the handoff manifest.
+        let seed = BasicDetectionSeedInit::from_agent_seed(agent_seed);
+        let mut agent_presence = AgentDetectionPresence::from_agent(seed.agent);
+        let mut state = seed.state;
+        let mut last_visible_idle = seed.last_visible_idle;
+        let mut last_visible_blocker = seed.last_visible_blocker;
+        let mut last_visible_working = seed.last_visible_working;
+        let mut last_background_work = seed.last_background_work;
+        let mut last_blocked_reason = None;
+        let mut seeded_hold = seed.agent.is_some();
         let mut last_visible_signal_refresh = None;
         let mut last_process_check = std::time::Instant::now();
         let mut last_foreground_pgid = None;
+        let mut last_agent_process_group: Option<(Agent, u32)> = None;
+        let mut launch_read_for: Option<(Agent, Option<(Agent, u32)>)> = None;
+        let mut wrapped_shell_watch = WrappedShellWatch::default();
         let mut has_process_probe = false;
         let mut acquisition_started_at = None;
         let mut last_content_change_at = None;
@@ -964,6 +1366,8 @@ fn spawn_basic_detection_task(
         let mut last_codex_prompt_ready = false;
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
+        let mut last_resolved_cwd_refresh = None;
+        let mut last_self_reported_shell_check = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -980,12 +1384,17 @@ fn spawn_basic_detection_task(
                     ).await;
                     agent_presence = AgentDetectionPresence::from_agent(None);
                     state = AgentState::Unknown;
+                    seeded_hold = false;
                     last_visible_idle = false;
                     last_visible_blocker = false;
                     last_visible_working = false;
+                    last_background_work = false;
+                    last_blocked_reason = None;
                     last_visible_signal_refresh = None;
                     last_process_check = std::time::Instant::now();
                     last_foreground_pgid = None;
+                    last_agent_process_group = None;
+                    wrapped_shell_watch.clear();
                     has_process_probe = false;
                     acquisition_started_at = None;
                     last_content_change_at = None;
@@ -1009,6 +1418,7 @@ fn spawn_basic_detection_task(
             }
             release_was_active = suppressed_agent.is_some();
             let pid = child_pid.load(Ordering::Acquire);
+            refresh_resolved_cwd_now(pid, &resolved_cwd, &mut last_resolved_cwd_refresh, now);
             let mut agent_changed = false;
             let mut agent = agent_presence.current_agent();
             let lifecycle_authority_active =
@@ -1025,8 +1435,11 @@ fn spawn_basic_detection_task(
             let foreground_pgid = (pid > 0)
                 .then(|| crate::detect::foreground_process_group_id(pid))
                 .flatten();
+            let wrapped_shell_changed =
+                pid > 0 && wrapped_shell_watch.poll(crate::detect::foreground_process_group_id);
             let process_group_changed =
-                foreground_group_changed(foreground_pgid, last_foreground_pgid);
+                foreground_group_changed(foreground_pgid, last_foreground_pgid)
+                    || wrapped_shell_changed;
             let should_check_process = pid > 0 && {
                 let process_probe_input = ProcessProbeInput {
                     current_agent: agent,
@@ -1040,11 +1453,12 @@ fn spawn_basic_detection_task(
                     pending_restore_probe: false,
                     elapsed_since_process_check: now.duration_since(last_process_check),
                 };
-                should_check_foreground_process(
-                    lifecycle_authority_active,
-                    agent_job.in_background(),
-                    process_probe_input,
-                )
+                wrapped_shell_changed
+                    || should_check_foreground_process(
+                        lifecycle_authority_active,
+                        agent_job.in_background(),
+                        process_probe_input,
+                    )
             };
 
             if should_check_process {
@@ -1052,6 +1466,8 @@ fn spawn_basic_detection_task(
                 let had_process_probe = has_process_probe;
                 has_process_probe = true;
                 let probe = probe_foreground_process(pid, foreground_pgid);
+                publish_nested_agent_process_group(&nested_agent_process_group_id, &probe);
+                wrapped_shell_watch.observe(probe.wrapped_shell);
                 let process_group_id = probe.process_group_id;
                 let tracked_process_group_id =
                     process_group_for_change_tracking(foreground_pgid, process_group_id);
@@ -1109,12 +1525,15 @@ fn spawn_basic_detection_task(
                             last_visible_idle = false;
                             last_visible_blocker = false;
                             last_visible_working = false;
+                            last_blocked_reason = None;
                             last_visible_signal_refresh = None;
                             publish_agent_process_detected_event(
                                 state_events.clone(),
                                 pane_id,
                                 agent,
                                 now,
+                                foreground_action
+                                    == ForegroundShellAgentAction::ReportReplacementProcess,
                             )
                             .await;
                         } else {
@@ -1122,6 +1541,15 @@ fn spawn_basic_detection_task(
                         }
                     }
                 }
+                publish_agent_launch_once(
+                    &state_events,
+                    pane_id,
+                    pid,
+                    new_agent.filter(|probed| agent == Some(*probed)),
+                    agent_process_group,
+                    &mut launch_read_for,
+                )
+                .await;
             }
 
             let process_exited = pending_foreground_shell_clear
@@ -1193,6 +1621,13 @@ fn spawn_basic_detection_task(
             )
             .await;
             let Some(screen_detection) = screen_detection else {
+            if seeded_hold {
+                if !process_exited && should_hold_seeded_detection(true, &content) {
+                    pending_idle.clear();
+                    continue;
+                }
+                seeded_hold = false;
+            }
                 pending_idle.clear();
                 continue;
             };
@@ -1212,6 +1647,8 @@ fn spawn_basic_detection_task(
                     last_visible_idle,
                     last_visible_blocker,
                     last_visible_working,
+                    last_background_work,
+                    last_blocked_reason,
                     last_visible_signal_refresh,
                     process_exited,
                     agent_changed,
@@ -1225,6 +1662,8 @@ fn spawn_basic_detection_task(
                     visible_idle,
                     visible_blocker,
                     visible_working,
+                    background_work,
+                    blocked_reason,
                     process_exited: publish_process_exited,
                 } => {
                     apply_agent_detection_publish_update(
@@ -1236,14 +1675,20 @@ fn spawn_basic_detection_task(
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            background_work,
+                            blocked_reason,
                             process_exited: publish_process_exited,
                         },
                         now,
                         &mut state,
-                        &mut last_visible_idle,
-                        &mut last_visible_blocker,
-                        &mut last_visible_working,
-                        &mut last_visible_signal_refresh,
+                        DetectionPublishTrackers {
+                            last_visible_idle: &mut last_visible_idle,
+                            last_visible_blocker: &mut last_visible_blocker,
+                            last_visible_working: &mut last_visible_working,
+                            last_background_work: &mut last_background_work,
+                            last_blocked_reason: &mut last_blocked_reason,
+                            last_visible_signal_refresh: &mut last_visible_signal_refresh,
+                        },
                         &mut foreground_shell_exit_reported,
                     )
                     .await;
@@ -1491,6 +1936,188 @@ async fn run_terminal_compression_task(
     }
 }
 
+#[derive(Clone)]
+struct TerminalCompressionWake {
+    notify: Arc<Notify>,
+    generation: Arc<AtomicU64>,
+}
+
+impl TerminalCompressionWake {
+    fn wake(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
+        self.notify.notify_one();
+    }
+}
+
+/// Drives libghostty-vt's caller-owned compression after terminal activity settles.
+struct TerminalCompressionTask {
+    wake: TerminalCompressionWake,
+    // Read only by the compression test, which runs on Linux and macOS.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    completed_passes: Arc<AtomicU64>,
+    handle: tokio::task::AbortHandle,
+}
+
+impl Drop for TerminalCompressionTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+impl TerminalCompressionTask {
+    fn spawn(pane_id: PaneId, terminal: Arc<PaneTerminal>) -> Self {
+        let wake = TerminalCompressionWake {
+            notify: Arc::new(Notify::new()),
+            generation: Arc::new(AtomicU64::new(0)),
+        };
+        let task_notify = wake.notify.clone();
+        let task_generation = wake.generation.clone();
+        #[cfg(test)]
+        let completed_passes = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let task_completed_passes = completed_passes.clone();
+        let handle = tokio::spawn(async move {
+            run_terminal_compression_task(
+                pane_id,
+                terminal,
+                task_notify,
+                task_generation,
+                #[cfg(test)]
+                task_completed_passes,
+            )
+            .await;
+        })
+        .abort_handle();
+        Self {
+            wake,
+            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+            completed_passes,
+            handle,
+        }
+    }
+
+    fn wake(&self) {
+        self.wake.wake();
+    }
+
+    fn notifier(&self) -> TerminalCompressionWake {
+        self.wake.clone()
+    }
+
+    fn abort(&self) {
+        self.handle.abort();
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    fn completed_passes(&self) -> u64 {
+        self.completed_passes.load(Ordering::Acquire)
+    }
+}
+
+async fn run_terminal_compression_task(
+    pane_id: PaneId,
+    terminal: Arc<PaneTerminal>,
+    notify: Arc<Notify>,
+    generation: Arc<AtomicU64>,
+    #[cfg(test)] completed_passes: Arc<AtomicU64>,
+) {
+    let mut observed_generation = generation.load(Ordering::Acquire);
+    let mut activity = loop {
+        match terminal.try_compression_activity() {
+            Ok(Some(activity)) => break activity,
+            Ok(None) => tokio::time::sleep(TERMINAL_COMPRESSION_IDLE).await,
+            Err(err) => {
+                warn!(pane = pane_id.raw(), err = %err, "failed to read terminal compression activity");
+                return;
+            }
+        }
+    };
+
+    'schedule: loop {
+        loop {
+            tokio::time::sleep(TERMINAL_COMPRESSION_IDLE).await;
+            let current = match terminal.try_compression_activity() {
+                Ok(Some(current)) => current,
+                Ok(None) => continue,
+                Err(err) => {
+                    warn!(pane = pane_id.raw(), err = %err, "failed to read terminal compression activity");
+                    return;
+                }
+            };
+            let current_generation = generation.load(Ordering::Acquire);
+            if activity == current && observed_generation == current_generation {
+                break;
+            }
+            activity = current;
+            observed_generation = current_generation;
+        }
+
+        loop {
+            let current_generation = generation.load(Ordering::Acquire);
+            if observed_generation != current_generation {
+                observed_generation = current_generation;
+                continue 'schedule;
+            }
+
+            let permit = match terminal_compression_permits().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            let current_generation = generation.load(Ordering::Acquire);
+            if observed_generation != current_generation {
+                observed_generation = current_generation;
+                continue 'schedule;
+            }
+
+            let terminal_for_step = terminal.clone();
+            let step = spawn_blocking_with_compression_permit(permit, move || {
+                terminal_for_step.try_compress_incremental_if_activity(activity)
+            })
+            .await;
+            let step = match step {
+                Ok(Ok(step)) => step,
+                Ok(Err(err)) => {
+                    warn!(pane = pane_id.raw(), err = %err, "failed to compress terminal scrollback");
+                    return;
+                }
+                Err(err) => {
+                    warn!(pane = pane_id.raw(), err = %err, "terminal compression worker failed");
+                    return;
+                }
+            };
+
+            match step {
+                TerminalCompressionStep::Busy => continue 'schedule,
+                TerminalCompressionStep::ActivityChanged(current) => {
+                    activity = current;
+                    observed_generation = generation.load(Ordering::Acquire);
+                    continue 'schedule;
+                }
+                TerminalCompressionStep::Compressed(
+                    crate::ghostty::TerminalCompressionResult::Unsupported,
+                ) => return,
+                TerminalCompressionStep::Compressed(
+                    crate::ghostty::TerminalCompressionResult::Pending,
+                ) => tokio::time::sleep(TERMINAL_COMPRESSION_STEP).await,
+                TerminalCompressionStep::Compressed(
+                    crate::ghostty::TerminalCompressionResult::Complete,
+                ) => {
+                    #[cfg(test)]
+                    completed_passes.fetch_add(1, Ordering::Release);
+                    loop {
+                        notify.notified().await;
+                        let current_generation = generation.load(Ordering::Acquire);
+                        if observed_generation != current_generation {
+                            observed_generation = current_generation;
+                            continue 'schedule;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this aborts async tasks and closes the PTY. An already-running bounded
 /// compression step may finish before releasing its terminal reference.
@@ -1500,9 +2127,19 @@ pub struct PaneRuntime {
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
+    /// Process group an agent was identified in one PTY below this pane's own,
+    /// published by the detection task. Zero when the pane identified normally.
+    /// Unix-only: no Windows wrapper presents a nested PTY to descend into.
+    #[cfg(unix)]
+    nested_agent_process_group_id: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     persistence_cwd: Mutex<Option<std::path::PathBuf>>,
     cwd_process_exited: Arc<AtomicBool>,
+    /// Directory of the shell the user is interacting with, published by the
+    /// per-pane detection task. Keeps `cwd` a lock-and-clone: resolving it walks
+    /// the pane's children to cross a wrapper's nested PTY, which has no place
+    /// on a path the sidebar runs per pane per render.
+    resolved_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     content_seq: Arc<AtomicU64>,
@@ -1513,6 +2150,10 @@ pub struct PaneRuntime {
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
+    /// When input from a user or caller last reached the PTY, in unix ms; 0
+    /// when none has. Automatic writes (terminal replies, the history harvest,
+    /// restore launches) leave it alone.
+    last_input_ms: AtomicU64,
     // Task handles for deterministic shutdown
     compression: TerminalCompressionTask,
     detect_handle: Option<tokio::task::AbortHandle>,
@@ -2308,6 +2949,12 @@ impl PaneRuntime {
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_state: None,
+            // Filled in by the server from app-level terminal state; the pane
+            // runtime does not know the detected agent.
+            agent: None,
+            agent_state: None,
+            hook_agent_state: None,
+            unseen: false,
         }
     }
 
@@ -2506,6 +3153,7 @@ impl PaneRuntime {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<Self> {
         let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
+        let agent_seed = state.agent_seed();
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
@@ -2519,6 +3167,10 @@ impl PaneRuntime {
             terminal_title,
             initial_history_ansi,
             agent_state: _,
+            agent: _,
+            agent_state: _,
+            hook_agent_state: _,
+            unseen: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2539,7 +3191,16 @@ impl PaneRuntime {
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
+        // A seeded title arrives without a PTY title-change event, so nothing
+        // else registers this pane as a title source. Without this the value
+        // sits in the runtime and never reaches app-level terminal state — and
+        // so never the sidebar — until the child happens to re-emit OSC 0/2,
+        // which an idle agent may not do for hours.
+        let seeded_terminal_title = terminal_title.is_some();
         pane_terminal.seed_terminal_title(terminal_title);
+        if seeded_terminal_title {
+            render_dirty.request_terminal_title(pane_id);
+        }
         if let Some(input_state) = input_state {
             pane_terminal.seed_handoff_input_state(input_state);
         }
@@ -2554,8 +3215,10 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let child_pid = Arc::new(AtomicU32::new(child_pid));
+        let nested_agent_process_group_id = Arc::new(AtomicU32::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
         let cwd_process_exited = Arc::new(AtomicBool::new(false));
+        let resolved_cwd: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let content_seq = Arc::new(AtomicU64::new(0));
         let content_write_lock = Arc::new(Mutex::new(()));
@@ -2609,7 +3272,10 @@ impl PaneRuntime {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
                 }
                 for content in result.clipboard_writes {
-                    if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite { content }) {
+                    if let Err(err) = read_events.try_send(AppEvent::ClipboardWrite {
+                        content,
+                        source_pane: Some(pane_id),
+                    }) {
                         warn!(
                             pane = pane_id.raw(),
                             err = %err,
@@ -2647,11 +3313,14 @@ impl PaneRuntime {
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
+            nested_agent_process_group_id.clone(),
+            resolved_cwd.clone(),
             terminal.clone(),
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             self_reported_agent_active.clone(),
             events,
+            agent_seed,
         );
 
         Ok(Self {
@@ -2660,9 +3329,11 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
+            nested_agent_process_group_id,
             reported_cwd,
             persistence_cwd: Mutex::new(None),
             cwd_process_exited,
+            resolved_cwd,
             child_wait_completed: None,
             kitty_keyboard_flags,
             content_seq,
@@ -2673,6 +3344,8 @@ impl PaneRuntime {
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
+            compression,
+            last_input_ms: AtomicU64::new(0),
             compression,
             detect_handle: Some(detect_handle),
         })
@@ -2724,7 +3397,10 @@ impl PaneRuntime {
 
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
+        #[cfg(unix)]
+        let nested_agent_process_group_id = Arc::new(AtomicU32::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
+        let resolved_cwd: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let content_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
@@ -2813,7 +3489,10 @@ impl PaneRuntime {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
                 }
                 for content in result.clipboard_writes {
-                    if let Err(err) = events.try_send(AppEvent::ClipboardWrite { content }) {
+                    if let Err(err) = events.try_send(AppEvent::ClipboardWrite {
+                        content,
+                        source_pane: Some(pane_id),
+                    }) {
                         warn!(
                             pane = pane_id.raw(),
                             err = %err,
@@ -2849,6 +3528,8 @@ impl PaneRuntime {
             const TICK_PENDING_RELEASE: Duration = Duration::from_millis(50);
 
             let child_pid = child_pid.clone();
+            #[cfg(unix)]
+            let nested_agent_process_group_id_for_task = nested_agent_process_group_id.clone();
             let terminal = terminal.clone();
             let state_events = events.clone();
             let detection_content_seq = detection_content_seq.clone();
@@ -2860,6 +3541,7 @@ impl PaneRuntime {
             let detect_reset = detect_reset_notify.clone();
             let pending_release = Arc::new(Mutex::new(None));
             let pending_release_for_task = pending_release.clone();
+            let resolved_cwd_for_task = resolved_cwd.clone();
 
             let handle = tokio::spawn(async move {
                 let mut agent_presence =
@@ -2870,6 +3552,10 @@ impl PaneRuntime {
                 #[cfg(windows)]
                 let mut last_observation = (Instant::now(), Some(0));
                 let mut last_foreground_pgid = None;
+                let mut last_agent_process_group: Option<(Agent, u32)> = None;
+                let mut launch_read_for: Option<(Agent, Option<(Agent, u32)>)> = None;
+                #[cfg(unix)]
+                let mut wrapped_shell_watch = WrappedShellWatch::default();
                 let mut has_process_probe = false;
                 let mut acquisition_started_at = None;
                 let mut last_content_change_at = None;
@@ -2879,6 +3565,8 @@ impl PaneRuntime {
                 let mut pending_restore_probe = initial_state.detected_agent.is_some();
                 let mut last_visible_blocker = false;
                 let mut last_visible_working = false;
+                let mut last_background_work = false;
+                let mut last_blocked_reason = None;
                 let mut last_visible_signal_refresh = None;
                 let mut last_detection_text = String::new();
                 let mut last_screen_scan_detection_content_seq = None;
@@ -2887,6 +3575,8 @@ impl PaneRuntime {
                 let mut last_codex_prompt_ready = false;
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
+                let mut last_resolved_cwd_refresh = None;
+                let mut last_self_reported_shell_check = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2915,6 +3605,9 @@ impl PaneRuntime {
                             state = AgentState::Unknown;
                             last_visible_idle = false;
                             last_foreground_pgid = None;
+                            last_agent_process_group = None;
+                            #[cfg(unix)]
+                            wrapped_shell_watch.clear();
                             has_process_probe = false;
                             acquisition_started_at = None;
                             last_content_change_at = None;
@@ -2924,6 +3617,8 @@ impl PaneRuntime {
                             pending_restore_probe = false;
                             last_visible_blocker = false;
                             last_visible_working = false;
+                            last_background_work = false;
+                            last_blocked_reason = None;
                             last_visible_signal_refresh = None;
                             last_detection_text.clear();
                             last_screen_scan_detection_content_seq = None;
@@ -2942,6 +3637,12 @@ impl PaneRuntime {
                     }
                     release_was_active = suppressed_agent.is_some();
                     let pid = child_pid.load(Ordering::Acquire);
+                    refresh_resolved_cwd_now(
+                        pid,
+                        &resolved_cwd_for_task,
+                        &mut last_resolved_cwd_refresh,
+                        now,
+                    );
                     let mut agent = agent_presence.current_agent();
                     let lifecycle_authority_active =
                         full_lifecycle_authority_active_for_task.load(Ordering::Acquire);
@@ -2992,18 +3693,25 @@ impl PaneRuntime {
                             last_content_seq.is_some() && last_content_seq != Some(content_seq);
                         last_observation = (now, (!retry).then_some(content_seq));
                     }
+                    #[cfg(unix)]
+                    let wrapped_shell_changed =
+                        pid > 0 && wrapped_shell_watch.poll(detect::foreground_process_group_id);
+                    #[cfg(not(unix))]
+                    let wrapped_shell_changed = false;
                     let process_group_changed =
-                        foreground_group_changed(foreground_pgid, last_foreground_pgid);
+                        foreground_group_changed(foreground_pgid, last_foreground_pgid)
+                            || wrapped_shell_changed;
                     let should_check_process = pid > 0 && {
                         let process_probe_input = ProcessProbeInput {
                             foreground_pgid,
                             ..process_probe_input
                         };
-                        should_check_foreground_process(
-                            lifecycle_authority_active,
-                            agent_job.in_background(),
-                            process_probe_input,
-                        )
+                        wrapped_shell_changed
+                            || should_check_foreground_process(
+                                lifecycle_authority_active,
+                                agent_job.in_background(),
+                                process_probe_input,
+                            )
                     };
 
                     let mut agent_changed = false;
@@ -3013,6 +3721,14 @@ impl PaneRuntime {
                         has_process_probe = true;
                         if pid > 0 {
                             let probe = probe_foreground_process(pid, foreground_pgid);
+                            #[cfg(unix)]
+                            publish_nested_agent_process_group(
+                                &nested_agent_process_group_id_for_task,
+                                &probe,
+                            );
+                            #[cfg(unix)]
+                            wrapped_shell_watch.observe(probe.wrapped_shell);
+                            let probed_agent_process_group = probe.agent_process_group();
                             let process_name = probe.process_name;
                             let process_group_id = probe.process_group_id;
                             let tracked_process_group_id = process_group_for_change_tracking(
@@ -3083,12 +3799,14 @@ impl PaneRuntime {
                                         last_visible_idle = false;
                                         last_visible_blocker = false;
                                         last_visible_working = false;
+                                        last_blocked_reason = None;
                                         last_visible_signal_refresh = None;
                                         publish_agent_process_detected_event(
                                             state_events.clone(),
                                             pane_id,
                                             agent,
                                             now,
+                                            foreground_action == ForegroundShellAgentAction::ReportReplacementProcess,
                                         )
                                         .await;
                                     } else {
@@ -3115,6 +3833,15 @@ impl PaneRuntime {
                                 }
                                 agent_changed = true;
                             }
+                            publish_agent_launch_once(
+                                &state_events,
+                                pane_id,
+                                pid,
+                                new_agent.filter(|probed| agent == Some(*probed)),
+                                agent_process_group,
+                                &mut launch_read_for,
+                            )
+                            .await;
                         }
                     }
 
@@ -3216,6 +3943,8 @@ impl PaneRuntime {
                             last_visible_idle,
                             last_visible_blocker,
                             last_visible_working,
+                            last_background_work,
+                            last_blocked_reason,
                             last_visible_signal_refresh,
                             process_exited,
                             agent_changed,
@@ -3229,6 +3958,8 @@ impl PaneRuntime {
                             visible_idle,
                             visible_blocker,
                             visible_working,
+                            background_work,
+                            blocked_reason,
                             process_exited: publish_process_exited,
                         } => {
                             apply_agent_detection_publish_update(
@@ -3240,14 +3971,20 @@ impl PaneRuntime {
                                     visible_idle,
                                     visible_blocker,
                                     visible_working,
+                                    background_work,
+                                    blocked_reason,
                                     process_exited: publish_process_exited,
                                 },
                                 now,
                                 &mut state,
-                                &mut last_visible_idle,
-                                &mut last_visible_blocker,
-                                &mut last_visible_working,
-                                &mut last_visible_signal_refresh,
+                                DetectionPublishTrackers {
+                                    last_visible_idle: &mut last_visible_idle,
+                                    last_visible_blocker: &mut last_visible_blocker,
+                                    last_visible_working: &mut last_visible_working,
+                                    last_background_work: &mut last_background_work,
+                                    last_blocked_reason: &mut last_blocked_reason,
+                                    last_visible_signal_refresh: &mut last_visible_signal_refresh,
+                                },
                                 &mut foreground_shell_exit_reported,
                             )
                             .await;
@@ -3270,9 +4007,12 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
+            #[cfg(unix)]
+            nested_agent_process_group_id,
             reported_cwd,
             persistence_cwd: Mutex::new(None),
             cwd_process_exited: child_wait_completed.clone(),
+            resolved_cwd,
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             content_seq,
@@ -3283,6 +4023,8 @@ impl PaneRuntime {
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
+            compression,
+            last_input_ms: AtomicU64::new(0),
             compression,
             detect_handle,
         })
@@ -3305,6 +4047,11 @@ impl PaneRuntime {
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(&self) -> Arc<Notify> {
         self.detect_reset_notify.clone()
+    }
+
+    pub fn set_self_reported_agent_active(&self, active: bool) {
+        self.self_reported_agent_active
+            .store(active, Ordering::Release);
     }
 
     pub fn set_self_reported_agent_active(&self, active: bool) {
@@ -3367,6 +4114,13 @@ impl PaneRuntime {
             .nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
     }
 
+    /// Force the next detection tick to re-read the screen even when the
+    /// idle-scan throttle would skip it (used by the post-handoff sweep).
+    #[cfg(unix)]
+    pub fn force_detection_rescan(&self) {
+        mark_detection_content_changed(&self.detection_content_seq);
+    }
+
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
         self.terminal.scroll_up(lines);
@@ -3397,6 +4151,13 @@ impl PaneRuntime {
     pub fn scroll_reset(&self) {
         self.terminal.scroll_reset();
         self.compression.wake();
+        self.compression.wake();
+    }
+
+    /// Purge the pane's saved scrollback (tmux `clear-history` semantics),
+    /// leaving the visible screen and running process untouched.
+    pub fn clear_scrollback(&self) {
+        self.terminal.clear_scrollback();
     }
 
     /// Set scrollback offset measured from the live bottom of the terminal.
@@ -3511,6 +4272,12 @@ impl PaneRuntime {
         self.terminal.synchronized_output_state()
     }
 
+    /// Whether a frame built from `since` must not show this pane (fork issue
+    /// 126); see `SYNC_HOLD_MAX` in `src/pane/terminal.rs`.
+    pub fn synchronized_frame_held(&self, since: u64, now: std::time::Instant) -> bool {
+        self.terminal.synchronized_frame_held(since, now)
+    }
+
     pub fn visible_text(&self) -> String {
         self.terminal.visible_text()
     }
@@ -3521,6 +4288,10 @@ impl PaneRuntime {
 
     pub fn detection_text(&self) -> String {
         self.terminal.detection_text()
+    }
+
+    pub fn detection_ansi(&self) -> String {
+        self.terminal.detection_ansi()
     }
 
     pub fn terminal_title(&self) -> Option<String> {
@@ -3663,7 +4434,36 @@ impl PaneRuntime {
         self.terminal.encode_terminal_key(key)
     }
 
+    fn stamp_input(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        self.last_input_ms.fetch_max(now, Ordering::Relaxed);
+    }
+
+    /// When input from a user or caller last reached the PTY, in unix ms.
+    pub fn last_input_at_ms(&self) -> Option<i64> {
+        let stamp = self.last_input_ms.load(Ordering::Relaxed);
+        (stamp > 0).then(|| i64::try_from(stamp).unwrap_or(i64::MAX))
+    }
+
+
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        let sent = self.io.try_send_bytes(bytes);
+        if sent.is_ok() {
+            self.stamp_input();
+        }
+        sent
+    }
+
+    /// `try_send_bytes` for automatic writes that are not activity: the
+    /// history harvest behind a read, and restore or resume launches.
+    pub fn try_send_bytes_untracked(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
     }
 
@@ -3792,6 +4592,18 @@ impl PaneRuntime {
             return Some(cwd);
         }
 
+        // What the detection task last resolved, which sees the shell a wrapper
+        // runs one PTY below. A lock and a clone: the walk that produced it
+        // happened on the pane's own cadence, not here.
+        if let Some(cwd) = self
+            .resolved_cwd
+            .lock()
+            .ok()
+            .and_then(|resolved_cwd| resolved_cwd.clone())
+        {
+            return Some(cwd);
+        }
+
         let pid = self.child_pid.load(Ordering::Relaxed);
         crate::platform::pane_process_cwd(pid)
     }
@@ -3822,14 +4634,36 @@ impl PaneRuntime {
         (pid > 0).then_some(pid)
     }
 
+    /// The foreground process group whose facts this pane reports.
+    ///
+    /// Its own, unless the detection probe identified an agent one PTY below —
+    /// behind a recognised wrapper — in which case the group that agent was
+    /// identified in. Reading the wrapper's group instead would have the pane
+    /// advertise a directory its session has never been in.
+    #[cfg(unix)]
+    fn reported_foreground_process_group_id(&self) -> Option<u32> {
+        let nested = self.nested_agent_process_group_id.load(Ordering::Relaxed);
+        if nested > 0 {
+            return Some(nested);
+        }
+        self.io.foreground_process_group_id()
+    }
+
+    /// The directory a pane created from this one should start in: the running
+    /// foreground command's, or the pane's own when nothing is running.
     pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
         #[cfg(unix)]
         {
-            let leader_cwd = self
-                .io
-                .foreground_process_group_id()
-                .and_then(usable_process_cwd);
-            leader_cwd.or_else(|| self.cwd())
+            let child_pid = self.child_pid.load(Ordering::Acquire);
+            let leader = self.reported_foreground_process_group_id();
+            // A leader that *is* the pane's own child is not a command to
+            // follow - it is the shell at its prompt, or a wrapper whose
+            // directory is frozen at launch. Either way `cwd` has the better
+            // answer, because it sees the shell a wrapper runs one PTY below.
+            if leader.is_none_or(|leader| leader == child_pid) {
+                return self.cwd();
+            }
+            leader.and_then(usable_process_cwd).or_else(|| self.cwd())
         }
 
         #[cfg(not(unix))]
@@ -3845,8 +4679,7 @@ impl PaneRuntime {
             let pid = self.child_pid.load(Ordering::Acquire);
             let shell_cwd = absolute_process_cwd(pid);
             let foreground_pgid = self
-                .io
-                .foreground_process_group_id()
+                .reported_foreground_process_group_id()
                 .or_else(|| crate::platform::foreground_process_group_id(pid));
             let leader_cwd = foreground_pgid.and_then(absolute_process_cwd);
 
@@ -4002,9 +4835,13 @@ impl PaneRuntime {
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                #[cfg(unix)]
+                #[cfg(unix)]
+                nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 persistence_cwd: Mutex::new(None),
                 cwd_process_exited: Arc::new(AtomicBool::new(false)),
+                resolved_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
@@ -4015,6 +4852,8 @@ impl PaneRuntime {
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
+                compression,
+                last_input_ms: AtomicU64::new(0),
                 compression,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
@@ -4344,6 +5183,51 @@ mod tests {
         *runtime.reported_cwd.lock().unwrap() = Some(cwd.clone());
 
         assert_eq!(runtime.follow_cwd(), Some(cwd));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wrapped_pane_reports_the_working_directory_of_the_identified_job() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let nested_cwd = std::env::temp_dir().join(format!(
+            "herdr-nested-agent-cwd-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&nested_cwd).expect("create nested agent cwd");
+        let expected_cwd = nested_cwd
+            .canonicalize()
+            .expect("canonical nested agent cwd");
+        let mut agent = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .current_dir(&nested_cwd)
+            .spawn()
+            .expect("spawn stand-in agent in the nested cwd");
+
+        // The wrapper's own directory, which the pane reported before the
+        // descent existed.
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let wrapper_cwd = std::env::temp_dir();
+        *runtime.reported_cwd.lock().unwrap() = Some(wrapper_cwd.clone());
+
+        let unwrapped = runtime.follow_cwd();
+        runtime
+            .nested_agent_process_group_id
+            .store(agent.id(), Ordering::Relaxed);
+        let wrapped = runtime.follow_cwd();
+
+        let _ = agent.kill();
+        let _ = agent.wait();
+        let _ = std::fs::remove_dir(&nested_cwd);
+
+        assert_eq!(
+            unwrapped,
+            Some(wrapper_cwd),
+            "a pane with no nested identification reports its own facts"
+        );
+        assert_eq!(wrapped, Some(expected_cwd));
     }
 
     #[test]
@@ -5199,6 +6083,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cwd_prefers_the_shell_s_own_report_then_the_resolved_directory() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let terminal = Arc::new(PaneTerminal::new(
+            GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+        ));
+        let compression = TerminalCompressionTask::spawn(PaneId::from_raw(0), terminal.clone());
+        let runtime = PaneRuntime {
+            self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            pane_id: PaneId::from_raw(0),
+            terminal,
+            compression,
+            io: PaneRuntimeIo::TestChannel {
+                sender: tx,
+                resize_tx,
+            },
+            current_size: Cell::new((80, 24, 0, 0)),
+            // No child process, so the direct-child fallback cannot answer and
+            // the precedence being asserted is the only thing in play.
+            child_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(unix)]
+            nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
+            reported_cwd: Arc::new(Mutex::new(None)),
+            resolved_cwd: Arc::new(Mutex::new(None)),
+            child_wait_completed: None,
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            content_seq: Arc::new(AtomicU64::new(0)),
+            detection_content_seq: Arc::new(AtomicU64::new(0)),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            preserve_processes_on_drop: true,
+            last_input_ms: AtomicU64::new(0),
+            detect_handle: Some(tokio::spawn(async {}).abort_handle()),
+        };
+
+        assert_eq!(runtime.cwd(), None);
+
+        *runtime.resolved_cwd.lock().unwrap() = Some(std::path::PathBuf::from("/resolved"));
+        assert_eq!(
+            runtime.cwd(),
+            Some(std::path::PathBuf::from("/resolved")),
+            "the resolved directory answers when the shell has reported nothing"
+        );
+
+        *runtime.reported_cwd.lock().unwrap() = Some(std::path::PathBuf::from("/reported"));
+        assert_eq!(
+            runtime.cwd(),
+            Some(std::path::PathBuf::from("/reported")),
+            "the shell's own claim outranks anything inferred from the process table"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn follow_cwd_uses_the_pane_directory_when_its_own_child_holds_the_foreground() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let terminal = Arc::new(PaneTerminal::new(
+            GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
+        ));
+        let compression = TerminalCompressionTask::spawn(PaneId::from_raw(0), terminal.clone());
+        let runtime = PaneRuntime {
+            self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            pane_id: PaneId::from_raw(0),
+            terminal,
+            compression,
+            io: PaneRuntimeIo::TestChannel {
+                sender: tx,
+                resize_tx,
+            },
+            current_size: Cell::new((80, 24, 0, 0)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
+            reported_cwd: Arc::new(Mutex::new(None)),
+            resolved_cwd: Arc::new(Mutex::new(Some(std::path::PathBuf::from("/resolved")))),
+            child_wait_completed: None,
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            content_seq: Arc::new(AtomicU64::new(0)),
+            detection_content_seq: Arc::new(AtomicU64::new(0)),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            preserve_processes_on_drop: true,
+            last_input_ms: AtomicU64::new(0),
+            detect_handle: Some(tokio::spawn(async {}).abort_handle()),
+        };
+
+        // A test runtime has no PTY, so no foreground group is reported: the
+        // "nothing is running in front" case, where a wrapper's own frozen
+        // directory must not outrank the resolved one.
+        assert_eq!(
+            runtime.follow_cwd(),
+            Some(std::path::PathBuf::from("/resolved")),
+            "a pane with nothing running seeds new panes from its own directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn compression_permit_survives_an_aborted_async_waiter() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = spawn_blocking_with_compression_permit(permit, move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+        started_rx.await.unwrap();
+
+        handle.abort();
+        assert!(semaphore.clone().try_acquire_owned().is_err());
+
+        release_tx.send(()).unwrap();
+        handle.await.unwrap();
+        assert!(semaphore.try_acquire_owned().is_ok());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn compression_task_rechecks_history_after_a_read() {
+        let suffix = "x".repeat(66);
+        let history = (1..=2_000)
+            .map(|line| format!("{line:05} {suffix}\r\n"))
+            .collect::<String>();
+        let runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 24, 20_000_000, history.as_bytes());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.compression.completed_passes() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let completed_before_read = runtime.compression.completed_passes();
+
+        let snapshot = runtime.recent_unwrapped_text_snapshot(usize::MAX);
+        assert!(snapshot.text.contains("00001 "));
+        assert!(snapshot.text.contains("02000 "));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.compression.completed_passes() == completed_before_read {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn compressed_scrollback_survives_shrink_and_grow_resize() {
+        let suffix = "x".repeat(66);
+        let history = (1..=2_000)
+            .map(|line| format!("{line:05} {suffix}\r\n"))
+            .collect::<String>();
+        let runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 45, 20_000_000, history.as_bytes());
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.compression.completed_passes() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        runtime.resize(21, 80, 0, 0);
+        let completed_after_shrink = runtime.compression.completed_passes();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.compression.completed_passes() == completed_after_shrink {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        runtime.resize(45, 80, 0, 0);
+
+        assert_eq!(runtime.current_size(), (45, 80));
+        assert_eq!(runtime.scroll_metrics().unwrap().viewport_rows, 45);
+        let snapshot = runtime.recent_unwrapped_text_snapshot(usize::MAX);
+        assert!(snapshot.text.contains("00001 "));
+        assert!(snapshot.text.contains("02000 "));
+    }
+
+    #[tokio::test]
     async fn focus_events_are_forwarded_when_enabled() {
         let (tx, mut rx) = mpsc::channel(4);
         let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
@@ -5223,7 +6297,10 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(unix)]
+            nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            resolved_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
@@ -5233,6 +6310,8 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
+            compression,
+            last_input_ms: AtomicU64::new(0),
             compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
@@ -5263,7 +6342,10 @@ mod tests {
             },
             current_size: Cell::new((80, 24, 0, 0)),
             child_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(unix)]
+            nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            resolved_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
@@ -5273,6 +6355,8 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
+            compression,
+            last_input_ms: AtomicU64::new(0),
             compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
@@ -5334,6 +6418,51 @@ mod tests {
         );
     }
 
+    // #112: a Claude restarted between two polls never shows the shell, only
+    // the agent's process group changing. That is a replacement process too.
+    #[test]
+    fn a_new_process_group_for_the_same_agent_is_a_replacement() {
+        assert!(agent_process_group_replaced(
+            Some((Agent::Claude, 10)),
+            Some((Agent::Claude, 11))
+        ));
+        assert!(!agent_process_group_replaced(
+            Some((Agent::Claude, 10)),
+            Some((Agent::Claude, 10))
+        ));
+        assert!(!agent_process_group_replaced(
+            Some((Agent::Claude, 10)),
+            Some((Agent::Codex, 11))
+        ));
+        assert!(!agent_process_group_replaced(
+            None,
+            Some((Agent::Claude, 11))
+        ));
+        assert!(!agent_process_group_replaced(
+            Some((Agent::Claude, 10)),
+            None
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_process_group_follows_the_job_the_agent_was_found_in() {
+        let outer = crate::platform::ForegroundJob {
+            process_group_id: 100,
+            processes: vec![foreground_process(100, "atuin")],
+        };
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "claude")],
+        };
+        let wrapped =
+            nested_process_probe_result(&outer, 150, &nested, 1, Agent::Claude, "claude".into());
+        assert_eq!(wrapped.agent_process_group(), Some((Agent::Claude, 200)));
+
+        let direct = process_probe_result(&nested, 1, Agent::Claude, "claude".into());
+        assert_eq!(direct.agent_process_group(), Some((Agent::Claude, 200)));
+    }
+
     #[test]
     fn unknown_non_shell_foreground_job_is_not_immediate_clear_signal() {
         assert_eq!(
@@ -5346,6 +6475,20 @@ mod tests {
             ),
             ForegroundShellAgentAction::ObserveProbe
         );
+    }
+
+    #[tokio::test]
+    async fn first_agent_acquisition_keeps_osc_evidence_replacement_clears_it() {
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        runtime.test_process_pty_bytes(b"\x1b]2;startup title\x1b\\\x1b]9;4;1;\x1b\\");
+
+        clear_osc_evidence_for_agent_transition(&runtime.terminal, None);
+        assert_eq!(runtime.agent_osc_title(), "startup title");
+        assert_eq!(runtime.agent_osc_progress(), "4;1;");
+
+        clear_osc_evidence_for_agent_transition(&runtime.terminal, Some(Agent::Claude));
+        assert_eq!(runtime.agent_osc_title(), "");
+        assert_eq!(runtime.agent_osc_progress(), "");
     }
 
     #[test]
@@ -5689,6 +6832,11 @@ mod tests {
         );
     }
 
+    /// Nested lookup for a pane that is not behind a PTY wrapper.
+    fn no_nested_job(_pid: u32) -> Option<(u32, crate::platform::ForegroundJob)> {
+        None
+    }
+
     fn foreground_process(pid: u32, name: &str) -> crate::platform::ForegroundProcess {
         crate::platform::ForegroundProcess {
             pid,
@@ -5744,6 +6892,7 @@ mod tests {
             Some(99),
             Some(job),
             || None,
+            no_nested_job,
             |pid| (pid == 99).then_some(Agent::Claude),
         );
 
@@ -5763,6 +6912,7 @@ mod tests {
             Some(99),
             None,
             || Some(job),
+            no_nested_job,
             |pid| (pid == 99).then_some(Agent::Claude),
         );
 
@@ -5785,6 +6935,7 @@ mod tests {
             Some(99),
             None,
             || Some(job),
+            no_nested_job,
             |pid| (pid == 100).then_some(Agent::Claude),
         );
 
@@ -5825,11 +6976,317 @@ mod tests {
             Some(99),
             None,
             || Some(job),
+            no_nested_job,
             |pid| (pid == 100).then_some(Agent::Claude),
         );
 
         assert_eq!(result.agent, Some(Agent::Claude));
         assert_eq!(result.process_name.as_deref(), Some("claude"));
+    }
+
+    /// The wrapper's child that owns the nested PTY in `wrapped_pane_probe`.
+    const WRAPPED_SHELL_PID: u32 = 150;
+
+    /// A pane whose PTY carries only `leader_name`, with `nested` one PTY down.
+    fn wrapped_pane_probe(
+        leader_name: &str,
+        nested: Option<crate::platform::ForegroundJob>,
+        nested_lookups: &std::cell::Cell<u32>,
+    ) -> ProcessProbeResult {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![foreground_process(42, leader_name)],
+        };
+
+        probe_foreground_process_from_jobs(
+            42,
+            Some(42),
+            None,
+            || Some(job),
+            |pid| {
+                nested_lookups.set(nested_lookups.get() + 1);
+                assert_eq!(pid, 42, "the descent starts from the process group leader");
+                nested.map(|job| (WRAPPED_SHELL_PID, job))
+            },
+            |_| None,
+        )
+    }
+
+    #[test]
+    fn recognized_wrapper_identifies_the_agent_in_the_pty_it_owns() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "claude")],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(result.process_name.as_deref(), Some("claude"));
+        assert_eq!(lookups.get(), 1);
+        // The pane's own group stays the tracked one; the nested group never
+        // appears on the pane's PTY.
+        assert_eq!(result.process_group_id, Some(42));
+        assert!(!result.foreground_is_pane_shell);
+    }
+
+    #[test]
+    fn a_wrapped_pane_is_not_re_probed_on_every_tick() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "claude")],
+        };
+
+        // What `tcgetpgrp` reports on the pane's own PTY. The nested group
+        // never appears there, so reporting it as the probed group would look
+        // like a foreground change on the very next tick and re-probe forever.
+        let observed = Some(42);
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+        let tracked = process_group_for_change_tracking(observed, result.process_group_id);
+
+        assert_eq!(tracked, observed);
+        assert!(!foreground_group_changed(observed, tracked));
+    }
+
+    #[test]
+    fn unrecognized_wrapper_does_not_descend() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "claude")],
+        };
+
+        let result = wrapped_pane_probe("script", Some(nested), &lookups);
+
+        assert_eq!(result.agent, None);
+        assert_eq!(lookups.get(), 0);
+    }
+
+    #[test]
+    fn recognized_wrapper_with_nothing_behind_it_reports_no_agent() {
+        let lookups = std::cell::Cell::new(0);
+
+        let result = wrapped_pane_probe("atuin", None, &lookups);
+
+        assert_eq!(result.agent, None);
+        assert_eq!(result.process_name, None);
+        assert_eq!(result.process_group_id, Some(42));
+        assert_eq!(lookups.get(), 1);
+    }
+
+    #[test]
+    fn recognized_wrapper_hiding_no_agent_reports_no_agent() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "zsh")],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        assert_eq!(result.agent, None);
+        assert_eq!(lookups.get(), 1);
+    }
+
+    #[test]
+    fn agent_in_the_pane_own_job_wins_and_skips_the_nested_lookup() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "codex")],
+        };
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 42,
+            processes: vec![
+                foreground_process(42, "atuin"),
+                foreground_process(43, "claude"),
+            ],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(42),
+            None,
+            || Some(job),
+            |_| {
+                lookups.set(lookups.get() + 1);
+                Some((WRAPPED_SHELL_PID, nested))
+            },
+            |_| None,
+        );
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(lookups.get(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_pane_reports_the_nested_job_as_its_foreground_group() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "claude")],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        // The cwd surfaces read this group, so a wrapped pane stops reporting
+        // the wrapper's directory.
+        assert_eq!(result.nested_process_group_id, Some(200));
+        assert_eq!(result.process_name.as_deref(), Some("claude"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_pane_at_its_prompt_reports_the_shell_to_watch() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: WRAPPED_SHELL_PID,
+            processes: vec![foreground_process(WRAPPED_SHELL_PID, "zsh")],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        assert_eq!(result.agent, None);
+        assert_eq!(
+            result.wrapped_shell,
+            Some(WrappedShell {
+                pid: WRAPPED_SHELL_PID,
+                foreground_pgid: WRAPPED_SHELL_PID,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_pane_with_an_agent_keeps_watching_the_shell() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 200,
+            processes: vec![foreground_process(200, "codex")],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        assert_eq!(result.agent, Some(Agent::Codex));
+        assert_eq!(
+            result.wrapped_shell,
+            Some(WrappedShell {
+                pid: WRAPPED_SHELL_PID,
+                foreground_pgid: 200,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unwrapped_pane_has_no_shell_to_watch() {
+        let lookups = std::cell::Cell::new(0);
+
+        let unrecognized = wrapped_pane_probe("script", None, &lookups);
+        let no_nested_pty = wrapped_pane_probe("atuin", None, &lookups);
+
+        assert_eq!(unrecognized.wrapped_shell, None);
+        assert_eq!(no_nested_pty.wrapped_shell, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_shell_watch_fires_when_the_hosted_shell_starts_a_command() {
+        let mut watch = WrappedShellWatch::default();
+        assert!(!watch.poll(|_| panic!("nothing to watch before a probe finds a wrapper")));
+
+        watch.observe(Some(WrappedShell {
+            pid: 150,
+            foreground_pgid: 150,
+        }));
+        assert!(!watch.poll(|pid| {
+            assert_eq!(pid, 150);
+            Some(150)
+        }));
+        assert!(watch.poll(|_| Some(300)), "a command took the foreground");
+        assert!(!watch.poll(|_| Some(300)), "one change fires once");
+        assert!(
+            watch.poll(|_| Some(150)),
+            "back at the prompt is a change too"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_shell_watch_fires_once_when_the_shell_is_gone() {
+        let mut watch = WrappedShellWatch::default();
+        watch.observe(Some(WrappedShell {
+            pid: 150,
+            foreground_pgid: 150,
+        }));
+
+        assert!(watch.poll(|_| None));
+        assert!(!watch.poll(|_| panic!("a vanished shell is not polled again")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapped_shell_watch_stops_after_a_probe_without_a_wrapper() {
+        let mut watch = WrappedShellWatch::default();
+        watch.observe(Some(WrappedShell {
+            pid: 150,
+            foreground_pgid: 150,
+        }));
+        watch.observe(None);
+
+        assert!(!watch.poll(|_| panic!("an unwrapped pane is not polled")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_without_nested_identification_reports_only_its_own_job() {
+        let lookups = std::cell::Cell::new(0);
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![foreground_process(99, "codex")],
+        };
+
+        let identified = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            no_nested_job,
+            |_| None,
+        );
+        let unidentified = wrapped_pane_probe("atuin", None, &lookups);
+
+        assert_eq!(identified.nested_process_group_id, None);
+        assert_eq!(identified.process_group_id, Some(99));
+        assert_eq!(unidentified.nested_process_group_id, None);
+        assert_eq!(unidentified.process_group_id, Some(42));
+    }
+
+    #[test]
+    fn unwrapped_pane_performs_no_nested_lookup() {
+        let lookups = std::cell::Cell::new(0);
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 99,
+            processes: vec![foreground_process(99, "vim")],
+        };
+
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            |_| {
+                lookups.set(lookups.get() + 1);
+                None
+            },
+            |_| None,
+        );
+
+        assert_eq!(result.agent, None);
+        assert_eq!(lookups.get(), 0);
     }
 
     fn process_probe_input() -> ProcessProbeInput {
@@ -6496,6 +7953,8 @@ mod tests {
             false,
             false,
             false,
+            None,
+            false,
             std::time::Instant::now(),
         );
         tokio::pin!(publish);
@@ -6533,6 +7992,8 @@ mod tests {
                 state: AgentState::Idle,
                 visible_blocker: false,
                 visible_working: false,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: false,
                 observed_at: _,
             } if delivered_pane == pane_id
@@ -6638,4 +8099,269 @@ mod tests {
             Some(AppEvent::CodexPromptObserved { ready: true, .. })
         ));
     }
+
+    /// Regression: a title carried across a live handoff must be registered as
+    /// a pending title source on import. `seed_terminal_title` only writes the
+    /// runtime's own fields, and the app-level `TerminalState.terminal_title`
+    /// the sidebar reads is refreshed solely from
+    /// `render_dirty.pending_terminal_title_sources()`. Without the
+    /// registration a seeded title is invisible until the child re-emits
+    /// OSC 0/2, so every idle agent's sidebar row goes blank after an upgrade.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn importing_a_handoff_pane_registers_its_seeded_title_for_sync() {
+        fn import(title: Option<&str>) -> (Arc<RenderSignal>, PaneId) {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("openpty");
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .expect("pty master fd is available in tests");
+            let owned = crate::pty::fd::duplicate_cloexec_fd(master_fd).expect("dup master fd");
+            let pane_id = PaneId::alloc();
+            let state = crate::handoff_runtime::HandoffRuntimeState {
+                pane_id: pane_id.raw(),
+                child_pid: std::process::id(),
+                rows: 24,
+                cols: 80,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                keyboard_protocol_flags: 0,
+                keyboard_protocol_ansi: None,
+                input_state: None,
+                terminal_title: title.map(str::to_string),
+                initial_history_ansi: None,
+                agent: None,
+                agent_state: None,
+                hook_agent_state: None,
+                unseen: false,
+            };
+            let render_dirty = Arc::new(RenderSignal::new());
+            let (events, _event_rx) = mpsc::channel(8);
+            let runtime = PaneRuntime::from_handoff_fd(
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: owned,
+                    state,
+                },
+                1024 * 1024,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                events,
+                Arc::new(Notify::new()),
+                Arc::clone(&render_dirty),
+            )
+            .expect("import handoff pane");
+            std::mem::forget(runtime);
+            drop(pair);
+            (render_dirty, pane_id)
+        }
+
+        let (with_title, pane_id) = import(Some("\u{2733} infra-relay"));
+        assert!(
+            with_title
+                .pending_terminal_title_sources()
+                .contains(&pane_id),
+            "a seeded title must register its pane so the first sync lifts it \
+             into app-level terminal state"
+        );
+
+        let (without_title, pane_id) = import(None);
+        assert!(
+            !without_title
+                .pending_terminal_title_sources()
+                .contains(&pane_id),
+            "an import with no title must not queue pointless title work"
+        );
+    }
+
+    fn test_foreground_job(process_group_id: u32, pids: &[u32]) -> crate::platform::ForegroundJob {
+        crate::platform::ForegroundJob {
+            process_group_id,
+            processes: pids
+                .iter()
+                .map(|pid| crate::platform::ForegroundProcess {
+                    pid: *pid,
+                    name: format!("p{pid}"),
+                    argv0: None,
+                    argv: None,
+                    cmdline: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn test_cwd(pid: u32) -> Option<std::path::PathBuf> {
+        Some(std::path::PathBuf::from(format!("/p{pid}")))
+    }
+
+    #[test]
+    fn foreground_job_cwd_falls_back_to_a_member_when_the_leader_cannot_answer() {
+        let job = test_foreground_job(20, &[10, 20]);
+
+        let cwd = foreground_job_cwd(&job, |pid| {
+            (pid != 20).then(|| std::path::PathBuf::from(format!("/p{pid}")))
+        });
+
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/p10")));
+    }
+
+    #[test]
+    fn foreground_job_cwd_is_none_when_nothing_can_answer() {
+        let job = test_foreground_job(20, &[10, 20]);
+
+        assert_eq!(foreground_job_cwd(&job, |_| None), None);
+    }
+
+    #[test]
+    fn foreground_job_cwd_prefers_the_leader_over_an_earlier_member() {
+        let job = test_foreground_job(20, &[10, 20]);
+
+        let cwd = foreground_job_cwd(&job, |pid| {
+            Some(std::path::PathBuf::from(format!("/p{pid}")))
+        });
+
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/p20")));
+    }
+
+    #[test]
+    fn pane_launch_env_removes_stale_pty_proxy_vars() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("ATUIN_PTY_PROXY_ACTIVE", "1");
+        cmd.env("ATUIN_PTY_PROXY_TMUX", "");
+        cmd.env("ATUIN_SESSION", "019ffa9d6d347ca1bbe547421eef391f");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        for var in STALE_PTY_PROXY_ENV_VARS {
+            assert!(cmd.get_env(var).is_none(), "{var} should not reach panes");
+        }
+        assert_eq!(
+            cmd.get_env("ATUIN_SESSION"),
+            Some(std::ffi::OsStr::new("019ffa9d6d347ca1bbe547421eef391f")),
+            "only the proxy's own re-entry marks are stale, not the rest of atuin"
+        );
+    }
+
+    #[test]
+    fn pane_launch_env_removes_stale_ssh_connection_vars() {
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env("SSH_CLIENT", "10.0.0.1 51234 22");
+        cmd.env("SSH_CONNECTION", "10.0.0.1 51234 10.0.0.2 22");
+        cmd.env("SSH_TTY", "/dev/pts/0");
+        cmd.env("SSH_AUTH_SOCK", "/tmp/agent.sock");
+
+        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+
+        for var in STALE_SSH_CONNECTION_ENV_VARS {
+            assert!(cmd.get_env(var).is_none(), "{var} should not reach panes");
+        }
+        assert_eq!(
+            cmd.get_env("SSH_AUTH_SOCK"),
+            Some(std::ffi::OsStr::new("/tmp/agent.sock")),
+            "agent forwarding stays usable in panes"
+        );
+    }
+
+    #[test]
+    fn resolved_cwd_refresh_holds_off_until_the_interval_elapses() {
+        let cell = Arc::new(Mutex::new(None));
+        let mut last = None;
+        let start = std::time::Instant::now();
+
+        refresh_resolved_cwd(
+            || Some(std::path::PathBuf::from("/first")),
+            &cell,
+            &mut last,
+            start,
+        );
+        assert_eq!(
+            cell.lock().unwrap().clone(),
+            Some(std::path::PathBuf::from("/first"))
+        );
+
+        refresh_resolved_cwd(
+            || panic!("a second refresh inside the interval must not resolve"),
+            &cell,
+            &mut last,
+            start + RESOLVED_CWD_REFRESH_INTERVAL / 2,
+        );
+
+        refresh_resolved_cwd(
+            || Some(std::path::PathBuf::from("/second")),
+            &cell,
+            &mut last,
+            start + RESOLVED_CWD_REFRESH_INTERVAL,
+        );
+        assert_eq!(
+            cell.lock().unwrap().clone(),
+            Some(std::path::PathBuf::from("/second")),
+            "the refresh runs on its own clock, not on a foreground group change"
+        );
+    }
+
+    #[test]
+    fn resolved_cwd_refresh_keeps_the_last_directory_when_resolution_fails() {
+        let cell = Arc::new(Mutex::new(Some(std::path::PathBuf::from("/known"))));
+        let mut last = None;
+
+        refresh_resolved_cwd(|| None, &cell, &mut last, std::time::Instant::now());
+
+        assert_eq!(
+            cell.lock().unwrap().clone(),
+            Some(std::path::PathBuf::from("/known")),
+            "a failed resolution must not blank a pane that has a known directory"
+        );
+    }
+
+    #[test]
+    fn resolved_pane_cwd_falls_back_to_the_child_when_the_nested_job_cannot_answer() {
+        let cwd = resolved_pane_cwd(
+            7,
+            |_| Some(test_foreground_job(20, &[20])),
+            |pid| (pid == 7).then(|| std::path::PathBuf::from("/p7")),
+        );
+
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/p7")));
+    }
+
+    #[test]
+    fn resolved_pane_cwd_is_none_when_nothing_can_answer() {
+        assert_eq!(resolved_pane_cwd(7, |_| None, |_| None), None);
+    }
+
+    #[test]
+    fn resolved_pane_cwd_is_none_without_a_child_process() {
+        let cwd = resolved_pane_cwd(
+            0,
+            |_| panic!("a pane with no child must not be probed"),
+            test_cwd,
+        );
+
+        assert_eq!(cwd, None);
+    }
+
+    #[test]
+    fn resolved_pane_cwd_prefers_the_shell_below_a_nested_pty() {
+        let cwd = resolved_pane_cwd(7, |_| Some(test_foreground_job(20, &[20])), test_cwd);
+
+        assert_eq!(
+            cwd,
+            Some(std::path::PathBuf::from("/p20")),
+            "a wrapper's own directory must not outrank the shell it re-runs"
+        );
+    }
+
+    #[test]
+    fn resolved_pane_cwd_uses_the_direct_child_without_a_nested_pty() {
+        let cwd = resolved_pane_cwd(7, |_| None, test_cwd);
+
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/p7")));
+    }
+
 }

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::detect::{Agent, AgentDetection, AgentState};
+use crate::detect::{Agent, AgentDetection, AgentState, BlockedReason};
 
 pub(super) const AGENT_PENDING_IDLE_RECHECK: std::time::Duration =
     std::time::Duration::from_millis(100);
@@ -18,6 +18,58 @@ pub(super) struct DetectionPublishState {
     pub(super) visible_idle: bool,
     pub(super) visible_blocker: bool,
     pub(super) visible_working: bool,
+    pub(super) background_work: bool,
+    pub(super) blocked_reason: Option<BlockedReason>,
+}
+
+/// Initial detection-task variables derived from a handoff agent seed, so the
+/// task resumes as if it had already published the pre-handoff state instead of
+/// re-identifying the surviving agent (which would publish Idle over it).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BasicDetectionSeedInit {
+    pub(super) agent: Option<Agent>,
+    pub(super) state: AgentState,
+    pub(super) last_visible_idle: bool,
+    pub(super) last_visible_blocker: bool,
+    pub(super) last_visible_working: bool,
+    pub(super) last_background_work: bool,
+}
+
+#[cfg(unix)]
+impl BasicDetectionSeedInit {
+    pub(super) fn from_agent_seed(seed: Option<(Agent, AgentState)>) -> Self {
+        let Some((agent, state)) = seed else {
+            return Self {
+                agent: None,
+                state: AgentState::Unknown,
+                last_visible_idle: false,
+                last_visible_blocker: false,
+                last_visible_working: false,
+                last_background_work: false,
+            };
+        };
+        Self {
+            agent: Some(agent),
+            state,
+            last_visible_idle: state == AgentState::Idle,
+            last_visible_blocker: state == AgentState::Blocked,
+            last_visible_working: state == AgentState::Working,
+            // The handoff seed carries only (agent, state), not the source
+            // detection's background_work flag, so a background-working
+            // process resumes needing one real detection pass to republish.
+            last_background_work: false,
+        }
+    }
+}
+
+/// While a handoff-seeded pane's screen is still blank (the re-adopted agent
+/// has not repainted into the new server's grid), screen detection has no
+/// evidence: the known-agent fallback would read blankness as plain Idle and
+/// overwrite the seeded state. Hold until real content arrives.
+#[cfg(unix)]
+pub(super) fn should_hold_seeded_detection(seeded_hold_active: bool, content: &str) -> bool {
+    seeded_hold_active && content.trim().is_empty()
 }
 
 #[derive(Debug, Default)]
@@ -150,6 +202,8 @@ pub(super) fn should_publish_detection_update(
         || next.visible_idle != previous.visible_idle
         || next.visible_blocker != previous.visible_blocker
         || next.visible_working != previous.visible_working
+        || next.background_work != previous.background_work
+        || next.blocked_reason != previous.blocked_reason
         || agent_changed
         || process_exited
         || (stable_visible_signal_refresh_due && next.visible_blocker && previous.visible_blocker)
@@ -220,6 +274,8 @@ pub(super) enum DetectionPublishDecision {
         visible_idle: bool,
         visible_blocker: bool,
         visible_working: bool,
+        background_work: bool,
+        blocked_reason: Option<BlockedReason>,
         process_exited: bool,
     },
 }
@@ -230,6 +286,8 @@ pub(super) struct ScreenDetectionPublishInput {
     pub(super) last_visible_idle: bool,
     pub(super) last_visible_blocker: bool,
     pub(super) last_visible_working: bool,
+    pub(super) last_background_work: bool,
+    pub(super) last_blocked_reason: Option<BlockedReason>,
     pub(super) last_visible_signal_refresh: Option<std::time::Instant>,
     pub(super) screen_detection: AgentDetection,
     pub(super) process_exited: bool,
@@ -246,18 +304,26 @@ pub(super) fn decide_screen_detection_publish(
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
+    let background_work = detection.background_work && new_state == AgentState::Working;
+    let blocked_reason = detection
+        .blocked_reason
+        .filter(|_| new_state == AgentState::Blocked);
 
     let previous_publish = DetectionPublishState {
         state: input.current_state,
         visible_idle: input.last_visible_idle,
         visible_blocker: input.last_visible_blocker,
         visible_working: input.last_visible_working,
+        background_work: input.last_background_work,
+        blocked_reason: input.last_blocked_reason,
     };
     let next_publish = DetectionPublishState {
         state: new_state,
         visible_idle,
         visible_blocker,
         visible_working,
+        background_work,
+        blocked_reason,
     };
     let stable_refresh_due = stable_visible_signal_refresh_due(
         previous_publish,
@@ -283,6 +349,8 @@ pub(super) fn decide_screen_detection_publish(
             visible_idle,
             visible_blocker,
             visible_working,
+            background_work,
+            blocked_reason,
             process_exited: input.process_exited,
         },
     }
@@ -311,6 +379,8 @@ pub(super) fn detection_update_for_publish_with_osc(
             visible_idle: true,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
         });
     }
 
@@ -355,6 +425,8 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
         }
     }
 
@@ -365,6 +437,8 @@ mod tests {
             visible_idle: state == AgentState::Idle,
             visible_blocker: false,
             visible_working: state == AgentState::Working,
+            background_work: false,
+            blocked_reason: (state == AgentState::Blocked).then_some(BlockedReason::Other),
         }
     }
 
@@ -378,6 +452,8 @@ mod tests {
             last_visible_idle: false,
             last_visible_blocker: false,
             last_visible_working: false,
+            last_background_work: false,
+            last_blocked_reason: None,
             last_visible_signal_refresh: None,
             screen_detection,
             process_exited: false,
@@ -521,6 +597,28 @@ mod tests {
     }
 
     #[test]
+    fn background_work_starting_while_working_publishes() {
+        let previous = publish_state(AgentState::Working);
+        let mut next = publish_state(AgentState::Working);
+        next.background_work = true;
+
+        assert!(should_publish_detection_update(
+            previous, next, false, false, false
+        ));
+    }
+
+    #[test]
+    fn background_work_stopping_while_working_publishes() {
+        let mut previous = publish_state(AgentState::Working);
+        previous.background_work = true;
+        let next = publish_state(AgentState::Working);
+
+        assert!(should_publish_detection_update(
+            previous, next, false, false, false
+        ));
+    }
+
+    #[test]
     fn transition_decision_publishes_next_for_visible_blocker() {
         let now = std::time::Instant::now();
         let mut pending_idle = PendingIdleConfirmation::default();
@@ -558,6 +656,8 @@ mod tests {
                 visible_idle: false,
                 visible_blocker: false,
                 visible_working: true,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: false,
             }
         );
@@ -578,8 +678,41 @@ mod tests {
                 visible_idle: true,
                 visible_blocker: false,
                 visible_working: false,
+                background_work: false,
+                blocked_reason: None,
                 process_exited: false,
             }
+        );
+    }
+
+    // Fork issue 137: a blocked pane whose reason changes (a permission prompt
+    // replaced by a question dialog) republishes so the reason stays current.
+    #[test]
+    fn screen_publish_republishes_when_only_the_blocked_reason_changes() {
+        let now = std::time::Instant::now();
+        let mut pending_idle = PendingIdleConfirmation::default();
+        let mut detection = screen_detection(AgentState::Blocked);
+        detection.blocked_reason = Some(BlockedReason::Question);
+        let mut input = screen_publish_input(AgentState::Blocked, detection, now);
+        input.last_blocked_reason = Some(BlockedReason::Permission);
+
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::Publish {
+                state: AgentState::Blocked,
+                visible_idle: false,
+                visible_blocker: false,
+                visible_working: false,
+                background_work: false,
+                blocked_reason: Some(BlockedReason::Question),
+                process_exited: false,
+            }
+        );
+
+        input.last_blocked_reason = Some(BlockedReason::Question);
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::NoPublish
         );
     }
 
@@ -604,5 +737,70 @@ mod tests {
         mark_detection_content_changed(&seq);
 
         assert_eq!(seq.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_init_without_seed_matches_cold_start() {
+        assert_eq!(
+            BasicDetectionSeedInit::from_agent_seed(None),
+            BasicDetectionSeedInit {
+                agent: None,
+                state: AgentState::Unknown,
+                last_visible_idle: false,
+                last_visible_blocker: false,
+                last_visible_working: false,
+                last_background_work: false,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_init_mirrors_seeded_state_as_last_published() {
+        assert_eq!(
+            BasicDetectionSeedInit::from_agent_seed(Some((Agent::Claude, AgentState::Working))),
+            BasicDetectionSeedInit {
+                agent: Some(Agent::Claude),
+                state: AgentState::Working,
+                last_visible_idle: false,
+                last_visible_blocker: false,
+                last_visible_working: true,
+                last_background_work: false,
+            }
+        );
+        assert_eq!(
+            BasicDetectionSeedInit::from_agent_seed(Some((Agent::Codex, AgentState::Blocked))),
+            BasicDetectionSeedInit {
+                agent: Some(Agent::Codex),
+                state: AgentState::Blocked,
+                last_visible_idle: false,
+                last_visible_blocker: true,
+                last_visible_working: false,
+                last_background_work: false,
+            }
+        );
+        assert_eq!(
+            BasicDetectionSeedInit::from_agent_seed(Some((Agent::Pi, AgentState::Idle))),
+            BasicDetectionSeedInit {
+                agent: Some(Agent::Pi),
+                state: AgentState::Idle,
+                last_visible_idle: true,
+                last_visible_blocker: false,
+                last_visible_working: false,
+                last_background_work: false,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seeded_hold_blocks_only_blank_screens() {
+        // A blank grid means the re-adopted agent has not repainted yet; the
+        // seeded state must survive until real content arrives.
+        assert!(should_hold_seeded_detection(true, ""));
+        assert!(should_hold_seeded_detection(true, " \n\t \n"));
+        assert!(!should_hold_seeded_detection(true, "esc to interrupt"));
+        assert!(!should_hold_seeded_detection(false, ""));
     }
 }

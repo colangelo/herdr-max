@@ -47,6 +47,13 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    /// The exporting server's effective size, (cols, rows): its attached
+    /// client's, or the size it had itself carried over a handoff. The
+    /// importing server keeps panes at this size until a client attaches,
+    /// instead of shrinking them to the headless default. Absent from
+    /// manifests written before this field existed.
+    #[serde(default)]
+    pub client_size: Option<(u16, u16)>,
 }
 
 #[cfg(unix)]
@@ -307,6 +314,7 @@ pub(crate) fn manifest_for(
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
     api_window_title: Option<String>,
+    client_size: Option<(u16, u16)>,
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
@@ -317,6 +325,7 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        client_size,
     }
 }
 
@@ -390,7 +399,7 @@ fn send_fd_batch(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
     if fds.is_empty() {
         return Ok(());
     }
-    let byte = [b'F'];
+    let byte = *b"F";
     let iov = [libc::iovec {
         iov_base: byte.as_ptr() as *mut libc::c_void,
         iov_len: byte.len(),
@@ -538,6 +547,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            last_client_size: None,
         }
     }
 
@@ -549,6 +559,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            None,
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
@@ -562,6 +573,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            None,
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
@@ -573,5 +585,24 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+        assert!(older.client_size.is_none());
+    }
+
+    #[test]
+    fn a_handoff_carries_the_client_size() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some((310, 56)),
+        );
+        let value = serde_json::to_value(&manifest).expect("manifest should serialize");
+
+        let loaded: HandoffManifest =
+            serde_json::from_value(value).expect("the manifest should load back");
+
+        assert_eq!(loaded.client_size, Some((310, 56)));
     }
 }

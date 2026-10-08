@@ -1,6 +1,6 @@
 ---
 title: CLI リファレンス
-description: セッション、ワークスペース、タブ、ペイン、通知、エージェント、wait、インテグレーション、ステータスのための Herdr コマンド。
+description: セッション、ワークスペース、タブ、ペイン、通知、todo、エージェント、wait、インテグレーション、ステータスのための Herdr コマンド。
 ---
 
 Herdr の CLI は、インテグレーションやエージェントが使うのと同じローカルソケット API を通じて、実行中のサーバーと通信します。
@@ -134,6 +134,26 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 ```
 
 `notification show` は設定済みの `[ui.toast]` 配信を使います。`--position` はアプリ内の Herdr トーストにのみ影響します。`--sound` のデフォルトは `none` で、`done` と `request` は通知が表示されたときにのみ、既存の完了音と要注意音を再生します。
+
+## Todo
+
+```bash
+herdr todo add <text> [--pane ID|--current] [--priority high|normal|low] [--link <target>] [--json]
+herdr todo list [--pane ID|--current|--all] [--json]
+herdr todo done <id> [--pane ID|--current] [--json]
+herdr todo undone <id> [--pane ID|--current] [--json]
+herdr todo edit <id> [--text TEXT] [--priority high|normal|low] [--link <target>|--unlink] [--pane ID|--current] [--json]
+herdr todo rm <id> [--pane ID|--current] [--json]
+herdr todo clear [--done] [--pane ID|--current] [--json]
+```
+
+ペインはそれぞれ自分の todo リストを持ちます。`--pane` も `--current` も指定しない場合、各サブコマンドは呼び出し元ペインの `HERDR_PANE_ID` に対して動作します。そのため、終了しようとしているエージェントは自分のペイン ID を知らなくても `herdr todo add "レビューに戻す"` で次の一手を残せます。Herdr ペインの外でターゲットなしに実行した場合、コマンドは推測せずにエラーになります。`todo list` はセッション内のすべてのペインを一覧する `--all` も受け付けます。
+
+`--priority` は `high`、`normal`、`low` のいずれかで、デフォルトは `normal` です。`--link <target>` は todo を別のペイン (`w1:p2` のようなペイン ID) に紐づけます。リンク作成時に対象のラベル (そのペインのラベル、エージェント名、渡した ID のいずれか) を取り込むため、対象がなくなった後でも意味が読み取れます。`edit --unlink` はリンクを外します。1 ペインあたり todo は最大 50 件、1 件あたり最大 500 文字で、上限を超える書き込みは切り詰めずに `todo_limit_reached` または `todo_text_too_long` で拒否されます。
+
+`todo list` は表示順 (未完了が先 → 優先度の高い順 → 作成順) に 1 行ずつ出力します。未完了の todo には `*` が付き、続いて id、優先度、テキストが並びます。リンク付きの todo には ` → ラベル` が、対象ペインがすでに存在しない場合はさらに ` (gone)` が付きます。未完了が残っている場合は、最後の行に未完了件数が出ます。`--all` はペイン列を追加します。生の `todo.list` レスポンス (各 todo の `link_pane_id`、`link_alive`、`created_at_unix`、`updated_at_unix` を含む) が欲しいときは `--json` を渡してください。
+
+todo はペインに属し、ペインとともに移動します。セッションスナップショットに乗ってサーバー再起動や `herdr update --handoff` をまたいで保持され、リンクは復元後のペイン ID に張り替えられます。復元されなかった対象へのリンクはラベルを保ったまま解決されなくなり、別のペインを指すことはありません。
 
 ## セッション
 

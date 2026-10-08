@@ -11,6 +11,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+mod agent_priority;
 mod agent_resume;
 mod agent_view_eval;
 mod api;
@@ -19,6 +20,7 @@ mod build_info;
 mod checksum;
 mod cli;
 mod client;
+mod codex_app_server;
 mod config;
 mod copy_mode;
 mod detect;
@@ -142,6 +144,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Most reliable direct bindings are ctrl+letter, function keys, and explicit modified chords.
 # alt+..., cmd/super, and punctuation-with-modifiers may depend on your terminal/tmux setup.
 # prefix = "ctrl+b"
+# A list gives more than one prefix, for example one for each hand: any listed
+# key enters prefix mode and every "prefix+X" binding works after any of them.
+# The first is the primary one shown in help. "ctrl+;" only arrives through the
+# kitty keyboard protocol (Ghostty, kitty, WezTerm, recent iTerm2); avoid
+# "ctrl+/", which a legacy terminal sends as ctrl+_ (the shell's undo).
+# prefix = ["ctrl+b", "ctrl+;"]
 
 # Prefix-mode actions
 # help = "prefix+?"
@@ -149,6 +157,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # detach = "prefix+q"
 # reload_config = "prefix+shift+r"
 # open_notification_target = "prefix+o"
+# open_notification_center = "prefix+ctrl+n"
+# open_pane_todos = "prefix+ctrl+t"
+# add_pane_todo = ""      # optional, unset by default; compose a new todo for the focused pane
+# open_todo_board = ""    # optional, unset by default; every pane's todos in one board
+# display_panes = "prefix+i"  # every pane's number, address, name and size, like tmux's prefix+q
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
 # new_workspace = "prefix+shift+n"
@@ -156,12 +169,17 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # open_worktree = ""    # optional, unset by default
 # remove_worktree = ""  # optional, unset by default; opens confirmation
 # rename_workspace = "prefix+shift+w"
+# toggle_pin_agent = ""      # optional, unset by default; pin or unpin the focused pane's agent to the top of the agent panel
+# toggle_sync_panes = "prefix+shift+s"  # type into every pane of the current tab at once
+# toggle_pin_workspace = ""  # optional, unset by default; pin or unpin the selected space to the top of the list
 # close_workspace = "prefix+shift+d"
 # previous_workspace = "" # optional, unset by default
 # next_workspace = ""     # optional, unset by default
 # previous_agent = ""     # optional, unset by default
 # next_agent = ""         # optional, unset by default
-# focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9"
+# focus_agent = ""        # optional indexed binding, e.g. "prefix+alt+1..9";
+#                          # add an "a..z" range for entries 10-35, e.g.
+#                          # ["prefix+alt+1..9", "prefix+alt+a..z"]
 # remote_image_paste = "ctrl+v" # only active in herdr --remote; empty disables raw-key image paste
 # new_tab = "prefix+c"
 # rename_tab = "prefix+shift+t"
@@ -173,24 +191,48 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
 # rename_pane = "prefix+shift+p"
+# break_pane = "prefix+!"
+# move_pane_to_tab = "prefix+m"
+# move_pane_next_tab = "prefix+>"
+# move_pane_prev_tab = "prefix+<"
 # edit_scrollback = "prefix+e"
 # clear_pane = ""                  # unbound; e.g. "prefix+ctrl+k"
+# clear_scrollback = ""   # optional, unset by default; purge saved scrollback (tmux clear-history)
+# copy_mode = "prefix+["                    # enter keyboard copy mode for the focused pane
+# copy_mode_page_up = "prefix+pageup"       # enter copy mode + page up in one gesture (tmux copy-mode -u)
+# copy_mode_half_page_up = "prefix+ctrl+u"  # enter copy mode + half page up
+# copy_mode_line_up = "prefix+ctrl+k"       # enter copy mode + one line up; with a non-ctrl+b prefix
+#                                           # "prefix+ctrl+b" is also free (the default prefix shadows it via send-prefix)
+#                                           # On a fullscreen (alt-screen) app like vim, the scroll gestures
+#                                           # scroll the app itself instead: ctrl+u/d page, ctrl+k/j line,
+#                                           # g/G top/bottom, esc exits
+# copy_mode_page_down = "prefix+pagedown"     # the mirrors: scroll back down a page,
+# copy_mode_half_page_down = "prefix+ctrl+d"  # half page, or one line. On a fullscreen app they
+# copy_mode_line_down = "prefix+ctrl+j"       # re-enter the scroll mode going down; on an ordinary
+#                                             # pane they do nothing unless copy mode is already open
 # focus_pane_left = "prefix+h"
 # focus_pane_down = "prefix+j"
 # focus_pane_up = "prefix+k"
 # focus_pane_right = "prefix+l"
+# swap_pane_left = "prefix+shift+h"    # swap the focused pane with the pane to the left
+# swap_pane_down = "prefix+shift+j"
+# swap_pane_up = "prefix+shift+k"
+# swap_pane_right = "prefix+shift+l"
 # cycle_pane_next = "prefix+tab"
 # cycle_pane_previous = "prefix+shift+tab"
 # last_pane = ""          # optional, unset by default; bind e.g. "prefix+tab" for global back-and-forth
 # split_vertical = "prefix+v"
 # split_horizontal = "prefix+minus"
 # close_pane = "prefix+x"
+# respawn_pane = "prefix+ctrl+x"   # restart the focused pane's process in place
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
 # resize_pane_left = ""   # optional, e.g. "ctrl+shift+alt+left" resizes without entering resize mode
 # resize_pane_down = ""   # optional, e.g. "ctrl+shift+alt+down"
 # resize_pane_up = ""     # optional, e.g. "ctrl+shift+alt+up"
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
+# balance_panes = "prefix+="              # balance all panes in the current tab to equal sizes
+# next_layout = "prefix+space"            # cycle the tab through layout presets (even-h -> even-v -> tiled)
 # toggle_sidebar = "prefix+b"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
@@ -230,6 +272,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # allow_unelevated_clients = false
 # headless_cols = 120
 # headless_rows = 40
+# Keep the last attached client's size (80x24 or larger) for panes while no
+# client is attached, across restarts too. The headless size above is then
+# only the first-start fallback. false: always use the headless size.
+# remember_client_size = true
 
 # [worktrees]
 # directory = "~/.herdr/worktrees"
@@ -346,8 +392,20 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
+# Working icon in agent rows: "on" steps a spinner on a slow shared tick while
+# any agent is working (the tick is armed only then); "off" keeps the static
+# working glyph. status_spinner_ms is the frame interval, clamped to 50..=2000.
+# status_spinner = "on"
+# status_spinner_ms = 200
+
+# How long the prefix+i labels and the resize labels (window or pane) stay up,
+# in milliseconds, clamped to 500..=60000.
+# display_panes_ms = 3000
+
 # Custom values reported through pane metadata use a $name token.
-# A token occurrence may be styled with { token = "workspace", fg = "#89b4fa", bold = true, dim = false }.
+# A token occurrence may be styled with { token = "workspace", fg = "#89b4fa", bold = true, dim = false, italic = true }.
+# keep = true gives a token its full width before the row's other tokens shrink or drop;
+# truncate = "start" cuts a long token from its beginning ("…text") instead of its end.
 # Omitted style fields preserve the contextual default.
 # [ui.sidebar.agents]
 # Blank rows between agent entries. Set to 1 to restore the previous spacing.
@@ -359,11 +417,161 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Expanded space rows. Built-ins are state_icon, state_text, workspace, branch, and git_status.
 # Custom values reported through workspace metadata use a $name token, for example $jj_status.
-# Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold and dim booleans.
+# Inline token styles accept strict #RGB/#RRGGBB foregrounds plus bold, dim and italic booleans, keep, and truncate = "start" or "end".
 # [ui.sidebar.spaces]
 # Blank rows between space entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
 # rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+
+# Workspace list ordering: "manual" (your drag order) or "priority"
+# (attention-needing workspaces bubble to the top, like agent_panel_sort).
+# workspace_sort = "manual"
+
+# How priority-sorted lists (spaces, agents panel) apply reorders: "bubble"
+# holds a row in place for sort_motion_settle_ms, then moves it one position
+# per sort_motion_step_ms so the list never teleports under the cursor;
+# "instant" re-sorts immediately.
+# sort_motion = "bubble"
+# sort_motion_settle_ms = 2000
+# sort_motion_step_ms = 150
+
+# Step cadence across a reshuffle: "linear" spaces every step evenly;
+# "bubble" eases in and out — slow to break away, quickest mid-flight,
+# slowing into the final slot. The curve stretches over the reshuffle, so it
+# only reads as acceleration when rows travel several positions.
+# sort_motion_easing = "linear"
+
+# Sidebar entry composition: "default" keeps the current layout; "editorial"
+# right-aligns jump numbers on the name row, renders thin uppercase section
+# headers, and dims inactive meta lines.
+# sidebar_style = "default"
+
+# Leader glyph(s) shown before the editorial jump numbers, hinting the jump
+# chord: workspaces jump with prefix+N, agents with prefix+alt+N. Rendered in
+# the matching *_number_color. Only applies when sidebar_style = "editorial".
+# workspace_number_prefix = "₽"
+# agent_number_prefix = "₽⌥"
+
+# Per-state color overrides for sidebar state glyphs and state text.
+# Same syntax as accent; unset values follow the theme.
+# [ui.state_colors]
+# working = "#f9e2af"
+# idle = "#a6e3a1"
+# done = "#94e2d5"
+# blocked = "#f38ba8"
+# unknown = "#6c7086"
+# Agents parked at their prompt behind work they launched; unset follows working.
+# background = "#94e2d5"
+
+# Per-state glyph overrides for sidebar state icons, layered on top of
+# status_indicators. Each value must be exactly one terminal cell wide.
+# "done" is a finished agent you have not looked at yet; "idle" is one you have.
+# [ui.state_symbols]
+# working = "◐"
+# idle = "✓"
+# done = "□"
+# blocked = "×"
+# unknown = "·"
+# An agent parked at its prompt while work it launched keeps running (a
+# background shell, a background agent, an MCP task) turns slowly between
+# these two instead of spinning.
+# background = "■"
+# background_alt = "◆"
+
+# Notification center position: "top-right" keeps the indicator in the tab
+# bar with the dropdown under it; "bottom-right" floats the indicator in the
+# frame's bottom-right corner with the dropdown opening above it.
+# notification_center_position = "top-right"
+
+# Show each workspace's jump symbol (1-9, then a-z; the switch_workspace
+# target) on the sidebar branch line.
+# show_workspace_numbers = false
+
+# Show each agent's jump symbol (1-9, then a-z; the focus_agent target) on
+# the agent panel status line.
+# show_agent_numbers = false
+
+# Show the herdr server's short host name, right-aligned on the sidebar
+# "SPACES" header row.
+# show_host = true
+
+# Color for show_workspace_numbers labels (same syntax as accent).
+# Unset uses the theme's muted number color.
+# workspace_number_color = "#89b4fa"
+
+# Color for show_agent_numbers labels (same syntax as accent).
+# Unset uses the theme's muted number color.
+# agent_number_color = "#89b4fa"
+
+# Color for the focused (active) pane border (same syntax as accent).
+# Unset uses the theme accent.
+# pane_border_active_color = "#d78700"
+
+# Color for unfocused (inactive) pane borders (same syntax as accent).
+# Unset uses the theme's muted border color.
+# pane_border_inactive_color = "#4a4a4a"
+
+# Box-drawing weight for the focused pane border: "light", "heavy", or "double".
+# pane_border_active_style = "light"
+
+# Colors for pane border titles (same syntax as accent). Unset follows the
+# matching border color.
+# pane_title_active_color = "#ffd700"
+# pane_title_inactive_color = "#7a7a7a"
+
+# Show a todo indicator (▾ N outstanding) at the far right of a split pane's
+# top border. Panes with no todos are unaffected.
+# show_pane_todo_indicator = true
+
+# Colour for the pane todo indicator while todos are outstanding (same syntax
+# as accent). Unset colours it by the highest outstanding priority.
+# pane_todo_color = "#f38ba8"
+
+# Highlight the active space and agent in the sidebar, using
+# pane_border_active_color and pane_border_active_style. Modes: "off",
+# "above", "below", "both" (lines in the spacer rows), "left", "right"
+# (a vertical bar on that edge). Booleans still work: true = "both".
+# sidebar_active_border = "off"
+
+# Show what is scrolled out of view in the spaces list and the agent panel.
+# "rows": a summary row at the edge ("↑ 2 pinned · 3 more", "↓ 5 more ·
+# ● 1 blocked"); click it to scroll a page. "fog": the two rows next to the
+# edge get a lighter background. "both" does both, "off" neither.
+# sidebar_overflow = "both"
+
+# How far the fog lifts the two rows next to a hidden edge, in percent of the
+# way from the background to the text colour, nearest row first. 0 to 2
+# entries, each 0..=60; 0 means no fog on that row.
+# sidebar_fog = [17, 7]
+# How much of the most urgent hidden state's colour the fog takes, 0..=100.
+# sidebar_fog_tint = 70
+# What the fog does: "lift" (a lighter background), "dim" (the text of those
+# rows fades toward the background) or "both".
+# sidebar_fog_style = "lift"
+# How far "dim" and "both" fade the text of the two fog rows toward the
+# background, in percent, nearest row first. 0 to 2 entries, each 0..=95; 0
+# means no fade on that row.
+# sidebar_fade = [85, 55]
+
+# Background of the active space and agent rows in the sidebar (same syntax
+# as accent). Unset uses the theme's subtle highlight.
+
+# Default backgrounds for focused/unfocused pane cells (same syntax as accent),
+# like tmux window-active-style / window-style. Only cells without an
+# app-painted background are tinted. Unset keeps the terminal default.
+# pane_active_bg = "#000000"
+# pane_inactive_bg = "#0c0c0c"
+
+# Dim unfocused pane content in all modes, not only while a herdr mode
+# (prefix/navigate) is active.
+# dim_inactive_panes = false
+
+# A lighter, always-on dim for unfocused panes: how far their text colour
+# moves toward the colour behind it, in percent (0..=90; 0 is off). It
+# recolours the text, so it stays weaker than the terminal's faint (which
+# dim_inactive_panes and prefix mode use) and the two stay different. 20 is
+# a good start.
+# inactive_pane_dim = 0
 
 # Background notification popup delivery
 [ui.toast]
@@ -375,10 +583,27 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # delay_seconds = 1
 
 [ui.toast.herdr]
+# In-app toast position: top-left, top-right, bottom-left, bottom-right, or center.
+# "center" floats the toast over the pane area, between the panes.
 # position = "bottom-right"
+# Toast box size: auto (hug the text), medium (>= 40% of the area width),
+# or large (>= 60%). medium/large add inner padding.
+# size = "auto"
+# How long each toast kind stays visible, in seconds. 0 keeps the toast
+# visible until clicked or replaced.
+# needs_attention_seconds = 8
+# finished_seconds = 5
+# update_seconds = 3
+# Where notes about a pane action (a refused pane move, a failed clear
+# scrollback) show: "corner" (the position above) or "pane" (centered in the
+# pane acted on, the corner when it is too small).
+# pane_feedback = "corner"
 
 [ui.toast.clipboard]
 # enabled = true
+# Copied-to-clipboard popup position: top-left, top-center, top-right,
+# bottom-left, bottom-center, bottom-right, or "pane" (centered in the pane the
+# text came from, bottom-center when it is too small).
 # position = "bottom-center"
 
 # Play sounds when agents change state in background workspaces
@@ -626,6 +851,7 @@ fn main() -> io::Result<()> {
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
+        println!("       herdr todo <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr session <subcommand> ...");
@@ -677,6 +903,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr notification <subcommand>",
                 "Notification helpers over the socket API",
+            ),
+            (
+                "herdr todo <subcommand>",
+                "Per-pane todo helpers over the socket API",
             ),
             (
                 "herdr agent <subcommand>",
@@ -884,6 +1114,58 @@ mod tests {
         assert_eq!(
             args_as_utf8(args).unwrap_err(),
             "argument 2 is not valid UTF-8"
+        );
+    }
+
+    /// The `--default-config` template is a hand-maintained string that is
+    /// disjoint from `KeysConfig`, so it drifts every time a keybinding action
+    /// is added. Guard against that: every `pub <field>: BindingConfig` action
+    /// in the struct must be documented as a `[keys]` entry in DEFAULT_CONFIG.
+    #[test]
+    fn default_config_documents_sidebar_overflow() {
+        assert!(DEFAULT_CONFIG.contains("# sidebar_overflow = \"both\""));
+        // Uncommented, the documented line parses to the default.
+        let toml = DEFAULT_CONFIG
+            .lines()
+            .find_map(|line| line.strip_prefix("# sidebar_overflow = "))
+            .expect("template line");
+        let config: crate::config::Config =
+            toml::from_str(&format!("[ui]\nsidebar_overflow = {toml}")).unwrap();
+        assert_eq!(
+            config.ui.sidebar_overflow,
+            crate::config::SidebarOverflowConfig::Both
+        );
+    }
+
+    #[test]
+    fn default_config_documents_every_binding_action() {
+        // Compile-time copy of the struct source so the check tracks the real fields.
+        const MODEL_SRC: &str = include_str!("config/model.rs");
+
+        let mut missing = Vec::new();
+        for line in MODEL_SRC.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            if ty.trim().trim_end_matches(',') != "BindingConfig" {
+                continue;
+            }
+            let name = name.trim();
+            // The template documents each action as `# <name> = ...`; the
+            // trailing " = " avoids matching a longer action that shares this
+            // name as a prefix (e.g. copy_mode vs copy_mode_page_up).
+            if !DEFAULT_CONFIG.contains(&format!("{name} = ")) {
+                missing.push(name.to_string());
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "keybinding actions missing from the --default-config [keys] template: {missing:?}"
         );
     }
 }

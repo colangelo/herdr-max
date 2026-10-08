@@ -406,6 +406,66 @@ class ChangelogScriptTests(unittest.TestCase):
                 "0.1.1",
             )
 
+    def test_manifest_from_release_payload_accepts_fork_suffixed_tag(self) -> None:
+        # A fork tags `v0.1.1-ac` while the manifest version stays the base `0.1.1`.
+        manifest = manifest_from_release_payload(
+            {
+                "tagName": "v0.1.1-ac",
+                "isDraft": False,
+                "isPrerelease": False,
+                "body": "### Fixed\n- One\n",
+                "assets": release_assets_with_digests(),
+            },
+            "0.1.1",
+            expected_tag="v0.1.1-ac",
+        )
+
+        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(
+            manifest["assets"]["linux-x86_64"], "https://example.com/linux-x86_64"
+        )
+
+    def test_manifest_from_release_payload_rejects_wrong_explicit_tag(self) -> None:
+        with self.assertRaisesRegex(ChangelogError, "expected v0.1.1-ac, got v0.1.1"):
+            manifest_from_release_payload(
+                {
+                    "tagName": "v0.1.1",
+                    "isDraft": False,
+                    "isPrerelease": False,
+                    "body": "### Fixed\n- One\n",
+                    "assets": release_assets_with_digests(),
+                },
+                "0.1.1",
+                expected_tag="v0.1.1-ac",
+            )
+
+    def test_verify_release_state_accepts_fork_suffixed_tag(self) -> None:
+        # The fork's releases are tagged `-ac` while the manifest keeps the base
+        # version, so verification must be able to name the tag the way
+        # sync-latest-json does. Without this, `just latest-json-check` can only
+        # ask for `v0.7.4` and every fork check dies on "release not found".
+        args = build_parser().parse_args(
+            [
+                "verify-release-state",
+                "--repo",
+                "colangelo/herdr-max",
+                "--version",
+                "0.7.4",
+                "--tag",
+                "v0.7.4-ac",
+                "--protocol",
+                "18",
+            ]
+        )
+
+        self.assertEqual(args.tag, "v0.7.4-ac")
+        self.assertEqual(args.version, "0.7.4")
+
+    def test_verify_release_state_tag_defaults_to_none(self) -> None:
+        args = build_parser().parse_args(["verify-release-state", "--version", "0.7.4"])
+
+        self.assertIsNone(args.tag)
+
     def test_manifest_from_release_payload_rejects_missing_asset(self) -> None:
         with self.assertRaisesRegex(ChangelogError, "missing asset herdr-macos-aarch64"):
             manifest_from_release_payload(

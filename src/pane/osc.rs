@@ -533,8 +533,14 @@ impl AgentOscStateTracker {
         self.terminal_title.as_deref()
     }
 
+    /// Seeds the title carried across a live handoff. The title was emitted by
+    /// the same live process whose PTY the import re-adopts, so it also counts
+    /// as detection evidence (`latest_title`): agents like claude signal
+    /// working solely through the OSC title, and an import that dropped it
+    /// would read a working agent as idle until the agent re-emits a title.
     #[cfg(unix)]
     pub(super) fn seed_terminal_title(&mut self, title: Option<String>) {
+        self.latest_title.clone_from(&title);
         self.terminal_title = title;
     }
 
@@ -1051,12 +1057,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn handoff_seed_does_not_restore_agent_detection_evidence() {
+    fn handoff_seed_restores_agent_detection_evidence() {
+        // The seeded title was emitted by the same live process whose PTY the
+        // import re-adopts, so it must count as detection evidence: claude's
+        // only working signal is the OSC title, and without it a working agent
+        // reads as idle after every handoff until it happens to re-emit.
         let mut tracker = AgentOscStateTracker::default();
 
         tracker.seed_terminal_title(Some("✳ restored title".into()));
 
         assert_eq!(tracker.terminal_title(), Some("✳ restored title"));
+        assert_eq!(tracker.latest_title(), "✳ restored title");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_seed_of_none_leaves_no_evidence() {
+        let mut tracker = AgentOscStateTracker::default();
+
+        tracker.seed_terminal_title(None);
+
+        assert_eq!(tracker.terminal_title(), None);
         assert_eq!(tracker.latest_title(), "");
     }
 

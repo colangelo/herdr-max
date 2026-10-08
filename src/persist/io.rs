@@ -11,6 +11,51 @@ pub(super) fn session_path() -> PathBuf {
     crate::session::data_dir().join("session.json")
 }
 
+/// Move a session file that cannot be used out of the way, under a
+/// timestamped name, and say so.
+///
+/// Renaming rather than copying is the point: a copy leaves the original
+/// sitting at the path the next save writes to, so the protection would depend
+/// on ordering. A rename preserves the file and removes it from harm in one
+/// act, and the next start finds no session file rather than the same
+/// unusable one.
+///
+/// Nothing deletes these. Each is the last copy of a session someone lost —
+/// panes, working directories, and todos that exist nowhere else.
+fn preserve_unusable_session(path: &Path, reason: &str) {
+    let stamp = time::OffsetDateTime::now_utc();
+    let name = format!(
+        "session.{:04}{:02}{:02}-{:02}{:02}{:02}Z.bak.json",
+        stamp.year(),
+        u8::from(stamp.month()),
+        stamp.day(),
+        stamp.hour(),
+        stamp.minute(),
+        stamp.second()
+    );
+    // A second-resolution stamp can repeat, and a repeat would let the second
+    // failure destroy what the first preserved — the same bug one level up.
+    let mut target = path.with_file_name(&name);
+    for n in 2..100 {
+        if !target.exists() {
+            break;
+        }
+        target = path.with_file_name(name.replace(".bak.json", &format!("-{n}.bak.json")));
+    }
+    match std::fs::rename(path, &target) {
+        Ok(()) => warn!(
+            reason,
+            preserved = %target.display(),
+            "session file could not be used; preserved it rather than letting the next save overwrite it"
+        ),
+        Err(err) => warn!(
+            reason,
+            err = %err,
+            "session file could not be used and could not be preserved"
+        ),
+    }
+}
+
 fn session_history_path() -> PathBuf {
     crate::session::data_dir().join("session-history.json")
 }
@@ -52,7 +97,16 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
     }
     let json = serde_json::to_string_pretty(snapshot)?;
     let tmp_path = target.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
+    // Flushed before the rename, not merely written: the rename is already
+    // atomic against a torn write, but without the flush a power loss can make
+    // the rename durable before the data is — which is exactly how a
+    // half-written file turns up at the session path.
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+    }
     if let Err(err) = std::fs::rename(&tmp_path, &target) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err);
@@ -101,6 +155,7 @@ pub fn load() -> Option<SessionSnapshot> {
                 event = "persist.restore", subsystem = "persist", outcome = "read_error",
                 path = %path.display(), err = %err, "failed to read session file"
             );
+            preserve_unusable_session(&path, "unreadable");
             return None;
         }
     };
@@ -114,6 +169,11 @@ pub fn load() -> Option<SessionSnapshot> {
                         path = %path.display(), file_version = version, supported = SNAPSHOT_VERSION,
                         "session file is from a newer herdr version, ignoring"
                     );
+                    // Declined deliberately, but the consequence is the same
+                    // as a failure: the save that follows would overwrite it,
+                    // so running an older herdr once would destroy the newer
+                    // session it politely refused to read.
+                    preserve_unusable_session(&path, "newer snapshot version");
                     return None;
                 }
             }
@@ -121,6 +181,7 @@ pub fn load() -> Option<SessionSnapshot> {
                 event = "persist.restore", subsystem = "persist", outcome = "parse_error",
                 path = %path.display(), err = %err, "failed to parse session file, ignoring"
             );
+            preserve_unusable_session(&path, "unparseable");
             None
         }
     }
@@ -164,6 +225,61 @@ mod tests {
         PaneHistorySnapshot, TabHistorySnapshot, WorkspaceHistorySnapshot,
     };
 
+    /// An unusable session file is the last copy of someone's panes, working
+    /// directories and todos. It is moved aside intact, and the path a save
+    /// would write to is left empty so the save cannot destroy it.
+    #[test]
+    fn an_unusable_session_file_is_preserved_with_its_contents() {
+        let path = temp_session_path("preserve");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(&path, b"{ torn json").expect("write");
+
+        preserve_unusable_session(&path, "unparseable");
+
+        assert!(!path.exists(), "the save path is clear");
+        let preserved: Vec<PathBuf> = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("read dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".bak.json"))
+            })
+            .collect();
+        assert_eq!(preserved.len(), 1, "one preserved file: {preserved:?}");
+        assert_eq!(
+            std::fs::read(&preserved[0]).expect("read preserved"),
+            b"{ torn json",
+            "preserved byte for byte"
+        );
+    }
+
+    /// Two failures in the same second must not let the later one overwrite
+    /// what the earlier one saved.
+    #[test]
+    fn repeated_failures_each_keep_their_own_copy() {
+        let path = temp_session_path("preserve-twice");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+
+        std::fs::write(&path, b"first").expect("write");
+        preserve_unusable_session(&path, "unparseable");
+        std::fs::write(&path, b"second").expect("write");
+        preserve_unusable_session(&path, "unparseable");
+
+        let mut bodies: Vec<Vec<u8>> = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("read dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".bak.json"))
+            })
+            .map(|p| std::fs::read(p).expect("read preserved"))
+            .collect();
+        bodies.sort();
+        assert_eq!(bodies, vec![b"first".to_vec(), b"second".to_vec()]);
+    }
+
     fn temp_session_path(name: &str) -> PathBuf {
         let unique = format!(
             "herdr-session-tests-{}-{}-{}",
@@ -192,6 +308,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            last_client_size: None,
         }
     }
 

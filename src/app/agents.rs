@@ -21,6 +21,8 @@ fn valid_agent_name(name: &str) -> bool {
 
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
+        let title_names = self.state.agent_title_names();
+        let title_names = &title_names;
         self.state
             .workspaces
             .iter()
@@ -30,7 +32,9 @@ impl App {
                     tab.layout
                         .pane_ids()
                         .into_iter()
-                        .filter_map(move |pane_id| self.agent_info(ws_idx, pane_id))
+                        .filter_map(move |pane_id| {
+                            self.agent_info_with_title_names(ws_idx, pane_id, title_names)
+                        })
                 })
             })
             .collect()
@@ -87,6 +91,24 @@ impl App {
             })
     }
 
+    /// Pin or unpin the agent a target names; pinned agents lead the panel.
+    pub(super) fn pin_agent_target(
+        &mut self,
+        target: &str,
+        pin: bool,
+    ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
+        let resolved = self.resolve_agent_target(target)?;
+        if pin {
+            self.state.pin_agent(resolved.pane_id);
+        } else {
+            self.state.unpin_agent(resolved.pane_id);
+        }
+        self.agent_info(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| TerminalTargetError::NotFound {
+                target: target.to_string(),
+            })
+    }
+
     pub(super) fn rename_agent_target(
         &mut self,
         target: &str,
@@ -111,6 +133,21 @@ impl App {
             }
         }
 
+        // Only looked up when a Codex thread may need naming, and only here:
+        // a rename is rare, and this reads the pane's process table.
+        let codex_process = self
+            .codex_app_server
+            .naming_socket()
+            .and_then(|_| {
+                let terminal_id = self
+                    .state
+                    .workspaces
+                    .get(resolved.ws_idx)?
+                    .terminal_id(resolved.pane_id)?;
+                self.terminal_runtimes.get(terminal_id)
+            })
+            .and_then(pane_codex_process);
+
         let Some(terminal) = self
             .state
             .terminals
@@ -127,9 +164,40 @@ impl App {
         if terminal.effective_agent_label().is_none() {
             return Err(AgentRenameError::NotAgent);
         }
+        let codex_rename = (terminal.effective_agent_label() == Some("codex"))
+            .then(|| {
+                let new_name = normalized_name.clone()?;
+                let thread_id = terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .filter(|session| session.agent == "codex")
+                    .map(|session| session.session_ref.value.clone())
+                    .or_else(|| {
+                        codex_process
+                            .as_ref()
+                            .and_then(|process| process.resumed_thread_id.clone())
+                    });
+                Some(crate::codex_app_server::NameJob::Rename {
+                    thread_id,
+                    cwd: terminal.cwd.clone(),
+                    old_name: terminal.agent_name.clone(),
+                    new_name,
+                    process_started_at: codex_process
+                        .as_ref()
+                        .and_then(|process| process.started_at),
+                })
+            })
+            .flatten();
         match normalized_name {
             Some(name) => terminal.set_agent_name(name),
             None => terminal.clear_agent_name(),
+        }
+        if let (Some(job), Some(socket)) = (codex_rename, self.codex_app_server.naming_socket()) {
+            crate::codex_app_server::spawn_name_job(
+                socket.to_path_buf(),
+                job,
+                Some(self.codex_thread_reply(resolved.pane_id)),
+            );
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -194,8 +262,10 @@ impl App {
         let shell_name = available_shell_name(runtime)
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
-        let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
-        argv.extend(params.args);
+        let pane_cwd = runtime.cwd().unwrap_or_else(|| terminal.cwd.clone());
+        let argv = agent_start_argv(kind, params.args, &self.codex_app_server, &pane_cwd);
+        let launches_on_codex_daemon =
+            kind == crate::detect::Agent::Codex && self.codex_app_server.naming_socket().is_some();
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
@@ -224,6 +294,19 @@ impl App {
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
+        if launches_on_codex_daemon {
+            if let Some(socket) = self.codex_app_server.naming_socket() {
+                crate::codex_app_server::spawn_name_job(
+                    socket.to_path_buf(),
+                    crate::codex_app_server::NameJob::Discover {
+                        cwd: pane_cwd,
+                        launched_at: crate::codex_app_server::unix_now_ms(),
+                        name: name.clone(),
+                    },
+                    Some(self.codex_thread_reply(pane_id)),
+                );
+            }
+        }
 
         let agent = self
             .agent_info(ws_idx, pane_id)
@@ -368,6 +451,16 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::api::schema::AgentInfo> {
+        self.agent_info_with_title_names(ws_idx, pane_id, &self.state.agent_title_names())
+    }
+
+    /// `agent_info` with the title fallback names worked out once for a list.
+    fn agent_info_with_title_names(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        title_names: &std::collections::HashMap<crate::terminal::TerminalId, String>,
+    ) -> Option<crate::api::schema::AgentInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_state = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane_state.attached_terminal_id)?;
@@ -377,14 +470,23 @@ impl App {
         let pane = self.pane_metadata(ws_idx, pane_id)?;
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
-            name: terminal.agent_name.clone(),
+            name: terminal
+                .agent_name
+                .clone()
+                .or_else(|| title_names.get(&terminal.id).cloned()),
+            name_source: (terminal.agent_name.is_none() && title_names.contains_key(&terminal.id))
+                .then_some(crate::api::schema::AgentNameSource::Title),
             agent: pane.agent,
             title: pane.title,
             terminal_title: pane.terminal_title,
             terminal_title_stripped: pane.terminal_title_stripped,
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
+            blocked_reason: pane.blocked_reason,
+            blocked_since: pane.blocked_since,
+            input_box: None,
             screen_detection_skipped: terminal.full_lifecycle_hook_authority_active(),
+            pinned: pane.pinned,
             state_labels: pane.state_labels,
             tokens: pane.tokens,
             agent_session: pane.agent_session,
@@ -409,11 +511,80 @@ impl App {
     ) -> Vec<crate::api::schema::AgentInfo> {
         self.collect_agent_infos()
             .into_iter()
+            // Only explicit names conflict: taking a name another agent has
+            // as its title fallback just drops that fallback.
             .filter(|agent| {
-                agent.name.as_deref() == Some(name) && agent.terminal_id != except_terminal_id
+                agent.name.as_deref() == Some(name)
+                    && agent.name_source.is_none()
+                    && agent.terminal_id != except_terminal_id
             })
             .collect()
     }
+}
+
+/// The argv `agent start` runs: the agent's executable, the caller's
+/// arguments, and for Codex the shared-daemon arguments when enabled.
+fn agent_start_argv(
+    kind: crate::detect::Agent,
+    args: Vec<String>,
+    codex_app_server: &crate::codex_app_server::CodexAppServer,
+    pane_cwd: &std::path::Path,
+) -> Vec<String> {
+    let codex_args = if kind == crate::detect::Agent::Codex {
+        codex_app_server.launch_args(pane_cwd, &args)
+    } else {
+        Vec::new()
+    };
+    let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+    argv.extend(args);
+    argv.extend(codex_args);
+    argv
+}
+
+impl App {
+    /// Where a naming job reports the Codex thread it resolved for `pane_id`.
+    fn codex_thread_reply(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> crate::codex_app_server::ThreadReply {
+        crate::codex_app_server::ThreadReply {
+            events: self.event_tx.clone(),
+            pane_id,
+        }
+    }
+}
+
+/// What naming needs to know about the Codex process running in a pane.
+struct PaneCodexProcess {
+    /// The thread it reopened with `resume <id>`.
+    resumed_thread_id: Option<String>,
+    /// When it started, in unix ms.
+    started_at: Option<i64>,
+}
+
+/// The Codex process in the pane's foreground job, or one PTY down behind a
+/// recognised wrapper.
+fn pane_codex_process(runtime: &crate::terminal::TerminalRuntime) -> Option<PaneCodexProcess> {
+    let job = crate::detect::foreground_job(runtime.child_pid()?)?;
+    let codex = |job: &crate::platform::ForegroundJob| {
+        crate::detect::agent_processes_in_job(job, crate::detect::Agent::Codex)
+            .next()
+            .cloned()
+    };
+    let process = codex(&job).or_else(|| {
+        let (_, nested) = crate::detect::wrapped_shell_job(
+            &job,
+            crate::platform::nested_foreground_job_with_owner,
+        )?;
+        codex(&nested)
+    })?;
+    Some(PaneCodexProcess {
+        resumed_thread_id: process
+            .argv
+            .as_deref()
+            .and_then(crate::codex_app_server::resumed_thread_id),
+        started_at: crate::platform::process_started_at_ms(process.pid),
+    })
 }
 
 fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
@@ -421,7 +592,10 @@ fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<St
     if runtime.child_pid().is_none() {
         return Some("sh".into());
     }
-    crate::platform::available_pane_shell(runtime.child_pid()?)
+    crate::platform::available_pane_shell(
+        runtime.child_pid()?,
+        crate::detect::is_nested_pty_wrapper,
+    )
 }
 
 pub(super) fn runtime_hosts_agent(
@@ -443,6 +617,11 @@ fn live_runtime_agent(runtime: &crate::terminal::TerminalRuntime) -> Option<crat
             job.processes
                 .iter()
                 .find_map(|process| crate::platform::process_agent_hint(process.pid))
+        })
+        .or_else(|| {
+            // A PTY wrapper such as atuin's hides the agent one PTY down.
+            crate::detect::nested_agent_job(&job, crate::platform::nested_foreground_job_with_owner)
+                .map(|(_, agent, _)| agent)
         })
 }
 
@@ -493,5 +672,64 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_app_server_tests {
+    use super::agent_start_argv;
+    use crate::codex_app_server::CodexAppServer;
+    use crate::detect::Agent;
+    use std::path::Path;
+
+    fn codex(app_server: bool) -> CodexAppServer {
+        CodexAppServer::from_config(&crate::config::CodexAgentConfig {
+            app_server,
+            app_server_socket: "/run/codex.sock".into(),
+            name_threads: false,
+        })
+    }
+
+    #[test]
+    fn codex_start_is_unchanged_when_the_switch_is_off() {
+        assert_eq!(
+            agent_start_argv(
+                Agent::Codex,
+                vec!["--yolo".into()],
+                &codex(false),
+                Path::new("/repo")
+            ),
+            ["codex", "--yolo"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_start_goes_to_the_daemon_with_the_pane_cwd() {
+        assert_eq!(
+            agent_start_argv(
+                Agent::Codex,
+                vec!["--yolo".into()],
+                &codex(true),
+                Path::new("/repo")
+            ),
+            [
+                "codex",
+                "--yolo",
+                "--remote",
+                "unix:///run/codex.sock",
+                "-C",
+                "/repo"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_agents_never_get_codex_arguments() {
+        assert_eq!(
+            agent_start_argv(Agent::Claude, Vec::new(), &codex(true), Path::new("/repo")),
+            ["claude"]
+        );
     }
 }

@@ -1,8 +1,9 @@
 use crate::api::schema::{
-    Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
-    PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
-    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    LayoutBalanceParams, LayoutPreset, LayoutSetPresetParams, Method, OutputMatch,
+    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams,
+    PaneInputSetParams, PaneLayoutParams, PaneListParams, PaneMoveDestination, PaneMoveParams,
+    PaneNeighborParams, PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams,
+    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
@@ -20,19 +21,23 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "current" => pane_current(&args[1..]),
         "get" => pane_get(&args[1..]),
         "layout" => pane_layout(&args[1..]),
+        "balance" => pane_balance(&args[1..]),
         "process-info" => pane_process_info(&args[1..]),
         "neighbor" => pane_neighbor(&args[1..]),
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
         "resize" => pane_resize(&args[1..]),
         "zoom" => pane_zoom(&args[1..]),
+        "sync" => pane_sync(&args[1..]),
         "read" => pane_read(&args[1..]),
         "rename" => pane_rename(&args[1..]),
         "input" => pane_input(&args[1..]),
         "split" => pane_split(&args[1..]),
         "swap" => pane_swap(&args[1..]),
         "move" => pane_move(&args[1..]),
+        "clear" => pane_clear(&args[1..]),
         "close" => pane_close(&args[1..]),
+        "respawn" => pane_respawn(&args[1..]),
         "send-text" => pane_send_text(&args[1..]),
         "send-keys" => pane_send_keys(&args[1..]),
         "wait-output" => pane_wait_output(&args[1..]),
@@ -40,6 +45,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "report-agent-session" => pane_report_agent_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
+        "report-hint" => pane_report_hint(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
             print_pane_help();
@@ -139,6 +145,63 @@ fn parse_pane_current_args(
 }
 
 fn pane_layout(args: &[String]) -> std::io::Result<i32> {
+    // `--set <preset>` rebuilds the layout into a preset; without it this is the
+    // read-only layout query. Remaining args select the target (--pane/--current).
+    let mut preset: Option<LayoutPreset> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--set" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --set (even-h|even-v|tiled)");
+                    return Ok(2);
+                };
+                let Some(parsed) = parse_layout_preset(value) else {
+                    eprintln!("unknown layout preset: {value} (even-h|even-v|tiled)");
+                    return Ok(2);
+                };
+                preset = Some(parsed);
+                index += 2;
+            }
+            other => {
+                rest.push(other.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    let pane_id = match parse_optional_current_pane_args_from_env(&rest) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    match preset {
+        Some(preset) => super::runtime::pane_layout_set_preset(LayoutSetPresetParams {
+            tab_id: None,
+            pane_id,
+            preset,
+        }),
+        None => super::print_response(&super::send_request(&Request {
+            id: "cli:pane:layout".into(),
+            method: Method::PaneLayout(PaneLayoutParams { pane_id }),
+        })?),
+    }
+}
+
+fn parse_layout_preset(value: &str) -> Option<LayoutPreset> {
+    match value {
+        "even-h" | "even-horizontal" => Some(LayoutPreset::EvenHorizontal),
+        "even-v" | "even-vertical" => Some(LayoutPreset::EvenVertical),
+        "tiled" => Some(LayoutPreset::Tiled),
+        _ => None,
+    }
+}
+
+fn pane_balance(args: &[String]) -> std::io::Result<i32> {
     let pane_id = match parse_optional_current_pane_args_from_env(args) {
         Ok(pane_id) => pane_id,
         Err(message) => {
@@ -147,10 +210,10 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
-    super::print_response(&super::send_request(&Request {
-        id: "cli:pane:layout".into(),
-        method: Method::PaneLayout(PaneLayoutParams { pane_id }),
-    })?)
+    super::runtime::pane_balance(LayoutBalanceParams {
+        tab_id: None,
+        pane_id,
+    })
 }
 
 fn pane_process_info(args: &[String]) -> std::io::Result<i32> {
@@ -427,6 +490,30 @@ fn parse_pane_zoom_args(args: &[String]) -> Result<PaneZoomParams, String> {
     Ok(PaneZoomParams { pane_id, mode })
 }
 
+fn pane_sync(args: &[String]) -> std::io::Result<i32> {
+    match parse_pane_sync_args(args) {
+        Ok(params) => super::runtime::pane_sync(params),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+/// `herdr pane sync [<pane_id>|--pane ID|--current] [--toggle|--on|--off]`:
+/// the zoom grammar, with the sync modes.
+fn parse_pane_sync_args(args: &[String]) -> Result<crate::api::schema::PaneSyncParams, String> {
+    let params = parse_pane_zoom_args(args)?;
+    Ok(crate::api::schema::PaneSyncParams {
+        pane_id: params.pane_id,
+        mode: super::sync_mode(match params.mode {
+            PaneZoomMode::Toggle => "toggle",
+            PaneZoomMode::On => "on",
+            PaneZoomMode::Off => "off",
+        }),
+    })
+}
+
 fn pane_rename(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr pane rename <pane_id> <label>|--clear");
@@ -457,16 +544,17 @@ fn pane_read(args: &[String]) -> std::io::Result<i32> {
         }
     };
 
+    let lines = params.lines;
     let response = super::send_request(&Request {
         id: "cli:pane:read".into(),
         method: Method::PaneRead(params),
     })?;
 
-    super::print_read_response(&response)
+    super::print_read_response(&response, lines)
 }
 
 fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
-    const USAGE: &str = "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]";
+    const USAGE: &str = "usage: herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw] [--strip-dim]";
 
     let args = super::expand_equals_args(args, &["--source", "--lines", "--format"]);
     let mut pane_id = None;
@@ -474,6 +562,7 @@ fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
     let mut lines = None;
     let mut format = ReadFormat::Text;
     let mut strip_ansi = true;
+    let mut strip_dim = false;
 
     let mut index = 0;
     while index < args.len() {
@@ -509,6 +598,10 @@ fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
                 strip_ansi = false;
                 index += 1;
             }
+            "--strip-dim" => {
+                strip_dim = true;
+                index += 1;
+            }
             option if option.starts_with('-') => {
                 return Err(format!("unknown option: {option}"));
             }
@@ -532,6 +625,7 @@ fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
         lines,
         format,
         strip_ansi,
+        strip_dim,
         intent: crate::api::schema::ReadIntent::Interactive,
     })
 }
@@ -1001,28 +1095,233 @@ fn parse_pane_direction(value: &str) -> Result<PaneDirection, String> {
     }
 }
 
+fn pane_clear(args: &[String]) -> std::io::Result<i32> {
+    let pane_id = match parse_pane_clear_args(args) {
+        Ok(pane_id) => pane_id,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::send_ok_request(Method::PaneClearScrollback(PaneTarget { pane_id }))
+}
+
+fn parse_pane_clear_args(args: &[String]) -> Result<String, String> {
+    let mut pane_id = None;
+    let mut index = 0;
+    if args
+        .first()
+        .is_some_and(|arg| !arg.as_str().starts_with("--"))
+    {
+        pane_id = args.first().map(|arg| super::normalize_pane_id(arg));
+        index = 1;
+    }
+    while index < args.len() {
+        match args[index].as_str() {
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--current" => {
+                pane_id = None;
+                index += 1;
+            }
+            other => {
+                return Err(format!(
+                "unknown option: {other}\nusage: herdr pane clear [<pane_id>|--pane ID|--current]"
+            ))
+            }
+        }
+    }
+    match pane_id {
+        Some(pane_id) => Ok(pane_id),
+        // `--current` (or no target): resolve from the pane environment.
+        None => std::env::var("HERDR_PANE_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| super::normalize_pane_id(&value))
+            .ok_or_else(|| {
+                "no pane specified: pass <pane_id>, or use --current inside a herdr pane"
+                    .to_string()
+            }),
+    }
+}
+
 fn pane_close(args: &[String]) -> std::io::Result<i32> {
-    let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane close <pane_id>");
+    let (args, force) = super::take_force_flag(args);
+    let [raw_pane_id] = args.as_slice() else {
+        eprintln!("usage: herdr pane close <pane_id> [--force]");
         return Ok(2);
     };
-    if args.len() != 1 {
-        eprintln!("usage: herdr pane close <pane_id>");
-        return Ok(2);
-    }
 
-    super::runtime::pane_close(super::normalize_pane_id(raw_pane_id))
+    super::runtime::pane_close(super::normalize_pane_id(raw_pane_id), force)
+}
+
+fn pane_respawn(args: &[String]) -> std::io::Result<i32> {
+    let (args, force) = super::take_force_flag(args);
+    let [raw_pane_id] = args.as_slice() else {
+        eprintln!("usage: herdr pane respawn <pane_id> [--force]");
+        return Ok(2);
+    };
+
+    super::runtime::pane_respawn(super::normalize_pane_id(raw_pane_id), force)
+}
+
+const PANE_SEND_TEXT_USAGE: &str =
+    "usage: herdr pane send-text <pane_id> <text> [--chunk BYTES [--chunk-delay MS]]";
+
+/// Pause between `--chunk` pieces when `--chunk-delay` is not given. Without a
+/// pause, back-to-back writes can reach the program in the pane as one read,
+/// which a TUI still treats as one paste-sized burst.
+const DEFAULT_CHUNK_DELAY_MS: u64 = 20;
+
+#[derive(Debug, PartialEq, Eq)]
+struct PaneSendTextArgs {
+    pane_id: String,
+    text: String,
+    chunk: Option<ChunkPacing>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ChunkPacing {
+    max_bytes: usize,
+    delay: std::time::Duration,
 }
 
 fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
-    if args.len() < 2 {
-        eprintln!("usage: herdr pane send-text <pane_id> <text>");
-        return Ok(2);
+    let parsed = match parse_pane_send_text_args(args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    let Some(pacing) = parsed.chunk else {
+        return super::send_ok_request(Method::PaneSendText(PaneSendTextParams {
+            pane_id: parsed.pane_id,
+            text: parsed.text,
+        }));
+    };
+
+    // One request per piece, paced client-side: each piece reaches the pane as
+    // its own write, and the command returns only after the last one is sent.
+    let pieces = split_utf8_chunks(&parsed.text, pacing.max_bytes);
+    let total = pieces.len();
+    for (index, piece) in pieces.into_iter().enumerate() {
+        if index > 0 {
+            std::thread::sleep(pacing.delay);
+        }
+        let code = super::send_ok_request(Method::PaneSendText(PaneSendTextParams {
+            pane_id: parsed.pane_id.clone(),
+            text: piece.to_string(),
+        }))?;
+        if code != 0 {
+            eprintln!("sent {index} of {total} pieces before the failure");
+            return Ok(code);
+        }
+    }
+    Ok(0)
+}
+
+/// Parse `pane send-text`. `--chunk` and `--chunk-delay` are recognised
+/// anywhere after the pane id; `--` ends option parsing so text that starts
+/// with those words can still be sent. Every other word is text, joined with
+/// single spaces exactly as before.
+fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String> {
+    let Some((raw_pane_id, rest)) = args.split_first() else {
+        return Err(PANE_SEND_TEXT_USAGE.into());
+    };
+
+    let mut words: Vec<&str> = Vec::new();
+    let mut chunk = None;
+    let mut delay_ms = None;
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = rest[index].as_str();
+        let (flag, attached) = match arg.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (arg, None),
+        };
+        match flag {
+            "--" if attached.is_none() => {
+                words.extend(rest[index + 1..].iter().map(String::as_str));
+                break;
+            }
+            "--chunk" | "--chunk-delay" => {
+                let value = match attached {
+                    Some(value) => value,
+                    None => {
+                        index += 1;
+                        rest.get(index)
+                            .map(String::as_str)
+                            .ok_or_else(|| format!("missing value for {flag}"))?
+                    }
+                };
+                let parsed: u64 = value
+                    .parse()
+                    .map_err(|_| format!("invalid value for {flag}: {value}"))?;
+                if flag == "--chunk" {
+                    if parsed == 0 {
+                        return Err("--chunk must be at least 1".into());
+                    }
+                    chunk = Some(
+                        usize::try_from(parsed)
+                            .map_err(|_| format!("invalid value for --chunk: {value}"))?,
+                    );
+                } else {
+                    delay_ms = Some(parsed);
+                }
+            }
+            _ => words.push(arg),
+        }
+        index += 1;
     }
 
-    let pane_id = super::normalize_pane_id(&args[0]);
-    let text = args[1..].join(" ");
-    super::send_ok_request(Method::PaneSendText(PaneSendTextParams { pane_id, text }))
+    if words.is_empty() {
+        return Err(PANE_SEND_TEXT_USAGE.into());
+    }
+    if chunk.is_none() && delay_ms.is_some() {
+        return Err("--chunk-delay requires --chunk".into());
+    }
+
+    Ok(PaneSendTextArgs {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+        text: words.join(" "),
+        chunk: chunk.map(|max_bytes| ChunkPacing {
+            max_bytes,
+            delay: std::time::Duration::from_millis(delay_ms.unwrap_or(DEFAULT_CHUNK_DELAY_MS)),
+        }),
+    })
+}
+
+/// Split `text` into pieces of at most `max_bytes` bytes without cutting a
+/// UTF-8 character. A character wider than `max_bytes` becomes a piece of its
+/// own, so every piece is non-empty and valid UTF-8. Empty text yields one
+/// empty piece, matching an unchunked send.
+fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
+    let max_bytes = max_bytes.max(1);
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while rest.len() > max_bytes {
+        let mut end = max_bytes;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            // The first character alone is wider than the limit.
+            end = rest.chars().next().map_or(rest.len(), char::len_utf8);
+        }
+        let (piece, tail) = rest.split_at(end);
+        pieces.push(piece);
+        rest = tail;
+    }
+    pieces.push(rest);
+    pieces
 }
 
 fn pane_send_keys(args: &[String]) -> std::io::Result<i32> {
@@ -1478,6 +1777,101 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+const REPORT_HINT_USAGE: &str = "usage: herdr pane report-hint <pane_id> --source ID --agent LABEL (--kind question|permission [--id ID] [--ttl-ms N] | --clear) [--seq N]";
+
+fn pane_report_hint(args: &[String]) -> std::io::Result<i32> {
+    match parse_pane_report_hint_args(args) {
+        Ok(params) => super::send_ok_request(Method::PaneReportHint(params)),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+/// `herdr pane report-hint <pane_id> --source ID --agent LABEL (--kind
+/// question|permission [--id ID] [--ttl-ms N] | --clear) [--seq N]`.
+fn parse_pane_report_hint_args(
+    args: &[String],
+) -> Result<crate::api::schema::PaneReportHintParams, String> {
+    use crate::api::schema::AgentHintKind;
+    let Some(raw_pane_id) = args.first() else {
+        return Err(REPORT_HINT_USAGE.into());
+    };
+    let pane_id = super::normalize_pane_id(raw_pane_id);
+    let (mut source, mut agent, mut kind, mut id) = (None, None, None, None);
+    let (mut ttl_ms, mut seq, mut clear) = (None, None, false);
+    let mut index = 1;
+    let value = |index: usize, flag: &str| -> Result<String, String> {
+        args.get(index + 1)
+            .cloned()
+            .ok_or_else(|| format!("missing value for {flag}"))
+    };
+    let number = |flag: &str, text: String| -> Result<u64, String> {
+        text.parse::<u64>()
+            .map_err(|_| format!("invalid value for {flag}: {text}"))
+    };
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                source = Some(value(index, "--source")?);
+                index += 2;
+            }
+            "--agent" => {
+                agent = Some(value(index, "--agent")?);
+                index += 2;
+            }
+            "--kind" => {
+                kind = Some(match value(index, "--kind")?.as_str() {
+                    "question" => AgentHintKind::Question,
+                    "permission" => AgentHintKind::Permission,
+                    other => return Err(format!("unknown hint kind: {other}")),
+                });
+                index += 2;
+            }
+            "--id" => {
+                id = Some(value(index, "--id")?);
+                index += 2;
+            }
+            "--ttl-ms" => {
+                ttl_ms = Some(number("--ttl-ms", value(index, "--ttl-ms")?)?);
+                index += 2;
+            }
+            "--seq" => {
+                seq = Some(number("--seq", value(index, "--seq")?)?);
+                index += 2;
+            }
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+    }
+    let Some(source) = source.filter(|source| !source.trim().is_empty()) else {
+        return Err("missing required --source".into());
+    };
+    let Some(agent) = agent.filter(|agent| !agent.trim().is_empty()) else {
+        return Err("missing required --agent".into());
+    };
+    if clear && kind.is_some() {
+        return Err("cannot set --kind and --clear together".into());
+    }
+    if !clear && kind.is_none() {
+        return Err("give --kind, or --clear to end the hint".into());
+    }
+    Ok(crate::api::schema::PaneReportHintParams {
+        pane_id,
+        source,
+        agent,
+        kind,
+        id,
+        ttl_ms,
+        clear,
+        seq,
+    })
+}
+
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
@@ -1674,7 +2068,8 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane layout [--pane ID|--current]");
+    eprintln!("  herdr pane layout [--set even-h|even-v|tiled] [--pane ID|--current]");
+    eprintln!("  herdr pane balance [--pane ID|--current]");
     eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  herdr pane edges [--pane ID|--current]");
@@ -1683,8 +2078,9 @@ fn print_pane_help() {
         "  herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
     );
     eprintln!("  herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]");
+    eprintln!("  herdr pane sync [<pane_id>|--pane ID|--current] [--toggle|--on|--off]");
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
-    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]");
     eprintln!("  herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane");
     eprintln!(
         "  herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]"
@@ -1694,13 +2090,16 @@ fn print_pane_help() {
     eprintln!("  herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]");
     eprintln!("  herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]");
     eprintln!("  herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]");
+    eprintln!("  herdr pane clear [<pane_id>|--pane ID|--current]");
     eprintln!("  herdr pane close <pane_id>");
-    eprintln!("  herdr pane send-text <pane_id> <text>");
+    eprintln!("  herdr pane respawn <pane_id> [--force]");
+    eprintln!("  herdr pane send-text <pane_id> <text> [--chunk BYTES [--chunk-delay MS]]");
     eprintln!("  herdr pane send-keys <pane_id> <key> [key ...]");
     eprintln!("  herdr pane wait-output <pane_id> (--match TEXT | --regex PATTERN) [--source visible|recent|recent-unwrapped] [--lines N] [--timeout MS] [--raw]");
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
+    eprintln!("  {}", &REPORT_HINT_USAGE["usage: ".len()..]);
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
@@ -1711,6 +2110,113 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_without_chunk_joins_words_as_before() {
+        let parsed = parse_pane_send_text_args(&args(&["p1", "hello", "world"])).unwrap();
+        assert_eq!(parsed.pane_id, super::super::normalize_pane_id("p1"));
+        assert_eq!(parsed.text, "hello world");
+        assert_eq!(parsed.chunk, None);
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_accepts_chunk_options_anywhere_after_pane() {
+        for form in [
+            args(&["p1", "--chunk", "300", "--chunk-delay", "5", "hi", "there"]),
+            args(&["p1", "hi", "there", "--chunk=300", "--chunk-delay=5"]),
+            args(&["p1", "hi", "--chunk", "300", "there", "--chunk-delay", "5"]),
+        ] {
+            let parsed = parse_pane_send_text_args(&form).unwrap();
+            assert_eq!(parsed.text, "hi there", "{form:?}");
+            assert_eq!(
+                parsed.chunk,
+                Some(ChunkPacing {
+                    max_bytes: 300,
+                    delay: std::time::Duration::from_millis(5),
+                }),
+                "{form:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_defaults_chunk_delay() {
+        let parsed = parse_pane_send_text_args(&args(&["p1", "x", "--chunk", "8"])).unwrap();
+        assert_eq!(
+            parsed.chunk.map(|pacing| pacing.delay),
+            Some(std::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS))
+        );
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_double_dash_keeps_option_words_as_text() {
+        let parsed =
+            parse_pane_send_text_args(&args(&["p1", "--chunk", "4", "--", "--chunk", "9"]))
+                .unwrap();
+        assert_eq!(parsed.text, "--chunk 9");
+        assert_eq!(parsed.chunk.map(|pacing| pacing.max_bytes), Some(4));
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_rejects_bad_chunk_options() {
+        for (form, needle) in [
+            (args(&["p1"]), "usage"),
+            (args(&["p1", "--chunk", "300"]), "usage"),
+            (args(&["p1", "x", "--chunk"]), "missing value for --chunk"),
+            (args(&["p1", "x", "--chunk", "0"]), "at least 1"),
+            (
+                args(&["p1", "x", "--chunk", "-3"]),
+                "invalid value for --chunk",
+            ),
+            (args(&["p1", "x", "--chunk-delay", "5"]), "requires --chunk"),
+            (
+                args(&["p1", "x", "--chunk", "4", "--chunk-delay", "soon"]),
+                "invalid value for --chunk-delay",
+            ),
+        ] {
+            let error = parse_pane_send_text_args(&form).unwrap_err();
+            assert!(error.contains(needle), "{form:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn split_utf8_chunks_respects_byte_limit_and_round_trips() {
+        let text = "a".repeat(1000);
+        let pieces = split_utf8_chunks(&text, 300);
+        assert_eq!(
+            pieces.iter().map(|piece| piece.len()).collect::<Vec<_>>(),
+            vec![300, 300, 300, 100]
+        );
+        assert_eq!(pieces.concat(), text);
+    }
+
+    #[test]
+    fn split_utf8_chunks_never_cuts_a_multibyte_character() {
+        // Emoji are 4 bytes (one is a ZWJ sequence of several scalars), CJK 3,
+        // accented Latin 2; limits chosen to land mid-character repeatedly.
+        let text = "héllo 🦀 世界 👩‍💻 日本語テキスト ✓ ".repeat(40);
+        for max_bytes in [1, 2, 3, 4, 5, 7, 10, 64, 300] {
+            let pieces = split_utf8_chunks(&text, max_bytes);
+            assert_eq!(pieces.concat(), text, "limit {max_bytes}");
+            for piece in &pieces {
+                assert!(!piece.is_empty(), "limit {max_bytes}");
+                let single_char = piece.chars().count() == 1;
+                assert!(
+                    piece.len() <= max_bytes || single_char,
+                    "limit {max_bytes}: piece {piece:?} is {} bytes",
+                    piece.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_utf8_chunks_keeps_short_and_empty_text_whole() {
+        assert_eq!(split_utf8_chunks("", 300), vec![""]);
+        assert_eq!(split_utf8_chunks("世界", 300), vec!["世界"]);
+        assert_eq!(split_utf8_chunks("世界", 6), vec!["世界"]);
+        assert_eq!(split_utf8_chunks("世界", 5), vec!["世", "界"]);
     }
 
     #[test]
@@ -1940,6 +2446,61 @@ mod tests {
     }
 
     #[test]
+    fn parse_pane_report_hint_args_takes_a_hint_or_a_clear() {
+        use crate::api::schema::AgentHintKind;
+        let params = parse_pane_report_hint_args(&args(&[
+            "w1:p1",
+            "--source",
+            "herdr:claude-mod",
+            "--agent",
+            "claude",
+            "--kind",
+            "permission",
+            "--id",
+            "toolu_1",
+            "--ttl-ms",
+            "15000",
+            "--seq",
+            "42",
+        ]))
+        .unwrap();
+        assert_eq!(params.kind, Some(AgentHintKind::Permission));
+        assert_eq!(params.id.as_deref(), Some("toolu_1"));
+        assert_eq!(
+            (params.ttl_ms, params.seq, params.clear),
+            (Some(15000), Some(42), false)
+        );
+
+        let cleared = parse_pane_report_hint_args(&args(&[
+            "w1:p1", "--source", "s", "--agent", "claude", "--clear",
+        ]))
+        .unwrap();
+        assert!(cleared.clear && cleared.kind.is_none());
+    }
+
+    #[test]
+    fn parse_pane_report_hint_args_rejects_bad_requests() {
+        let base = ["w1:p1", "--source", "s", "--agent", "claude"];
+        let with = |extra: &[&str]| {
+            let mut all: Vec<&str> = base.to_vec();
+            all.extend_from_slice(extra);
+            parse_pane_report_hint_args(&args(&all))
+        };
+        assert!(with(&[]).is_err(), "neither a kind nor --clear");
+        assert!(with(&["--kind", "question", "--clear"]).is_err());
+        assert!(with(&["--kind", "form"])
+            .unwrap_err()
+            .contains("unknown hint kind"));
+        assert!(with(&["--kind", "question", "--ttl-ms", "soon"]).is_err());
+        assert!(
+            parse_pane_report_hint_args(&args(&["w1:p1", "--agent", "claude", "--clear"]))
+                .unwrap_err()
+                .contains("--source")
+        );
+        assert!(parse_pane_report_hint_args(&args(&[])).is_err());
+    }
+
+    #[test]
     fn parse_pane_zoom_args_defaults_to_current_toggle() {
         let params = parse_pane_zoom_args(&args(&[])).unwrap();
 
@@ -2032,6 +2593,14 @@ mod tests {
         assert_eq!(params.pane_id, Some("issue-2".into()));
         assert_eq!(params.direction, PaneDirection::Left);
         assert_eq!(params.amount, Some(0.125));
+    }
+
+    #[test]
+    fn parse_pane_read_args_takes_strip_dim() {
+        let params = parse_pane_read_args(&args(&["p", "--strip-dim"])).unwrap();
+        assert!(params.strip_dim);
+        let params = parse_pane_read_args(&args(&["p"])).unwrap();
+        assert!(!params.strip_dim, "off by default");
     }
 
     #[test]

@@ -159,6 +159,10 @@ impl App {
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
             self.state.next_managed_agent_deadline(),
+            self.state.display_panes_deadline(),
+            self.state.resize_labels_deadline(),
+            self.state.sync_deadline(),
+            self.state.agent_hint_deadline(),
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
@@ -169,6 +173,8 @@ impl App {
             self.pending_agent_resume_deadline,
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
+            self.sort_motion_next_due(),
+            self.spinner_next_due(),
             render_deadline,
         ]
         .into_iter()
@@ -177,6 +183,90 @@ impl App {
     }
 
     #[cfg(test)]
+    /// Earliest pending bubble-motion work across the sidebar lists, for the
+    /// loop-deadline aggregator.
+    pub(crate) fn sort_motion_next_due(&self) -> Option<Instant> {
+        if !self.state.sort_motion_bubble {
+            return None;
+        }
+        let timing = self.state.sort_motion_timing;
+        [
+            crate::ui::workspace_motion_active(&self.state)
+                .then(|| self.state.workspace_list_motion.next_due(timing))
+                .flatten(),
+            crate::ui::agent_panel_motion_active(&self.state)
+                .then(|| self.state.agent_panel_motion.next_due(timing))
+                .flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// When the working spinner's next frame is due, for the loop-deadline
+    /// aggregator. `None` while no working agent is on screen, so an idle
+    /// session never wakes for it.
+    pub(crate) fn spinner_next_due(&self) -> Option<Instant> {
+        if !self.state.spinner_active() {
+            return None;
+        }
+        Some(self.last_spinner_tick.map_or_else(Instant::now, |last| {
+            last + self.state.status_spinner_interval
+        }))
+    }
+
+    /// Steps the working spinner when its interval has elapsed. Returns true
+    /// when the frame changed and the sidebar needs a redraw. The only place
+    /// the frame mutates, so every agent row on screen shows the same frame.
+    pub(crate) fn advance_spinner(&mut self, now: Instant) -> bool {
+        if !self.state.spinner_active() {
+            // Restart from a fresh interval when an agent next starts working.
+            self.last_spinner_tick = None;
+            return false;
+        }
+        let due = self.last_spinner_tick.is_none_or(|last| {
+            now.saturating_duration_since(last) >= self.state.status_spinner_interval
+        });
+        if !due {
+            return false;
+        }
+        self.last_spinner_tick = Some(now);
+        self.state.spinner_frame = self.state.spinner_frame.wrapping_add(1);
+        true
+    }
+
+    /// Advances sidebar bubble motion toward the live priority order. Returns
+    /// true when a display order changed and a render is needed. The only
+    /// place motion state mutates, keeping render and hit-testing coherent
+    /// between calls.
+    pub(crate) fn advance_sort_motion(&mut self, now: Instant) -> bool {
+        if !self.state.sort_motion_bubble {
+            return false;
+        }
+        let timing = self.state.sort_motion_timing;
+        let mut changed = false;
+        if crate::ui::workspace_motion_active(&self.state) {
+            let target = crate::ui::workspace_unit_target_keys(&self.state);
+            let before = self.state.workspace_list_motion.project(&target);
+            let after = self
+                .state
+                .workspace_list_motion
+                .tick(now, &target, timing)
+                .to_vec();
+            changed |= before != after;
+        }
+        if crate::ui::agent_panel_motion_active(&self.state) {
+            let target = crate::ui::agent_panel_target_keys(&self.state);
+            let before = self.state.agent_panel_motion.project(&target);
+            let after = self
+                .state
+                .agent_panel_motion
+                .tick(now, &target, timing)
+                .to_vec();
+            changed |= before != after;
+        }
+        changed
+    }
     pub(crate) fn drain_internal_events(&mut self) -> bool {
         self.drain_internal_events_up_to(super::APP_EVENT_DRAIN_LIMIT)
             .1

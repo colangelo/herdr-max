@@ -78,6 +78,19 @@ pub enum ToastHerdrPosition {
     BottomLeft,
     #[default]
     BottomRight,
+    Center,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToastHerdrSize {
+    /// Size the toast to its text content.
+    #[default]
+    Auto,
+    /// At least 40% of the anchor area width, with inner padding.
+    Medium,
+    /// At least 60% of the anchor area width, with inner padding.
+    Large,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -90,6 +103,22 @@ pub enum ToastClipboardPosition {
     #[default]
     BottomCenter,
     BottomRight,
+    /// Centered in the pane the text was copied from; bottom-center when
+    /// there is no such pane in view or it is too small (fork issue 129).
+    Pane,
+}
+
+/// Where herdr's notes about a pane action (a refused or failed pane move,
+/// clear scrollback, todo save) show (fork issue 129).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToastPaneFeedback {
+    /// In the `[ui.toast.herdr]` position, like every other toast.
+    #[default]
+    Corner,
+    /// Centered in the pane acted on; the corner when that pane is not in
+    /// view or is too small.
+    Pane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -122,6 +151,298 @@ impl StatusIndicatorStyle {
             Self::Dots => "dots",
             Self::Symbols => "symbols",
         }
+    }
+}
+
+/// Whether the working state icon in the sidebar's agent rows animates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusSpinnerConfig {
+    /// Step a spinner on a slow shared tick while any agent is working. The
+    /// tick is armed only while a working agent is on screen, so an idle
+    /// session costs nothing.
+    #[default]
+    #[serde(alias = "agent")]
+    On,
+    /// Always draw the static working glyph.
+    Off,
+}
+
+/// Bounds for `ui.status_spinner_ms`: fast enough to read as motion, slow
+/// enough that the tick stays a rounding error next to PTY output.
+pub const MIN_STATUS_SPINNER_MS: u64 = 50;
+pub const MAX_STATUS_SPINNER_MS: u64 = 2000;
+pub const DEFAULT_STATUS_SPINNER_MS: u64 = 200;
+
+/// Bounds for `ui.display_panes_ms`: long enough to read the labels, short
+/// enough that they never outstay the moment they answer.
+pub const MIN_DISPLAY_PANES_MS: u64 = 500;
+pub const MAX_DISPLAY_PANES_MS: u64 = 60_000;
+pub const DEFAULT_DISPLAY_PANES_MS: u64 = 3000;
+
+/// `ui.display_panes_ms` held to its bounds.
+pub fn clamp_display_panes_ms(ms: u64) -> u64 {
+    ms.clamp(MIN_DISPLAY_PANES_MS, MAX_DISPLAY_PANES_MS)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceSortConfig {
+    #[default]
+    Manual,
+    Priority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarStyleConfig {
+    /// Current layout: jump numbers lead the second row, bold headers.
+    #[default]
+    Default,
+    /// Numbers right-aligned on the name row, thin uppercase headers,
+    /// dimmed inactive meta lines.
+    Editorial,
+}
+
+/// Optional color overrides for the sidebar state glyphs and state text.
+/// Unset values fall back to the theme palette slots.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct StateColorsConfig {
+    pub working: Option<String>,
+    pub idle: Option<String>,
+    pub done: Option<String>,
+    pub blocked: Option<String>,
+    pub unknown: Option<String>,
+    /// Agents parked at their prompt behind work they launched. Unset follows
+    /// `working`, which is the state they are still reported in.
+    pub background: Option<String>,
+}
+
+/// Per-state override glyphs for the sidebar state icons. Unset values fall
+/// back to the glyph the active `ui.status_indicators` style draws for that
+/// state. A value must be exactly one terminal cell wide so the icon column
+/// never shifts; anything else is reported as a diagnostic and ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct StateSymbolsConfig {
+    pub working: Option<String>,
+    pub idle: Option<String>,
+    pub done: Option<String>,
+    pub blocked: Option<String>,
+    pub unknown: Option<String>,
+    /// The two frames of the background-work pulse, in order.
+    pub background: Option<String>,
+    pub background_alt: Option<String>,
+}
+
+impl StateSymbolsConfig {
+    fn entries(&self) -> [(&'static str, Option<&str>); 7] {
+        [
+            ("working", self.working.as_deref()),
+            ("idle", self.idle.as_deref()),
+            ("done", self.done.as_deref()),
+            ("blocked", self.blocked.as_deref()),
+            ("unknown", self.unknown.as_deref()),
+            ("background", self.background.as_deref()),
+            ("background_alt", self.background_alt.as_deref()),
+        ]
+    }
+
+    /// The override when it is a usable single-cell glyph.
+    pub fn valid(value: &Option<String>) -> Option<&str> {
+        value.as_deref().filter(|glyph| is_single_cell(glyph))
+    }
+
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.entries()
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let value = value?;
+                (!is_single_cell(value)).then(|| {
+                    format!(
+                        "ui.state_symbols.{name} = {value:?} must be exactly one terminal cell wide; ignoring"
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+fn is_single_cell(glyph: &str) -> bool {
+    unicode_width::UnicodeWidthStr::width(glyph) == 1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMotionEasingConfig {
+    /// Every bubble step is `sort_motion_step_ms` apart.
+    #[default]
+    Linear,
+    /// Ease across a reshuffle: slow to break away, quickest mid-flight,
+    /// slowing again as the list settles.
+    Bubble,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMotionConfig {
+    /// Priority re-sorts settle for a delay, then rows bubble one position
+    /// per step interval.
+    #[default]
+    Bubble,
+    /// Priority re-sorts apply immediately (pre-motion behavior).
+    Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotificationCenterPositionConfig {
+    /// Anchored under the tab bar's right edge.
+    #[default]
+    TopRight,
+    /// Anchored to the bottom-right of the frame.
+    BottomRight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneBorderActiveStyleConfig {
+    #[default]
+    Light,
+    Heavy,
+    Double,
+}
+
+/// How the spaces list and the agent panel show what is scrolled out of view
+/// (fork issue 159): summary rows at the edge, a lighter background on the
+/// rows next to it, both, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarOverflowConfig {
+    #[default]
+    Both,
+    Rows,
+    Fog,
+    Off,
+}
+
+impl SidebarOverflowConfig {
+    /// Summary rows at the edge of a list with rows hidden past it.
+    pub fn edge_rows(self) -> bool {
+        matches!(self, Self::Both | Self::Rows)
+    }
+
+    /// A lighter background on the rows next to a hidden edge.
+    pub fn fog(self) -> bool {
+        matches!(self, Self::Both | Self::Fog)
+    }
+}
+
+/// How the fog next to a hidden sidebar edge shows (fork issue 166): a lighter
+/// background, text faded toward the background, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarFogStyle {
+    #[default]
+    Lift,
+    Dim,
+    Both,
+}
+
+impl SidebarFogStyle {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "lift" => Some(Self::Lift),
+            "dim" => Some(Self::Dim),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// The background of the fogged rows is lifted.
+    pub fn lifts(self) -> bool {
+        matches!(self, Self::Lift | Self::Both)
+    }
+
+    /// The text of the fogged rows is faded toward the background.
+    pub fn dims(self) -> bool {
+        matches!(self, Self::Dim | Self::Both)
+    }
+}
+
+/// Highlight pattern for the active space/agent in the sidebar. Accepts a
+/// string mode or, for backward compatibility, a bool (true = both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarActiveBorderConfig {
+    #[default]
+    Off,
+    Above,
+    Below,
+    Both,
+    Left,
+    Right,
+}
+
+impl SidebarActiveBorderConfig {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Above => "above",
+            Self::Below => "below",
+            Self::Both => "both",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+}
+
+impl Serialize for SidebarActiveBorderConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SidebarActiveBorderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ModeVisitor;
+
+        impl serde::de::Visitor<'_> for ModeVisitor {
+            type Value = SidebarActiveBorderConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "a bool or one of \"off\", \"above\", \"below\", \"both\", \"left\", \"right\"",
+                )
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(if value {
+                    SidebarActiveBorderConfig::Both
+                } else {
+                    SidebarActiveBorderConfig::Off
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "off" => Ok(SidebarActiveBorderConfig::Off),
+                    "above" => Ok(SidebarActiveBorderConfig::Above),
+                    "below" => Ok(SidebarActiveBorderConfig::Below),
+                    "both" => Ok(SidebarActiveBorderConfig::Both),
+                    "left" => Ok(SidebarActiveBorderConfig::Left),
+                    "right" => Ok(SidebarActiveBorderConfig::Right),
+                    _ => Err(E::unknown_variant(
+                        value,
+                        &["off", "above", "below", "both", "left", "right"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ModeVisitor)
     }
 }
 
@@ -207,6 +528,21 @@ pub struct ToastConfig {
 #[serde(default)]
 pub struct HerdrToastConfig {
     pub position: ToastHerdrPosition,
+    /// Toast box size preset: "auto" hugs the text, "medium" and "large"
+    /// widen the box relative to the anchor area. Default: auto.
+    pub size: ToastHerdrSize,
+    /// How long a needs-attention toast stays visible, in seconds. 0 keeps it
+    /// visible until clicked or replaced. Default: 8.
+    pub needs_attention_seconds: u64,
+    /// How long a finished toast stays visible, in seconds. 0 keeps it
+    /// visible until clicked or replaced. Default: 5.
+    pub finished_seconds: u64,
+    /// How long an update-installed toast stays visible, in seconds. 0 keeps
+    /// it visible until clicked or replaced. Default: 3.
+    pub update_seconds: u64,
+    /// Where notes about a pane action show: "corner" (the position above)
+    /// or "pane" (centered in the pane acted on). Default: corner.
+    pub pane_feedback: ToastPaneFeedback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -323,6 +659,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug)]
@@ -351,6 +688,12 @@ pub struct KeysConfig {
     pub remove_worktree: BindingConfig,
     /// Rename the selected workspace. Default: "prefix+shift+w"
     pub rename_workspace: BindingConfig,
+    /// Pin or unpin the selected workspace to the top of the list. Default: unset
+    pub toggle_pin_workspace: BindingConfig,
+    /// Type into every pane of the current tab at once. Default: "prefix+shift+s"
+    pub toggle_sync_panes: BindingConfig,
+    /// Pin or unpin the focused pane's agent to the top of the agent panel. Default: unset
+    pub toggle_pin_agent: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
     /// Open the workspace navigation surface. Default: "prefix+w"
@@ -375,6 +718,17 @@ pub struct KeysConfig {
     pub reload_config: BindingConfig,
     /// Focus the currently visible notification target. Default: "prefix+o".
     pub open_notification_target: BindingConfig,
+    /// Open the notification center panel. Default: "prefix+ctrl+n".
+    pub open_notification_center: BindingConfig,
+    /// Open the focused pane's todo panel. Default: "prefix+ctrl+t".
+    pub open_pane_todos: BindingConfig,
+    /// Open the todo editor on a new todo for the focused pane. Unbound by default.
+    pub add_pane_todo: BindingConfig,
+    /// Open the session-wide todo board. Unbound by default.
+    pub open_todo_board: BindingConfig,
+    /// Show every pane's number, address, name and size in characters, and the
+    /// window size, until the next key or for 3 seconds. Default: "prefix+i".
+    pub display_panes: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -407,11 +761,35 @@ pub struct KeysConfig {
     pub close_tab: BindingConfig,
     /// Rename the focused pane. Default: "prefix+shift+p".
     pub rename_pane: BindingConfig,
+    /// Break the focused pane into a new tab. Default: "prefix+!".
+    pub break_pane: BindingConfig,
+    /// Move the focused pane to another tab or space via a picker. Default: "prefix+m".
+    pub move_pane_to_tab: BindingConfig,
+    /// Move the focused pane to the next tab without wrapping. Default: "prefix+>".
+    pub move_pane_next_tab: BindingConfig,
+    /// Move the focused pane to the previous tab without wrapping. Default: "prefix+<".
+    pub move_pane_prev_tab: BindingConfig,
     /// Open the focused pane scrollback in $EDITOR. Default: "prefix+e".
     pub edit_scrollback: BindingConfig,
     pub clear_pane: BindingConfig,
+    /// Purge the focused pane's saved scrollback (tmux `clear-history`).
+    /// Unbound by default.
+    pub clear_scrollback: BindingConfig,
     /// Enter keyboard copy mode for the focused pane. Default: "prefix+[".
     pub copy_mode: BindingConfig,
+    /// Enter copy mode and scroll up one page in the same gesture
+    /// (tmux `copy-mode -u`). Default: "prefix+pageup".
+    pub copy_mode_page_up: BindingConfig,
+    /// Enter copy mode and scroll up half a page. Default: "prefix+ctrl+u".
+    pub copy_mode_half_page_up: BindingConfig,
+    /// Enter copy mode and scroll the viewport up one line. Default: "prefix+ctrl+k".
+    pub copy_mode_line_up: BindingConfig,
+    /// Scroll the focused pane down a page. Default: "prefix+pagedown"
+    pub copy_mode_page_down: BindingConfig,
+    /// Scroll the focused pane down half a page. Default: "prefix+ctrl+d"
+    pub copy_mode_half_page_down: BindingConfig,
+    /// Scroll the focused pane down one line. Default: "prefix+ctrl+j"
+    pub copy_mode_line_down: BindingConfig,
     /// Focus the pane to the left. Default: "prefix+h".
     pub focus_pane_left: BindingConfig,
     /// Focus the pane below. Default: "prefix+j".
@@ -440,6 +818,8 @@ pub struct KeysConfig {
     pub split_horizontal: BindingConfig,
     /// Close the focused pane. Default: "prefix+x"
     pub close_pane: BindingConfig,
+    /// Restart the focused pane's process in place. Default: "prefix+ctrl+x"
+    pub respawn_pane: BindingConfig,
     /// Toggle zoom for the focused pane. Default: "prefix+z"
     #[serde(alias = "fullscreen")]
     pub zoom: BindingConfig,
@@ -453,6 +833,10 @@ pub struct KeysConfig {
     pub resize_pane_up: BindingConfig,
     /// Resize the focused pane toward the right. Unset by default.
     pub resize_pane_right: BindingConfig,
+    /// Balance all panes in the current tab to equal sizes. Default: "prefix+="
+    pub balance_panes: BindingConfig,
+    /// Cycle the tab through layout presets (even-h -> even-v -> tiled). Default: "prefix+space"
+    pub next_layout: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
@@ -489,6 +873,12 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     rename_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_pin_workspace: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_sync_panes: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_pin_agent: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     close_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_picker: Option<BindingConfig>,
@@ -512,6 +902,16 @@ pub(crate) struct KeysConfigOverlay {
     reload_config: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_notification_target: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_notification_center: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_pane_todos: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    add_pane_todo: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_todo_board: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_panes: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -545,10 +945,32 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     rename_pane: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    break_pane: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_pane_to_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_pane_next_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    move_pane_prev_tab: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     edit_scrollback: Option<BindingConfig>,
     clear_pane: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    clear_scrollback: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     copy_mode: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_page_up: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_half_page_up: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_line_up: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_page_down: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_half_page_down: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    copy_mode_line_down: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_pane_left: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -577,6 +999,8 @@ pub(crate) struct KeysConfigOverlay {
     split_horizontal: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_pane: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    respawn_pane: Option<BindingConfig>,
     #[serde(alias = "fullscreen", skip_serializing_if = "Option::is_none")]
     zoom: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,6 +1013,9 @@ pub(crate) struct KeysConfigOverlay {
     resize_pane_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resize_pane_right: Option<BindingConfig>,
+    balance_panes: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_layout: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,6 +1078,9 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_worktree);
         apply_field!(remove_worktree);
         apply_field!(rename_workspace);
+        apply_field!(toggle_pin_workspace);
+        apply_field!(toggle_sync_panes);
+        apply_field!(toggle_pin_agent);
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
         apply_field!(goto);
@@ -663,6 +1093,11 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(detach);
         apply_field!(reload_config);
         apply_field!(open_notification_target);
+        apply_field!(open_notification_center);
+        apply_field!(open_pane_todos);
+        apply_field!(add_pane_todo);
+        apply_field!(open_todo_board);
+        apply_field!(display_panes);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -679,9 +1114,20 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(switch_workspace);
         apply_field!(close_tab);
         apply_field!(rename_pane);
+        apply_field!(break_pane);
+        apply_field!(move_pane_to_tab);
+        apply_field!(move_pane_next_tab);
+        apply_field!(move_pane_prev_tab);
         apply_field!(edit_scrollback);
         apply_field!(clear_pane);
+        apply_field!(clear_scrollback);
         apply_field!(copy_mode);
+        apply_field!(copy_mode_page_up);
+        apply_field!(copy_mode_half_page_up);
+        apply_field!(copy_mode_line_up);
+        apply_field!(copy_mode_page_down);
+        apply_field!(copy_mode_half_page_down);
+        apply_field!(copy_mode_line_down);
         apply_field!(focus_pane_left);
         apply_field!(focus_pane_down);
         apply_field!(focus_pane_up);
@@ -696,12 +1142,15 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(split_vertical);
         apply_field!(split_horizontal);
         apply_field!(close_pane);
+        apply_field!(respawn_pane);
         apply_field!(zoom);
         apply_field!(resize_mode);
         apply_field!(resize_pane_left);
         apply_field!(resize_pane_down);
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
+        apply_field!(balance_panes);
+        apply_field!(next_layout);
         apply_field!(toggle_sidebar);
         apply_field!(indexed);
         apply_field!(command);
@@ -756,6 +1205,9 @@ impl KeysConfig {
         copy_effective_action_field!(open_worktree, keybinds.open_worktree);
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
+        copy_effective_action_field!(toggle_pin_workspace, keybinds.toggle_pin_workspace);
+        copy_effective_action_field!(toggle_sync_panes, keybinds.toggle_sync_panes);
+        copy_effective_action_field!(toggle_pin_agent, keybinds.toggle_pin_agent);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
@@ -768,6 +1220,11 @@ impl KeysConfig {
         copy_effective_action_field!(detach, keybinds.detach);
         copy_effective_action_field!(reload_config, keybinds.reload_config);
         copy_effective_action_field!(open_notification_target, keybinds.open_notification_target);
+        copy_effective_action_field!(open_notification_center, keybinds.open_notification_center);
+        copy_effective_action_field!(open_pane_todos, keybinds.open_pane_todos);
+        copy_effective_action_field!(add_pane_todo, keybinds.add_pane_todo);
+        copy_effective_action_field!(open_todo_board, keybinds.open_todo_board);
+        copy_effective_action_field!(display_panes, keybinds.display_panes);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -784,9 +1241,20 @@ impl KeysConfig {
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
         copy_effective_action_field!(rename_pane, keybinds.rename_pane);
+        copy_effective_action_field!(break_pane, keybinds.break_pane);
+        copy_effective_action_field!(move_pane_to_tab, keybinds.move_pane_to_tab);
+        copy_effective_action_field!(move_pane_next_tab, keybinds.move_pane_next_tab);
+        copy_effective_action_field!(move_pane_prev_tab, keybinds.move_pane_prev_tab);
         copy_effective_action_field!(edit_scrollback, keybinds.edit_scrollback);
         copy_effective_action_field!(clear_pane, keybinds.clear_pane);
+        copy_effective_action_field!(clear_scrollback, keybinds.clear_scrollback);
         copy_effective_action_field!(copy_mode, keybinds.copy_mode);
+        copy_effective_action_field!(copy_mode_page_up, keybinds.copy_mode_page_up);
+        copy_effective_action_field!(copy_mode_half_page_up, keybinds.copy_mode_half_page_up);
+        copy_effective_action_field!(copy_mode_line_up, keybinds.copy_mode_line_up);
+        copy_effective_action_field!(copy_mode_page_down, keybinds.copy_mode_page_down);
+        copy_effective_action_field!(copy_mode_half_page_down, keybinds.copy_mode_half_page_down);
+        copy_effective_action_field!(copy_mode_line_down, keybinds.copy_mode_line_down);
         copy_effective_action_field!(focus_pane_left, keybinds.focus_pane_left);
         copy_effective_action_field!(focus_pane_down, keybinds.focus_pane_down);
         copy_effective_action_field!(focus_pane_up, keybinds.focus_pane_up);
@@ -801,12 +1269,15 @@ impl KeysConfig {
         copy_effective_action_field!(split_vertical, keybinds.split_vertical);
         copy_effective_action_field!(split_horizontal, keybinds.split_horizontal);
         copy_effective_action_field!(close_pane, keybinds.close_pane);
+        copy_effective_action_field!(respawn_pane, keybinds.respawn_pane);
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(resize_pane_left, keybinds.resize_pane_left);
         copy_effective_action_field!(resize_pane_down, keybinds.resize_pane_down);
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
+        copy_effective_action_field!(balance_panes, keybinds.balance_panes);
+        copy_effective_action_field!(next_layout, keybinds.next_layout);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_user_field!(indexed);
 
@@ -980,6 +1451,9 @@ pub struct UiConfig {
     pub pane_gaps: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Show a todo indicator at the far right of a split pane's top border,
+    /// carrying the pane's outstanding todo count. Default: true.
+    pub show_pane_todo_indicator: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
     /// Desktop tab row placement. Default: top.
@@ -991,6 +1465,17 @@ pub struct UiConfig {
     /// Format for the outer terminal window title. Empty leaves the title alone.
     /// Default: "{hostname}: {workspace}".
     pub window_title: String,
+    /// Show the workspace jump number (1-9, the `switch_workspace` target) on the
+    /// sidebar branch line. Default: false.
+    /// Show the workspace jump symbol (1-9, then a-z; the `switch_workspace`
+    /// target) on the sidebar branch line. Default: false.
+    pub show_workspace_numbers: bool,
+    /// Show each agent's jump symbol (1-9, then a-z; the `focus_agent`
+    /// target) on the agent panel status line. Default: false.
+    pub show_agent_numbers: bool,
+    /// Show the Herdr server's short host name, right-aligned on the sidebar
+    /// "SPACES" header row. Default: true.
+    pub show_host: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
@@ -1000,9 +1485,135 @@ pub struct UiConfig {
     pub status_indicators: StatusIndicatorStyle,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
+    /// Sidebar workspace list ordering. "manual" keeps the user's drag order,
+    /// "priority" bubbles attention-needing workspaces to the top. Default: "manual".
+    pub workspace_sort: WorkspaceSortConfig,
+    /// How priority-sorted lists (spaces, agents panel) apply reorders.
+    /// "bubble" holds a row in place for `sort_motion_settle_ms`, then moves
+    /// it one position per `sort_motion_step_ms` so the list never teleports
+    /// under the cursor; "instant" re-sorts immediately. Default: "bubble".
+    pub sort_motion: SortMotionConfig,
+    /// How long a row holds its position after its sort position changes
+    /// before it starts bubbling, in milliseconds. Default: 2000.
+    pub sort_motion_settle_ms: u64,
+    /// Interval between one-position bubble steps, in milliseconds.
+    /// Default: 150.
+    pub sort_motion_step_ms: u64,
+    /// Step cadence across a reshuffle. "linear" spaces every step evenly;
+    /// "bubble" eases in and out — slow to break away, quickest mid-flight,
+    /// slowing into the final slot. Only visible on longer travels.
+    /// Default: "linear".
+    pub sort_motion_easing: SortMotionEasingConfig,
+    /// Sidebar entry composition. "default" keeps the current layout;
+    /// "editorial" right-aligns jump numbers on the name row, renders thin
+    /// uppercase section headers, and dims inactive meta lines.
+    pub sidebar_style: SidebarStyleConfig,
+    /// Per-state color overrides for sidebar state glyphs and state text
+    /// (working/idle/done/blocked/unknown). Same syntax as `accent`.
+    pub state_colors: StateColorsConfig,
+    /// Per-state sidebar icon glyph overrides; see `StateSymbolsConfig`.
+    pub state_symbols: StateSymbolsConfig,
+    /// Working-icon animation in agent rows. Saved values are "on" or "off". Default: "on".
+    pub status_spinner: StatusSpinnerConfig,
+    /// Milliseconds between spinner frames, clamped to 50..=2000. Default: 200.
+    pub status_spinner_ms: u64,
+    /// Milliseconds the `prefix+i` labels and the resize labels stay up,
+    /// clamped to 500..=60000. Default: 3000.
+    pub display_panes_ms: u64,
+    /// Notification center position. "top-right" puts the indicator in the
+    /// tab bar with the dropdown under its right edge; "bottom-right" floats
+    /// the indicator in the frame's bottom-right corner with the dropdown
+    /// opening above it. Default: "top-right".
+    pub notification_center_position: NotificationCenterPositionConfig,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
+    /// Color for `show_workspace_numbers` labels. Same syntax as `accent`.
+    /// Unset uses the theme's muted number color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_number_color: Option<String>,
+    /// Color for `show_agent_numbers` labels. Same syntax as `accent`.
+    /// Unset uses the theme's muted number color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_number_color: Option<String>,
+    /// Leader glyph(s) shown before the workspace jump number in
+    /// `sidebar_style = "editorial"`, e.g. "₽" to hint the `prefix + N`
+    /// chord. Rendered in `workspace_number_color`. Default empty (bare number).
+    #[serde(default)]
+    pub workspace_number_prefix: String,
+    /// Leader glyph(s) shown before the agent jump number in
+    /// `sidebar_style = "editorial"`, e.g. "₽⌥" to hint the `prefix + alt + N`
+    /// chord. Rendered in `agent_number_color`. Default empty (bare number).
+    #[serde(default)]
+    pub agent_number_prefix: String,
+    /// Override color for the focused (active) pane border. Same syntax as `accent`.
+    /// Unset uses the theme accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_border_active_color: Option<String>,
+    /// Override color for unfocused (inactive) pane borders. Same syntax as `accent`.
+    /// Unset uses the theme's muted border color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_border_inactive_color: Option<String>,
+    /// Box-drawing weight for the focused pane border: "light", "heavy", or
+    /// "double". Default: "light".
+    pub pane_border_active_style: PaneBorderActiveStyleConfig,
+    /// Override color for the focused pane's border title. Same syntax as `accent`.
+    /// Unset follows `pane_border_active_color`, then the theme accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_title_active_color: Option<String>,
+    /// Override color for unfocused panes' border titles. Same syntax as `accent`.
+    /// Unset follows `pane_border_inactive_color`, then the theme's muted color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_title_inactive_color: Option<String>,
+    /// Override colour for the pane todo indicator while todos are outstanding.
+    /// Same syntax as `accent`. Unset colours it by the highest outstanding
+    /// priority (high red, normal yellow, low blue); an all-done indicator is
+    /// always muted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_todo_color: Option<String>,
+    /// Highlight pattern for the active space and agent in the sidebar, using
+    /// `pane_border_active_color` and `pane_border_active_style`. Accepts
+    /// "off", "above", "below", "both", "left", "right" — or a bool for
+    /// backward compatibility (true = "both"). Default: off.
+    pub sidebar_active_border: SidebarActiveBorderConfig,
+    /// How the spaces list and agent panel show rows scrolled out of view:
+    /// "both" (default), "rows" (summary rows at the edge), "fog" (a lighter
+    /// background on the rows next to the edge) or "off".
+    pub sidebar_overflow: SidebarOverflowConfig,
+    /// How far the fog lifts the rows next to a hidden edge, in percent of the
+    /// way from the background to the text colour, nearest row first. 0 to 2
+    /// entries, each clamped to 0..=60; 0 (or no entry) means no fog on that
+    /// row. Default: [17, 7].
+    pub sidebar_fog: Vec<i64>,
+    /// How much of the most urgent hidden state's colour the fog takes,
+    /// 0..=100 (0: a neutral lift). Default: 70.
+    pub sidebar_fog_tint: i64,
+    /// What the fog does: "lift" (a lighter background, default), "dim" (the
+    /// text fades toward the background) or "both". Unknown values use "lift".
+    pub sidebar_fog_style: String,
+    /// How far the "dim" and "both" fog styles move the text of the fogged
+    /// rows toward the fog base, in percent, nearest row first. 0 to 2
+    /// entries, each clamped to 0..=95; 0 (or no entry) means no fade on that
+    /// row. Default: [85, 55].
+    pub sidebar_fade: Vec<i64>,
+    /// Default background for the focused pane's cells (tmux
+    /// `window-active-style` bg). Same syntax as `accent`. Only cells without
+    /// an explicit app-painted background are tinted. Unset keeps the
+    /// terminal default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_active_bg: Option<String>,
+    /// Default background for unfocused panes' cells (tmux `window-style`
+    /// bg). Same syntax and semantics as `pane_active_bg`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_inactive_bg: Option<String>,
+    /// Dim unfocused pane content in all modes, not only while a herdr mode
+    /// (prefix/navigate) is active. Default: false.
+    pub dim_inactive_panes: bool,
+    /// How far an unfocused pane's text colour moves toward the colour behind
+    /// it, in percent (0..=90, clamped with a diagnostic). A real colour change
+    /// that stays lighter than the SGR faint `dim_inactive_panes` and prefix
+    /// mode use. 0 is off. Default: 0.
+    pub inactive_pane_dim: i64,
     /// Optional visual toast notifications for background workspace events.
     pub toast: ToastConfig,
     /// Play sounds when agents change state in background workspaces.
@@ -1046,6 +1657,9 @@ pub struct ServerConfig {
     pub headless_cols: u16,
     /// Virtual terminal height used when no client is attached. Default: 40.
     pub headless_rows: u16,
+    /// Use the last attached client's size, not the headless size, while no
+    /// client is attached, and keep it across restarts. Default: true.
+    pub remember_client_size: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1071,6 +1685,40 @@ impl Default for RemoteConfig {
         }
     }
 }
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    pub codex: CodexAgentConfig,
+}
+
+/// How herdr launches Codex panes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct CodexAgentConfig {
+    /// Launch and resume Codex panes on the shared Codex app-server daemon
+    /// (`--remote unix://<app_server_socket>` and `-C <pane cwd>`). Default: false.
+    pub app_server: bool,
+    /// The daemon's control socket. `~` expands to the home directory.
+    /// Default: `~/.codex/app-server-control/app-server-control.sock`.
+    pub app_server_socket: String,
+    /// Name each Codex pane's daemon thread after the pane's agent name.
+    /// Needs `app_server`. Default: false.
+    pub name_threads: bool,
+}
+
+impl Default for CodexAgentConfig {
+    fn default() -> Self {
+        Self {
+            app_server: false,
+            app_server_socket: DEFAULT_CODEX_APP_SERVER_SOCKET.to_string(),
+            name_threads: false,
+        }
+    }
+}
+
+pub const DEFAULT_CODEX_APP_SERVER_SOCKET: &str =
+    "~/.codex/app-server-control/app-server-control.sock";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -1128,6 +1776,9 @@ impl Default for KeysConfig {
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
+            toggle_pin_workspace: BindingConfig::empty(),
+            toggle_sync_panes: BindingConfig::one("prefix+shift+s"),
+            toggle_pin_agent: BindingConfig::empty(),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
@@ -1140,6 +1791,11 @@ impl Default for KeysConfig {
             detach: BindingConfig::one("prefix+q"),
             reload_config: BindingConfig::one("prefix+shift+r"),
             open_notification_target: BindingConfig::one("prefix+o"),
+            open_notification_center: BindingConfig::one("prefix+ctrl+n"),
+            open_pane_todos: BindingConfig::one("prefix+ctrl+t"),
+            add_pane_todo: BindingConfig::empty(),
+            open_todo_board: BindingConfig::empty(),
+            display_panes: BindingConfig::one("prefix+i"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),
@@ -1156,9 +1812,20 @@ impl Default for KeysConfig {
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
             rename_pane: BindingConfig::one("prefix+shift+p"),
+            break_pane: BindingConfig::one("prefix+!"),
+            move_pane_to_tab: BindingConfig::one("prefix+m"),
+            move_pane_next_tab: BindingConfig::one("prefix+>"),
+            move_pane_prev_tab: BindingConfig::one("prefix+<"),
             edit_scrollback: BindingConfig::one("prefix+e"),
             clear_pane: BindingConfig::default(),
+            clear_scrollback: BindingConfig::empty(),
             copy_mode: BindingConfig::one("prefix+["),
+            copy_mode_page_up: BindingConfig::one("prefix+pageup"),
+            copy_mode_half_page_up: BindingConfig::one("prefix+ctrl+u"),
+            copy_mode_line_up: BindingConfig::one("prefix+ctrl+k"),
+            copy_mode_page_down: BindingConfig::one("prefix+pagedown"),
+            copy_mode_half_page_down: BindingConfig::one("prefix+ctrl+d"),
+            copy_mode_line_down: BindingConfig::one("prefix+ctrl+j"),
             focus_pane_left: BindingConfig::one("prefix+h"),
             focus_pane_down: BindingConfig::one("prefix+j"),
             focus_pane_up: BindingConfig::one("prefix+k"),
@@ -1173,12 +1840,15 @@ impl Default for KeysConfig {
             split_vertical: BindingConfig::one("prefix+v"),
             split_horizontal: BindingConfig::one("prefix+minus"),
             close_pane: BindingConfig::one("prefix+x"),
+            respawn_pane: BindingConfig::one("prefix+ctrl+x"),
             zoom: BindingConfig::one("prefix+z"),
             resize_mode: BindingConfig::one("prefix+r"),
             resize_pane_left: BindingConfig::empty(),
             resize_pane_down: BindingConfig::empty(),
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
+            balance_panes: BindingConfig::one("prefix+="),
+            next_layout: BindingConfig::one("prefix+space"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
@@ -1218,16 +1888,52 @@ impl Default for UiConfig {
             pane_scrollbars: true,
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
+            show_pane_todo_indicator: true,
             hide_tab_bar_when_single_tab: false,
             tab_bar_position: TabBarPositionConfig::Top,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),
+            show_workspace_numbers: false,
+            show_agent_numbers: false,
+            show_host: true,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
             sidebar: SidebarConfig::default(),
+            workspace_sort: WorkspaceSortConfig::Manual,
+            sort_motion: SortMotionConfig::Bubble,
+            sort_motion_settle_ms: 2000,
+            sort_motion_step_ms: 150,
+            sort_motion_easing: SortMotionEasingConfig::Linear,
+            sidebar_style: SidebarStyleConfig::Default,
+            state_colors: StateColorsConfig::default(),
+            state_symbols: StateSymbolsConfig::default(),
+            status_spinner: StatusSpinnerConfig::default(),
+            status_spinner_ms: DEFAULT_STATUS_SPINNER_MS,
+            display_panes_ms: DEFAULT_DISPLAY_PANES_MS,
+            notification_center_position: NotificationCenterPositionConfig::TopRight,
             accent: "cyan".into(),
+            workspace_number_color: None,
+            agent_number_color: None,
+            workspace_number_prefix: String::new(),
+            agent_number_prefix: String::new(),
+            pane_border_active_color: None,
+            pane_border_inactive_color: None,
+            pane_border_active_style: PaneBorderActiveStyleConfig::Light,
+            pane_title_active_color: None,
+            pane_title_inactive_color: None,
+            pane_todo_color: None,
+            sidebar_active_border: SidebarActiveBorderConfig::Off,
+            sidebar_overflow: SidebarOverflowConfig::default(),
+            sidebar_fog: vec![17, 7],
+            sidebar_fog_tint: 70,
+            sidebar_fog_style: "lift".to_string(),
+            sidebar_fade: vec![85, 55],
+            pane_active_bg: None,
+            pane_inactive_bg: None,
+            dim_inactive_panes: false,
+            inactive_pane_dim: 0,
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
         }
@@ -1261,6 +1967,11 @@ impl Default for HerdrToastConfig {
     fn default() -> Self {
         Self {
             position: ToastHerdrPosition::BottomRight,
+            size: ToastHerdrSize::Auto,
+            needs_attention_seconds: 8,
+            finished_seconds: 5,
+            update_seconds: 3,
+            pane_feedback: ToastPaneFeedback::Corner,
         }
     }
 }
@@ -1318,6 +2029,7 @@ impl Default for ServerConfig {
             allow_unelevated_clients: false,
             headless_cols: crate::config::DEFAULT_HEADLESS_COLS,
             headless_rows: crate::config::DEFAULT_HEADLESS_ROWS,
+            remember_client_size: true,
         }
     }
 }
@@ -1354,6 +2066,18 @@ manifest_check = false
         assert!(!config.update.manifest_check);
     }
 
+    #[test]
+    fn ui_show_host_defaults_true_and_parses_override() {
+        assert!(Config::default().ui.show_host);
+
+        // A `[ui]` table without the key inherits the default.
+        let inherited: Config = toml::from_str("[ui]\nsidebar_width = 30\n").unwrap();
+        assert!(inherited.ui.show_host);
+
+        // An explicit override wins.
+        let overridden: Config = toml::from_str("[ui]\nshow_host = false\n").unwrap();
+        assert!(!overridden.ui.show_host);
+    }
     #[test]
     fn update_channel_default_follows_windows_build_identity() {
         assert_eq!(
@@ -1518,6 +2242,350 @@ status_indicators = "symbols"
     }
 
     #[test]
+    fn pane_border_and_title_config_parses_and_defaults() {
+        let defaults = Config::default();
+        assert_eq!(
+            defaults.ui.pane_border_active_style,
+            PaneBorderActiveStyleConfig::Light
+        );
+        assert_eq!(defaults.ui.pane_border_active_color, None);
+        assert_eq!(defaults.ui.pane_border_inactive_color, None);
+        assert_eq!(defaults.ui.pane_title_active_color, None);
+        assert_eq!(defaults.ui.pane_title_inactive_color, None);
+        assert_eq!(
+            defaults.ui.sidebar_active_border,
+            SidebarActiveBorderConfig::Off
+        );
+        assert_eq!(defaults.ui.pane_active_bg, None);
+        assert_eq!(defaults.ui.pane_inactive_bg, None);
+        assert!(!defaults.ui.dim_inactive_panes);
+
+        let toml = r##"
+[ui]
+pane_border_active_style = "heavy"
+pane_border_active_color = "#d78700"
+pane_border_inactive_color = "#4a4a4a"
+pane_title_active_color = "#ffd700"
+pane_title_inactive_color = "#7a7a7a"
+sidebar_active_border = true
+pane_active_bg = "#000000"
+pane_inactive_bg = "#0c0c0c"
+dim_inactive_panes = true
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.pane_border_active_style,
+            PaneBorderActiveStyleConfig::Heavy
+        );
+        assert_eq!(
+            config.ui.pane_border_active_color.as_deref(),
+            Some("#d78700")
+        );
+        assert_eq!(
+            config.ui.pane_border_inactive_color.as_deref(),
+            Some("#4a4a4a")
+        );
+        assert_eq!(
+            config.ui.pane_title_active_color.as_deref(),
+            Some("#ffd700")
+        );
+        assert_eq!(
+            config.ui.pane_title_inactive_color.as_deref(),
+            Some("#7a7a7a")
+        );
+        // legacy bool maps to both/off
+        assert_eq!(
+            config.ui.sidebar_active_border,
+            SidebarActiveBorderConfig::Both
+        );
+        assert_eq!(config.ui.pane_active_bg.as_deref(), Some("#000000"));
+        assert_eq!(config.ui.pane_inactive_bg.as_deref(), Some("#0c0c0c"));
+        assert!(config.ui.dim_inactive_panes);
+        let config: Config = toml::from_str("[ui]\nsidebar_active_border = false").unwrap();
+        assert_eq!(
+            config.ui.sidebar_active_border,
+            SidebarActiveBorderConfig::Off
+        );
+
+        for (value, expected) in [
+            ("off", SidebarActiveBorderConfig::Off),
+            ("above", SidebarActiveBorderConfig::Above),
+            ("below", SidebarActiveBorderConfig::Below),
+            ("both", SidebarActiveBorderConfig::Both),
+            ("left", SidebarActiveBorderConfig::Left),
+            ("right", SidebarActiveBorderConfig::Right),
+        ] {
+            let toml = format!("[ui]\nsidebar_active_border = \"{value}\"");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.ui.sidebar_active_border, expected, "{value}");
+        }
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_active_border = \"under\"").is_err());
+
+        let toml = r#"
+[ui]
+pane_border_active_style = "double"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.pane_border_active_style,
+            PaneBorderActiveStyleConfig::Double
+        );
+
+        let toml = r#"
+[ui]
+pane_border_active_style = "thick"
+"#;
+        assert!(toml::from_str::<Config>(toml).is_err());
+    }
+
+    #[test]
+    fn workspace_sort_config_parses_and_defaults() {
+        assert_eq!(
+            Config::default().ui.workspace_sort,
+            WorkspaceSortConfig::Manual
+        );
+
+        let toml = r#"
+[ui]
+workspace_sort = "priority"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.workspace_sort, WorkspaceSortConfig::Priority);
+
+        let toml = r#"
+[ui]
+workspace_sort = "manual"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.workspace_sort, WorkspaceSortConfig::Manual);
+
+        let toml = r#"
+[ui]
+agent_panel_scope = "current"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.workspace_sort, WorkspaceSortConfig::Manual);
+    }
+
+    #[test]
+    fn number_prefixes_parse_and_default() {
+        let defaults = Config::default();
+        assert_eq!(defaults.ui.workspace_number_prefix, "");
+        assert_eq!(defaults.ui.agent_number_prefix, "");
+
+        let toml = r#"
+[ui]
+workspace_number_prefix = "₽"
+agent_number_prefix = "₽⌥"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.workspace_number_prefix, "₽");
+        assert_eq!(config.ui.agent_number_prefix, "₽⌥");
+    }
+
+    #[test]
+    fn sidebar_style_and_state_colors_parse_and_default() {
+        let defaults = Config::default();
+        assert_eq!(defaults.ui.sidebar_style, SidebarStyleConfig::Default);
+        assert_eq!(defaults.ui.state_colors, StateColorsConfig::default());
+
+        let toml = r##"
+[ui]
+sidebar_style = "editorial"
+[ui.state_colors]
+working = "#ffc832"
+idle = "#4ade80"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sidebar_style, SidebarStyleConfig::Editorial);
+        assert_eq!(config.ui.state_colors.working.as_deref(), Some("#ffc832"));
+        assert_eq!(config.ui.state_colors.idle.as_deref(), Some("#4ade80"));
+        assert_eq!(config.ui.state_colors.done, None);
+        assert_eq!(config.ui.state_colors.blocked, None);
+    }
+
+    #[test]
+    fn display_panes_ms_defaults_to_three_seconds_and_parses() {
+        assert_eq!(Config::default().ui.display_panes_ms, 3000);
+        assert_eq!(DEFAULT_DISPLAY_PANES_MS, 3000);
+        let config: Config = toml::from_str("[ui]\ndisplay_panes_ms = 5000\n").unwrap();
+        assert_eq!(config.ui.display_panes_ms, 5000);
+        assert!(config.collect_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn an_out_of_range_display_panes_ms_is_reported_and_clamped() {
+        for ms in [0, 499, 60_001] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\ndisplay_panes_ms = {ms}\n")).unwrap();
+            let diagnostics = config.collect_diagnostics();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.contains("ui.display_panes_ms")),
+                "{ms}: {diagnostics:?}"
+            );
+        }
+        assert_eq!(clamp_display_panes_ms(0), MIN_DISPLAY_PANES_MS);
+        assert_eq!(clamp_display_panes_ms(u64::MAX), MAX_DISPLAY_PANES_MS);
+        assert_eq!(clamp_display_panes_ms(4000), 4000);
+    }
+
+    #[test]
+    fn status_spinner_parses_with_its_beta_alias_and_defaults_on() {
+        let defaults = Config::default();
+        assert_eq!(defaults.ui.status_spinner, StatusSpinnerConfig::On);
+        assert_eq!(defaults.ui.status_spinner_ms, DEFAULT_STATUS_SPINNER_MS);
+
+        let config: Config =
+            toml::from_str("[ui]\nstatus_spinner = \"off\"\nstatus_spinner_ms = 125\n").unwrap();
+        assert_eq!(config.ui.status_spinner, StatusSpinnerConfig::Off);
+        assert_eq!(config.ui.status_spinner_ms, 125);
+
+        // The two betas that shipped the title-clocked spinner wrote "agent".
+        let config: Config = toml::from_str("[ui]\nstatus_spinner = \"agent\"\n").unwrap();
+        assert_eq!(config.ui.status_spinner, StatusSpinnerConfig::On);
+    }
+
+    #[test]
+    fn state_symbols_parse_default_and_reject_multi_cell_glyphs() {
+        assert_eq!(
+            Config::default().ui.state_symbols,
+            StateSymbolsConfig::default()
+        );
+
+        let toml = r##"
+[ui.state_symbols]
+done = "●"
+idle = "✔"
+background = "⊙"
+background_alt = "⊚"
+working = "⠋⠙"
+blocked = ""
+unknown = "日"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        let symbols = &config.ui.state_symbols;
+        assert_eq!(StateSymbolsConfig::valid(&symbols.done), Some("●"));
+        assert_eq!(StateSymbolsConfig::valid(&symbols.idle), Some("✔"));
+        assert_eq!(StateSymbolsConfig::valid(&symbols.background), Some("⊙"));
+        assert_eq!(
+            StateSymbolsConfig::valid(&symbols.background_alt),
+            Some("⊚")
+        );
+        // Two cells, zero cells, and a double-width CJK glyph would all shift
+        // the icon column, so they are reported and dropped.
+        assert_eq!(StateSymbolsConfig::valid(&symbols.working), None);
+        assert_eq!(StateSymbolsConfig::valid(&symbols.blocked), None);
+        assert_eq!(StateSymbolsConfig::valid(&symbols.unknown), None);
+        assert_eq!(
+            symbols.diagnostics(),
+            vec![
+                "ui.state_symbols.working = \"⠋⠙\" must be exactly one terminal cell wide; ignoring",
+                "ui.state_symbols.blocked = \"\" must be exactly one terminal cell wide; ignoring",
+                "ui.state_symbols.unknown = \"日\" must be exactly one terminal cell wide; ignoring",
+            ]
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.starts_with("ui.state_symbols.working")));
+    }
+
+    #[test]
+    fn sort_motion_config_parses_and_defaults() {
+        let defaults = Config::default();
+        assert_eq!(defaults.ui.sort_motion, SortMotionConfig::Bubble);
+        assert_eq!(defaults.ui.sort_motion_settle_ms, 2000);
+        assert_eq!(defaults.ui.sort_motion_step_ms, 150);
+
+        let toml = r#"
+[ui]
+sort_motion = "instant"
+sort_motion_settle_ms = 500
+sort_motion_step_ms = 80
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sort_motion, SortMotionConfig::Instant);
+        assert_eq!(config.ui.sort_motion_settle_ms, 500);
+        assert_eq!(config.ui.sort_motion_step_ms, 80);
+
+        let toml = r#"
+[ui]
+sort_motion = "bubble"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sort_motion, SortMotionConfig::Bubble);
+        assert_eq!(config.ui.sort_motion_settle_ms, 2000);
+    }
+
+    #[test]
+    fn sort_motion_easing_parses_and_defaults() {
+        assert_eq!(
+            Config::default().ui.sort_motion_easing,
+            SortMotionEasingConfig::Linear
+        );
+
+        let toml = r#"
+[ui]
+sort_motion_easing = "bubble"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sort_motion_easing, SortMotionEasingConfig::Bubble);
+
+        let toml = r#"
+[ui]
+sort_motion_easing = "linear"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.sort_motion_easing, SortMotionEasingConfig::Linear);
+    }
+
+    #[test]
+    fn notification_center_position_config_parses_and_defaults() {
+        assert_eq!(
+            Config::default().ui.notification_center_position,
+            NotificationCenterPositionConfig::TopRight
+        );
+
+        let toml = r#"
+[ui]
+notification_center_position = "bottom-right"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.notification_center_position,
+            NotificationCenterPositionConfig::BottomRight
+        );
+
+        let toml = r#"
+[ui]
+notification_center_position = "top-right"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.notification_center_position,
+            NotificationCenterPositionConfig::TopRight
+        );
+    }
+
+    #[test]
+    fn agent_numbers_config_defaults_and_parse() {
+        let default_config = Config::default();
+        assert!(!default_config.ui.show_agent_numbers);
+        assert!(default_config.ui.agent_number_color.is_none());
+
+        let toml = r##"
+[ui]
+show_agent_numbers = true
+agent_number_color = "#a54242"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.ui.show_agent_numbers);
+        assert_eq!(config.ui.agent_number_color.as_deref(), Some("#a54242"));
+    }
+
+    #[test]
     fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
         assert_eq!(default_config.ui.pane_borders, PaneBordersConfig::Auto);
@@ -1565,6 +2633,22 @@ tab_bar_right_separator = " · "
             TabBarRightEntryConfig::Hostname
         ));
         assert_eq!(config.ui.tab_bar_right_separator, " · ");
+    }
+
+    #[test]
+    fn pane_todo_indicator_config_parses_and_defaults() {
+        let defaults = Config::default();
+        assert!(defaults.ui.show_pane_todo_indicator);
+        assert_eq!(defaults.ui.pane_todo_color, None);
+
+        let toml = r##"
+[ui]
+show_pane_todo_indicator = false
+pane_todo_color = "#f38ba8"
+"##;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.ui.show_pane_todo_indicator);
+        assert_eq!(config.ui.pane_todo_color.as_deref(), Some("#f38ba8"));
     }
 
     #[test]
@@ -1870,6 +2954,30 @@ mouse_scroll_lines = 0
         assert!(toml::from_str::<Config>(toml).is_err());
     }
 
+    // Fork issue 129.
+    #[test]
+    fn pane_feedback_config_parses_and_defaults_off() {
+        let config: Config = toml::from_str(
+            "[ui.toast.herdr]\npane_feedback = \"pane\"\n\n[ui.toast.clipboard]\nposition = \"pane\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.ui.toast.herdr.pane_feedback, ToastPaneFeedback::Pane);
+        assert_eq!(
+            config.ui.toast.clipboard.position,
+            ToastClipboardPosition::Pane
+        );
+
+        let defaults = Config::default();
+        assert_eq!(
+            defaults.ui.toast.herdr.pane_feedback,
+            ToastPaneFeedback::Corner
+        );
+        assert_eq!(
+            defaults.ui.toast.clipboard.position,
+            ToastClipboardPosition::BottomCenter
+        );
+    }
+
     #[test]
     fn toast_config_parses() {
         let toml = r#"
@@ -1904,11 +3012,33 @@ position = "top-center"
             config.ui.toast.herdr.position,
             ToastHerdrPosition::BottomRight
         );
+        assert_eq!(config.ui.toast.herdr.needs_attention_seconds, 8);
+        assert_eq!(config.ui.toast.herdr.finished_seconds, 5);
+        assert_eq!(config.ui.toast.herdr.update_seconds, 3);
         assert!(config.ui.toast.clipboard.enabled);
         assert_eq!(
             config.ui.toast.clipboard.position,
             ToastClipboardPosition::BottomCenter
         );
+    }
+
+    #[test]
+    fn toast_config_parses_center_position_and_durations() {
+        let toml = r#"
+[ui.toast.herdr]
+position = "center"
+size = "large"
+needs_attention_seconds = 4
+finished_seconds = 4
+update_seconds = 0
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.toast.herdr.position, ToastHerdrPosition::Center);
+        assert_eq!(config.ui.toast.herdr.size, ToastHerdrSize::Large);
+        assert_eq!(config.ui.toast.herdr.needs_attention_seconds, 4);
+        assert_eq!(config.ui.toast.herdr.finished_seconds, 4);
+        assert_eq!(config.ui.toast.herdr.update_seconds, 0);
+        assert_eq!(Config::default().ui.toast.herdr.size, ToastHerdrSize::Auto);
     }
 
     #[test]
@@ -1991,15 +3121,19 @@ delay_seconds = {}
             crate::config::DEFAULT_HEADLESS_ROWS
         );
 
+        assert!(default_config.server.remember_client_size);
+
         let config: Config = toml::from_str(
             r#"[server]
 headless_cols = 160
 headless_rows = 50
+remember_client_size = false
 "#,
         )
         .unwrap();
         assert_eq!(config.server.headless_cols, 160);
         assert_eq!(config.server.headless_rows, 50);
+        assert!(!config.server.remember_client_size);
 
         let invalid: Config = toml::from_str(
             r#"[server]
@@ -2113,5 +3247,142 @@ scrollback_lines = 12345
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.advanced.scrollback_limit_bytes, 12345);
+    }
+
+    #[test]
+    fn sidebar_fog_style_parses_and_an_unknown_value_falls_back_to_lift() {
+        let config = Config::default();
+        assert_eq!(config.sidebar_fog_style(), SidebarFogStyle::Lift);
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+        for (value, style) in [
+            ("lift", SidebarFogStyle::Lift),
+            ("dim", SidebarFogStyle::Dim),
+            ("both", SidebarFogStyle::Both),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[ui]\nsidebar_fog_style = \"{value}\"")).unwrap();
+            assert_eq!(config.sidebar_fog_style(), style);
+            assert!(config.sidebar_fog_diagnostics().is_empty());
+        }
+        let config: Config = toml::from_str("[ui]\nsidebar_fog_style = \"blur\"").unwrap();
+        assert_eq!(config.sidebar_fog_style(), SidebarFogStyle::Lift);
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec!["ui.sidebar_fog_style (\"blur\") is not lift, dim or both; using lift"]
+        );
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fog_style = 3").is_err());
+    }
+
+    #[test]
+    fn inactive_pane_dim_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.inactive_pane_dim, 0);
+        assert_eq!(config.inactive_pane_dim(), 0);
+        assert!(config.collect_diagnostics().is_empty());
+
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = 20").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 20);
+        assert_eq!(config.inactive_pane_dim_diagnostics(), None);
+
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = 250").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 90);
+        assert_eq!(
+            config.inactive_pane_dim_diagnostics().as_deref(),
+            Some("ui.inactive_pane_dim (250) is outside 0..=90; using 90")
+        );
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|line| line.contains("ui.inactive_pane_dim (250)")));
+        let config: Config = toml::from_str("[ui]\ninactive_pane_dim = -3").unwrap();
+        assert_eq!(config.inactive_pane_dim(), 0);
+        assert!(toml::from_str::<Config>("[ui]\ninactive_pane_dim = \"light\"").is_err());
+        // dim_inactive_panes keeps working next to it.
+        let config: Config =
+            toml::from_str("[ui]\ndim_inactive_panes = true\ninactive_pane_dim = 20").unwrap();
+        assert!(config.ui.dim_inactive_panes);
+    }
+
+    #[test]
+    fn sidebar_fade_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.sidebar_fade, vec![85, 55]);
+        assert_eq!(config.sidebar_fade(), [85, 55]);
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = [70]").unwrap();
+        assert_eq!(config.sidebar_fade(), [70, 0]);
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = []").unwrap();
+        assert_eq!(config.sidebar_fade(), [0, 0]);
+
+        let config: Config = toml::from_str("[ui]\nsidebar_fade = [99, -4, 5]").unwrap();
+        assert_eq!(config.sidebar_fade(), [95, 0]);
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec![
+                "ui.sidebar_fade has 3 entries; only the first 2 are used",
+                "ui.sidebar_fade[0] (99) is outside 0..=95; using 95",
+                "ui.sidebar_fade[1] (-4) is outside 0..=95; using 0",
+            ]
+        );
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fade = \"strong\"").is_err());
+    }
+
+    #[test]
+    fn sidebar_fog_parses_clamps_and_reports() {
+        let config = Config::default();
+        assert_eq!(config.ui.sidebar_fog, vec![17, 7]);
+        assert_eq!(config.sidebar_fog(), ([17, 7], 70));
+        assert!(config.sidebar_fog_diagnostics().is_empty());
+
+        let config: Config =
+            toml::from_str("[ui]\nsidebar_fog = [25, 3]\nsidebar_fog_tint = 40").unwrap();
+        assert_eq!(config.sidebar_fog(), ([25, 3], 40));
+
+        // 0 entries, 1 entry: the missing rows are 0, no fog.
+        let config: Config = toml::from_str("[ui]\nsidebar_fog = []").unwrap();
+        assert_eq!(config.sidebar_fog().0, [0, 0]);
+        let config: Config = toml::from_str("[ui]\nsidebar_fog = [9]").unwrap();
+        assert_eq!(config.sidebar_fog().0, [9, 0]);
+
+        // Out of range is clamped and reported; extras are ignored and reported.
+        let config: Config =
+            toml::from_str("[ui]\nsidebar_fog = [99, -4, 5]\nsidebar_fog_tint = 400").unwrap();
+        assert_eq!(config.sidebar_fog(), ([60, 0], 100));
+        assert_eq!(
+            config.sidebar_fog_diagnostics(),
+            vec![
+                "ui.sidebar_fog has 3 entries; only the first 2 are used",
+                "ui.sidebar_fog[0] (99) is outside 0..=60; using 60",
+                "ui.sidebar_fog[1] (-4) is outside 0..=60; using 0",
+                "ui.sidebar_fog_tint (400) is outside 0..=100; using 100",
+            ]
+        );
+
+        // A wrong type is still an error.
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_fog = \"strong\"").is_err());
+    }
+
+    #[test]
+    fn sidebar_overflow_defaults_to_both_and_parses_every_mode() {
+        assert_eq!(
+            Config::default().ui.sidebar_overflow,
+            SidebarOverflowConfig::Both
+        );
+        for (value, expected) in [
+            ("both", SidebarOverflowConfig::Both),
+            ("rows", SidebarOverflowConfig::Rows),
+            ("fog", SidebarOverflowConfig::Fog),
+            ("off", SidebarOverflowConfig::Off),
+        ] {
+            let toml = format!("[ui]\nsidebar_overflow = \"{value}\"");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.ui.sidebar_overflow, expected, "{value}");
+        }
+        assert!(toml::from_str::<Config>("[ui]\nsidebar_overflow = \"edges\"").is_err());
+        assert!(SidebarOverflowConfig::Both.edge_rows() && SidebarOverflowConfig::Both.fog());
+        assert!(SidebarOverflowConfig::Rows.edge_rows() && !SidebarOverflowConfig::Rows.fog());
+        assert!(!SidebarOverflowConfig::Fog.edge_rows() && SidebarOverflowConfig::Fog.fog());
+        assert!(!SidebarOverflowConfig::Off.edge_rows() && !SidebarOverflowConfig::Off.fog());
     }
 }

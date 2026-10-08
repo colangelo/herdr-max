@@ -26,3 +26,15 @@ __pycache__/
 
 /.wrangler/
 **/.wrangler/
+
+.env
+.env.local
+.env.*.local
+
+# agent-relay is nats-only for this repo: no committed relay files, ever.
+# This is a tripwire against a stale sender re-introducing a file inbox.
+agent-relay/
+
+# VS Code 
+.vscode/
+

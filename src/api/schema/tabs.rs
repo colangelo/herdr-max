@@ -44,5 +44,32 @@ pub struct TabInfo {
     pub label: String,
     pub focused: bool,
     pub pane_count: usize,
+    /// Aggregated over every pane in the tab by display ranking, so a tab
+    /// containing a working agent reports `working` even when a sibling pane
+    /// has finished unseen. Blocked still outranks working. This is the state
+    /// the tab *is*, not the one that most wants attention.
     pub agent_status: AgentStatus,
+    /// Input typed into one pane goes to every synced pane of the tab.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub sync: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabSyncParams {
+    /// The tab to change; the tab on screen when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub mode: SyncMode,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMode {
+    #[default]
+    Toggle,
+    On,
+    Off,
 }

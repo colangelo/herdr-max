@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{agent_label, parse_agent_label, Agent};
 
-pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 3;
+pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 4;
 const DEFAULT_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
 const CATALOG_URL_ENV: &str = "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL";
 const MAX_FETCH_BYTES: usize = 256 * 1024;
@@ -633,6 +633,65 @@ contains = ["{contains}"]
         crate::detect::manifest::reload_manifests();
         let _ = fs::remove_dir_all(&dir);
         result
+    }
+
+    // Fork issue 139: a newer downloaded claude manifest must not shadow the
+    // bundled one that carries this fork's rules; codex still takes remote.
+    #[test]
+    fn a_newer_remote_never_shadows_a_fork_owned_bundled_manifest() {
+        with_state_dir("fork-owned-bundled", || {
+            let claude = remote_manifest_for("claude", "9999.01.01.1", "upstream-only-text");
+            process_agent_manifest(Agent::Claude, &claude, 1).unwrap();
+            let codex = remote_manifest("9999.01.01.1", "remote-codex-text");
+            process_agent_manifest(Agent::Codex, &codex, 1).unwrap();
+            crate::detect::manifest::reload_manifests();
+
+            let explain = crate::detect::manifest::explain(Agent::Claude, "upstream-only-text");
+            assert!(
+                matches!(
+                    explain.source,
+                    Some(crate::detect::manifest::ManifestSource::Bundled)
+                ),
+                "bundled wins: {:?}",
+                explain.source
+            );
+            assert_eq!(
+                explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                None,
+                "upstream's rule is not in force"
+            );
+            let warning = explain.warning.expect("it says why");
+            assert!(
+                warning.contains("fork-owned bundled manifest wins"),
+                "{warning}"
+            );
+            assert_eq!(
+                explain.cached_remote_version.as_deref(),
+                Some("9999.01.01.1")
+            );
+
+            let explain = crate::detect::manifest::explain(Agent::Codex, "remote-codex-text");
+            assert!(matches!(
+                explain.source,
+                Some(crate::detect::manifest::ManifestSource::Remote { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn the_bundled_claude_manifest_is_fork_owned() {
+        let manifest = crate::detect::manifest::explain(Agent::Claude, "");
+        // The bundled manifest is what runs with no remote file present.
+        assert!(matches!(
+            manifest.source,
+            Some(crate::detect::manifest::ManifestSource::Bundled)
+        ));
+        assert!(crate::detect::manifest::bundled_manifest_is_fork_owned(
+            Agent::Claude
+        ));
+        assert!(!crate::detect::manifest::bundled_manifest_is_fork_owned(
+            Agent::Codex
+        ));
     }
 
     #[test]

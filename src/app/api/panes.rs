@@ -8,6 +8,7 @@ use crate::api::schema::{
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
     PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
+    ClosedPaneTodos, PaneCloseParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
@@ -15,6 +16,7 @@ use crate::api::schema::{
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
     PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
     PaneZoomResult, ResponseResult,
+    PaneRespawnParams, StoppedProcess, TodoInfo,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -111,6 +113,7 @@ impl App {
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        self.resize_split_target(ws_idx, target_pane_id, kept_size);
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
             pane.right_click_passthrough = matches!(
                 params.right_click,
@@ -539,23 +542,22 @@ impl App {
         };
         let shell_pid = runtime.child_pid();
         let foreground_job = shell_pid.and_then(crate::detect::foreground_job);
+        let nested_job = foreground_job.as_ref().and_then(|job| {
+            crate::detect::wrapped_shell_job(job, crate::platform::nested_foreground_job_with_owner)
+                .map(|(_, nested)| nested)
+        });
+        let shell_at_prompt = shell_pid.is_some_and(|pid| {
+            crate::platform::available_pane_shell(pid, crate::detect::is_nested_pty_wrapper)
+                .is_some()
+        });
         let foreground_process_group_id = foreground_job.as_ref().map(|job| job.process_group_id);
         let foreground_processes = foreground_job
-            .map(|job| {
-                job.processes
-                    .into_iter()
-                    .map(|process| PaneProcessInfoProcess {
-                        pid: process.pid,
-                        name: process.name,
-                        argv0: process.argv0,
-                        argv: process.argv,
-                        cmdline: process.cmdline,
-                        cwd: crate::platform::process_cwd(process.pid)
-                            .map(|cwd| cwd.display().to_string()),
-                    })
-                    .collect()
-            })
+            .map(process_info_processes)
             .unwrap_or_default();
+        let nested_foreground_process_group_id =
+            nested_job.as_ref().map(|job| job.process_group_id);
+        let nested_foreground_processes =
+            nested_job.map(process_info_processes).unwrap_or_default();
 
         encode_success(
             id,
@@ -566,6 +568,9 @@ impl App {
                     foreground_process_group_id,
                     tty: None,
                     foreground_processes,
+                    nested_foreground_process_group_id,
+                    nested_foreground_processes,
+                    shell_at_prompt,
                 },
             },
         )
@@ -1244,11 +1249,18 @@ impl App {
                 (target_ws_idx, target_tab_idx, moved_pane_id)
             }
             ResolvedPaneMoveDestination::NewWorkspace { label, tab_label } => {
+                // The live cwd, as the sidebar names spaces: the stored one
+                // only moves on an OSC 7 report and can be the spawn folder.
                 let identity_cwd = self
-                    .state
-                    .terminals
+                    .terminal_runtimes
                     .get(&source_terminal_id)
-                    .map(|terminal| terminal.cwd.clone())
+                    .and_then(|runtime| runtime.cwd())
+                    .or_else(|| {
+                        self.state
+                            .terminals
+                            .get(&source_terminal_id)
+                            .map(|terminal| terminal.cwd.clone())
+                    })
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
                 let moved_pane_id = moved.pane_id;
                 let workspace = crate::workspace::Workspace::from_existing_pane(
@@ -1406,6 +1418,42 @@ impl App {
         self.schedule_session_save();
     }
 
+    /// `pane.sync`: put a pane in or out of its tab's synced set (fork issue
+    /// 141). The tab has to sync already.
+    pub(super) fn handle_pane_sync(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneSyncParams,
+    ) -> String {
+        use crate::api::schema::SyncMode;
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(synced) = self.state.workspaces[ws_idx]
+            .find_tab_index_for_pane(pane_id)
+            .and_then(|tab_idx| self.state.workspaces[ws_idx].tabs.get(tab_idx))
+            .and_then(|tab| tab.is_syncing().then(|| tab.pane_synced(pane_id)))
+        else {
+            return encode_error(
+                id,
+                "sync_not_active",
+                "the pane's tab is not syncing; turn it on with tab.sync first",
+            );
+        };
+        let wanted = match params.mode {
+            SyncMode::Toggle => !synced,
+            SyncMode::On => true,
+            SyncMode::Off => false,
+        };
+        if wanted != synced {
+            self.state.toggle_pane_sync(ws_idx, pane_id);
+        }
+        match self.pane_info(ws_idx, pane_id) {
+            Some(pane) => encode_success(id, ResponseResult::PaneInfo { pane }),
+            None => encode_error(id, "pane_not_found", "pane not found"),
+        }
+    }
+
     pub(super) fn handle_pane_zoom(&mut self, id: String, params: PaneZoomParams) -> String {
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -1532,6 +1580,7 @@ impl App {
             params.source,
             params.format,
             params.lines,
+            params.strip_dim,
         );
 
         encode_success(
@@ -1585,6 +1634,17 @@ impl App {
         });
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
+        if !applied {
+            // The API still answers ok (the report was well formed), so this is
+            // the only trace of a report herdr refused or held (fork issue 127).
+            tracing::info!(
+                pane = pane_id.raw(),
+                source = %params.source,
+                agent = %agent_label,
+                newer = report_is_newer,
+                "agent session report not applied"
+            );
+        }
         self.report_agent_resume(
             id,
             ws_idx,
@@ -1607,6 +1667,21 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        if let Err(message) = validate_optional_resume_argv(params.resume_argv.as_deref()) {
+            return encode_error(id, "invalid_resume_argv", message);
+        }
+        let report_is_newer = self
+            .pane_terminal(ws_idx, pane_id)
+            .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path,
+        );
+        let codex_thread = (agent_label == "codex")
+            .then(|| params.agent_session_id.clone())
+            .flatten();
         if let Err(message) = validate_optional_resume_argv(params.resume_argv.as_deref()) {
             return encode_error(id, "invalid_resume_argv", message);
         }
@@ -1656,6 +1731,105 @@ impl App {
         })
     }
 
+    fn pane_terminal(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&crate::terminal::TerminalState> {
+        let pane = self.state.workspaces.get(ws_idx)?.pane_state(pane_id)?;
+        self.state.terminals.get(&pane.attached_terminal_id)
+    }
+        // A new Codex pane whose thread could not be told apart at launch
+        // gets its name once the hook reports the thread (its session id).
+        if let (Some(socket), Some(thread_id)) =
+            (self.codex_app_server.naming_socket(), codex_thread)
+        {
+            let name = self
+                .find_pane(pane_id)
+                .and_then(|(ws_idx, _)| self.state.workspaces.get(ws_idx))
+                .and_then(|workspace| workspace.terminal_id(pane_id))
+                .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                .and_then(|terminal| terminal.agent_name.clone());
+            if let Some(name) = name {
+                crate::codex_app_server::spawn_name_job(
+                    socket.to_path_buf(),
+                    crate::codex_app_server::NameJob::Known {
+                        thread_id,
+                        name,
+                        only_if_unnamed: true,
+                    },
+                    None,
+                );
+            }
+        }
+        let applied =
+            report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
+        if !applied {
+            // The API still answers ok (the report was well formed), so this is
+            // the only trace of a report herdr refused or held (fork issue 127).
+            tracing::info!(
+                pane = pane_id.raw(),
+                source = %params.source,
+                agent = %agent_label,
+                newer = report_is_newer,
+                "agent session report not applied"
+            );
+        }
+        self.report_agent_resume(
+            id,
+            ws_idx,
+            pane_id,
+            params.source,
+            agent_label,
+            params.seq.filter(|_| applied),
+            applied.then_some(params.resume_argv).flatten(),
+        )
+    }
+
+    /// A resume command belongs to the session it was reported with, so it is
+    /// kept only when Herdr accepted that session.
+    fn session_report_applied(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        session_ref: Option<&crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        session_ref.is_none_or(|session_ref| {
+            self.pane_terminal(ws_idx, pane_id)
+                .is_some_and(|terminal| terminal.session_ref_is_current(session_ref))
+        })
+    }
+
+    fn report_agent_resume(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        source: String,
+        agent_label: String,
+        seq: Option<u64>,
+        resume_argv: Option<Vec<String>>,
+    ) -> String {
+        let Some(argv) = resume_argv else {
+            return encode_success(id, ResponseResult::Ok {});
+        };
+        let can_record = self
+            .pane_terminal(ws_idx, pane_id)
+            .is_some_and(|terminal| terminal.can_record_reported_resume(&source, &agent_label));
+        if !can_record {
+            return encode_error(
+                id,
+                "resume_not_accepted",
+                "resume_argv requires the reporter to hold the pane; report its state with pane.report_agent first",
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::AgentResumeReported {
+            pane_id,
+            source,
+            agent_label,
+            seq,
+            argv,
+        });
     fn pane_terminal(
         &self,
         ws_idx: usize,
@@ -1870,6 +2044,70 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// `pane.report_hint`: a source says an agent waits on the user (fork issue
+    /// 157). Hint state lives in the terminal; an unknown pane is an error, a
+    /// stale or ignored report is still `ok`.
+    pub(super) fn handle_pane_report_hint(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneReportHintParams,
+    ) -> String {
+        use crate::api::schema::AgentHintKind;
+        const DEFAULT_TTL_MS: u64 = 15_000;
+        const MAX_TTL_MS: u64 = 60_000;
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            return invalid_agent(id);
+        };
+        let source = params.source.trim().to_string();
+        if source.is_empty() {
+            return encode_error(id, "invalid_hint_source", "hint source must not be empty");
+        }
+        let kind = match (params.kind, params.clear) {
+            (Some(_), true) => {
+                return encode_error(
+                    id,
+                    "invalid_hint_request",
+                    "cannot set and clear a hint in one report",
+                );
+            }
+            (None, false) => {
+                return encode_error(
+                    id,
+                    "invalid_hint_request",
+                    "a hint needs a kind, or clear to end it",
+                );
+            }
+            (Some(AgentHintKind::Question), false) => Some(crate::detect::BlockedReason::Question),
+            (Some(AgentHintKind::Permission), false) => {
+                Some(crate::detect::BlockedReason::Permission)
+            }
+            (None, true) => None,
+        };
+        let ttl_ms = params.ttl_ms.unwrap_or(DEFAULT_TTL_MS);
+        if ttl_ms == 0 || ttl_ms > MAX_TTL_MS {
+            return encode_error(
+                id,
+                "invalid_hint_ttl",
+                format!("hint ttl_ms must be between 1 and {MAX_TTL_MS}"),
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::AgentHintReported {
+            pane_id,
+            report: crate::terminal::AgentHintReport {
+                source,
+                agent_label,
+                kind,
+                id: params.id,
+                ttl: std::time::Duration::from_millis(ttl_ms),
+                seq: params.seq,
+            },
+        });
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_pane_clear_agent_authority(
         &mut self,
         id: String,
@@ -1953,20 +2191,45 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
-    pub(super) fn handle_pane_close(&mut self, id: String, target: PaneTarget) -> String {
-        match self.close_pane(id.clone(), &target) {
-            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+    pub(super) fn handle_pane_clear_scrollback(
+        &mut self,
+        id: String,
+        target: PaneTarget,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        let Some((runtime, _workspace_id)) = self.lookup_runtime(ws_idx, pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        runtime.clear_scrollback();
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_close(&mut self, id: String, params: PaneCloseParams) -> String {
+        match self.close_pane(id.clone(), &params.pane_id, params.force) {
+            Ok(dropped) => closed_response(id, params.force, dropped),
             Err(response) => response,
         }
     }
 
-    /// Close a pane; `Err` carries the encoded error response.
-    pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
-            return Err(pane_not_found(id, &target.pane_id));
+    /// Close a pane; `Ok` carries the open todos it dropped, `Err` the encoded
+    /// error response.
+    ///
+    /// The TUI's own close asks with a modal and treats its retry as the
+    /// answer. Any other caller is answered instead: `confirmation_required`
+    /// without `force`, and nothing changes on any client's screen.
+    pub(super) fn close_pane(
+        &mut self,
+        id: String,
+        pane_ref: &str,
+        force: bool,
+    ) -> Result<Vec<ClosedPaneTodos>, String> {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(pane_ref) else {
+            return Err(pane_not_found(id, pane_ref));
         };
         let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
-            return Err(pane_not_found(id, &target.pane_id));
+            return Err(pane_not_found(id, pane_ref));
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
@@ -1983,15 +2246,18 @@ impl App {
                 ));
             }
         }
+        let dropped = self.open_todos_in([(ws_idx, pane_id)]);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
-                return Err(pane_not_found(id, &target.pane_id));
+                return Err(pane_not_found(id, pane_ref));
             };
             ws.close_pane(pane_id)
         };
+        self.state.forget_pane_todo_ui(pane_id);
         self.state.remove_plugin_pane_records([pane_id]);
+        self.respawn_replaced_runtimes.remove(&pane_id);
         if should_close_workspace {
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
@@ -2025,8 +2291,139 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.state.drop_stale_close_confirmation();
 
-        Ok(())
+        Ok(dropped)
+    }
+
+    /// The same question the TUI asks before an implicit worktree group close.
+    pub(super) fn would_ask_before_closing_worktree_group(&self, ws_idx: usize) -> bool {
+        self.state.confirm_close
+            && self
+                .state
+                .workspace_close_would_close_worktree_group(ws_idx)
+    }
+
+    /// The open todos of these panes, as a forced close reports them.
+    pub(super) fn open_todos_in(
+        &self,
+        panes: impl IntoIterator<Item = (usize, PaneId)>,
+    ) -> Vec<ClosedPaneTodos> {
+        panes
+            .into_iter()
+            .filter_map(|(ws_idx, pane_id)| {
+                let terminal = self.state.pane_terminal(pane_id)?;
+                let public_pane_id = self.public_pane_id(ws_idx, pane_id)?;
+                let todos: Vec<_> = terminal
+                    .todos()
+                    .iter()
+                    .filter(|todo| !todo.done)
+                    .map(|todo| self.todo_info(&public_pane_id, todo))
+                    .collect();
+                (!todos.is_empty()).then_some(ClosedPaneTodos {
+                    pane_id: public_pane_id,
+                    todos,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether the pane still has a live child process. Deliberately the cheap
+    /// `child_pid()` fact rather than a process-table probe: this is a
+    /// keypress-time decision, not a render-loop one, and `Some` is exactly
+    /// "something is still running here".
+    pub(super) fn pane_has_live_child(&self, ws_idx: usize, pane_id: PaneId) -> bool {
+        self.lookup_runtime_sender(ws_idx, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::child_pid)
+            .is_some()
+    }
+
+    /// Respawn a pane's process. The TUI's own request asks with a modal and
+    /// treats its retry as the answer; any other caller is answered instead:
+    /// `confirmation_required` naming the live work without `force`, and
+    /// nothing changes on any client's screen (fork issue 125).
+    pub(super) fn handle_pane_respawn(&mut self, id: String, params: PaneRespawnParams) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let has_live_child = self.pane_has_live_child(ws_idx, pane_id);
+        let mut report = None;
+        if self.tui_request_in_flight {
+            if self
+                .state
+                .confirm_pane_respawn(ws_idx, pane_id, has_live_child)
+            {
+                return encode_error(
+                    id,
+                    "confirmation_required",
+                    "this pane still has live work; repeat the request to confirm",
+                );
+            }
+        } else {
+            let stopped_process = has_live_child
+                .then(|| self.pane_live_process(ws_idx, pane_id))
+                .flatten();
+            let open_todos = self
+                .open_todos_in([(ws_idx, pane_id)])
+                .into_iter()
+                .flat_map(|pane| pane.todos)
+                .collect::<Vec<_>>();
+            if !params.force && (stopped_process.is_some() || !open_todos.is_empty()) {
+                return respawn_refusal(id, &params.pane_id, stopped_process.as_ref(), &open_todos);
+            }
+            report = params.force.then_some((stopped_process, open_todos));
+        }
+        if !self.respawn_pane_runtime(pane_id, crate::app::api::RespawnTarget::LaunchArgv) {
+            return encode_error(id, "respawn_failed", "failed to respawn the pane process");
+        }
+        // A forced respawn answers the question a modal may be asking about
+        // this pane, so that modal leaves.
+        if !self.tui_request_in_flight && self.state.confirm_respawn_pane == Some(pane_id) {
+            self.state.confirm_respawn_pane = None;
+            self.state.drop_stale_close_confirmation();
+        }
+        self.emit_pane_updated(ws_idx, pane_id);
+        match report {
+            Some((stopped_process, open_todos)) => encode_success(
+                id,
+                ResponseResult::Respawned {
+                    stopped_process,
+                    open_todos,
+                },
+            ),
+            None => encode_success(id, ResponseResult::Ok {}),
+        }
+    }
+
+    /// The pane's running process as a refusal or a forced respawn names it:
+    /// the shell's pid, and the foreground process's name when known. Only
+    /// asked on a respawn from outside the TUI, never per frame.
+    fn pane_live_process(&self, ws_idx: usize, pane_id: PaneId) -> Option<StoppedProcess> {
+        let pid = self
+            .lookup_runtime_sender(ws_idx, pane_id)
+            .and_then(crate::terminal::TerminalRuntime::child_pid)?;
+        // The foreground job's leader, or one PTY down when the pane runs a
+        // recognised wrapper (atuin's pty-proxy), so the process named is the
+        // program the user started, not the wrapper.
+        let leader = |job: &crate::platform::ForegroundJob| {
+            job.processes
+                .iter()
+                .find(|process| process.pid == job.process_group_id)
+                .or_else(|| job.processes.first())
+                .map(|process| StoppedProcess {
+                    pid: process.pid,
+                    name: Some(process.name.clone()),
+                })
+        };
+        let named = crate::detect::foreground_job(pid).and_then(|job| {
+            crate::detect::wrapped_shell_job(
+                &job,
+                crate::platform::nested_foreground_job_with_owner,
+            )
+            .and_then(|(_, nested)| leader(&nested))
+            .or_else(|| leader(&job))
+        });
+        Some(named.unwrap_or(StoppedProcess { pid, name: None }))
     }
 
     pub(super) fn handle_pane_send_keys(
@@ -2309,8 +2706,94 @@ fn split_path_id(idx: usize, path: &[bool]) -> String {
     format!("split_{idx}_{path}")
 }
 
+/// `confirmation_required` for a close that would drop open todos, naming them.
+pub(super) fn open_todos_refusal(id: String, what: &str, open: &[ClosedPaneTodos]) -> String {
+    let todos = open
+        .iter()
+        .flat_map(|pane| {
+            pane.todos
+                .iter()
+                .map(move |todo| format!("{}: {}", pane.pane_id, todo.text))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    encode_error(
+        id,
+        "confirmation_required",
+        format!(
+            "{what} still has open todos ({todos}); pass --force (force=true) to close it anyway"
+        ),
+    )
+}
+
+/// `confirmation_required` for a respawn that would stop a running process or
+/// leave open todos behind, naming both.
+fn respawn_refusal(
+    id: String,
+    pane_ref: &str,
+    process: Option<&StoppedProcess>,
+    open_todos: &[TodoInfo],
+) -> String {
+    let mut reasons = Vec::new();
+    if let Some(process) = process {
+        reasons.push(match &process.name {
+            Some(name) => format!("is still running {name} (pid {})", process.pid),
+            None => format!("is still running a process (pid {})", process.pid),
+        });
+    }
+    if !open_todos.is_empty() {
+        let todos = open_todos
+            .iter()
+            .map(|todo| format!("{pane_ref}: {}", todo.text))
+            .collect::<Vec<_>>()
+            .join("; ");
+        reasons.push(format!("has open todos ({todos})"));
+    }
+    encode_error(
+        id,
+        "confirmation_required",
+        format!(
+            "this pane {}; pass --force (force=true) to respawn it anyway",
+            reasons.join(" and ")
+        ),
+    )
+}
+
+/// A forced close always answers with the todos it dropped, so a script can
+/// keep them; an ordinary close answers `ok`.
+pub(super) fn closed_response(id: String, force: bool, dropped: Vec<ClosedPaneTodos>) -> String {
+    if force {
+        encode_success(
+            id,
+            ResponseResult::Closed {
+                closed_todos: dropped,
+            },
+        )
+    } else {
+        encode_success(id, ResponseResult::Ok {})
+    }
+}
+
 fn invalid_agent(id: String) -> String {
     encode_error(id, "invalid_agent", "agent label must not be empty")
+}
+
+fn validate_optional_resume_argv(argv: Option<&[String]>) -> Result<(), String> {
+    argv.map_or(Ok(()), crate::agent_resume::validate_resume_argv)
+}
+
+fn process_info_processes(job: crate::platform::ForegroundJob) -> Vec<PaneProcessInfoProcess> {
+    job.processes
+        .into_iter()
+        .map(|process| PaneProcessInfoProcess {
+            pid: process.pid,
+            name: process.name,
+            argv0: process.argv0,
+            argv: process.argv,
+            cmdline: process.cmdline,
+            cwd: crate::platform::process_cwd(process.pid).map(|cwd| cwd.display().to_string()),
+        })
+        .collect()
 }
 
 fn validate_optional_resume_argv(argv: Option<&[String]>) -> Result<(), String> {
@@ -2327,6 +2810,36 @@ mod tests {
         workspace::Workspace,
     };
 
+    #[test]
+    fn a_respawn_refusal_names_the_running_process_and_the_open_todos() {
+        let todo = TodoInfo {
+            pane_id: "w1:p2".into(),
+            id: 1,
+            text: "finish the migration".into(),
+            done: false,
+            priority: crate::terminal::todo::TodoPriority::Normal,
+            link_pane_id: None,
+            link_label: None,
+            link_alive: false,
+            created_at_unix: 0,
+            updated_at_unix: 0,
+        };
+        let process = StoppedProcess {
+            pid: 4242,
+            name: Some("claude".into()),
+        };
+
+        let raw = respawn_refusal("r".into(), "w1:p2", Some(&process), &[todo]);
+        let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(response["error"]["code"], "confirmation_required");
+        assert_eq!(
+            response["error"]["message"],
+            "this pane is still running claude (pid 4242) and has open todos \
+             (w1:p2: finish the migration); pass --force (force=true) to respawn it anyway"
+        );
+    }
+
     fn app_with_test_workspace() -> (App, String) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -2341,6 +2854,114 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    // Fork issue 157: `pane.report_hint` over the API.
+    #[test]
+    fn pane_report_hint_blocks_the_pane_with_the_hint_and_clears() {
+        use crate::api::schema::{AgentHintKind, PaneReportHintParams};
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        let hint = |kind, clear, seq| PaneReportHintParams {
+            pane_id: public_pane_id.clone(),
+            source: "herdr:claude-mod".into(),
+            agent: "claude".into(),
+            kind,
+            id: Some("toolu_1".into()),
+            ttl_ms: None,
+            clear,
+            seq: Some(seq),
+        };
+
+        let ok = app
+            .handle_pane_report_hint("req".into(), hint(Some(AgentHintKind::Question), false, 10));
+        assert!(matches!(
+            serde_json::from_str::<SuccessResponse>(&ok).unwrap().result,
+            ResponseResult::Ok {}
+        ));
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.state, crate::detect::AgentState::Blocked);
+        assert_eq!(
+            terminal.blocked_reason(),
+            Some(crate::detect::BlockedReason::Question)
+        );
+        assert!(app.state.agent_hint_deadline().is_some());
+
+        app.handle_pane_report_hint("req".into(), hint(None, true, 11));
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(terminal.state, crate::detect::AgentState::Idle);
+        assert!(app.state.agent_hint_deadline().is_none());
+    }
+
+    #[test]
+    fn pane_report_hint_rejects_bad_requests() {
+        use crate::api::schema::{AgentHintKind, PaneReportHintParams};
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let params = |mutate: &dyn Fn(&mut PaneReportHintParams)| {
+            let mut params = PaneReportHintParams {
+                pane_id: public_pane_id.clone(),
+                source: "s".into(),
+                agent: "claude".into(),
+                kind: Some(AgentHintKind::Question),
+                id: None,
+                ttl_ms: None,
+                clear: false,
+                seq: None,
+            };
+            mutate(&mut params);
+            params
+        };
+        let code = |app: &mut App, params| {
+            let response: serde_json::Value =
+                serde_json::from_str(&app.handle_pane_report_hint("req".into(), params)).unwrap();
+            response["error"]["code"]
+                .as_str()
+                .unwrap_or("ok")
+                .to_string()
+        };
+        assert_eq!(code(&mut app, params(&|_| {})), "ok");
+        assert_eq!(
+            code(&mut app, params(&|p| p.pane_id = "w9:p9".into())),
+            "pane_not_found"
+        );
+        assert_eq!(
+            code(&mut app, params(&|p| p.kind = None)),
+            "invalid_hint_request"
+        );
+        assert_eq!(
+            code(&mut app, params(&|p| p.clear = true)),
+            "invalid_hint_request"
+        );
+        assert_eq!(
+            code(&mut app, params(&|p| p.ttl_ms = Some(0))),
+            "invalid_hint_ttl"
+        );
+        assert_eq!(
+            code(&mut app, params(&|p| p.ttl_ms = Some(60_001))),
+            "invalid_hint_ttl"
+        );
+        assert_eq!(code(&mut app, params(&|p| p.ttl_ms = Some(60_000))), "ok");
+        assert_eq!(
+            code(&mut app, params(&|p| p.source = "  ".into())),
+            "invalid_hint_source"
+        );
+        assert_eq!(
+            code(&mut app, params(&|p| p.agent = "".into())),
+            "invalid_agent"
+        );
     }
 
     #[test]
@@ -2486,6 +3107,62 @@ mod tests {
             .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
             .unwrap();
         assert_eq!(runtime.scroll_metrics().unwrap().max_offset_from_bottom, 0);
+    }
+
+    #[tokio::test]
+    async fn api_pane_clear_purges_scrollback_and_preserves_screen() {
+        let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();
+        let (visible_before, offset_before) = {
+            let runtime = app
+                .state
+                .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+                .expect("runtime");
+            (
+                runtime.visible_text(),
+                runtime
+                    .scroll_metrics()
+                    .expect("metrics")
+                    .max_offset_from_bottom,
+            )
+        };
+        assert!(offset_before > 0, "expected saved scrollback before clear");
+
+        let response = app.handle_pane_clear_scrollback(
+            "req".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let runtime = app
+            .state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("metrics")
+                .max_offset_from_bottom,
+            0,
+            "scrollback should be purged"
+        );
+        assert_eq!(runtime.visible_text(), visible_before);
+    }
+
+    #[tokio::test]
+    async fn api_pane_clear_unknown_pane_returns_not_found() {
+        let (mut app, _public_pane_id, _pane_id) = app_with_scrollback_runtime();
+
+        let response = app.handle_pane_clear_scrollback(
+            "req".into(),
+            PaneTarget {
+                pane_id: "w1:p99".into(),
+            },
+        );
+
+        assert_eq!(metadata_error_code(&response), "pane_not_found");
     }
 
     #[tokio::test]
@@ -3069,8 +3746,9 @@ mod tests {
 
         let response = app.handle_pane_close(
             "req".into(),
-            PaneTarget {
+            PaneCloseParams {
                 pane_id: public_pane_id,
+                force: false,
             },
         );
 
@@ -3604,6 +4282,84 @@ mod tests {
             &app.state.workspaces[0].tabs[0].render_dirty,
             &app.render_dirty
         ));
+    }
+
+    /// #103: a pane that `cd`'d away without an OSC 7 report still carries
+    /// its spawn folder in `TerminalState::cwd`. A new space made for it must
+    /// take its identity from the live folder, as the sidebar names it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pane_move_to_new_space_seeds_identity_from_the_live_cwd() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-issue-103-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let stale_dir = root.join("master");
+        let live_dir = root.join("CONTEXT");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::create_dir_all(&live_dir).unwrap();
+        // The runtime reports the resolved path (`/private/var/...` on macOS).
+        let live_dir = live_dir.canonicalize().unwrap();
+
+        let (mut app, _) = app_with_test_workspace();
+        let moved = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&moved]
+            .attached_terminal_id
+            .clone();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_dir.clone();
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            moved,
+            24,
+            80,
+            live_dir.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while runtime.cwd() != Some(live_dir.clone()) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let moved_public = app.public_pane_id(0, moved).unwrap();
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: moved_public,
+                destination: PaneMoveDestination::NewWorkspace {
+                    label: None,
+                    tab_label: None,
+                },
+                focus: false,
+            },
+        );
+        let identity_cwd = app
+            .state
+            .workspaces
+            .get(1)
+            .map(|ws| ws.identity_cwd.clone());
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::PaneMove { .. }));
+        assert_eq!(identity_cwd, Some(live_dir));
     }
 
     #[test]

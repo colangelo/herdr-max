@@ -15,6 +15,8 @@ pub(super) fn run_workspace_command(args: &[String]) -> std::io::Result<i32> {
         "create" => workspace_create(&args[1..]),
         "get" => workspace_get(&args[1..]),
         "focus" => workspace_focus(&args[1..]),
+        "pin" => workspace_pin(&args[1..], true),
+        "unpin" => workspace_pin(&args[1..], false),
         "rename" => workspace_rename(&args[1..]),
         "report-metadata" => workspace_report_metadata(&args[1..]),
         "close" => workspace_close(&args[1..]),
@@ -128,6 +130,16 @@ fn workspace_focus(args: &[String]) -> std::io::Result<i32> {
     super::runtime::workspace_focus(super::normalize_workspace_id(raw_workspace_id))
 }
 
+fn workspace_pin(args: &[String], pin: bool) -> std::io::Result<i32> {
+    let verb = if pin { "pin" } else { "unpin" };
+    let [raw_workspace_id] = args else {
+        eprintln!("usage: herdr workspace {verb} <workspace_id>");
+        return Ok(2);
+    };
+
+    super::runtime::workspace_pin(super::normalize_workspace_id(raw_workspace_id), pin)
+}
+
 fn workspace_rename(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
         eprintln!("usage: herdr workspace rename <workspace_id> <label>");
@@ -226,11 +238,12 @@ fn workspace_report_metadata(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn workspace_close(args: &[String]) -> std::io::Result<i32> {
-    let (raw_workspace_id, close_group) = match args {
-        [workspace_id] => (workspace_id, false),
-        [workspace_id, flag] if flag == "--group" => (workspace_id, true),
+    let (args, force) = super::take_force_flag(args);
+    let (raw_workspace_id, close_group) = match args.as_slice() {
+        [workspace_id] => (*workspace_id, false),
+        [workspace_id, flag] if *flag == "--group" => (*workspace_id, true),
         _ => {
-            eprintln!("usage: herdr workspace close <workspace_id> [--group]");
+            eprintln!("usage: herdr workspace close <workspace_id> [--group] [--force]");
             return Ok(2);
         }
     };
@@ -238,6 +251,7 @@ fn workspace_close(args: &[String]) -> std::io::Result<i32> {
     super::runtime::workspace_close(crate::api::schema::WorkspaceCloseParams {
         workspace_id: super::normalize_workspace_id(raw_workspace_id),
         close_group,
+        force,
     })
 }
 
@@ -247,6 +261,8 @@ fn print_workspace_help() {
     eprintln!("  herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]");
     eprintln!("  herdr workspace get <workspace_id>");
     eprintln!("  herdr workspace focus <workspace_id>");
+    eprintln!("  herdr workspace pin <workspace_id>");
+    eprintln!("  herdr workspace unpin <workspace_id>");
     eprintln!("  herdr workspace rename <workspace_id> <label>");
     eprintln!("  herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr workspace close <workspace_id> [--group]");

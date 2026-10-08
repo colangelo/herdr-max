@@ -1,5 +1,6 @@
 use std::io;
 
+use super::claude_mod::{install_claude_mod, uninstall_claude_mod, ClaudeModOutcome};
 use super::registry::{integration_target_label, integration_target_supported};
 use super::targets::{
     install_antigravity_cli, install_claude, install_codex, install_copilot, install_cursor,
@@ -113,7 +114,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Claude => {
             let installed = install_claude()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed claude integration hook to {}",
                     installed.hook_path.display()
@@ -122,7 +123,17 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured claude settings at {}",
                     installed.settings_path.display()
                 ),
-            ]
+            ];
+            // The herdr-attention mod (fork issue 157). A skip is a note, not
+            // a failure: the settings hooks and screen detection still work.
+            match install_claude_mod()? {
+                ClaudeModOutcome::Installed(root) => messages.push(format!(
+                    "installed the claude mod at {} (running claude sessions pick it up on /reload-plugins or restart)",
+                    root.display()
+                )),
+                ClaudeModOutcome::Skipped(reason) => messages.push(reason),
+            }
+            messages
         }
         crate::api::schema::IntegrationTarget::Codex => {
             let installed = install_codex()?;
@@ -380,6 +391,7 @@ pub(crate) fn uninstall_target(
                     result.settings_path.display()
                 ));
             }
+            messages.extend(uninstall_claude_mod()?);
             messages
         }
         crate::api::schema::IntegrationTarget::Codex => {

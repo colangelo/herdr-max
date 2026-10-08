@@ -589,12 +589,7 @@ impl App {
             return encode_error(id, "plugin_pane_not_found", "plugin pane not found");
         }
         let pane_id = params.pane_id;
-        if let Err(response) = self.close_pane(
-            id.clone(),
-            &crate::api::schema::PaneTarget {
-                pane_id: pane_id.clone(),
-            },
-        ) {
+        if let Err(response) = self.close_pane(id.clone(), &pane_id, false) {
             return response;
         }
         encode_success(id, ResponseResult::PluginPaneClosed { pane_id })
@@ -978,6 +973,11 @@ action = "open"
     /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
     /// before the command writes, so waiting on existence alone can read EOF.
     /// `pump` advances any event loop the command depends on.
+    #[cfg(unix)]
+    /// Wait for a plugin command's capture file. The commands write it to a
+    /// temporary name and rename it into place, so the file is whole the moment
+    /// it exists: reading it on the first non-empty poll raced a shell still
+    /// writing it, and failed under load.
     fn read_capture_when_ready(path: &std::path::Path, mut pump: impl FnMut()) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -1946,7 +1946,7 @@ platforms = ["linux", "macos"]
 [[panes]]
 id = "board"
 title = "Plugin Board"
-command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_ENTRYPOINT_ID\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_BIN_PATH\" \"$HERDR_PLUGIN_CONTEXT_JSON\" \"${{HERDR_CELL_WIDTH_PX-unset}}\" \"${{HERDR_CELL_HEIGHT_PX-unset}}\" > {}"]
+command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_ENTRYPOINT_ID\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_BIN_PATH\" \"$HERDR_PLUGIN_CONTEXT_JSON\" \"${{HERDR_CELL_WIDTH_PX-unset}}\" \"${{HERDR_CELL_HEIGHT_PX-unset}}\" > {0}.tmp && mv {0}.tmp {0}"]
 "#,
                 capture.display()
             ),
@@ -2053,7 +2053,7 @@ platforms = ["linux", "macos"]
 [[panes]]
 id = "board"
 title = "Plugin Board"
-command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUGIN_CONFIG_DIR\" \"$HERDR_PLUGIN_STATE_DIR\" > {}"]
+command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUGIN_CONFIG_DIR\" \"$HERDR_PLUGIN_STATE_DIR\" > {0}.tmp && mv {0}.tmp {0}"]
 "#,
                 capture.display()
             ),
@@ -2403,7 +2403,7 @@ title = "Plugin Popup"
 placement = "popup"
 width = "80%"
 height = "40%"
-command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
+command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{0}.tmp' && mv '{0}.tmp' '{0}'; sleep 1"]
 "#,
             env_capture.display()
         );
@@ -2994,7 +2994,7 @@ min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[startup]]
-command = ["sh", "-c", "printf '%s:%s' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVENT\" > {}"]
+command = ["sh", "-c", "printf '%s:%s' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVENT\" > {0}.tmp && mv {0}.tmp {0}"]
 "#,
                 capture.display()
             ),
@@ -3042,7 +3042,7 @@ platforms = ["linux", "macos"]
 
 [[events]]
 on = "worktree.created"
-command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {0}.tmp && mv {0}.tmp {0}"]
 "#,
                 capture.display()
             ),

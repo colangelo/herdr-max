@@ -8,7 +8,7 @@ fn agent_wait_exits_immediately_when_status_already_matches() {
     let socket_path = runtime_dir.join("herdr.sock");
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let created = send_request(
         &socket_path,
@@ -64,7 +64,7 @@ fn agent_wait_times_out_when_status_does_not_match() {
     let socket_path = runtime_dir.join("herdr.sock");
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let created = send_request(
         &socket_path,
@@ -138,7 +138,7 @@ fn agent_wait_exits_when_done_status_matches() {
         Some(Path::new(&path_override)),
     );
 
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let created = send_request(
         &socket_path,

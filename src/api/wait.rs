@@ -64,6 +64,7 @@ pub(super) fn wait_for_output(
                 lines: params.lines,
                 format: crate::api::schema::ReadFormat::Text,
                 strip_ansi: params.strip_ansi,
+                strip_dim: false,
                 intent: crate::api::schema::ReadIntent::Passive,
             }),
         };

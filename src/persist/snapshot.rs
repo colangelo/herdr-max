@@ -26,6 +26,20 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// The last client size, (cols, rows), a server with no client attached
+    /// lays panes out at. Optional and additive, so builds on either side of
+    /// it read each other's files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_client_size: Option<(u16, u16)>,
+}
+
+impl SessionSnapshot {
+    /// The stored client size if it is one worth using: a missing, zero or
+    /// below-floor size falls back to the configured headless size.
+    pub fn remembered_client_size(&self) -> Option<(u16, u16)> {
+        self.last_client_size
+            .and_then(crate::app::state::rememberable_client_size)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -57,6 +71,9 @@ pub struct WorkspaceSnapshot {
     pub identity_cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    /// The space's pin (fork issue 148); absent in older files: not pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_order: Option<u64>,
     #[serde(default)]
     pub public_pane_numbers: HashMap<u32, usize>,
     #[serde(default)]
@@ -110,7 +127,75 @@ pub struct PaneSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_resume: Option<PaneAgentResumeSnapshot>,
+    /// Launch-only flags of the pane's agent, added to its resume command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_launch: Option<PaneAgentLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Pane todos, in stored (insertion) order. Omitted for panes with no
+    /// todos so sessions written before this field keep serializing identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<PaneTodoSnapshot>,
+    #[serde(
+        default = "default_next_todo_id",
+        skip_serializing_if = "is_initial_todo_id"
+    )]
+    pub next_todo_id: u64,
+    /// When input from a user or caller last reached the pane, in unix ms.
+    /// Absent when none was recorded, including every session saved before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_at_ms: Option<i64>,
+    /// The agent's pin (fork issue 148); absent in older files: not pinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_order: Option<u64>,
+    /// Public ids the pane had before it moved to another space. A shell in
+    /// the pane still exports the id it started under, so its hooks report
+    /// with it; keeping these across a restart or a handoff keeps those
+    /// reports landing. Omitted when the pane never moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_public_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTodoSnapshot {
+    pub id: u64,
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub priority: crate::terminal::todo::TodoPriority,
+    /// Old raw pane id of the link target; remapped on restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_pane: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_label: Option<String>,
+    pub created_at_unix: u64,
+    pub updated_at_unix: u64,
+}
+
+fn default_next_todo_id() -> u64 {
+    1
+}
+
+fn is_initial_todo_id(id: &u64) -> bool {
+    *id == default_next_todo_id()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAgentResumeSnapshot {
+    pub source: String,
+    pub agent: String,
+    pub argv: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAgentLaunchSnapshot {
+    pub agent: String,
+    pub flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +254,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
+            pin_order: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -195,6 +281,10 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    /// Read loosely: an unreadable size is dropped, not a reason to lose the
+    /// session.
+    #[serde(default)]
+    last_client_size: Option<serde_json::Value>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -210,6 +300,9 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        last_client_size: raw
+            .last_client_size
+            .and_then(|value| serde_json::from_value(value).ok()),
     })
 }
 
@@ -269,6 +362,7 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
+    last_client_size: Option<(u16, u16)>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -281,6 +375,36 @@ pub fn capture(
         sidebar_width: None,
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
+        last_client_size,
+    }
+}
+
+/// Write each pane's former public ids (the ids a move left behind, see
+/// `AppState::public_pane_id_aliases`) into `snapshot`, which was captured
+/// from `workspaces`. Sorted, so an unchanged session saves identically.
+pub fn record_former_public_ids(
+    snapshot: &mut SessionSnapshot,
+    workspaces: &[Workspace],
+    aliases: &std::collections::HashMap<String, crate::layout::PaneId>,
+) {
+    for (former_id, pane_id) in aliases {
+        let pane = workspaces
+            .iter()
+            .zip(snapshot.workspaces.iter_mut())
+            .flat_map(|(workspace, ws_snap)| workspace.tabs.iter().zip(ws_snap.tabs.iter_mut()))
+            .find(|(tab, _)| tab.panes.contains_key(pane_id))
+            .and_then(|(_, tab_snap)| tab_snap.panes.get_mut(&pane_id.raw()));
+        if let Some(pane) = pane {
+            pane.former_public_ids.push(former_id.clone());
+        }
+    }
+    for pane in snapshot
+        .workspaces
+        .iter_mut()
+        .flat_map(|ws| ws.tabs.iter_mut())
+        .flat_map(|tab| tab.panes.values_mut())
+    {
+        pane.former_public_ids.sort();
     }
 }
 
@@ -307,6 +431,7 @@ fn capture_workspace(
         custom_name: ws.custom_name.clone(),
         identity_cwd,
         worktree_space: ws.worktree_space.clone(),
+        pin_order: ws.pin_order,
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
@@ -350,26 +475,20 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
-        let agent_session = terminal.and_then(|terminal| {
-            if let Some(authority) = terminal.hook_authority.as_ref() {
-                if let Some(session_ref) = authority.session_ref.as_ref() {
-                    return Some(PaneAgentSessionSnapshot {
-                        source: authority.source.clone(),
-                        agent: authority.agent_label.clone(),
-                        kind: session_ref.kind,
-                        value: session_ref.value.clone(),
-                    });
-                }
-            }
-            terminal
-                .persisted_agent_session
-                .as_ref()
-                .map(|session| PaneAgentSessionSnapshot {
-                    source: session.source.clone(),
-                    agent: session.agent.clone(),
-                    kind: session.session_ref.kind,
-                    value: session.session_ref.value.clone(),
-                })
+        let agent_session = terminal
+            .and_then(|terminal| terminal.session_for_snapshot())
+            .map(|(source, agent, kind, value)| PaneAgentSessionSnapshot {
+                source,
+                agent,
+                kind,
+                value,
+            });
+        let todos = terminal.map(capture_pane_todos).unwrap_or_default();
+        let next_todo_id = terminal
+            .map(|terminal| terminal.next_todo_id)
+            .unwrap_or_else(default_next_todo_id);
+        let last_input_at_ms = terminal.and_then(|terminal| {
+            crate::terminal::pane_last_input_at_ms(terminal, terminal_runtimes.get(&terminal.id))
         });
         let agent_resume = terminal
             .and_then(|terminal| terminal.reported_resume())
@@ -377,6 +496,34 @@ fn capture_tab(
                 source: resume.source.clone(),
                 agent: resume.agent.clone(),
                 argv: resume.argv.clone(),
+            });
+        let pin_order = terminal.and_then(|terminal| terminal.pin_order);
+        // A Claude pane's footer shows the model and effort it runs now; a hook
+        // record older than that must not win (fork issue 144). Read from the
+        // bottom of the buffer once per capture, only for a Claude record.
+        let footer = terminal
+            .and_then(|terminal| terminal.reported_resume_for_snapshot())
+            .filter(|resume| resume.agent == "claude")
+            .and_then(|_| terminal_runtimes.get(&terminal?.id))
+            .map(|runtime| runtime.detection_text())
+            .unwrap_or_default();
+        let agent_resume = terminal
+            .and_then(|terminal| terminal.reported_resume_for_snapshot())
+            .map(|resume| PaneAgentResumeSnapshot {
+                source: resume.source.clone(),
+                agent: resume.agent.clone(),
+                argv: crate::agent_resume::argv_with_live_footer(
+                    &resume.agent,
+                    &resume.argv,
+                    &footer,
+                ),
+            });
+        let agent_launch = terminal
+            .and_then(|terminal| terminal.agent_launch_for_snapshot())
+            .map(|record| PaneAgentLaunchSnapshot {
+                agent: record.agent.clone(),
+                flags: record.flags.clone(),
+                started_at_ms: record.started_at_ms,
             });
         panes.insert(
             id.raw(),
@@ -387,7 +534,13 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 agent_resume,
+                agent_launch,
                 launch_argv,
+                todos,
+                next_todo_id,
+                last_input_at_ms,
+                pin_order,
+                former_public_ids: Vec::new(),
             },
         );
     }
@@ -411,6 +564,29 @@ pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
     value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
     let bytes = serde_json::to_vec(&value).ok()?;
     Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// Capture a pane's todos. The link target is stored as the pane's current raw
+/// id, matching how the rest of the snapshot refers to panes; restore remaps it.
+fn capture_pane_todos(terminal: &crate::terminal::TerminalState) -> Vec<PaneTodoSnapshot> {
+    terminal
+        .todos()
+        .iter()
+        .map(|todo| PaneTodoSnapshot {
+            id: todo.id,
+            text: todo.text.clone(),
+            done: todo.done,
+            priority: todo.priority,
+            link_pane: todo
+                .link
+                .as_ref()
+                .and_then(|link| link.pane)
+                .map(|pane| pane.raw()),
+            link_label: todo.link.as_ref().map(|link| link.label.clone()),
+            created_at_unix: todo.created_at_unix,
+            updated_at_unix: todo.updated_at_unix,
+        })
+        .collect()
 }
 
 /// Capture pane screen history separately from the structural session snapshot.
@@ -517,6 +693,17 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// #111: a session saved before panes carried former ids reads as if no
+    /// pane ever moved, and a pane that never moved saves no field.
+    #[test]
+    fn a_pane_without_former_ids_reads_and_saves_unchanged() {
+        let json = r#"{"cwd":"/tmp","next_todo_id":1}"#;
+        let pane: PaneSnapshot = serde_json::from_str(json).expect("an old pane reads");
+        assert!(pane.former_public_ids.is_empty());
+        let saved = serde_json::to_string(&pane).expect("saves");
+        assert!(!saved.contains("former_public_ids"), "{saved}");
+    }
     use std::path::PathBuf;
 
     use ratatui::layout::{Direction, Rect};
@@ -576,6 +763,7 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
+            state.last_client_size,
         )
     }
 
@@ -663,6 +851,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            last_client_size: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -706,7 +895,14 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                agent_resume: None,
+                agent_launch: None,
                 launch_argv: None,
+                todos: Vec::new(),
+                next_todo_id: 1,
+                last_input_at_ms: None,
+                pin_order: None,
+                former_public_ids: Vec::new(),
             },
         );
         panes.insert(
@@ -718,7 +914,14 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                agent_resume: None,
+                agent_launch: None,
                 launch_argv: None,
+                todos: Vec::new(),
+                next_todo_id: 1,
+                last_input_at_ms: None,
+                pin_order: None,
+                former_public_ids: Vec::new(),
             },
         );
 
@@ -728,6 +931,7 @@ mod tests {
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
                 next_public_pane_number: 3,
                 public_tab_numbers: vec![1],
@@ -752,6 +956,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            last_client_size: None,
             version: SNAPSHOT_VERSION,
         };
 
@@ -820,6 +1025,106 @@ mod tests {
 
         assert_eq!(restored.sidebar_width, None);
         assert_eq!(restored.sidebar_section_split, None);
+    }
+
+    #[test]
+    fn workspace_pin_is_saved_and_an_old_file_without_it_is_not_pinned() {
+        let old = serde_json::json!({
+            "identity_cwd": "/tmp/a",
+            "tabs": [],
+            "active_tab": 0
+        });
+        let restored: WorkspaceSnapshot = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.pin_order, None);
+
+        let pinned = serde_json::json!({
+            "identity_cwd": "/tmp/a",
+            "tabs": [],
+            "active_tab": 0,
+            "pin_order": 3
+        });
+        let restored: WorkspaceSnapshot = serde_json::from_value(pinned).unwrap();
+        assert_eq!(restored.pin_order, Some(3));
+        let saved = serde_json::to_value(&restored).unwrap();
+        assert_eq!(saved["pin_order"], 3);
+
+        let mut unpinned = restored;
+        unpinned.pin_order = None;
+        let saved = serde_json::to_value(&unpinned).unwrap();
+        assert!(saved.get("pin_order").is_none());
+    }
+
+    #[test]
+    fn pane_pin_is_saved_and_an_old_pane_without_it_is_not_pinned() {
+        let old = serde_json::json!({ "cwd": "/tmp/a" });
+        let restored: PaneSnapshot = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.pin_order, None);
+
+        let pinned: PaneSnapshot =
+            serde_json::from_value(serde_json::json!({ "cwd": "/tmp/a", "pin_order": 2 })).unwrap();
+        assert_eq!(pinned.pin_order, Some(2));
+        assert_eq!(serde_json::to_value(&pinned).unwrap()["pin_order"], 2);
+    }
+
+    #[test]
+    fn snapshot_round_trips_last_client_size() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.last_client_size = Some((310, 56));
+
+        let json = serde_json::to_string(&capture_from_state(&state)).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(restored.last_client_size, Some((310, 56)));
+        assert_eq!(restored.remembered_client_size(), Some((310, 56)));
+    }
+
+    #[test]
+    fn snapshot_without_last_client_size_loads() {
+        let json = serde_json::json!({
+            "version": SNAPSHOT_VERSION,
+            "workspaces": [],
+            "active": null,
+            "selected": 0
+        })
+        .to_string();
+
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(restored.remembered_client_size(), None);
+        let unset = capture_from_state(&state_with_workspaces(&["one"]));
+        assert!(
+            !serde_json::to_string(&unset)
+                .unwrap()
+                .contains("last_client_size"),
+            "an unset size is left out of the file"
+        );
+    }
+
+    #[test]
+    fn zero_last_client_size_is_ignored() {
+        for stored in [
+            serde_json::json!([0, 0]),
+            serde_json::json!([310, 0]),
+            serde_json::json!([60, 20]),
+            serde_json::json!("wide"),
+            serde_json::json!([70000, 56]),
+        ] {
+            let json = serde_json::json!({
+                "version": SNAPSHOT_VERSION,
+                "workspaces": [],
+                "active": null,
+                "selected": 0,
+                "sidebar_width": 30,
+                "last_client_size": stored,
+            })
+            .to_string();
+
+            let restored = parse_snapshot(&json)
+                .unwrap_or_else(|err| panic!("{stored} must not lose the session: {err}"));
+
+            assert_eq!(restored.remembered_client_size(), None, "{stored}");
+            assert_eq!(restored.sidebar_width, Some(30), "{stored}");
+        }
     }
 
     #[test]
@@ -1340,6 +1645,87 @@ mod tests {
     }
 
     #[test]
+    fn capture_contract_includes_reported_agent_resume() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority(
+            "prime-agent".into(),
+            "prime-agent".into(),
+            crate::detect::AgentState::Idle,
+            None,
+            Some(1),
+        );
+        assert!(terminal.record_reported_resume(
+            "prime-agent",
+            "prime-agent",
+            Some(1),
+            vec!["prime-agent".into(), "--resume".into(), "a".into()],
+        ));
+
+        let snapshot = capture_from_state(&state);
+        let resume = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_resume
+            .as_ref()
+            .expect("reported resume should be captured");
+
+        assert_eq!(resume.source, "prime-agent");
+        assert_eq!(resume.agent, "prime-agent");
+        assert_eq!(resume.argv, vec!["prime-agent", "--resume", "a"]);
+    }
+
+    #[test]
+    fn capture_contract_includes_agent_launch_flags() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .set_detected_agent_process_at(crate::detect::Agent::Claude, std::time::Instant::now());
+        terminal.record_agent_launch(
+            crate::detect::Agent::Claude,
+            Some(&crate::agent_resume::AgentLaunchArgv {
+                argv: ["claude", "--settings", "/u/gpt.json", "hello"]
+                    .map(String::from)
+                    .to_vec(),
+                cwd: None,
+                started_at_ms: None,
+            }),
+        );
+
+        let snapshot = capture_from_state(&state);
+        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+
+        assert_eq!(
+            pane.agent_launch,
+            Some(PaneAgentLaunchSnapshot {
+                agent: "claude".into(),
+                flags: vec!["--settings".into(), "/u/gpt.json".into()],
+                started_at_ms: None,
+            })
+        );
+        let json = serde_json::to_value(pane).unwrap();
+        assert_eq!(
+            json["agent_launch"],
+            serde_json::json!({"agent": "claude", "flags": ["--settings", "/u/gpt.json"]})
+        );
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("agent_launch");
+        let loaded: PaneSnapshot = serde_json::from_value(older).unwrap();
+        assert_eq!(
+            loaded.agent_launch, None,
+            "files written before the field still load"
+        );
+    }
+
+    #[test]
     fn capture_contract_preserves_restored_agent_session() {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
@@ -1394,6 +1780,135 @@ mod tests {
 
     #[test]
     fn snapshot_parsing_preserves_missing_cwd() {
+    fn pane_snapshot_round_trips_todos() {
+        let snapshot = PaneSnapshot {
+            agent_resume: None,
+            agent_launch: None,
+            cwd: std::path::PathBuf::from("/tmp"),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+            todos: vec![PaneTodoSnapshot {
+                id: 3,
+                text: "rerun the deploy".into(),
+                done: false,
+                priority: crate::terminal::todo::TodoPriority::High,
+                link_pane: Some(11),
+                link_label: Some("infra".into()),
+                created_at_unix: 100,
+                updated_at_unix: 200,
+            }],
+            next_todo_id: 4,
+            last_input_at_ms: None,
+            pin_order: None,
+            former_public_ids: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: PaneSnapshot = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.todos.len(), 1);
+        assert_eq!(back.todos[0].id, 3);
+        assert_eq!(back.todos[0].text, "rerun the deploy");
+        assert_eq!(
+            back.todos[0].priority,
+            crate::terminal::todo::TodoPriority::High
+        );
+        assert_eq!(back.todos[0].link_pane, Some(11));
+        assert_eq!(back.todos[0].link_label.as_deref(), Some("infra"));
+        assert_eq!(back.next_todo_id, 4);
+    }
+
+    #[test]
+    fn pane_snapshot_without_todos_omits_the_field() {
+        let snapshot = PaneSnapshot {
+            agent_resume: None,
+            agent_launch: None,
+            cwd: std::path::PathBuf::from("/tmp"),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+            todos: Vec::new(),
+            next_todo_id: 1,
+            last_input_at_ms: None,
+            pin_order: None,
+            former_public_ids: Vec::new(),
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+
+        assert!(
+            !json.contains("todos"),
+            "todo-free panes must serialize as before: {json}"
+        );
+        assert!(
+            !json.contains("next_todo_id"),
+            "todo-free panes must serialize as before: {json}"
+        );
+    }
+
+    #[test]
+    fn pane_snapshot_loads_session_files_written_before_todos_existed() {
+        let json = r#"{"cwd":"/tmp"}"#;
+
+        let snapshot: PaneSnapshot = serde_json::from_str(json).unwrap();
+
+        assert!(snapshot.todos.is_empty());
+        assert_eq!(snapshot.next_todo_id, 1, "counter must default to 1, not 0");
+    }
+
+    #[test]
+    fn capture_contract_tracks_pane_todos_and_link_targets() {
+        let mut state = state_with_workspaces(&["todos"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let second = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal
+            .add_todo(
+                "rerun the deploy",
+                crate::terminal::todo::TodoPriority::High,
+                Some(crate::terminal::todo::TodoLink {
+                    pane: Some(second),
+                    label: "infra".into(),
+                }),
+                100,
+            )
+            .unwrap();
+        terminal
+            .add_todo("plain", crate::terminal::todo::TodoPriority::Low, None, 101)
+            .unwrap();
+
+        let snapshot = capture_from_state(&state);
+        let pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+
+        assert_eq!(pane.todos.len(), 2);
+        assert_eq!(pane.todos[0].text, "rerun the deploy");
+        assert_eq!(
+            pane.todos[0].priority,
+            crate::terminal::todo::TodoPriority::High
+        );
+        assert_eq!(pane.todos[0].link_pane, Some(second.raw()));
+        assert_eq!(pane.todos[0].link_label.as_deref(), Some("infra"));
+        assert_eq!(pane.todos[1].link_pane, None);
+        assert_eq!(pane.todos[1].link_label, None);
+        assert_eq!(pane.next_todo_id, 3);
+        assert!(
+            snapshot.workspaces[0].tabs[0].panes[&second.raw()]
+                .todos
+                .is_empty(),
+            "todos belong to the pane that owns them"
+        );
+    }
+
+    #[test]
         let mut panes = HashMap::new();
         panes.insert(
             0,
@@ -1404,7 +1919,14 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                agent_resume: None,
+                agent_launch: None,
                 launch_argv: None,
+                todos: Vec::new(),
+                next_todo_id: 1,
+                last_input_at_ms: None,
+                pin_order: None,
+                former_public_ids: Vec::new(),
             },
         );
         panes.insert(
@@ -1418,7 +1940,14 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                agent_resume: None,
+                agent_launch: None,
                 launch_argv: None,
+                todos: Vec::new(),
+                next_todo_id: 1,
+                last_input_at_ms: None,
+                pin_order: None,
+                former_public_ids: Vec::new(),
             },
         );
 
@@ -1429,6 +1958,7 @@ mod tests {
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
                 worktree_space: None,
+                pin_order: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1453,6 +1983,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            last_client_size: None,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

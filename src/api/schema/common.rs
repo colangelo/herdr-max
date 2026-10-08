@@ -51,6 +51,35 @@ pub struct TabTarget {
     pub tab_id: String,
 }
 
+/// `pane.close`. Without `force`, a close that would drop open todos or a
+/// worktree group is refused with `confirmation_required`; with it, the pane
+/// closes and the result lists the todos it dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneCloseParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
+}
+
+/// `pane.respawn`. Without `force`, a respawn that would stop a running
+/// process or that leaves open todos behind is refused with
+/// `confirmation_required`; with it, the pane respawns and the result says
+/// what it went ahead over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneRespawnParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
+}
+
+/// `tab.close`, with the same `force` as `pane.close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabCloseParams {
+    pub tab_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentTarget {
     pub target: String,

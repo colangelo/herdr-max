@@ -1,6 +1,6 @@
 ---
 title: CLI 参考
-description: 用于会话、工作区、标签页、窗格、通知、智能体、等待、集成和状态的 Herdr 命令。
+description: 用于会话、工作区、标签页、窗格、通知、待办、智能体、等待、集成和状态的 Herdr 命令。
 ---
 
 Herdr 的 CLI 通过与集成和智能体相同的本地 socket API 与运行中的服务器通信。
@@ -134,6 +134,26 @@ herdr notification show <title> [--body TEXT] [--position top-left|top-right|bot
 ```
 
 `notification show` 使用配置的 `[ui.toast]` 投递方式。`--position` 只影响 Herdr 应用内的 toast。`--sound` 默认为 `none`;`done` 和 `request` 只在通知实际显示时播放已有的完成音和需要关注音。
+
+## 待办
+
+```bash
+herdr todo add <text> [--pane ID|--current] [--priority high|normal|low] [--link <target>] [--json]
+herdr todo list [--pane ID|--current|--all] [--json]
+herdr todo done <id> [--pane ID|--current] [--json]
+herdr todo undone <id> [--pane ID|--current] [--json]
+herdr todo edit <id> [--text TEXT] [--priority high|normal|low] [--link <target>|--unlink] [--pane ID|--current] [--json]
+herdr todo rm <id> [--pane ID|--current] [--json]
+herdr todo clear [--done] [--pane ID|--current] [--json]
+```
+
+每个窗格都有自己的待办列表。不带 `--pane` 或 `--current` 时,各子命令作用于调用方窗格的 `HERDR_PANE_ID`,因此即将退出的智能体不必知道自己的窗格 ID,直接用 `herdr todo add "交回评审"` 就能记下下一步。在 Herdr 窗格之外且没有目标时,命令直接报错而不是猜测目标;`todo list` 还接受 `--all` 来列出会话里的所有窗格。
+
+`--priority` 取 `high`、`normal` 或 `low`,默认 `normal`。`--link <target>` 用窗格 ID(例如 `w1:p2`)把待办指向另一个窗格;建立链接时会记下目标的标签(该窗格的标签、智能体名称,或你传入的 ID),所以目标消失后仍然读得懂。`edit --unlink` 解除链接。每个窗格最多 50 条待办,每条最多 500 个字符;超出上限的写入会以 `todo_limit_reached` 或 `todo_text_too_long` 被拒绝,而不是被截断。
+
+`todo list` 按展示顺序(未完成在前 → 优先级从高到低 → 创建顺序)逐行输出。未完成的待办以 `*` 标记,后面是 id、优先级和文本;带链接的待办会追加 ` → 标签`,目标窗格已不存在时再追加 ` (gone)`。还有未完成的待办时,最后一行给出未完成的数量。`--all` 会多出一列窗格 ID。需要原始的 `todo.list` 响应(含每条待办的 `link_pane_id`、`link_alive`、`created_at_unix` 和 `updated_at_unix`)时加 `--json`。
+
+待办属于窗格并随窗格走:它们跟随会话快照跨越服务器重启和 `herdr update --handoff`,链接也会重新映射到恢复后的窗格 ID。目标没有恢复的链接会保留标签并停止解析,而不会指向别的窗格。
 
 ## 会话
 

@@ -104,6 +104,15 @@ fn upward_alignment(previous: &[String], next: &[String]) -> Option<(usize, usiz
     for text in next {
         *next_counts.entry(text.as_str()).or_insert(0usize) += 1;
     }
+    // Rows that sit unchanged at the same index are pinned (a prompt box, a
+    // footer, a task list, a sticky header), not scrolled content. Left in,
+    // they count as mismatches at every shift, and a tall pinned area under a
+    // short scrolling region outvotes the real overlap.
+    let pinned: Vec<bool> = previous
+        .iter()
+        .zip(next)
+        .map(|(before, after)| !before.is_empty() && before == after)
+        .collect();
     let mut alignment = None;
     for shift in 1..previous.len() {
         let overlap = previous.len() - shift;
@@ -113,7 +122,7 @@ fn upward_alignment(previous: &[String], next: &[String]) -> Option<(usize, usiz
         for index in 0..overlap {
             let before = &previous[index];
             let after = &next[index + shift];
-            if before.is_empty() || after.is_empty() {
+            if before.is_empty() || after.is_empty() || pinned[index] || pinned[index + shift] {
                 continue;
             }
             comparable += 1;
@@ -457,6 +466,87 @@ mod tests {
             row_identities(&boxed.rows),
             ["one   │", "two   │", "three │", "four  │"]
         );
+    }
+
+    /// A Claude Code screen at 138 columns and `rows` rows: a scrolling
+    /// transcript over `chrome` pinned rows (prompt box, footer, task list).
+    /// Scrolled up, row 0 is the sticky header and the last transcript row
+    /// carries the "Jump to bottom" pill.
+    fn claude_screen(
+        transcript: &[String],
+        offset: usize,
+        rows: usize,
+        chrome: usize,
+    ) -> ScreenSnapshot {
+        let area = rows - chrome;
+        let end = transcript.len() - offset;
+        let mut lines: Vec<String> = transcript[end - area..end].to_vec();
+        if offset > 0 {
+            lines[0] = "❯ can you create a paragraph of 100 lines, random".to_string();
+            let last = area - 1;
+            lines[last] = format!("{} Jump to bottom (click) ↓", lines[last].trim_end());
+        }
+        lines.push("─".repeat(138));
+        lines.push("❯".to_string());
+        lines.push("─".repeat(138));
+        for index in 0..chrome - 3 {
+            lines.push(format!("  ☐ pinned task {index}"));
+        }
+        let rows: Vec<ScreenTextRow> = lines.iter().map(|line| row(line)).collect();
+        ScreenSnapshot { cols: 138, rows }
+    }
+
+    fn claude_transcript(lines: usize) -> Vec<String> {
+        (0..lines)
+            .map(|index| {
+                if index % 7 == 6 {
+                    String::new()
+                } else {
+                    format!("  sentence {index} of a long answer that fills the pane")
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pinned_rows_under_the_prompt_do_not_break_alignment_at_138_columns() {
+        // https://gitea.cat-bluegill.ts.net/AC-forks/herdr/issues/84: at 138
+        // columns and 26 rows, with the prompt at row 14 (12 pinned rows
+        // below the transcript), a one-notch step of about six rows left so
+        // little scrolling overlap that the pinned rows outvoted it and the
+        // harvest stopped after ~30 rows.
+        let transcript = claude_transcript(300);
+        for chrome in [4, 8, 12] {
+            let mut history = claude_screen(&transcript, 0, 26, chrome).rows;
+            let mut previous = claude_screen(&transcript, 0, 26, chrome);
+            for step in 1..=20 {
+                let next = claude_screen(&transcript, step * 6, 26, chrome);
+                let merge = merge_scrolled_up(&mut history, &previous, &next);
+                assert!(
+                    matches!(merge, UpwardMerge::Advanced { .. }),
+                    "chrome {chrome}, step {step}: {merge:?}"
+                );
+                previous = next;
+            }
+            let harvested: Vec<String> = row_identities(&history)
+                .into_iter()
+                .filter(|line| line.starts_with("  sentence "))
+                .collect();
+            let expected: Vec<String> = transcript
+                .iter()
+                .map(|line| line.trim_end().to_string())
+                .filter(|line| line.starts_with("  sentence "))
+                .collect();
+            assert!(
+                expected.ends_with(&harvested),
+                "chrome {chrome}: harvested rows are not a gapless tail of the transcript"
+            );
+            assert!(
+                harvested.len() > 100,
+                "chrome {chrome}: {}",
+                harvested.len()
+            );
+        }
     }
 
     #[test]

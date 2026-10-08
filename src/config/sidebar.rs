@@ -97,11 +97,66 @@ impl<'de> Deserialize<'de> for SidebarTokenColor {
     }
 }
 
+/// Which end of a token loses cells when the row is too narrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarTokenTruncate {
+    /// Cut the end, keep the beginning, `text…` (the default).
+    End,
+    /// Cut the beginning, keep the end, `…text`.
+    Start,
+    /// A value this build does not know: treated as `End`, reported as a
+    /// diagnostic (fork issue 164).
+    Unrecognized,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SidebarTokenStyle {
     pub fg: Option<SidebarTokenColor>,
     pub bold: Option<bool>,
     pub dim: Option<bool>,
+    pub italic: Option<bool>,
+    /// The token gets its full width before other flexible tokens in the row
+    /// shrink, and is dropped last.
+    pub keep: Option<bool>,
+    pub truncate: Option<SidebarTokenTruncate>,
+    /// Style keys whose value had the wrong type, as `STYLE_KEY_*` bits: the
+    /// value is ignored and `sidebar_style_diagnostics` names it by position
+    /// (fork issue 163).
+    pub invalid: u8,
+}
+
+const STYLE_KEY_FG: u8 = 1;
+const STYLE_KEY_BOLD: u8 = 2;
+const STYLE_KEY_DIM: u8 = 4;
+const STYLE_KEY_ITALIC: u8 = 8;
+const STYLE_KEY_KEEP: u8 = 16;
+const STYLE_KEY_TRUNCATE: u8 = 32;
+
+impl SidebarTokenStyle {
+    /// The style keys whose value was ignored for having the wrong type, with
+    /// what each expects.
+    pub(crate) fn invalid_keys(&self) -> Vec<(&'static str, &'static str)> {
+        [
+            (STYLE_KEY_FG, "fg", "a #RGB or #RRGGBB colour"),
+            (STYLE_KEY_BOLD, "bold", "true or false"),
+            (STYLE_KEY_DIM, "dim", "true or false"),
+            (STYLE_KEY_ITALIC, "italic", "true or false"),
+            (STYLE_KEY_KEEP, "keep", "true or false"),
+            (STYLE_KEY_TRUNCATE, "truncate", "\"start\" or \"end\""),
+        ]
+        .into_iter()
+        .filter(|(bit, ..)| self.invalid & bit != 0)
+        .map(|(_, key, expected)| (key, expected))
+        .collect()
+    }
+
+    pub(crate) fn keeps_width(&self) -> bool {
+        self.keep == Some(true)
+    }
+
+    pub(crate) fn truncates_start(&self) -> bool {
+        self.truncate == Some(SidebarTokenTruncate::Start)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,25 +225,124 @@ impl SpaceSidebarToken {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawStyledSidebarToken {
     token: String,
-    #[serde(default)]
     fg: Option<SidebarTokenColor>,
-    #[serde(default)]
     bold: Option<bool>,
-    #[serde(default)]
     dim: Option<bool>,
     #[serde(default)]
     rules: Vec<SidebarTokenRule>,
+    italic: Option<bool>,
+    keep: Option<bool>,
+    truncate: Option<SidebarTokenTruncate>,
+    invalid: u8,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum RawSidebarToken {
     Plain(String),
     Styled(RawStyledSidebarToken),
+}
+
+/// A token is a name or a style table. Written by hand, not as an untagged
+/// enum: an untagged enum buffers the table, so one unknown key fails every
+/// variant and the error loses the key's name (fork issue 162). Here an
+/// unknown key is skipped through `IgnoredAny`, which the config loader
+/// reports by path ("unknown config key ...rows.1.2.wobble"). A wrong value
+/// type for a style key is dropped too, and reported by position through
+/// `sidebar_style_diagnostics` (fork issue 163), so one typo does not cost the
+/// file; only `token` itself, which names what the cell shows, must be right.
+impl<'de> Deserialize<'de> for RawSidebarToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TokenVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TokenVisitor {
+            type Value = RawSidebarToken;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "a token name or a { token, fg, bold, dim, italic, keep, truncate } table",
+                )
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(RawSidebarToken::Plain(value.to_string()))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut token = None;
+                let mut style = RawStyledSidebarToken {
+                    token: String::new(),
+                    fg: None,
+                    bold: None,
+                    dim: None,
+                    italic: None,
+                    keep: None,
+                    truncate: None,
+                    invalid: 0,
+                };
+                // A wrong-typed value reads as unset and sets the key's bit.
+                fn lenient<'de, A, T>(
+                    map: &mut A,
+                    bit: u8,
+                    invalid: &mut u8,
+                ) -> Result<Option<T>, A::Error>
+                where
+                    A: serde::de::MapAccess<'de>,
+                    T: serde::de::DeserializeOwned,
+                {
+                    let value = map.next_value::<toml::Value>()?;
+                    match T::deserialize(value) {
+                        Ok(value) => Ok(Some(value)),
+                        Err(_) => {
+                            *invalid |= bit;
+                            Ok(None)
+                        }
+                    }
+                }
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "token" => token = Some(map.next_value::<String>()?),
+                        "fg" => style.fg = lenient(&mut map, STYLE_KEY_FG, &mut style.invalid)?,
+                        "bold" => {
+                            style.bold = lenient(&mut map, STYLE_KEY_BOLD, &mut style.invalid)?
+                        }
+                        "dim" => style.dim = lenient(&mut map, STYLE_KEY_DIM, &mut style.invalid)?,
+                        "italic" => {
+                            style.italic = lenient(&mut map, STYLE_KEY_ITALIC, &mut style.invalid)?
+                        }
+                        "keep" => {
+                            style.keep = lenient(&mut map, STYLE_KEY_KEEP, &mut style.invalid)?
+                        }
+                        "truncate" => {
+                            style.truncate = lenient::<_, String>(
+                                &mut map,
+                                STYLE_KEY_TRUNCATE,
+                                &mut style.invalid,
+                            )?
+                            .map(|value| match value.as_str() {
+                                "start" => SidebarTokenTruncate::Start,
+                                "end" => SidebarTokenTruncate::End,
+                                _ => SidebarTokenTruncate::Unrecognized,
+                            });
+                        }
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                style.token = token.ok_or_else(|| serde::de::Error::missing_field("token"))?;
+                Ok(RawSidebarToken::Styled(style))
+            }
+        }
+
+        deserializer.deserialize_any(TokenVisitor)
+    }
 }
 
 impl RawSidebarToken {
@@ -264,6 +418,17 @@ where
     }
     if !rules.is_empty() {
         map.serialize_entry("rules", rules)?;
+    }
+    if let Some(italic) = style.italic {
+        map.serialize_entry("italic", &italic)?;
+    }
+    if let Some(keep) = style.keep {
+        map.serialize_entry("keep", &keep)?;
+    }
+    match style.truncate {
+        Some(SidebarTokenTruncate::Start) => map.serialize_entry("truncate", "start")?,
+        Some(SidebarTokenTruncate::End) => map.serialize_entry("truncate", "end")?,
+        Some(SidebarTokenTruncate::Unrecognized) | None => {}
     }
     map.end()
 }
@@ -482,6 +647,51 @@ pub struct SidebarConfig {
     pub spaces: SpacesSidebarConfig,
 }
 
+/// A `truncate` value this build does not know falls back to `end`, with one
+/// line per occurrence (fork issue 164). Like an unknown key, it costs the
+/// option and not the file.
+pub(crate) fn sidebar_style_diagnostics(sidebar: &SidebarConfig) -> Vec<String> {
+    fn unrecognized<T>(
+        label: &str,
+        rows: &[Vec<T>],
+        parts: impl Fn(&T) -> SidebarTokenStyle,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for (row, tokens) in rows.iter().enumerate() {
+            for (column, token) in tokens.iter().enumerate() {
+                let style = parts(token);
+                if style.truncate == Some(SidebarTokenTruncate::Unrecognized) {
+                    out.push(format!(
+                        "{label}[{row}][{column}] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\""
+                    ));
+                }
+                for (key, expected) in style.invalid_keys() {
+                    out.push(format!(
+                        "{label}[{row}][{column}] has an invalid `{key}` (expected {expected}); ignoring it"
+                    ));
+                }
+            }
+        }
+        out
+    }
+    let mut out = unrecognized("ui.sidebar.agents.rows", &sidebar.agents.rows, |t| {
+        t.parts().1
+    });
+    for (agent, rows) in &sidebar.agents.rows_by_agent {
+        out.extend(unrecognized(
+            &format!("ui.sidebar.agents.rows_by_agent.{agent}"),
+            rows,
+            |t| t.parts().1,
+        ));
+    }
+    out.extend(unrecognized(
+        "ui.sidebar.spaces.rows",
+        &sidebar.spaces.rows,
+        |t| t.parts().1,
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,10 +783,10 @@ row_gap = 3
 rows = [[{ token = "workspace", fg = "#abc", bold = false }, "workspace"], [{ token = "$summary", dim = false }]]
 
 [ui.sidebar.agents.rows_by_agent]
-claude = [[{ token = "agent", fg = "#112233", bold = true, dim = false }]]
+claude = [[{ token = "agent", fg = "#112233", bold = true, dim = false, italic = true }]]
 
 [ui.sidebar.spaces]
-rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = true }]]
+rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = true, italic = false }]]
 "##,
         )
         .unwrap();
@@ -597,6 +807,9 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
         assert_eq!(token, &AgentSidebarToken::Agent);
         assert_eq!(style.bold, Some(true));
         assert_eq!(style.dim, Some(false));
+        assert_eq!(style.italic, Some(true));
+        // Omitted stays omitted: contextual.
+        assert_eq!(config.ui.sidebar.agents.rows[0][0].parts().1.italic, None);
 
         let (token, style) = config.ui.sidebar.spaces.rows[0][0].parts();
         assert_eq!(token, &SpaceSidebarToken::GitStatus);
@@ -607,6 +820,32 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
         let (token, style) = config.ui.sidebar.spaces.rows[1][0].parts();
         assert_eq!(token, &SpaceSidebarToken::Custom("jj".into()));
         assert_eq!(style.bold, Some(true));
+        assert_eq!(style.italic, Some(false));
+    }
+
+    #[test]
+    fn keep_and_truncate_parse_and_round_trip() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [[{ token = "$asks", keep = true, truncate = "start" }, { token = "branch", keep = false, truncate = "end" }, "workspace"]]
+"##,
+        )
+        .unwrap();
+        let rows = &config.ui.sidebar.spaces.rows;
+        let (_, first) = rows[0][0].parts();
+        assert_eq!(first.keep, Some(true));
+        assert_eq!(first.truncate, Some(SidebarTokenTruncate::Start));
+        assert!(first.keeps_width() && first.truncates_start());
+        let (_, second) = rows[0][1].parts();
+        assert_eq!(second.keep, Some(false));
+        assert_eq!(second.truncate, Some(SidebarTokenTruncate::End));
+        assert!(!second.keeps_width() && !second.truncates_start());
+        let (_, plain) = rows[0][2].parts();
+        assert_eq!((plain.keep, plain.truncate), (None, None));
+
+        let text = toml::to_string(&config.ui.sidebar.spaces).unwrap();
+        let again: SpacesSidebarConfig = toml::from_str(&text).unwrap();
+        assert_eq!(again.rows, rows.clone());
     }
 
     #[test]
@@ -662,18 +901,98 @@ rows = [[{ token = "$status", rules = [{ contains = "error", bold = true }] }]]
     }
 
     #[test]
-    fn rejects_invalid_occurrence_styles() {
-        for entry in [
-            r##"{ token = "workspace", fg = "red" }"##,
-            r##"{ token = "workspace", fg = "#abcd" }"##,
-            r##"{ token = "workspace", underline = true }"##,
+    fn a_wrong_type_for_keep_or_truncate_is_dropped_and_reported() {
+        for (entry, key) in [
+            (r##"{ token = "workspace", keep = "yes" }"##, "keep"),
+            (r##"{ token = "workspace", truncate = 1 }"##, "truncate"),
+            (r##"{ token = "workspace", truncate = true }"##, "truncate"),
         ] {
             let input = format!("[ui.sidebar.agents]\nrows = [[{entry}]]\n");
+            let config: crate::config::Config =
+                toml::from_str(&input).unwrap_or_else(|err| panic!("rejected {entry}: {err}"));
+            let (_, style) = config.ui.sidebar.agents.rows[0][0].parts();
+            assert_eq!((style.keep, style.truncate), (None, None), "{entry}");
+            let diagnostics = sidebar_style_diagnostics(&config.ui.sidebar);
+            assert_eq!(diagnostics.len(), 1, "{entry}: {diagnostics:?}");
             assert!(
-                toml::from_str::<crate::config::Config>(&input).is_err(),
-                "accepted {entry}"
+                diagnostics[0].starts_with("ui.sidebar.agents.rows[0][0] has an invalid")
+                    && diagnostics[0].contains(&format!("`{key}`")),
+                "{entry}: {diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_unrecognized_truncate_value_falls_back_to_end_with_a_diagnostic() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [["workspace"], [{ token = "$asks", truncate = "middle", keep = true }]]
+[ui.sidebar.agents.rows_by_agent]
+claude = [[{ token = "agent", truncate = "sideways" }]]
+"##,
+        )
+        .unwrap();
+        let (_, style) = config.ui.sidebar.spaces.rows[1][0].parts();
+        assert_eq!(style.truncate, Some(SidebarTokenTruncate::Unrecognized));
+        assert!(!style.truncates_start());
+        assert_eq!(style.keep, Some(true), "the other options stay");
+        assert_eq!(
+            sidebar_style_diagnostics(&config.ui.sidebar),
+            vec![
+                "ui.sidebar.agents.rows_by_agent.claude[0][0] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\"",
+                "ui.sidebar.spaces.rows[1][0] has an unrecognized truncate value (expected \"start\" or \"end\"); using \"end\"",
+            ]
+        );
+        assert!(sidebar_style_diagnostics(&SidebarConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_style_key_is_skipped_and_the_known_fields_stay() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [[{ token = "workspace", underline = true, bold = true }]]
+"##,
+        )
+        .unwrap();
+        let (token, style) = config.ui.sidebar.spaces.rows[0][0].parts();
+        assert_eq!(token, &SpaceSidebarToken::Workspace);
+        assert_eq!(style.bold, Some(true));
+    }
+
+    #[test]
+    fn italic_round_trips_through_serialization() {
+        let config: crate::config::Config = toml::from_str(
+            r##"[ui.sidebar.spaces]
+rows = [[{ token = "$asks", fg = "#ffd60a", bold = true, italic = true }, { token = "branch", italic = false }, "workspace"]]
+"##,
+        )
+        .unwrap();
+        let text = toml::to_string(&config.ui.sidebar.spaces).unwrap();
+        let again: crate::config::SpacesSidebarConfig = toml::from_str(&text).unwrap();
+        assert_eq!(again.rows, config.ui.sidebar.spaces.rows);
+        assert_eq!(again.rows[0][0].parts().1.italic, Some(true));
+        assert_eq!(again.rows[0][1].parts().1.italic, Some(false));
+        assert_eq!(again.rows[0][2].parts().1.italic, None);
+    }
+
+    #[test]
+    fn invalid_occurrence_styles_are_dropped_with_a_diagnostic() {
+        for (entry, key) in [
+            (r##"{ token = "workspace", fg = "red" }"##, "fg"),
+            (r##"{ token = "workspace", fg = "#abcd" }"##, "fg"),
+            (r##"{ token = "workspace", bold = "yes" }"##, "bold"),
+            (r##"{ token = "workspace", italic = 1 }"##, "italic"),
+        ] {
+            let input = format!("[ui.sidebar.agents]\nrows = [[{entry}]]\n");
+            let config: crate::config::Config =
+                toml::from_str(&input).unwrap_or_else(|err| panic!("rejected {entry}: {err}"));
+            let diagnostics = sidebar_style_diagnostics(&config.ui.sidebar);
+            assert_eq!(diagnostics.len(), 1, "{entry}: {diagnostics:?}");
+            assert!(diagnostics[0].contains(&format!("`{key}`")), "{entry}");
+        }
+        // A token with no `token` name has nothing to show: still an error.
+        let input = "[ui.sidebar.agents]\nrows = [[{ fg = \"#abc\" }]]\n";
+        assert!(toml::from_str::<crate::config::Config>(input).is_err());
     }
 
     #[test]

@@ -113,8 +113,17 @@ pub fn cleanup_test_base(base: &Path) {
     let _ = fs::remove_dir_all(base);
 }
 
-pub fn wait_for_socket(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
+/// How long a "must appear" wait may take before the suite calls it a hang.
+///
+/// A *liveness* bound, not a margin. Every caller used to pick its own 5s or
+/// 10s, which read as an assertion that startup is fast: under full-suite
+/// parallelism a loaded machine blew through 5s and seven `api_ping` tests
+/// failed at 5.29-5.99s with a correct server simply starting slowly. A
+/// correct run never approaches this bound, so only a real hang trips it.
+pub const APPEARS_TIMEOUT: Duration = Duration::from_secs(120);
+
+pub fn wait_for_socket(path: &Path) {
+    let deadline = Instant::now() + APPEARS_TIMEOUT;
     while Instant::now() < deadline {
         if path.exists() && UnixStream::connect(path).is_ok() {
             return;
@@ -124,8 +133,8 @@ pub fn wait_for_socket(path: &Path, timeout: Duration) {
     panic!("socket did not appear at {}", path.display());
 }
 
-pub fn wait_for_file(path: &Path, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
+pub fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + APPEARS_TIMEOUT;
     while Instant::now() < deadline {
         if path.exists() {
             return;

@@ -38,6 +38,7 @@ socket API 可以:
 - 列出、检查、分割、交换、聚焦、调整、重命名、读取、关闭窗格并向其发送输入
 - 通过 CLI 辅助命令列出、检查、读取、提示、等待、重命名、聚焦、启动和附加智能体
 - 从钩子和插件上报自定义智能体状态
+- 为每个窗格添加、列出、编辑、删除和清空待办
 - 订阅事件并等待输出或状态变化
 - 安装和卸载内置集成
 - 停止服务器并重载配置
@@ -94,6 +95,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | --- | --- |
 | 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
 | 通知 | `notification.show` |
+| 待办 | `todo.list`、`todo.add`、`todo.update`、`todo.remove`、`todo.clear` |
 | 客户端 | `client.window_title.set`、`client.window_title.clear` |
 | 会话 | `session.snapshot` |
 | 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
@@ -254,6 +256,55 @@ herdr notification show "build failed" --body "api workspace" --position top-lef
 ```
 
 可能的 reason 有 `shown`、`disabled`、`rate_limited`、`no_foreground_client` 和 `busy`。`disabled` 表示 `ui.toast.delivery = "off"`。`busy` 表示已有的应用内 toast 未被替换。terminal 和 system 投递是通过当前前台连接的 Herdr 客户端尽力而为的。
+
+待办是与通知相对的持久机制:每个窗格拥有一份下一步清单,跨服务器重启和实时交接保留,方法为 `todo.list`、`todo.add`、`todo.update`、`todo.remove` 和 `todo.clear`。`herdr todo` 是同一批方法的 CLI 包装。
+
+列出一个窗格的待办;省略 `pane_id` 时返回所有窗格的待办:
+
+```json
+{"id":"req_tlist","method":"todo.list","params":{"pane_id":"w1:p2"}}
+```
+
+```json
+{"id":"req_tlist","result":{"type":"todo_list","todos":[{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000100}]}}
+```
+
+待办按展示顺序返回:未完成在前 → 优先级从高到低(`high`、`normal`、`low`)→ 创建顺序。每条都带有自己的 `pane_id`,因此整个会话的列表也不会有歧义。`link_pane_id` 和 `link_label` 只出现在带链接的待办上。链接的窗格消失后 `link_alive` 变为 `false`,标签仍然保留,所以失效的链接仍读得懂,并且永远不会解析到别的窗格。
+
+给窗格添加待办:
+
+```json
+{"id":"req_tadd","method":"todo.add","params":{"pane_id":"w1:p2","text":"rerun the deploy","priority":"high","link_pane_id":"w1:p1"}}
+```
+
+```json
+{"id":"req_tadd","result":{"type":"todo","todo":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy","done":false,"priority":"high","link_pane_id":"w1:p1","link_label":"infra","link_alive":true,"created_at_unix":1789000000,"updated_at_unix":1789000000}}}
+```
+
+`priority` 可选,默认 `normal`。`link_pane_id` 可选,必须解析到一个存在的窗格;链接标签依次取自该窗格的标签、智能体名称,或你传入的 ID。文本会被去除首尾空白且不能为空,每条待办上限 500 个字符,每个窗格上限 50 条。不会静默截断:超限或非法的写入会以 `todo_text_empty`、`todo_text_too_long`、`todo_limit_reached`、`todo_link_unresolved` 或 `pane_not_found` 失败。
+
+更新一条待办。省略的字段保持原值,`clear_link` 解除链接并优先于 `link_pane_id`:
+
+```json
+{"id":"req_tupd","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"done":true}}
+{"id":"req_tunlink","method":"todo.update","params":{"pane_id":"w1:p2","id":3,"text":"rerun the deploy after review","priority":"normal","clear_link":true}}
+```
+
+响应为 `type: "todo"`,携带保存后的记录。不属于该窗格的 id 会以 `todo_not_found` 失败,被拒绝的更新不会改动待办。
+
+删除一条待办,或清空一个窗格的列表;`done_only` 保留未完成的待办:
+
+```json
+{"id":"req_trm","method":"todo.remove","params":{"pane_id":"w1:p2","id":3}}
+{"id":"req_tclear","method":"todo.clear","params":{"pane_id":"w1:p2","done_only":true}}
+```
+
+```json
+{"id":"req_trm","result":{"type":"ok"}}
+{"id":"req_tclear","result":{"type":"todo_cleared","removed":2}}
+```
+
+每次改变窗格列表的调用都会为该窗格发出 `todo.changed`;没有删除任何内容的 clear 不改变任何状态,也不会发出事件。
 
 设置或清除前台客户端的外层终端窗口标题:
 
@@ -652,6 +703,8 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 标签页事件订阅包括 `tab.created`、`tab.closed`、`tab.focused`、`tab.renamed` 和 `tab.moved`。`tab.moved` 包含被移动的 `tab_id`、`workspace_id`、请求的 `insert_index` 和该工作区更新后的有序 `tabs` 列表。
 窗格事件订阅包括 `pane.created`、`pane.updated`、`pane.closed`、`pane.focused`、`pane.moved`、`pane.exited`、`pane.agent_detected`、`pane.output_matched`、`pane.agent_status_changed` 和 `pane.scroll_changed`。`pane.focused` 也会上报任意连接到此服务器的客户端手动选择窗格的变化，不会移动其他客户端的视图，且载荷不包含客户端身份。重复选择已选中的窗格不会再次发出事件。终端标题变化可能发出 `pane.updated`,但如果原始标题只有旋转指示符发生变化且 `terminal_title_stripped` 不变,则不会发出。`pane.scroll_changed` 只针对一个 `pane_id`,每当 Herdr 观察到滚动快照变化时,都会发出 `pane_id`、`workspace_id` 和当前 `scroll` 指标。
 布局事件订阅包括 `layout.updated`。该事件携带一个标签页更新后的 `PaneLayoutSnapshot`。使用 `session.snapshot` 维护缓存的客户端应将该事件作为重新读取受影响布局的通知；延迟到达的载荷可能早于最新快照。
+
+待办事件订阅包括 `todo.changed`,每次改变窗格列表的 `todo.*` 调用发出一次。事件只携带受影响的 `pane_id`;用 `todo.list` 把列表读回来,消费者看到的结构就始终一致。
 
 Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
 

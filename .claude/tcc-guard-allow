@@ -1,0 +1,7 @@
+# Per-repo opt-out for infra's tcc-path-guard PreToolUse hook (ac/infra tools/tcc-path-guard.py;
+# procedure: ac/infra docs/tcc-path-guard-per-repo-opt-out.md, CONTEXT PATTERNS/tcc-guard-opt-out.md).
+# Scope chosen by ac in the herdr-relay session, 2026-09-28 15:4x ("1: yes" to "only that folder"):
+# ac's screenshots are a normal input to herdr work (bug reports, UI review), and every mention
+# or read of one prompted. Only the screenshots folder is opted out; the rest of Pictures,
+# Desktop/Documents/Downloads and ~/Library stay guarded. The $HOME-wide walk deny stays on.
+Pictures/Screenshots

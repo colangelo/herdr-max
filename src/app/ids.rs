@@ -37,6 +37,16 @@ impl App {
         ))
     }
 
+    /// [`Self::public_pane_id`] for a caller that does not know which
+    /// workspace holds the pane. `PaneId` is unique across the session while
+    /// public pane ids are workspace-scoped, so resolving a cross-workspace
+    /// target against the *active* workspace yields `None` and silently drops
+    /// whatever was being built from it.
+    pub(super) fn session_public_pane_id(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        let (ws_idx, _) = self.find_pane(pane_id)?;
+        self.public_pane_id(ws_idx, pane_id)
+    }
+
     pub(super) fn pane_launch_env(
         &self,
         ws_idx: usize,
@@ -103,11 +113,17 @@ impl App {
         None
     }
 
+    /// Resolve a pane id from the API. A live id means the pane that has it;
+    /// only an id no live pane has falls back to the ids panes had before they
+    /// moved to another space (their shells still export those).
     pub(crate) fn parse_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
-        if let Some(alias) = self.state.public_pane_id_aliases.get(id).copied() {
-            return self.find_pane(alias).map(|(ws_idx, _)| (ws_idx, alias));
-        }
+        self.parse_live_pane_id(id).or_else(|| {
+            let alias = self.state.public_pane_id_aliases.get(id).copied()?;
+            self.find_pane(alias).map(|(ws_idx, _)| (ws_idx, alias))
+        })
+    }
 
+    fn parse_live_pane_id(&self, id: &str) -> Option<(usize, crate::layout::PaneId)> {
         if let Some(rest) = id.strip_prefix("p_") {
             if let Some((ws_raw, pane_raw)) = rest.rsplit_once('_') {
                 let ws_idx = self.parse_workspace_id(ws_raw)?;

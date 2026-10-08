@@ -1552,7 +1552,32 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     select_pane_foreground_job_cached(child_pid)
 }
 
-pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
+/// The foreground job of the PTY this process owns, or `None` when it owns no
+/// PTY of its own.
+///
+/// Always `None` here. ConPTY wrappers do not present this shape — there is no
+/// controlling terminal to differ from the parent's, and process detection
+/// already walks the pane's descendants — so a stub keeps the contract total
+/// rather than pretending to support a nested lookup.
+pub fn nested_foreground_job(_pid: u32) -> Option<ForegroundJob> {
+    None
+}
+
+/// Always `None`, for the same reason as `nested_foreground_job`.
+pub fn nested_foreground_job_with_owner(_pid: u32) -> Option<(u32, ForegroundJob)> {
+    None
+}
+
+/// Not read on Windows: only Unix names Codex daemon threads.
+pub fn process_started_at_ms(_pid: u32) -> Option<i64> {
+    None
+}
+
+/// ConPTY presents no nested PTY to look behind, so `_is_wrapper` goes unused.
+pub(crate) fn available_pane_shell(
+    child_pid: u32,
+    _is_wrapper: impl Fn(&super::ForegroundProcess) -> bool,
+) -> Option<String> {
     let snapshot = ProcessSnapshot::new(snapshot_processes());
     available_pane_shell_from_snapshot(child_pid, &snapshot)
 }
@@ -3329,6 +3354,13 @@ impl Drop for InputSourceRestore {
     }
 }
 
+/// This process's physical memory footprint in bytes, for tests that must see
+/// memory actually given back to the OS. Not measured on this platform.
+#[cfg(test)]
+pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3721,8 +3753,10 @@ mod tests {
             .decode(encoded)
             .unwrap();
         let utf16 = bytes
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         assert_eq!(
             String::from_utf16(&utf16).unwrap(),

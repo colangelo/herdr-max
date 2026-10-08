@@ -62,6 +62,8 @@ impl App {
                 TabBarRightEntryConfig::Zoom => {
                     self.state.tab_bar_right.push(TabBarStatusSegment::Zoom);
                 }
+                // Reported by `tab_bar_right_diagnostics`; shows nothing.
+                TabBarRightEntryConfig::Invalid { .. } => {}
                 TabBarRightEntryConfig::Hostname => {
                     self.state
                         .tab_bar_right

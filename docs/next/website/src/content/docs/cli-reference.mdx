@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Herdr commands for sessions, workspaces, tabs, panes, notifications, agents, waits, integrations, and status.
+description: Herdr commands for sessions, workspaces, tabs, panes, notifications, todos, agents, waits, integrations, and status.
 ---
 
 Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
@@ -134,10 +134,34 @@ herdr server reload-agent-manifests
 ## Notifications
 
 ```bash
-herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right] [--sound none|done|request]
+herdr notification show <title> [--body TEXT] [--position top-left|top-right|bottom-left|bottom-right|center] [--sound none|done|request]
+herdr notification list [--json]
+herdr notification clear [--json]
 ```
 
 `notification show` uses the configured `[ui.toast]` delivery. `--position` only affects in-app Herdr toasts. `--sound` defaults to `none`; `done` and `request` play the existing finished and needs-attention sounds only when the notification is shown.
+
+`notification list` prints the server's notification log newest-first — the same feed as the in-app notification center — with unread entries marked `*` and a trailing unread count. An entry reads as unread until it is activated in the notification center or marked via `notification.mark_seen`. Pass `--json` for the raw `notification.list` response, including each entry's `id`, `kind`, `read` flag, target ids, and `posted_at_unix`. The log holds the newest 100 entries in server memory and empties on a cold server restart. `notification clear` empties the log (the same action as the notification center's "Clear all" button) and reports how many entries were removed.
+
+## Todos
+
+```bash
+herdr todo add <text> [--pane ID|--current] [--priority high|normal|low] [--link <target>] [--json]
+herdr todo list [--pane ID|--current|--all] [--json]
+herdr todo done <id> [--pane ID|--current] [--json]
+herdr todo undone <id> [--pane ID|--current] [--json]
+herdr todo edit <id> [--text TEXT] [--priority high|normal|low] [--link <target>|--unlink] [--pane ID|--current] [--json]
+herdr todo rm <id> [--pane ID|--current] [--json]
+herdr todo clear [--done] [--pane ID|--current] [--json]
+```
+
+Every pane carries its own todo list. Without `--pane` or `--current`, each verb acts on the calling pane's `HERDR_PANE_ID`, so an agent about to exit can record its next steps with `herdr todo add "hand back to review"` without knowing its own pane id. Run outside a Herdr pane without a target and the command fails instead of guessing; `todo list` also accepts `--all` to list every pane in the session.
+
+`--priority` is `high`, `normal`, or `low` and defaults to `normal`. `--link <target>` points a todo at another pane by pane id (`w1:p2`); the link captures a label for the target when it is made — that pane's label, its agent name, or the id you passed — so it still reads sensibly once the target is gone. `edit --unlink` drops the link. A pane holds at most 50 todos of at most 500 characters each; writes past either limit are rejected with `todo_limit_reached` or `todo_text_too_long` rather than truncated.
+
+`todo list` prints one todo per line in display order — outstanding before done, then highest priority first, then creation order — marking outstanding todos with `*`, followed by the id, priority, and text, with ` → label` appended for a linked todo and ` (gone)` when its target pane no longer exists. A trailing line counts the outstanding todos when any remain. `--all` adds a pane column. Pass `--json` for the raw `todo.list` response, including each todo's `link_pane_id`, `link_alive`, `created_at_unix`, and `updated_at_unix`.
+
+Todos belong to the pane and follow it: they ride the session snapshot across server restarts and `herdr update --handoff`, and links are remapped to the restored pane ids. A link whose target did not come back keeps its label and stops resolving instead of pointing at some other pane.
 
 ## Sessions
 
@@ -157,9 +181,11 @@ herdr workspace list
 herdr workspace create [--cwd PATH] [--label TEXT] [--env KEY=VALUE] [--focus] [--no-focus]
 herdr workspace get <workspace_id>
 herdr workspace focus <workspace_id>
+herdr workspace pin <workspace_id>
+herdr workspace unpin <workspace_id>
 herdr workspace rename <workspace_id> <label>
 herdr workspace report-metadata <workspace_id> --source ID [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]
-herdr workspace close <workspace_id> [--group]
+herdr workspace close <workspace_id> [--group] [--force]
 ```
 
 Create a workspace without stealing focus:
@@ -167,6 +193,10 @@ Create a workspace without stealing focus:
 ```bash
 herdr workspace create --cwd ~/project --label api --no-focus
 ```
+
+Pin with the mouse too: right-click a space for Pin or Unpin (first in its menu), right-click an agent row in the agent panel for Pin or Unpin, and click the `↑` marker of a pinned row to unpin it. With bubble motion, pinning bubbles the row up into the pinned block and unpinning bubbles it back down.
+
+Pinned workspaces sit at the top of the list in pin order, under every sort. `pin` is idempotent, `unpin` returns the row to where the sort puts it, and `.result.workspace.pinned` reports the state. The pin is saved with the session.
 
 A workspace is a top-level project or work context. Creating one also creates its first tab and root pane. The JSON response exposes their IDs as `.result.workspace.workspace_id`, `.result.tab.tab_id`, and `.result.root_pane.pane_id`.
 
@@ -193,10 +223,13 @@ herdr tab create [--workspace <workspace_id>] [--cwd PATH] [--label TEXT] [--env
 herdr tab get <tab_id>
 herdr tab focus <tab_id>
 herdr tab rename <tab_id> <label>
-herdr tab close <tab_id>
+herdr tab sync [<tab_id>|--tab ID|--current] [--toggle|--on|--off]
+herdr tab close <tab_id> [--force]
 ```
 
-A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`. Closing a workspace's last tab also closes the workspace, matching the TUI close-tab action. If `confirm_close` is enabled and closing the tab would also close a whole worktree group, `tab close` returns a `confirmation_required` error instead.
+A tab is another terminal layout inside a workspace. Without `--workspace`, `tab create` uses the active workspace and fails if none exists. Its JSON response exposes `.result.tab.tab_id` and `.result.root_pane.pane_id`. Closing a workspace's last tab also closes the workspace, matching the TUI close-tab action. If `confirm_close` is enabled and closing the tab would also close a whole worktree group, `tab close` returns a `confirmation_required` error instead, unless you pass `--force`.
+
+`tab sync` turns input sync on or off for a tab (the tab on screen without an id). While it is on, what you type into one pane also goes to every other member of the group, each in its own keyboard mode; yellow (`#FFD60A`) borders and a `SYNC` chip mark the group and panes outside it get a gray border. `tab sync --on` makes every pane a member (and a pane created later joins); "Sync input" in the menu of another pane starts a group of just the focused pane and that one. `pane sync --on` adds a member, `--off` removes one, and both fail with `sync_not_active` while the tab is not syncing. Taking out the last member leaves sync mode on for about three seconds (`SYNC ending…`), then it ends; adding a member in that time cancels it. Sync is never saved: it is off after a restart or a live handoff. `.result.tab.sync` and `.result.pane.synced` report the state.
 
 With `ui.confirm_close` enabled, the TUI asks for confirmation before closing a workspace's last tab from a keybinding or the tab menu. Ordinary CLI/API tab closes remain immediate.
 
@@ -215,6 +248,7 @@ herdr pane edges [--pane ID|--current]
 herdr pane focus --direction left|right|up|down [--pane ID|--current]
 herdr pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]
 herdr pane zoom [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
+herdr pane sync [<pane_id>|--pane ID|--current] [--toggle|--on|--off]
 herdr pane rename <pane_id> <label>|--clear
 herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane
 herdr pane split [<pane_id>|--pane ID|--current] --direction right|down [--ratio FLOAT] [--cwd PATH] [--env KEY=VALUE] [--right-click herdr|pane] [--focus] [--no-focus]
@@ -223,8 +257,33 @@ herdr pane swap --source-pane ID --target-pane ID
 herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [--ratio FLOAT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
-herdr pane close <pane_id>
+herdr pane clear [<pane_id>|--pane ID|--current]
+herdr pane close <pane_id> [--force]
+herdr pane respawn <pane_id> [--force]
 ```
+
+`pane close`, `tab close` and `workspace close` never put a question on anyone's
+screen. When the close would drop open todos, the command returns
+`confirmation_required`, lists the todos in the message, and changes nothing.
+`--force` closes anyway, and the JSON result lists the todos it dropped under
+`.result.closed_todos` (one entry per pane, with its `pane_id` and `todos`), so a
+script can keep them. For `pane close` and `tab close`, `--force` also answers
+the worktree group question below. Closing from the TUI still asks in a dialog.
+
+`pane respawn` restarts a pane's process in place. The pane keeps its ID,
+position, size, label, and todos; only the process is replaced. A pane launched
+with a command re-runs that command, and a plain shell pane gets a fresh shell.
+The replacement starts in the pane's current directory, not the one the pane was
+launched in, and the respawn never moves focus.
+When the pane still holds live work — a running child process or outstanding
+todos — the command returns `confirmation_required`, says which (the process
+name and pid, the todos), and changes nothing; repeating it does not confirm.
+`--force` respawns anyway, and the JSON result (`type: "respawned"`) names the
+process it stopped under `.result.stopped_process` (`pid`, `name`) and the todos
+the pane still carries under `.result.open_todos`. Like the closes above, it
+never puts a question on anyone's screen; respawning from the TUI still asks in
+a dialog. Use it to recover a wedged agent or dev server without losing the
+pane's place in the layout.
 
 For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,
@@ -243,17 +302,17 @@ After `pane move`, use `.result.move_result.pane.pane_id` for later commands. A 
 Read output:
 
 ```bash
-herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw]
+herdr pane read <pane_id> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--raw] [--strip-dim]
 herdr pane read <pane_id> --source visible --ansi
 herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
 
-`pane read` prints UTF-8 terminal text directly. ANSI escapes are stripped by default; use `--format ansi` or `--ansi` to preserve them where the source exposes styling. The `detection` source is always plain text. For recent sources, `--lines N` selects the last N rendered terminal rows before optional unwrapping; without it, reads default to 80 rows. For `visible` and `detection`, omitting `--lines` returns the full snapshot, while specifying it keeps the last N newline-delimited lines. `agent read` uses the same output and line behavior.
+`pane read` prints UTF-8 terminal text directly. ANSI escapes are stripped by default; use `--format ansi` or `--ansi` to preserve them where the source exposes styling. The `detection` source is always plain text. For recent sources, `--lines N` selects the last N rendered terminal rows before optional unwrapping; without it, reads default to 80 rows. For `visible` and `detection`, omitting `--lines` returns the full snapshot, while specifying it keeps the last N newline-delimited lines. `agent read` uses the same output and line behavior. `--strip-dim` leaves out faint (dim) text, for every source including `detection`: Claude Code draws its grey reply suggestion and the argument hint of `/compact` faint, so without the flag a text read shows them as if they were typed. With `--format ansi` the other styling stays. A read of an agent that draws its own full-screen history (such as Claude Code) scrolls that history to collect it and then scrolls back. When that stops before the top and returns fewer lines than `--lines` asked for, the command prints `herdr: partial read: N of M requested lines …` on stderr; stdout and the exit status are unchanged, and a retry usually returns more.
 
 Send input:
 
 ```bash
-herdr pane send-text <pane_id> <text>
+herdr pane send-text <pane_id> <text> [--chunk BYTES [--chunk-delay MS]]
 herdr pane send-keys <pane_id> <key> [key ...]
 herdr pane run <pane_id> <command>
 ```
@@ -265,6 +324,8 @@ and `shift+tab`, function keys such as `f1`, and named punctuation such as
 `minus`, `plus`, and `backtick`. Legacy `C-c` and `c-c` are accepted as
 aliases for `ctrl+c`.
 `esc` is the canonical spelling; `escape` is also accepted.
+
+`send-text` delivers the text as one raw write, without bracketed paste. Some TUIs, Claude Code among them, classify input by the size of the burst: a single write of about 1000 bytes or more is collapsed into a `[Pasted text #1]` placeholder, and a command such as `/compact` never expands it. `--chunk BYTES` splits the text into pieces of at most that many bytes, never cutting a UTF-8 character, and sends each as its own write with `--chunk-delay MS` (default 20) between them, so the pieces arrive as typed text. The command returns after the last piece is sent, so you can read the pane or press Enter right after. `--chunk 300` is a safe size for Claude Code; put `--` before text that itself starts with `--chunk`.
 
 `pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
 
@@ -302,9 +363,20 @@ Arguments after `--` are the command Herdr runs to resume this session after a s
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
 
+`agent get` (and `agent list --input-box`) also include `input_box: { "text": … }` for a Claude Code agent whose screen shows its input box: the draft typed there, without the `❯` marker. Faint text (Claude Code's grey reply suggestion, the argument hint of `/compact`) is not part of it, and a `[Pasted text #N]` placeholder is. The text is empty for an empty box, a multi-line draft keeps its lines, and the field is absent when no box is on screen or the agent is not Claude Code. `agent list` leaves it out unless `--input-box` is given, because it reads every Claude Code pane's screen. The `/compact` argument hint is matched by its exact grey (`38;2;153;153;153`), so a theme that draws it in another grey would show it as text; plain `--strip-dim` keeps that hint, which is not faint.
+
 Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
 
 `pane get` and `pane list` include `scroll` when terminal scroll metrics are available. `scroll.offset_from_bottom == 0` means the pane is at the bottom of its scrollback.
+
+Tell Herdr an agent is waiting on a question or a permission prompt, or that it stopped:
+
+```bash
+herdr pane report-hint <pane_id> --source ID --agent LABEL \
+  (--kind question|permission [--id ID] [--ttl-ms N] | --clear) [--seq N]
+```
+
+A hint raises `blocked` with that reason while it is live and ages out after `--ttl-ms` (default 15000, at most 60000) unless it is repeated. See `pane.report_hint` in the socket API for how the screen and a hint combine.
 
 Report display-only pane metadata without taking over semantic state:
 
@@ -336,19 +408,23 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).
 
 ```bash
-herdr agent list
+herdr agent list [--input-box]
 herdr agent get <target>
-herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
+herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]
 herdr agent send-keys <target> <key> [key ...]
 herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
+herdr agent pin <target>
+herdr agent unpin <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
 herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
+
+Pinned agents sit at the top of the agent panel in pin order, under every sort and any agent view. `agent pin` is idempotent, `agent unpin` returns the row to where the sort puts it, and `.result.agent.pinned` and `.result.pane.pinned` report the state. The pin belongs to the agent's terminal and is saved with the session, so it survives a restart, a live handoff and a resumed agent.
 
 Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
 
