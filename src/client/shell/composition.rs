@@ -650,6 +650,24 @@ impl ClientShellState {
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
                 None
+            } else if let ClientShellOverlay::NotificationCenter(center) = overlay {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                let rendered = super::notification_center::render_notification_center(
+                    &mut composed,
+                    center,
+                    layout.tab_bar,
+                    self.hits.notification_indicator,
+                    self.config.notification_center_position,
+                    now_unix,
+                    &self.config.palette,
+                );
+                if let Some(rendered) = rendered.as_ref() {
+                    occlusion.cover(rendered.outer);
+                }
+                self.hits.notification_center = rendered;
+                None
             } else if let ClientShellOverlay::TodoPanel(panel) = overlay {
                 // The panel hangs from its pane, so it is drawn against the
                 // pane's rect rather than centred like the other overlays.

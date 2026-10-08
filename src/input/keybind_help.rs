@@ -78,6 +78,10 @@ pub(crate) fn keybind_help_groups(
                     binding_label(&keybinds.open_notification_target),
                     "open notification target",
                 ),
+                entry(
+                    binding_label(&keybinds.open_notification_center),
+                    "notification center",
+                ),
             ],
         ),
         (
@@ -210,6 +214,15 @@ pub(crate) fn keybind_help_groups(
             entry("d", "remove todo"),
             entry("c", "clear done todos"),
             entry("g", "follow todo link"),
+            entry("esc / q", "close panel"),
+        ],
+    ));
+    groups.push((
+        "notification center",
+        vec![
+            entry("enter", "jump to notification"),
+            entry("r", "mark all read"),
+            entry("c", "clear all"),
             entry("esc / q", "close panel"),
         ],
     ));

@@ -83,6 +83,7 @@ pub(crate) fn render_client_overlay(
         // geometry this function does not have.
         ClientShellOverlay::ContextMenu(_)
         | ClientShellOverlay::GlobalMenu(_)
+        | ClientShellOverlay::NotificationCenter(_)
         | ClientShellOverlay::TodoPanel(_)
         | ClientShellOverlay::TodoEdit(_) => None,
     }

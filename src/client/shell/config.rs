@@ -152,6 +152,7 @@ impl ClientShellConfig {
                 .pane_todo_color
                 .as_deref()
                 .map(crate::config::parse_color),
+            notification_center_position: config.ui.notification_center_position,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),

@@ -481,6 +481,9 @@ impl ClientShellState {
         use crossterm::event::KeyModifiers;
 
         match self.overlay {
+            Some(ClientShellOverlay::NotificationCenter(_)) => {
+                return self.route_notification_center_key(key, outcome);
+            }
             Some(ClientShellOverlay::TodoPanel(_)) => {
                 return self.route_todo_panel_key(key, outcome)
             }

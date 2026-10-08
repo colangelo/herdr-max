@@ -540,6 +540,8 @@ impl ClientShellState {
                 | PendingEndpointKind::PaneLinkResolve { .. }
                 | PendingEndpointKind::CopyMotion { .. }
                 | PendingEndpointKind::CopySearch { .. }
+                | PendingEndpointKind::NotificationList { .. }
+                | PendingEndpointKind::NotificationMutation
                 | PendingEndpointKind::TodoList { .. }
                 | PendingEndpointKind::TodoMutation { .. }
                 | PendingEndpointKind::TodoSave { .. },

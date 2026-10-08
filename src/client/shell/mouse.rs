@@ -702,6 +702,9 @@ impl ClientShellState {
             return;
         }
         match self.overlay {
+            Some(ClientShellOverlay::NotificationCenter(_)) => {
+                return self.route_notification_center_mouse(mouse, outcome);
+            }
             Some(ClientShellOverlay::TodoPanel(_)) => {
                 return self.route_todo_panel_mouse(mouse, outcome);
             }

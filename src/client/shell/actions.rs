@@ -62,6 +62,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if action == crate::input::KeybindAction::OpenNotificationCenter {
+                    self.open_notification_center(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::OpenNotificationTarget {
                     self.focus_visible_notification(outcome);
                     return;
@@ -849,6 +853,17 @@ impl ClientShellState {
             kind @ (PendingEndpointKind::IntegrationList
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
+            }
+            PendingEndpointKind::NotificationList { summary } => {
+                return (
+                    self.handle_notification_list_result(summary, result),
+                    Vec::new(),
+                );
+            }
+            PendingEndpointKind::NotificationMutation => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_notification_mutation_result(result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
             }
             PendingEndpointKind::TodoList {
                 pane_id,
