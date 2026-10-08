@@ -936,8 +936,10 @@ pub(crate) struct PaneFocusTarget {
 }
 
 /// Endpoint-configured pane appearance; resolved at startup/reload, pure during rendering.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct PaneAppearance {
+    pub(crate) show_todos: bool,
+    pub(crate) todo_color: Option<Color>,
     pub(crate) border_active: Option<Color>,
     pub(crate) border_inactive: Option<Color>,
     pub(crate) border_style: crate::config::PaneBorderActiveStyleConfig,
@@ -949,11 +951,31 @@ pub(crate) struct PaneAppearance {
     pub(crate) inactive_dim: u32,
 }
 
+impl Default for PaneAppearance {
+    fn default() -> Self {
+        Self {
+            show_todos: true,
+            todo_color: None,
+            border_active: None,
+            border_inactive: None,
+            border_style: crate::config::PaneBorderActiveStyleConfig::Light,
+            title_active: None,
+            title_inactive: None,
+            active_bg: None,
+            inactive_bg: None,
+            dim_inactive: false,
+            inactive_dim: 0,
+        }
+    }
+}
+
 impl PaneAppearance {
     pub(crate) fn from_config(config: &crate::config::Config) -> Self {
         let ui = &config.ui;
         let parse = |value: &Option<String>| value.as_deref().map(crate::config::parse_color);
         Self {
+            show_todos: ui.show_pane_todo_indicator,
+            todo_color: parse(&ui.pane_todo_color),
             border_active: parse(&ui.pane_border_active_color),
             border_inactive: parse(&ui.pane_border_inactive_color),
             border_style: ui.pane_border_active_style,

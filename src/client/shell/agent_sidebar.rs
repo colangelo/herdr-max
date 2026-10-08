@@ -11,6 +11,7 @@ use ratatui::{
 use super::*;
 
 pub(super) struct AgentRow {
+    pub(super) todos: crate::ui::TodoDisplaySummary,
     pub(super) state_change_seq: u64,
     pub(super) background_work: bool,
     pub(super) jump_index: usize,
@@ -374,6 +375,13 @@ pub(super) fn agent_row(
         state_text,
     );
     Some(AgentRow {
+        todos: snapshot
+            .resource_facts
+            .as_ref()
+            .and_then(|f| f.pane_todos.as_ref())
+            .and_then(|facts| facts.get(&agent.pane_id))
+            .map(crate::ui::TodoDisplaySummary::from_fact)
+            .unwrap_or_default(),
         state_change_seq: agent.state_change_seq,
         background_work: snapshot
             .resource_facts
@@ -423,6 +431,13 @@ pub(super) fn render_agent_row(
         .then(|| crate::config::jump_symbol(row.jump_index))
         .flatten();
     let label = super::sidebar_chrome::number_label(jump, &config.agent_number_prefix);
+    let todo_label = match row.todos.open {
+        0 => String::new(),
+        n if n > 99 => "τ 99+".to_owned(),
+        n => format!("τ {n}"),
+    };
+    let todo_color = crate::ui::todo_priority_color(row.todos.priority, palette, config.todo_color);
+    let jump_row = usize::from(!todo_label.is_empty());
     let number_color = config.agent_number_color.unwrap_or(palette.overlay0);
     let bar =
         u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left);
@@ -455,7 +470,9 @@ pub(super) fn render_agent_row(
     };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = bar + if index == 0 { 1 } else { 3 };
-        let reserve = if editorial && index == 0 {
+        let reserve = if index == 0 && !todo_label.is_empty() {
+            super::sidebar_chrome::number_reserve(&todo_label, config.sidebar_active_border)
+        } else if editorial && index == jump_row {
             super::sidebar_chrome::number_reserve(&label, config.sidebar_active_border)
         } else {
             0
@@ -487,11 +504,30 @@ pub(super) fn render_agent_row(
             );
         }
     }
-    if editorial {
+    if !todo_label.is_empty() {
         super::sidebar_chrome::draw_number(
             buffer,
             rect,
             rect.y,
+            &todo_label,
+            todo_color,
+            config.sidebar_active_border,
+        );
+        let width = display_width(&todo_label).min(usize::from(u16::MAX)) as u16;
+        if rect.width >= width.saturating_add(4) {
+            let end = rect.right().saturating_sub(u16::from(
+                config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Right,
+            ));
+            for x in end - width..end {
+                buffer[(x, rect.y)].set_style(Style::default().add_modifier(Modifier::BOLD));
+            }
+        }
+    }
+    if editorial {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            rect,
+            rect.y.saturating_add(jump_row as u16),
             &label,
             number_color,
             config.sidebar_active_border,

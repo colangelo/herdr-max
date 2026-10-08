@@ -113,6 +113,12 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            show_pane_todos: config.ui.show_pane_todo_indicator,
+            todo_color: config
+                .ui
+                .pane_todo_color
+                .as_deref()
+                .map(crate::config::parse_color),
             follow_workspace: true,
             follow_agent: true,
             host_background: None,
@@ -382,6 +388,11 @@ impl ClientShellConfig {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
+                self.show_pane_todos = ui.show_pane_todo_indicator;
+                self.todo_color = ui
+                    .pane_todo_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
                 self.sidebar_overflow = config.ui.sidebar_overflow;
                 self.sidebar_fog = config.sidebar_fog().0;
                 self.sidebar_fog_tint = config.sidebar_fog().1;

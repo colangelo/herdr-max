@@ -13,6 +13,8 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) show_pane_todos: bool,
+    pub(super) todo_color: Option<ratatui::style::Color>,
     pub(super) follow_workspace: bool,
     pub(super) follow_agent: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
@@ -108,6 +110,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) pane_todos: Vec<(Rect, String)>,
     pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,

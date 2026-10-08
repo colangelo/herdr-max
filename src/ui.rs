@@ -2,7 +2,12 @@ use ratatui::layout::Rect;
 
 mod inactive_dim;
 mod onboarding;
+mod pane_todo_indicator;
 mod panes;
+pub(crate) use pane_todo_indicator::{
+    paint_pane_todo_indicator, pane_todo_indicator_for_rect, todo_priority_color,
+    TodoDisplaySummary,
+};
 mod release_notes;
 mod scrollbar;
 mod sidebar;

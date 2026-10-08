@@ -797,48 +797,63 @@ fn render_pane_border_titles(
     pane_infos: &[PaneInfo],
     frame: &mut Frame,
 ) {
-    let buf = frame.buffer_mut();
-    let area = buf.area;
+    let buffer = frame.buffer_mut();
+    let area = buffer.area;
     for info in pane_infos {
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
-        else {
-            continue;
-        };
         let y = info.rect.y;
-        if y < area.y || y >= area.y.saturating_add(area.height) {
+        if y < area.y || y >= area.bottom() {
             continue;
         }
-        let start_x = info.rect.x.saturating_add(1);
-        let end_x = info
-            .rect
-            .x
-            .saturating_add(info.rect.width)
-            .saturating_sub(1)
-            .min(area.x.saturating_add(area.width));
-        if start_x >= end_x {
-            continue;
+        let terminal = ws
+            .pane_state(info.id)
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
+        let indicator = terminal.and_then(|terminal| {
+            crate::ui::pane_todo_indicator_for_rect(
+                info.rect,
+                true,
+                crate::ui::TodoDisplaySummary::from_terminal(terminal),
+                app.pane_appearance.show_todos,
+                &app.palette,
+                app.pane_appearance.todo_color,
+            )
+        });
+        let reserved = indicator
+            .as_ref()
+            .map_or(0, |indicator| indicator.rect.width);
+        if let Some(title) = terminal
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|label| {
+                pane_border_title(
+                    &label,
+                    info.rect.width.saturating_sub(reserved),
+                    info.is_focused,
+                )
+            })
+        {
+            let start = info.rect.x.saturating_add(1);
+            let end = info
+                .rect
+                .right()
+                .saturating_sub(1 + reserved)
+                .min(area.right());
+            if start < end {
+                let style = Style::default().fg(app
+                    .pane_appearance
+                    .title_color(info.is_focused, &app.palette));
+                let style = if info.is_focused {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                };
+                buffer.set_stringn(start, y, title, usize::from(end - start), style);
+            }
         }
-        let color = app
-            .pane_appearance
-            .title_color(info.is_focused, &app.palette);
-        let mut style = Style::default().fg(color);
-        if info.is_focused {
-            style = style.add_modifier(Modifier::BOLD);
+        if let Some(indicator) = indicator {
+            crate::ui::paint_pane_todo_indicator(buffer, &indicator);
         }
-        buf.set_stringn(
-            start_x,
-            y,
-            title,
-            end_x.saturating_sub(start_x) as usize,
-            style,
-        );
     }
 }
 

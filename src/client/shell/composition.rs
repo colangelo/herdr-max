@@ -277,6 +277,36 @@ impl ClientShellState {
                 pixel_height: pane.pixel_height,
             })
             .collect();
+        if self.config.mouse_capture {
+            if let Some(todos) = snapshot
+                .resource_facts
+                .as_ref()
+                .and_then(|facts| facts.pane_todos.as_ref())
+            {
+                for pane in &surface.panes {
+                    if let Some(summary) = todos.get(&pane.pane_id) {
+                        let rect = Rect::new(
+                            layout.pane_surface.x.saturating_add(pane.rect.x),
+                            layout.pane_surface.y.saturating_add(pane.rect.y),
+                            pane.rect.width,
+                            pane.rect.height,
+                        );
+                        if let Some(indicator) = crate::ui::pane_todo_indicator_for_rect(
+                            rect,
+                            pane.inner_rect.y > pane.rect.y,
+                            crate::ui::TodoDisplaySummary::from_fact(summary),
+                            self.config.show_pane_todos,
+                            &self.config.palette,
+                            self.config.todo_color,
+                        ) {
+                            self.hits
+                                .pane_todos
+                                .push((indicator.rect, pane.pane_id.clone()));
+                        }
+                    }
+                }
+            }
+        }
         let topology_signature = pane_surface_topology_signature(surface);
         self.hits.pane_splits = surface
             .splits
