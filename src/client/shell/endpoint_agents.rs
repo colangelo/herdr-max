@@ -84,6 +84,17 @@ pub(super) fn render_expanded(
         |row| row.agent.focused,
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            if !row.stale && row.agent.pin_rank.is_some() {
+                if let Some(marker) = super::pins::marker_rect(rect, 1, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        row.endpoint_id.clone(),
+                        crate::api::schema::Method::AgentUnpin(crate::api::schema::AgentTarget {
+                            target: row.agent.pane_id.clone(),
+                        }),
+                    ));
+                }
+            }
             if row.stale {
                 buffer.set_style(
                     rect,

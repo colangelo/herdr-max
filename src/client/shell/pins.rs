@@ -126,7 +126,84 @@ pub(super) fn order_workspaces(
     }
 }
 
+pub(super) fn marker_rect(rect: Rect, lead: u16, config: &ClientShellConfig) -> Option<Rect> {
+    let offset =
+        u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left)
+            + lead
+            - 1;
+    (rect.height > 0 && rect.width > offset).then(|| Rect::new(rect.x + offset, rect.y, 1, 1))
+}
+pub(super) fn workspace_marker(
+    rect: Rect,
+    entry: WorkspaceEntry,
+    config: &ClientShellConfig,
+) -> Option<Rect> {
+    entry.pin_rank?;
+    marker_rect(
+        rect,
+        if entry.indented {
+            3
+        } else if entry.group_collapsed.is_some() {
+            2
+        } else {
+            1
+        },
+        config,
+    )
+}
+
 impl ClientShellState {
+    pub(super) fn unpin_marker_at(
+        &mut self,
+        point: (u16, u16),
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some((_, endpoint_id, method)) = self
+            .hits
+            .pin_markers
+            .iter()
+            .find(|(rect, _, _)| super::contains(*rect, point))
+            .cloned()
+        else {
+            return false;
+        };
+        if endpoint_id == self.active_endpoint_id {
+            self.push_endpoint_method(method, outcome);
+        } else if let Some(endpoint) = self.endpoints.iter().find(|endpoint| {
+            endpoint.endpoint_id == endpoint_id && endpoint.status == ClientEndpointStatus::Online
+        }) {
+            let method_name = crate::api::api_method_name(&method).to_owned();
+            if endpoint
+                .methods
+                .as_ref()
+                .is_some_and(|methods| !methods.contains(&method_name))
+            {
+                return true;
+            }
+            let Some(snapshot) = endpoint.snapshot.as_ref() else {
+                return true;
+            };
+            let boot_id = snapshot.boot_id.clone();
+            let id = format!("client-shell:{}", self.next_request_id);
+            self.next_request_id = self.next_request_id.saturating_add(1);
+            self.pending_requests.insert(
+                id.clone(),
+                PendingEndpointRequest {
+                    boot_id: boot_id.clone(),
+                    method_name,
+                    confirmation_workspace_id: None,
+                    kind: PendingEndpointKind::Generic,
+                },
+            );
+            outcome.actions.push(ClientShellAction::Endpoint {
+                endpoint_id,
+                boot_id,
+                request: Box::new(crate::api::schema::Request { id, method }),
+            });
+        }
+        true
+    }
+
     pub(super) fn toggle_workspace_pin(
         &mut self,
         workspace_id: String,
@@ -174,6 +251,33 @@ impl ClientShellState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clicking_pin_marker_unpins_without_changing_focus_and_neighbor_does_nothing() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(super::super::tests::snapshot()));
+        let focus = state
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .focused_workspace_id
+            .clone();
+        state.hits.pin_markers.push((
+            Rect::new(2, 3, 1, 1),
+            ClientEndpointId::Local,
+            crate::api::schema::Method::WorkspaceUnpin(crate::api::schema::WorkspaceTarget {
+                workspace_id: "ws_1".into(),
+            }),
+        ));
+        let mut outcome = ClientShellInput::default();
+        assert!(!state.unpin_marker_at((3, 3), &mut outcome));
+        assert!(outcome.actions.is_empty());
+        assert!(state.unpin_marker_at((2, 3), &mut outcome));
+        assert!(
+            matches!(&outcome.actions[0], ClientShellAction::Endpoint { request, .. } if matches!(&request.method, crate::api::schema::Method::WorkspaceUnpin(target) if target.workspace_id == "ws_1"))
+        );
+        assert_eq!(state.snapshot.as_ref().unwrap().focused_workspace_id, focus);
+    }
+
     #[test]
     fn pin_markers_use_the_fork_ramp_and_a_bounded_green_floor() {
         assert_eq!(marker_color(0), Color::Rgb(0xf4, 0x7b, 0x7b));

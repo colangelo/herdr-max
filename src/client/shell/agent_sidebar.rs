@@ -96,6 +96,17 @@ pub(super) fn render_agent_panel(
         |row| super::sidebar_overflow::item(row.status, row.pin_rank),
         |row| row.focused,
         |buffer, rect, row, hits| {
+            if row.pin_rank.is_some() {
+                if let Some(marker) = super::pins::marker_rect(rect, 1, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        ClientEndpointId::Local,
+                        crate::api::schema::Method::AgentUnpin(crate::api::schema::AgentTarget {
+                            target: row.pane_id.clone(),
+                        }),
+                    ));
+                }
+            }
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
         },

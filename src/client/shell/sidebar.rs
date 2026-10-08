@@ -108,6 +108,15 @@ pub(crate) fn render_collapsed_sidebar(
             Style::default().fg(config.state_color(status)),
         );
         super::sidebar_chrome::draw_active_border(buffer, rect, workspace.focused, config, 0);
+        if let Some(marker) = super::pins::workspace_marker(rect, entry, config) {
+            hits.pin_markers.push((
+                marker,
+                state.active_endpoint_id.clone(),
+                crate::api::schema::Method::WorkspaceUnpin(crate::api::schema::WorkspaceTarget {
+                    workspace_id: workspace.workspace_id.clone(),
+                }),
+            ));
+        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -714,7 +723,16 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
         },
         Style::default().fg(config.palette.accent),
     );
-    Some((toggle, key))
+    // Preserve the fork's full-card trailing chevron hit cell.
+    Some((
+        Rect::new(
+            workspace_rect.right().saturating_sub(1),
+            workspace_rect.y,
+            1,
+            1,
+        ),
+        key,
+    ))
 }
 
 pub(in crate::client::shell) fn displayed_workspace_status(

@@ -556,6 +556,17 @@ pub(super) fn render_expanded(
                     collapsed_groups,
                     config,
                 );
+                if let Some(marker) = super::pins::workspace_marker(nested, entry, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        endpoint.endpoint_id.clone(),
+                        crate::api::schema::Method::WorkspaceUnpin(
+                            crate::api::schema::WorkspaceTarget {
+                                workspace_id: workspace.workspace_id.clone(),
+                            },
+                        ),
+                    ));
+                }
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),

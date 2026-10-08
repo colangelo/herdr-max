@@ -113,6 +113,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) pin_markers: Vec<(Rect, ClientEndpointId, crate::api::schema::Method)>,
     pub(super) notification_indicator: Rect,
     pub(super) todo_board: Rect,
     pub(super) pane_todos: Vec<(Rect, String)>,
