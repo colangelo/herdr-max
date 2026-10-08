@@ -301,16 +301,21 @@ fn resource_facts(
             );
         }
     }
+    let mut pane_names = BTreeMap::new();
     let mut pane_pins = BTreeMap::new();
     let mut pane_todos = BTreeMap::new();
     let mut background_activity = BTreeMap::new();
     for public in &snapshot.panes {
-        let Some((_, pane_id)) = app.parse_pane_id(&public.pane_id) else {
+        let Some((ws_idx, pane_id)) = app.parse_pane_id(&public.pane_id) else {
             continue;
         };
         let Some(terminal) = app.state.pane_terminal(pane_id) else {
             continue;
         };
+        pane_names.insert(
+            public.pane_id.clone(),
+            app.state.pane_display_label(ws_idx, pane_id),
+        );
         if let Some(order) = terminal.pin_order {
             pane_pins.insert(public.pane_id.clone(), order);
         }
@@ -369,6 +374,7 @@ fn resource_facts(
         server_version: Some(crate::build_info::version()),
         workspace_pins: Some(workspace_pins),
         pane_pins: Some(pane_pins),
+        pane_names: Some(pane_names),
         workspace_heads: Some(workspace_heads),
         pane_todos: Some(pane_todos),
         background_activity: Some(background_activity),

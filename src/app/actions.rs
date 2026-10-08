@@ -2199,6 +2199,36 @@ impl AppState {
 /// The command a pane was launched with, reduced to its basename. Shared with
 /// the `todo.*` link handlers so a stored link and the navigator name a plain
 /// shell the same way.
+impl AppState {
+    /// Shared cached identity label used by pane labels, pickers and todo headings.
+    pub(crate) fn pane_display_label(&self, ws_idx: usize, pane_id: PaneId) -> String {
+        let pane_number = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.public_pane_number(pane_id))
+            .unwrap_or(0);
+        let terminal = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_state(pane_id))
+            .and_then(|pane| self.terminals.get(&pane.attached_terminal_id));
+        terminal
+            .and_then(|terminal| terminal.effective_title())
+            .or_else(|| {
+                terminal.and_then(|terminal| terminal.manual_label.as_deref().map(str::to_string))
+            })
+            .or_else(|| terminal.and_then(|terminal| terminal.terminal_title_stripped()))
+            .or_else(|| {
+                terminal.and_then(|terminal| terminal.agent_name.as_deref().map(str::to_string))
+            })
+            .or_else(|| {
+                terminal.and_then(|terminal| terminal.effective_agent_label().map(str::to_string))
+            })
+            .or_else(|| launch_label(terminal.and_then(|terminal| terminal.launch_argv.as_ref())))
+            .unwrap_or_else(|| format!("pane {pane_number}"))
+    }
+}
+
 pub(super) fn launch_label(argv: Option<&Vec<String>>) -> Option<String> {
     let argv = argv?;
     let command = argv.first()?;
@@ -2229,6 +2259,27 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn canonical_pane_label_keeps_number_command_and_assigned_name_fallbacks() {
+        let mut state = app_with_workspaces(&["labels"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        assert_eq!(state.pane_display_label(0, pane), "pane 1");
+        state.terminals.get_mut(&terminal_id).unwrap().launch_argv =
+            Some(vec!["/usr/bin/runner".into()]);
+        assert_eq!(state.pane_display_label(0, pane), "runner");
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("assigned".into());
+        assert_eq!(state.pane_display_label(0, pane), "assigned");
     }
 
     #[test]

@@ -11,6 +11,8 @@ pub struct ClientShellResourceFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_pins: Option<BTreeMap<String, u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_names: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_heads: Option<BTreeMap<String, ClientWorkspaceHead>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_todos: Option<BTreeMap<String, ClientPaneTodoSummary>>,
@@ -81,6 +83,7 @@ impl ClientShellResourceFacts {
             server_version: get("server_version").and_then(|v| serde_json::from_value(v).ok()),
             workspace_pins: map(get("workspace_pins")),
             pane_pins: map(get("pane_pins")),
+            pane_names: map(get("pane_names")),
             workspace_heads: map(get("workspace_heads")),
             pane_todos: map(get("pane_todos")),
             background_activity: map(get("background_activity")),

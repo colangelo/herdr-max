@@ -100,6 +100,37 @@ fn label_text(
     }
 }
 
+fn pane_name<'a>(snapshot: &'a ClientShellSnapshot, pane_id: &str) -> &'a str {
+    if let Some(name) = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.pane_names.as_ref())
+        .and_then(|names| names.get(pane_id))
+    {
+        return name;
+    }
+    // Older endpoints retain the closest label available in their baseline fields.
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.pane_id == pane_id);
+    agent
+        .and_then(|agent| agent.title.as_deref())
+        .or_else(|| {
+            snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .and_then(|pane| pane.label.as_deref())
+        })
+        .or_else(|| agent.and_then(|agent| agent.terminal_title_stripped.as_deref()))
+        .or_else(|| agent.and_then(|agent| agent.name.as_deref()))
+        .or_else(|| {
+            agent.and_then(|agent| agent.display_agent.as_deref().or(agent.agent.as_deref()))
+        })
+        .unwrap_or("terminal")
+}
+
 pub(super) fn paint(
     buffer: &mut Buffer,
     layout: ClientShellLayout,
@@ -115,25 +146,7 @@ pub(super) fn paint(
         if inner.is_empty() {
             continue;
         }
-        let name = snapshot
-            .agents
-            .iter()
-            .find(|agent| agent.pane_id == pane.pane_id)
-            .and_then(|agent| {
-                agent
-                    .name
-                    .as_deref()
-                    .or(agent.title.as_deref())
-                    .or(agent.display_agent.as_deref())
-            })
-            .or_else(|| {
-                snapshot
-                    .panes
-                    .iter()
-                    .find(|other| other.pane_id == pane.pane_id)
-                    .and_then(|other| other.label.as_deref())
-            })
-            .unwrap_or("terminal");
+        let name = pane_name(snapshot, &pane.pane_id);
         let boxed = inner.height >= 3 && inner.width > 4;
         let text = label_text(
             index,
@@ -338,6 +351,19 @@ fn summary_spans<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pane_labels_use_the_canonical_session_name_fact() {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            pane_names: Some([("pane_1".into(), "reported title".into())].into()),
+            ..Default::default()
+        });
+        assert_eq!(pane_name(&snapshot, "pane_1"), "reported title");
+        snapshot.resource_facts = None;
+        snapshot.panes[0].label = Some("assigned".into());
+        assert_eq!(pane_name(&snapshot, "pane_1"), "assigned");
+    }
+
     #[test]
     fn each_resize_rearms_the_configured_linger_and_other_keys_close_explicit_labels() {
         let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
