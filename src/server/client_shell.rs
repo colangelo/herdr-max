@@ -84,7 +84,7 @@ pub(super) fn snapshot_with_completions(
                 number: workspace.number,
                 label: workspace.label,
                 custom_label: state.custom_name.is_some(),
-                branch: state.head_label(),
+                branch: state.cached_git_branch.clone(),
                 git_ahead_behind: state.git_ahead_behind(),
                 tokens,
                 worktree: workspace
@@ -239,7 +239,8 @@ pub(super) fn snapshot_with_completions(
                 preview: notes.preview,
             });
 
-    let shell = protocol::ClientShellSnapshot {
+    let mut shell = protocol::ClientShellSnapshot {
+        resource_facts: None,
         boot_id: boot_id.to_owned(),
         revision,
         config_diagnostic: config_diagnostic.map(str::to_owned),
@@ -264,6 +265,7 @@ pub(super) fn snapshot_with_completions(
         agents,
         commands: app.client_shell_command_manifest(),
     };
+    shell.resource_facts = Some(resource_facts(app, &shell));
     (shell, completions)
 }
 
@@ -275,6 +277,119 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics: protocol::SurfaceGraphicsScene,
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
     pub(super) graphics_sources: crate::kitty_graphics::surface::SourceFiles,
+}
+
+fn resource_facts(
+    app: &app::App,
+    snapshot: &protocol::ClientShellSnapshot,
+) -> protocol::ClientShellResourceFacts {
+    use std::collections::BTreeMap;
+    let mut workspace_pins = BTreeMap::new();
+    let mut workspace_heads = BTreeMap::new();
+    for (public, state) in snapshot.workspaces.iter().zip(&app.state.workspaces) {
+        if let Some(order) = state.pin_order {
+            workspace_pins.insert(public.workspace_id.clone(), order);
+        }
+        if let Some(head) = state.cached_git_detached_head.as_ref() {
+            workspace_heads.insert(
+                public.workspace_id.clone(),
+                protocol::ClientWorkspaceHead {
+                    label: head.label(),
+                    short_oid: head.short_oid.clone(),
+                    operation: head.operation_name().map(str::to_owned),
+                },
+            );
+        }
+    }
+    let mut pane_pins = BTreeMap::new();
+    let mut pane_todos = BTreeMap::new();
+    let mut background_activity = BTreeMap::new();
+    for public in &snapshot.panes {
+        let Some((_, pane_id)) = app.parse_pane_id(&public.pane_id) else {
+            continue;
+        };
+        let Some(terminal) = app.state.pane_terminal(pane_id) else {
+            continue;
+        };
+        if let Some(order) = terminal.pin_order {
+            pane_pins.insert(public.pane_id.clone(), order);
+        }
+        let mut open = 0;
+        let mut highest = None;
+        for todo in terminal.todos().iter().filter(|todo| !todo.done) {
+            open += 1;
+            highest = Some(
+                highest.map_or(todo.priority, |old: crate::terminal::todo::TodoPriority| {
+                    old.max(todo.priority)
+                }),
+            );
+        }
+        pane_todos.insert(
+            public.pane_id.clone(),
+            protocol::ClientPaneTodoSummary {
+                total: terminal.todos().len(),
+                open,
+                highest_priority: highest.map(|priority| match priority {
+                    crate::terminal::todo::TodoPriority::High => "high".to_owned(),
+                    crate::terminal::todo::TodoPriority::Normal => "normal".to_owned(),
+                    crate::terminal::todo::TodoPriority::Low => "low".to_owned(),
+                }),
+            },
+        );
+        background_activity.insert(public.pane_id.clone(), terminal.background_work());
+    }
+    let mut tab_sync = BTreeMap::new();
+    for public in &snapshot.tabs {
+        let Some((ws_idx, tab_idx)) = app.parse_tab_id(&public.tab_id) else {
+            continue;
+        };
+        let Some(tab) = app
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.tabs.get(tab_idx))
+        else {
+            continue;
+        };
+        if tab.sync.is_some() {
+            tab_sync.insert(
+                public.tab_id.clone(),
+                protocol::ClientTabSync {
+                    members: tab
+                        .synced_panes()
+                        .into_iter()
+                        .filter_map(|pane| app.public_pane_id(ws_idx, pane))
+                        .collect(),
+                    ending: tab.sync_ending(),
+                },
+            );
+        }
+    }
+    protocol::ClientShellResourceFacts {
+        workspace_pins: Some(workspace_pins),
+        pane_pins: Some(pane_pins),
+        workspace_heads: Some(workspace_heads),
+        pane_todos: Some(pane_todos),
+        background_activity: Some(background_activity),
+        tab_sync: Some(tab_sync),
+        notifications: Some(protocol::ClientNotificationSummary {
+            total: app.state.notification_log.len(),
+            unread: app.state.notification_log.unread_count(),
+        }),
+        workspace_sort: Some(
+            match app.state.workspace_sort {
+                crate::app::state::WorkspaceSort::Manual => "manual",
+                crate::app::state::WorkspaceSort::Priority => "priority",
+            }
+            .to_owned(),
+        ),
+        host_label: {
+            static HOST_LABEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+            HOST_LABEL
+                .get_or_init(crate::platform::short_hostname)
+                .clone()
+        },
+    }
 }
 
 #[derive(Debug)]
@@ -695,6 +810,21 @@ mod tests {
         let (shell, completions) = snapshot_with_completions(&app, "boot", 9, None, None);
         assert_eq!(shell.panes.len(), 3);
         assert_eq!(shell.agents.len(), 2);
+        let facts = shell
+            .resource_facts
+            .as_ref()
+            .expect("supported optional facts");
+        assert!(facts.workspace_pins.as_ref().unwrap().is_empty());
+        assert!(facts.pane_pins.as_ref().unwrap().is_empty());
+        for pane in &shell.panes {
+            let todos = &facts.pane_todos.as_ref().unwrap()[&pane.pane_id];
+            assert_eq!((todos.total, todos.open), (0, 0));
+            assert_eq!(
+                facts.background_activity.as_ref().unwrap()[&pane.pane_id],
+                false
+            );
+        }
+        assert!(facts.tab_sync.as_ref().unwrap().is_empty());
         assert_eq!(shell.focused_pane_id, metadata.focused_pane_id);
         for (pane, public_pane) in shell.panes.iter().zip(&metadata.panes) {
             assert_eq!(pane.pane_id, public_pane.pane_id);
