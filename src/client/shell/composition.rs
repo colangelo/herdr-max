@@ -412,6 +412,18 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        if self.mode == ClientShellMode::Terminal && !self.pane_labels_visible() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            if let Some(rect) = super::sync_chrome::paint(
+                &mut composed,
+                mode_bar_area,
+                snapshot,
+                &self.config.palette,
+            ) {
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
         if self.pane_labels_visible() {
             let mut composed = frame.to_ratatui_buffer()?;
             for rect in super::display_panes::paint(&mut composed, layout, self, snapshot) {

@@ -530,7 +530,7 @@ pub(super) fn render_panes(
         }
     }
 
-    render_pane_borders(app, ws, pane_infos, split_borders, frame);
+    render_pane_borders(app, ws, target.tab_index, pane_infos, split_borders, frame);
 }
 
 fn apply_pane_appearance(
@@ -624,6 +624,7 @@ struct LineCell {
 fn render_pane_borders(
     app: &AppState,
     ws: &crate::workspace::Workspace,
+    tab_index: usize,
     pane_infos: &[PaneInfo],
     split_borders: &[crate::layout::SplitBorder],
     frame: &mut Frame,
@@ -632,6 +633,7 @@ fn render_pane_borders(
         return;
     }
 
+    let sync_tab = ws.tabs.get(tab_index).filter(|tab| tab.is_syncing());
     let mut cells = std::collections::HashMap::<(u16, u16), LineCell>::new();
     for info in pane_infos {
         add_pane_border_cells(&mut cells, info);
@@ -662,7 +664,17 @@ fn render_pane_borders(
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = app.pane_appearance.border_color(focused, &app.palette);
+        let color = match sync_tab {
+            Some(tab)
+                if pane_infos.iter().any(|info| {
+                    tab.pane_synced(info.id) && line_touches_pane(x, y, info, app.pane_gaps)
+                }) =>
+            {
+                crate::app::state::SYNC_YELLOW
+            }
+            Some(_) => app.palette.sync_outsider(),
+            None => app.pane_appearance.border_color(focused, &app.palette),
+        };
         cell.set_style(Style::default().fg(color));
     }
 
@@ -1038,7 +1050,57 @@ mod tests {
         split_borders: &[crate::layout::SplitBorder],
         frame: &mut Frame,
     ) {
-        render_pane_borders(app, ws, &app.view.pane_infos, split_borders, frame);
+        render_pane_borders(
+            app,
+            ws,
+            ws.active_tab_index(),
+            &app.view.pane_infos,
+            split_borders,
+            frame,
+        );
+    }
+
+    #[test]
+    fn sync_borders_follow_rendered_tab_and_gray_its_outsiders() {
+        let app = AppState::test_new();
+        let mut ws = Workspace::test_new("sync");
+        let target = ws.test_add_tab(None);
+        let id = ws.tabs[target].root_pane;
+        ws.tabs[target].set_sync(true);
+        let info = PaneInfo {
+            id,
+            rect: Rect::new(0, 0, 12, 4),
+            inner_rect: Rect::new(1, 1, 10, 2),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: true,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 4)).unwrap();
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            crate::app::state::SYNC_YELLOW
+        );
+        ws.tabs[target].toggle_pane_sync(id, std::time::Instant::now());
+        assert!(ws.tabs[target].sync_ending());
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            app.palette.sync_outsider()
+        );
+        ws.tabs[target].set_sync(false);
+        terminal
+            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            app.pane_appearance.border_color(true, &app.palette)
+        );
     }
 
     #[test]
