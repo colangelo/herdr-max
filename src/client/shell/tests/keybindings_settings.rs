@@ -371,8 +371,11 @@ detach = "prefix+x"
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("PREFIX"), "frame: {text:?}");
-    assert!(text.contains("ctrl+a"), "frame: {text:?}");
+    assert!(text.contains(" NAVIGATE  esc back  "), "frame: {text:?}");
+    assert!(
+        text.contains("↑ / ↓ ws  ⇥ pane  g navigator"),
+        "frame: {text:?}"
+    );
 
     let detach = state.handle_input_bytes(b"x");
     assert!(detach.detach);
