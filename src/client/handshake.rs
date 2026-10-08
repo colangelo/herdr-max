@@ -133,6 +133,7 @@ pub(super) struct HandshakeResult {
     pub(super) encoding: RenderEncoding,
     pub(super) endpoint_methods: Option<Vec<String>>,
     pub(super) endpoint_capabilities: Option<Vec<String>>,
+    pub(super) server_version: Option<String>,
 }
 
 pub(crate) fn probe_endpoint_negotiation(
@@ -155,7 +156,8 @@ pub(crate) fn probe_endpoint_negotiation(
     Ok(super::endpoint::EndpointNegotiation::new(
         handshake.endpoint_methods.unwrap_or_default(),
         handshake.endpoint_capabilities.unwrap_or_default(),
-    ))
+    )
+    .with_server_version(handshake.server_version))
 }
 
 /// Performs the client→server handshake.
@@ -288,6 +290,7 @@ pub(super) fn do_handshake(
             encoding: RenderEncoding::SemanticFrame,
             endpoint_methods: Some(welcome.methods),
             endpoint_capabilities: Some(welcome.capabilities),
+            server_version: Some(welcome.server_version),
         });
     }
 
@@ -305,6 +308,7 @@ pub(super) fn do_handshake(
                 encoding,
                 endpoint_methods: None,
                 endpoint_capabilities: None,
+                server_version: None,
             })
         }
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(

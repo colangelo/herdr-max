@@ -895,6 +895,7 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) endpoint_versions: HashMap<ClientEndpointId, String>,
     pub(super) pane_labels_until: Option<std::time::Instant>,
     pub(super) pane_labels_explicit: bool,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
@@ -1119,6 +1120,7 @@ impl ClientShellState {
             last_tab_bar_width: None,
             last_composed_size: None,
             last_composed_at: None,
+            endpoint_versions: HashMap::new(),
             pane_labels_until: None,
             pane_labels_explicit: false,
             activity_deadline: None,

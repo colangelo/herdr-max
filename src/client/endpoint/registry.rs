@@ -22,6 +22,7 @@ pub(crate) trait EndpointTransport: Send {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EndpointNegotiation {
+    server_version: Option<String>,
     methods: HashSet<String>,
     capabilities: HashSet<String>,
 }
@@ -29,9 +30,19 @@ pub(crate) struct EndpointNegotiation {
 impl EndpointNegotiation {
     pub(crate) fn new(methods: Vec<String>, capabilities: Vec<String>) -> Self {
         Self {
+            server_version: None,
             methods: methods.into_iter().collect(),
             capabilities: capabilities.into_iter().collect(),
         }
+    }
+
+    pub(crate) fn with_server_version(mut self, version: Option<String>) -> Self {
+        self.server_version = version;
+        self
+    }
+
+    pub(crate) fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
     }
 
     pub(crate) fn methods(&self) -> Vec<String> {

@@ -214,38 +214,28 @@ pub(super) fn paint(
             })
             .bg(if resize { p.mauve } else { p.red })
             .add_modifier(Modifier::BOLD);
-        let sizes = format!(
-            "  window {}x{} · panes {}x{}",
-            buffer.area.width,
-            buffer.area.height,
-            layout.pane_surface.width,
-            layout.pane_surface.height
-        );
-        let hint = if resize {
-            "  h/l width  j/k height  esc done".to_owned()
-        } else if state.pane_labels_explicit {
-            format!("  1-{} focus  any key close", panes.len().min(9))
-        } else {
-            String::new()
-        };
-        let version = snapshot
-            .resource_facts
-            .as_ref()
-            .and_then(|facts| facts.server_version.as_deref())
+        let version = state
+            .endpoint_versions
+            .get(&state.active_endpoint_id)
+            .map(String::as_str)
+            .or_else(|| {
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|facts| facts.server_version.as_deref())
+            })
             .unwrap_or("unknown");
-        let version = format!("  VERSION  {version}");
-        let main = format!("{}{}", sizes, hint);
-        let mut spans = vec![
-            Span::styled(if resize { " RESIZE " } else { " PANES " }, chip),
-            Span::styled(main.clone(), Style::default().fg(p.text)),
-        ];
-        if super::render::display_width(&main)
-            .saturating_add(super::render::display_width(&version))
-            .saturating_add(8)
-            <= bar.width
-        {
-            spans.push(Span::styled(version, Style::default().fg(p.overlay0)));
-        }
+        let spans = summary_spans(
+            buffer.area,
+            layout.pane_surface,
+            panes.len(),
+            state.pane_labels_explicit,
+            resize,
+            version,
+            p,
+            chip,
+            bar.width,
+        );
         Paragraph::new(Line::from(spans))
             .style(Style::default().bg(p.panel_bg))
             .render(bar, buffer);
@@ -264,12 +254,85 @@ pub(super) fn paint(
                     rect.y,
                     text,
                     usize::from(width),
-                    Style::default().fg(p.overlay0).bg(p.sidebar_bg),
+                    Style::default()
+                        .fg(panel_contrast_fg(p))
+                        .bg(p.red)
+                        .add_modifier(Modifier::BOLD),
                 );
             }
         }
     }
     covered
+}
+
+fn summary_spans<'a>(
+    window: Rect,
+    panes: Rect,
+    count: usize,
+    explicit: bool,
+    resize: bool,
+    version: &'a str,
+    p: &Palette,
+    chip: Style,
+    width: u16,
+) -> Vec<Span<'a>> {
+    let key = Style::default()
+        .fg(if resize { p.accent } else { p.red })
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(p.overlay0);
+    let value = Style::default().fg(p.text);
+    let mut spans = vec![
+        Span::styled(if resize { " RESIZE " } else { " PANES " }, chip),
+        Span::raw("  "),
+    ];
+    if resize {
+        spans.extend([
+            Span::styled("h/l", key),
+            Span::styled(" width  ", dim),
+            Span::styled("j/k", key),
+            Span::styled(" height  ", dim),
+            Span::styled("esc", key),
+            Span::styled(" done  ", dim),
+        ]);
+    }
+    spans.extend([
+        Span::styled("window ", dim),
+        Span::styled(format!("{}x{}", window.width, window.height), value),
+        Span::styled(" · panes ", dim),
+        Span::styled(format!("{}x{}", panes.width, panes.height), value),
+    ]);
+    if explicit {
+        spans.push(Span::raw("  "));
+        if count > 0 {
+            let last = count.min(9);
+            spans.extend([
+                Span::styled(
+                    if last == 1 {
+                        "1".to_owned()
+                    } else {
+                        format!("1-{last}")
+                    },
+                    key,
+                ),
+                Span::styled(" focus  ", dim),
+            ]);
+        }
+        spans.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
+    }
+    // Keep the hints on narrow bars, dropping the version first, as in the fork.
+    let version_spans = [
+        Span::raw("  "),
+        Span::styled(" VERSION ", chip),
+        Span::raw(" "),
+        Span::styled(version, value),
+    ];
+    if spans.iter().map(Span::width).sum::<usize>()
+        + version_spans.iter().map(Span::width).sum::<usize>()
+        <= usize::from(width)
+    {
+        spans.extend(version_spans);
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -287,6 +350,72 @@ mod tests {
         state.close_pane_labels();
         assert!(!state.pane_labels_visible());
     }
+    #[test]
+    fn summary_keeps_red_version_chip_key_colors_and_narrow_bar_priority() {
+        let config = ClientShellConfig::from_config(&Config::default());
+        let p = &config.palette;
+        let chip = Style::default()
+            .fg(panel_contrast_fg(p))
+            .bg(p.red)
+            .add_modifier(Modifier::BOLD);
+        let spans = summary_spans(
+            Rect::new(0, 0, 140, 30),
+            Rect::new(26, 0, 114, 29),
+            2,
+            true,
+            false,
+            "server-build",
+            p,
+            chip,
+            140,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("any key close   VERSION  server-build"));
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.content == " VERSION ")
+                .unwrap()
+                .style,
+            chip
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.content == "any key")
+                .unwrap()
+                .style
+                .fg,
+            Some(p.red)
+        );
+        let narrow = summary_spans(
+            Rect::new(0, 0, 90, 30),
+            Rect::new(26, 0, 64, 29),
+            2,
+            true,
+            false,
+            "server-build",
+            p,
+            chip,
+            90,
+        );
+        let text: String = narrow.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("any key close"));
+        assert!(!text.contains("VERSION"));
+        let passive = summary_spans(
+            Rect::new(0, 0, 140, 30),
+            Rect::new(26, 0, 114, 29),
+            2,
+            false,
+            false,
+            "server-build",
+            p,
+            chip,
+            140,
+        );
+        assert!(!passive.iter().any(|s| s.content.contains("focus")));
+    }
+
     #[test]
     fn long_label_drops_name_before_address_and_size() {
         let inner = Rect::new(0, 0, 80, 20);

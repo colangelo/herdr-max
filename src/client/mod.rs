@@ -479,6 +479,12 @@ async fn run_client_loop(
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
+        shell.set_endpoint_server_version(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.server_version.clone()),
+        );
         shell.set_endpoint_methods_for(
             &endpoint::ClientEndpointId::Local,
             initial
@@ -601,7 +607,8 @@ async fn run_client_loop(
         let negotiation = endpoint::EndpointNegotiation::new(
             handshake.endpoint_methods.unwrap_or_default(),
             handshake.endpoint_capabilities.unwrap_or_default(),
-        );
+        )
+        .with_server_version(handshake.server_version);
         let surface_decoder = negotiated_surface_decoder(&negotiation);
         let transport = start_endpoint_transport(
             stream,
@@ -1326,6 +1333,10 @@ async fn run_client_loop(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
                     let frame = state.shell.as_mut().and_then(|shell| {
+                        shell.set_endpoint_server_version(
+                            &endpoint_id,
+                            negotiation.server_version().map(str::to_owned),
+                        );
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,

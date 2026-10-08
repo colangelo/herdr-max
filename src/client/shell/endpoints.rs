@@ -190,6 +190,18 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_server_version(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        version: Option<String>,
+    ) {
+        if let Some(version) = version {
+            self.endpoint_versions.insert(endpoint_id.clone(), version);
+        } else {
+            self.endpoint_versions.remove(endpoint_id);
+        }
+    }
+
     pub(crate) fn set_endpoint_methods_for(
         &mut self,
         endpoint_id: &ClientEndpointId,
