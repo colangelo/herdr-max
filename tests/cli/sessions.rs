@@ -271,6 +271,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .args(["integration", "install", "pi"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert_eq!(integration_install.status.code(), Some(0));
@@ -283,6 +284,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .args(["integration", "status"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
@@ -294,6 +296,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
         .args(["integration", "uninstall", "pi"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert_eq!(integration_uninstall.status.code(), Some(0));
@@ -326,6 +329,7 @@ fn integration_status_outdated_only_prints_action_for_legacy_install() {
         .args(["integration", "status", "--outdated-only"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
 
@@ -352,6 +356,7 @@ fn integration_status_rejects_unknown_flags() {
         .args(["integration", "status", "--wat"])
         .env("HERDR_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
 
@@ -668,7 +673,7 @@ fn unloaded_session_survives_autosave_and_shutdown_when_recovery_is_blocked() {
     fs::write(data_dir.join("session-backups"), b"blocks recovery").unwrap();
 
     let mut herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
     run_cli_json(
         &socket_path,
         &["workspace", "create", "--cwd", base.to_str().unwrap()],
@@ -699,7 +704,7 @@ fn session_appearing_after_startup_is_preserved_before_autosave() {
     let socket_path = runtime_dir.join("herdr.sock");
     let data_dir = config_home.join(app_dir_name());
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
     // The API socket binds before restore; a read-only App request waits for it.
     let ready = run_cli_json(&socket_path, &["workspace", "list"]);
     assert_eq!(ready["result"]["workspaces"], serde_json::json!([]));

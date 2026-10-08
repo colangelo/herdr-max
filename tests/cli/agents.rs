@@ -146,7 +146,7 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
-    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "2.3");
+    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "3.2");
     let config = format!(
         "onboarding = false\n[terminal]\ndefault_shell = {:?}\nshell_mode = \"non_login\"\n",
         delayed_shell.to_str().unwrap()
