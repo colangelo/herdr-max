@@ -16,7 +16,28 @@ use crate::layout::PaneId;
 /// type instead of the pane module's implementation detail.
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
+/// Private input ownership token. A respawn preserves TerminalId but replaces
+/// this allocation; keeping a weak pointer also prevents allocation reuse.
+#[derive(Clone)]
+pub(crate) struct TerminalRuntimeInputIdentity(crate::pane::PaneRuntimeInputIdentity);
+
+impl std::fmt::Debug for TerminalRuntimeInputIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalRuntimeInputIdentity")
+            .finish_non_exhaustive()
+    }
+}
+
 impl TerminalRuntime {
+    pub(crate) fn input_identity(&self) -> TerminalRuntimeInputIdentity {
+        TerminalRuntimeInputIdentity(self.0.input_terminal_identity())
+    }
+
+    pub(crate) fn has_input_identity(&self, identity: &TerminalRuntimeInputIdentity) -> bool {
+        self.0.has_input_identity(&identity.0)
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }
