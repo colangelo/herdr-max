@@ -65,7 +65,7 @@ pub(crate) fn keybind_help_groups(
     keybinds: &Keybinds,
     prefixes: &[crate::config::KeyCombo],
 ) -> Vec<KeybindHelpGroup> {
-    let mut groups = vec![
+    let mut groups: Vec<KeybindHelpGroup> = vec![
         (
             "global",
             vec![
@@ -162,6 +162,8 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.rename_pane), "rename pane"),
                 entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
+                entry(binding_label(&keybinds.open_pane_todos), "pane todos"),
+                entry(binding_label(&keybinds.add_pane_todo), "add pane todo"),
                 entry(binding_label(&keybinds.copy_mode), "copy mode"),
                 entry(binding_label(&keybinds.zoom), "zoom pane"),
                 entry(binding_label(&keybinds.resize_mode), "resize mode"),
@@ -195,6 +197,42 @@ pub(crate) fn keybind_help_groups(
             ],
         ),
     ];
+
+    // Fixed chords rather than `KeysConfig` actions — the todo panel and its
+    // edit modal own their keymaps — but a shortcut absent from this panel is
+    // a shortcut nobody finds.
+    groups.push((
+        "pane todos",
+        vec![
+            entry("enter", "edit selected todo"),
+            entry("a", "add todo"),
+            entry("spc", "toggle done"),
+            entry("d", "remove todo"),
+            entry("c", "clear done todos"),
+            entry("g", "follow todo link"),
+            entry("esc / q", "close panel"),
+        ],
+    ));
+    groups.push((
+        "todo edit modal",
+        vec![
+            entry("ctrl+s / alt+enter", "save todo"),
+            entry("esc", "cancel edit"),
+            entry("tab", "cycle priority"),
+            entry("ctrl+l", "choose link target"),
+            entry("ctrl+g", "save and follow the link"),
+            entry("ctrl+t", "toggle done"),
+            entry("enter", "insert newline"),
+            entry("ctrl+a / ctrl+e", "line start / end"),
+            entry("ctrl+b / ctrl+f", "character back / forward"),
+            entry("alt+b / alt+f", "word back / forward"),
+            entry("ctrl+d", "delete forward"),
+            entry("ctrl+k / ctrl+u", "kill to line end / start"),
+            entry("ctrl+w", "kill word back"),
+            entry("ctrl+y", "yank last kill"),
+            entry("ctrl+_ / ctrl+- / ctrl+/", "undo"),
+        ],
+    ));
 
     if !keybinds.custom_commands.is_empty() {
         groups.push((

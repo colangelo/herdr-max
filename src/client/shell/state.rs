@@ -41,6 +41,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) confirm_close: bool,
+    /// `ui.pane_todo_color`: one colour for every open todo's mark instead of
+    /// the priority colours.
+    pub(super) pane_todo_color: Option<ratatui::style::Color>,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
@@ -115,6 +118,8 @@ pub(super) struct ShellHitMap {
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
+    pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
+    pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -291,6 +296,8 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    TodoPanel,
+    TodoEdit,
 }
 
 #[derive(Debug)]
@@ -622,6 +629,8 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    TodoPanel(super::todo_panel::ClientTodoPanelOverlay),
+    TodoEdit(super::todo_edit::ClientTodoEditOverlay),
 }
 
 impl ClientShellOverlay {
@@ -640,6 +649,8 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::TodoPanel(_) => ClientShellOverlayKind::TodoPanel,
+            Self::TodoEdit(_) => ClientShellOverlayKind::TodoEdit,
         }
     }
 }
@@ -692,6 +703,19 @@ pub(super) enum PendingEndpointKind {
         pane_id: String,
         origin: crate::api::schema::PaneTextPoint,
         session_generation: u64,
+    },
+    TodoList {
+        pane_id: String,
+        revision: Option<u64>,
+        panes: u64,
+    },
+    TodoMutation {
+        pane_id: String,
+    },
+    TodoSave {
+        pane_id: String,
+        todo_id: Option<u64>,
+        follow: Option<String>,
     },
     CopySearch {
         pane_id: String,

@@ -35,6 +35,8 @@ mod settings;
 mod state;
 mod surface_patch;
 mod text_editor;
+mod todo_edit;
+mod todo_panel;
 mod todo_text;
 mod word_selection;
 mod worktrees;

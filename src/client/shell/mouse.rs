@@ -701,6 +701,15 @@ impl ClientShellState {
             }
             return;
         }
+        match self.overlay {
+            Some(ClientShellOverlay::TodoPanel(_)) => {
+                return self.route_todo_panel_mouse(mouse, outcome);
+            }
+            Some(ClientShellOverlay::TodoEdit(_)) => {
+                return self.route_todo_edit_mouse(mouse, outcome);
+            }
+            _ => {}
+        }
         if matches!(
             self.overlay,
             Some(ClientShellOverlay::ProductAnnouncement(_))

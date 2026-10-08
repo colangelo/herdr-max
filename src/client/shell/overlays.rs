@@ -79,7 +79,12 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
-        ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
+        // Drawn by their own branches in composition: they need the pane
+        // geometry this function does not have.
+        ClientShellOverlay::ContextMenu(_)
+        | ClientShellOverlay::GlobalMenu(_)
+        | ClientShellOverlay::TodoPanel(_)
+        | ClientShellOverlay::TodoEdit(_) => None,
     }
 }
 

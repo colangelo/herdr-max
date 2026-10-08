@@ -138,6 +138,25 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if matches!(
+                    action,
+                    crate::input::KeybindAction::OpenPaneTodos
+                        | crate::input::KeybindAction::AddPaneTodo
+                ) {
+                    let focused = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_pane_id.clone());
+                    if let Some(pane_id) = focused {
+                        if action == crate::input::KeybindAction::OpenPaneTodos {
+                            self.open_todo_panel(pane_id, outcome);
+                        } else {
+                            self.open_todo_editor(pane_id, None, None);
+                        }
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 if action == crate::input::KeybindAction::WorkspacePicker {
                     self.pending_workspace_highlight = None;
                     self.mobile_switcher_scroll = 0;
@@ -551,7 +570,11 @@ impl ClientShellState {
                     _ => (
                         ClientEndpointNoticeKind::Rejected,
                         format!("{}:{code}", pending.method_name),
-                        "Action rejected",
+                        if matches!(pending.kind, PendingEndpointKind::TodoSave { .. }) {
+                            "todo save failed"
+                        } else {
+                            "Action rejected"
+                        },
                         error.message.clone(),
                     ),
                 };
@@ -826,6 +849,34 @@ impl ClientShellState {
             kind @ (PendingEndpointKind::IntegrationList
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
+            }
+            PendingEndpointKind::TodoList {
+                pane_id,
+                revision,
+                panes,
+            } => {
+                let repaint = self.handle_todo_list_result(&pane_id, revision, panes, result);
+                return (repaint, Vec::new());
+            }
+            PendingEndpointKind::TodoMutation { pane_id } => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_todo_mutation_result(&pane_id, result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
+            }
+            PendingEndpointKind::TodoSave {
+                pane_id,
+                todo_id,
+                follow,
+            } => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_todo_save_result(
+                    &pane_id,
+                    todo_id,
+                    follow,
+                    result.is_ok(),
+                    &mut outcome,
+                );
+                return (true, outcome.actions);
             }
             kind => {
                 let mut outcome = ClientShellInput::default();

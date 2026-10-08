@@ -448,6 +448,9 @@ impl ClientShellState {
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
+        if self.insert_todo_edit_text(text) {
+            return true;
+        }
         match self.overlay.as_mut() {
             Some(ClientShellOverlay::Rename(rename)) => {
                 rename.input.insert(text);
@@ -476,6 +479,14 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         use crossterm::event::KeyModifiers;
+
+        match self.overlay {
+            Some(ClientShellOverlay::TodoPanel(_)) => {
+                return self.route_todo_panel_key(key, outcome)
+            }
+            Some(ClientShellOverlay::TodoEdit(_)) => return self.route_todo_edit_key(key, outcome),
+            _ => {}
+        }
 
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if matches!(
