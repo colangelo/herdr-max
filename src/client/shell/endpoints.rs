@@ -246,6 +246,7 @@ impl ClientShellState {
         let generation = endpoint.snapshot_generation;
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
+        let follow_agent = self.config.follow_agent;
         if switching_endpoint {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
@@ -255,6 +256,7 @@ impl ClientShellState {
         if switching_endpoint {
             // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
+            self.config.follow_agent = follow_agent;
         }
         if let Some((_, pane_id)) = pending_agent_reveal {
             self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);
