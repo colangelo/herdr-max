@@ -241,6 +241,10 @@ pub(super) struct WorkspaceHit {
 
 #[derive(Debug)]
 pub(crate) enum ClientShellAction {
+    CancelQueuedEndpoint {
+        endpoint_id: ClientEndpointId,
+        request_id: String,
+    },
     Endpoint {
         endpoint_id: ClientEndpointId,
         boot_id: String,
@@ -274,6 +278,7 @@ pub(super) enum ClientShellMode {
     Navigate,
     Resize,
     Copy,
+    Scroll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,6 +622,9 @@ impl ClientShellOverlay {
 
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
+    ApplicationScroll {
+        generation: u64,
+    },
     Generic,
     ProductAnnouncementDismiss {
         version: String,
@@ -758,6 +766,7 @@ pub(super) enum ClientInputTarget {
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
     pub(super) copy_pane_id: Option<String>,
+    pub(super) application_scroll_generation: Option<u64>,
     pub(super) overlay: Option<ClientShellOverlayKind>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
@@ -857,6 +866,10 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) application_scroll: Option<super::application_scroll::ClientApplicationScroll>,
+    pub(super) next_application_scroll_generation: u64,
+    pub(super) retired_scroll_keys: HashSet<crate::input::InputLeaseKey<u8>>,
+    pub(super) pending_application_scroll_cancellations: Vec<(ClientEndpointId, String)>,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1033,6 +1046,10 @@ impl ClientShellState {
         }
         Self {
             machine_diagnostics: Default::default(),
+            application_scroll: None,
+            next_application_scroll_generation: 0,
+            retired_scroll_keys: HashSet::new(),
+            pending_application_scroll_cancellations: Vec::new(),
             config,
             snapshot: None,
             active_snapshot_generation: None,
@@ -1240,10 +1257,16 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.end_application_scroll_projection();
+        self.scroll_entry_repeats.clear();
+        if self.mode == ClientShellMode::Scroll {
+            self.mode = ClientShellMode::Terminal;
+        }
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;
         self.input_leases = ClientInputLeases::default();
+        self.restore_retired_scroll_leases();
         self.popup_terminal_id = None;
         self.chrome_drag = None;
         self.workspace_press = None;
@@ -1589,6 +1612,7 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        self.reconcile_application_scroll_projection();
         self.reconcile_pending_workspace_highlight();
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
@@ -1807,6 +1831,7 @@ impl ClientShellState {
             .set_scene(std::mem::take(&mut surface.graphics));
         self.pane_surface = Some(surface);
         self.pane_surface_generation = self.active_snapshot_generation;
+        self.reconcile_application_scroll_projection();
         self.invalidate_link_hover();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();

@@ -561,6 +561,11 @@ impl ClientShellState {
             }
         }
         match pending.kind {
+            PendingEndpointKind::ApplicationScroll { generation } => {
+                let mut outcome = ClientShellInput::default();
+                self.complete_application_scroll(generation, result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
+            }
             PendingEndpointKind::Generic => {}
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {

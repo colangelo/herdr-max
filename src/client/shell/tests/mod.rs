@@ -7,6 +7,7 @@ use crate::protocol::{
 use crossterm::event::MouseEvent;
 mod port_input;
 mod port_navigate;
+mod port_scroll;
 mod text_editing;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn dispatch_client_shell_actions(
-    actions: Vec<shell::ClientShellAction>,
+    mut actions: Vec<shell::ClientShellAction>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
     endpoints: &mut endpoint::EndpointRegistry,
     mut shell: Option<&mut shell::ClientShellState>,
@@ -9,9 +9,28 @@ pub(super) fn dispatch_client_shell_actions(
     scheduled_activation: &mut Option<ClientLoopEvent>,
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
+    if let Some(shell) = shell.as_deref_mut() {
+        actions.extend(
+            shell
+                .take_application_scroll_cancellations()
+                .into_iter()
+                .map(
+                    |(endpoint_id, request_id)| shell::ClientShellAction::CancelQueuedEndpoint {
+                        endpoint_id,
+                        request_id,
+                    },
+                ),
+        );
+    }
     let mut repaint = false;
     for action in actions {
         match action {
+            shell::ClientShellAction::CancelQueuedEndpoint {
+                endpoint_id,
+                request_id,
+            } => {
+                endpoint_commands.cancel_queued(&endpoint_id, &request_id);
+            }
             shell::ClientShellAction::Endpoint {
                 endpoint_id,
                 boot_id,
@@ -453,6 +472,11 @@ pub(super) fn complete_endpoint_activation(
     state.unfreeze_presentation();
     if successor.is_none() {
         let active_endpoint = endpoints.active_id().clone();
+        if let Some(shell) = state.shell.as_mut() {
+            for (endpoint_id, request_id) in shell.take_application_scroll_cancellations() {
+                endpoint_commands.cancel_queued(&endpoint_id, &request_id);
+            }
+        }
         let cancelled = endpoint_commands.send_next(&active_endpoint, endpoints);
         if let Some(shell) = state.shell.as_mut() {
             for request_id in cancelled {

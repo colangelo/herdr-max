@@ -180,10 +180,8 @@ pub(super) fn render_mode_bar(
                         (" ".to_owned(), base),
                         ("h/j/k/l w/b/e { }".to_owned(), key),
                         (" move  ".to_owned(), base),
-                        ("ctrl+k/j".to_owned(), key),
+                        ("^k/^j".to_owned(), key),
                         (" scroll  ".to_owned(), base),
-                        ("g/G/ctrl+g".to_owned(), key),
-                        (" top/bottom  ".to_owned(), base),
                         ("/ ?".to_owned(), key),
                         (" search  ".to_owned(), base),
                         ("n/N".to_owned(), key),
@@ -196,6 +194,20 @@ pub(super) fn render_mode_bar(
                         (exit_label.to_owned(), base),
                     ]);
                 }
+            }
+            ClientShellMode::Scroll => {
+                segments.extend([
+                    (" SCROLL ".to_owned(), mode_style),
+                    (" ".to_owned(), base),
+                    ("^u/^d".to_owned(), key),
+                    (" page  ".to_owned(), base),
+                    ("^k/^j".to_owned(), key),
+                    (" line  ".to_owned(), base),
+                    ("g/G".to_owned(), key),
+                    (" top/bottom  ".to_owned(), base),
+                    ("q/esc".to_owned(), key),
+                    (" exit  keys scroll the app".to_owned(), base),
+                ]);
             }
             ClientShellMode::Terminal => unreachable!(),
         }
