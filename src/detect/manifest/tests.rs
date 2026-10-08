@@ -783,3 +783,79 @@ contains = ["active"]
 "#;
     assert!(parse_manifest(manifest).is_err());
 }
+
+#[test]
+fn claude_background_shell_footer_is_working_in_every_shape() {
+    // The footer's shell count can end the line or be followed by more
+    // segments; both mean a background shell is running (fork issue 121).
+    // Fork-only: upstream 987b070f removed this rule so a Claude waiting at its
+    // prompt reads idle, and inverted the upstream tests that said so (an idle
+    // prompt box with `1 shell` is idle). The fork keeps background shells as
+    // working until #172 decides otherwise.
+    for footer in [
+        "  \u{23f5}\u{23f5} bypass permissions on \u{b7} 2 shells \u{b7} \u{2190} 1 agent",
+        "  \u{23f5}\u{23f5} bypass permissions on \u{b7} 2 shells",
+        "  \u{23f5}\u{23f5} auto mode on \u{b7} 1 shell",
+        "  \u{23f8} plan mode on \u{b7} 3 shells   ",
+    ] {
+        let screen = format!(
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276f}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n{footer}\n"
+        );
+        let result = explain(Agent::Claude, &screen);
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("background_shell_working"),
+            "{footer:?}"
+        );
+        assert_eq!(result.state, AgentState::Working, "{footer:?}");
+    }
+}
+
+#[test]
+fn claude_background_shell_rule_does_not_match_a_longer_word() {
+    let screen = "\u{276f}\n  \u{23f5}\u{23f5} bypass permissions on \u{b7} 2 shellsx\n";
+    let result = explain(Agent::Claude, screen);
+    assert_ne!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("background_shell_working")
+    );
+}
+
+#[test]
+fn claude_live_turn_with_background_shell_remains_working() {
+    // Kept from upstream 987b070f: `esc to interrupt` is the live-turn rule and
+    // still wins over the shell count.
+    let screen = concat!(
+        "────────────────────────────────────────────────────────────────\n",
+        "❯\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "  ⏵⏵ auto mode on · 1 shell · esc to interrupt\n",
+    );
+    let result = explain(Agent::Claude, screen);
+
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("live_turn_working")
+    );
+}
+
+#[test]
+fn claude_blocker_with_background_shell_remains_blocked() {
+    // Kept from upstream 987b070f: a permission dialog outranks the shell rule.
+    let screen = concat!(
+        "do you want to proceed?\n",
+        "bash command: rm -rf /tmp/test\n",
+        "❯ 1. Yes\n",
+        "  2. No\n\n",
+        "Esc to cancel · Tab to amend · ctrl+e to explain\n",
+        "  ⏵⏵ auto mode on · 1 shell · ← for agents\n",
+    );
+    let result = explain(Agent::Claude, screen);
+
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("bash_permission_prompt")
+    );
+}
