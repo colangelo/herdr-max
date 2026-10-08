@@ -90,13 +90,23 @@ impl HeadlessServer {
             workspace.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context =
             crate::app::actions::notification_context(workspace, &workspace_label, ws_idx, pane_id);
+        let notification_name = workspace
+            .pane_state(pane_id)
+            .map(|pane| {
+                crate::app::actions::notification_agent_name(
+                    &self.app.state,
+                    &pane.attached_terminal_id,
+                    agent_label,
+                )
+            })
+            .unwrap_or_else(|| agent_label.to_owned());
         let agent = known_agent
             .map(crate::detect::agent_label)
             .map(str::to_owned);
         self.send_to_client_shells(ServerMessage::SemanticNotification(
             protocol::SemanticNotification {
                 kind: semantic_kind,
-                title: format!("{agent_label} {event_text}"),
+                title: format!("{notification_name} {event_text}"),
                 body: non_empty_body(&context),
                 sound,
                 agent,
@@ -152,6 +162,16 @@ impl HeadlessServer {
         let Some(agent_label) = update.agent_label.as_deref() else {
             return;
         };
+        let notification_name = ws
+            .pane_state(update.pane_id)
+            .map(|pane| {
+                crate::app::actions::notification_agent_name(
+                    &self.app.state,
+                    &pane.attached_terminal_id,
+                    agent_label,
+                )
+            })
+            .unwrap_or_else(|| agent_label.to_owned());
         let event_text = match kind {
             crate::app::state::ToastKind::NeedsAttention => "needs attention",
             crate::app::state::ToastKind::Finished => "finished",
@@ -168,7 +188,7 @@ impl HeadlessServer {
         self.send_notify_to_foreground_client(
             toast_notify_kind(self.app.state.toast_config.delivery)
                 .expect("toast forwarding requires a client notification kind"),
-            format!("{agent_label} {event_text}"),
+            format!("{notification_name} {event_text}"),
             non_empty_body(&context),
         );
     }

@@ -138,3 +138,37 @@ fn hint_release_and_expiry_return_to_working_without_sound() {
     });
     assert!(sounds(&rx).is_empty());
 }
+
+#[test]
+fn hint_notification_uses_fork_agent_name_with_original_event_words() {
+    let (mut server, pane, rx) = setup();
+    let terminal_id = server.app.state.workspaces[0]
+        .pane_state(pane)
+        .unwrap()
+        .attached_terminal_id
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .agent_name = Some("worker".into());
+    server.handle_internal_event_with_forwarding(hint(
+        pane,
+        Some(crate::detect::BlockedReason::Question),
+        10,
+    ));
+    let mut notifications = Vec::new();
+    while let Ok(message) = rx.recv_timeout(Duration::from_millis(30)) {
+        if let ServerMessage::SemanticNotification(notification) = read_server_message(message) {
+            notifications.push(notification);
+        }
+    }
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title, "worker needs attention");
+    assert_eq!(
+        notifications[0].sound,
+        Some(protocol::SemanticNotificationSound::Request)
+    );
+}
