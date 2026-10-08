@@ -374,6 +374,12 @@ impl ClientShellState {
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
+        if self.label_key(&key, outcome) {
+            return;
+        }
+        if self.mode != ClientShellMode::Resize {
+            self.close_pane_labels();
+        }
         outcome.repaint |= self.clear_link_hover();
         if self.copy_operation_in_flight {
             self.copy_input_queue.push_back(key);
@@ -1043,6 +1049,7 @@ impl ClientShellState {
             || resize_bindings.matches_prefix_key(key)
             || resize_bindings.matches_direct_key(key)
         {
+            self.close_pane_labels();
             self.mode = self.copy_or_terminal_mode();
             outcome.repaint = true;
             return;

@@ -366,6 +366,7 @@ fn resource_facts(
         }
     }
     protocol::ClientShellResourceFacts {
+        server_version: Some(crate::build_info::version()),
         workspace_pins: Some(workspace_pins),
         pane_pins: Some(pane_pins),
         workspace_heads: Some(workspace_heads),

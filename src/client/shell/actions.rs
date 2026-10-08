@@ -60,6 +60,21 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if action == crate::input::KeybindAction::DisplayPanes {
+                    self.arm_pane_labels(true, std::time::Instant::now());
+                    self.mode = ClientShellMode::Terminal;
+                    outcome.repaint = true;
+                    return;
+                }
+                if matches!(
+                    action,
+                    crate::input::KeybindAction::ResizePaneLeft
+                        | crate::input::KeybindAction::ResizePaneRight
+                        | crate::input::KeybindAction::ResizePaneUp
+                        | crate::input::KeybindAction::ResizePaneDown
+                ) {
+                    self.arm_pane_labels(false, std::time::Instant::now());
+                }
                 if action == crate::input::KeybindAction::OpenNavigator {
                     self.open_navigator_overlay();
                     outcome.repaint = true;

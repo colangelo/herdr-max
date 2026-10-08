@@ -119,6 +119,9 @@ impl ClientShellConfig {
                 .pane_todo_color
                 .as_deref()
                 .map(crate::config::parse_color),
+            display_panes_duration: std::time::Duration::from_millis(
+                crate::config::clamp_display_panes_ms(config.ui.display_panes_ms),
+            ),
             follow_workspace: true,
             follow_agent: true,
             host_background: None,
@@ -388,6 +391,9 @@ impl ClientShellConfig {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
+                self.display_panes_duration = std::time::Duration::from_millis(
+                    crate::config::clamp_display_panes_ms(ui.display_panes_ms),
+                );
                 self.show_pane_todos = ui.show_pane_todo_indicator;
                 self.todo_color = ui
                     .pane_todo_color

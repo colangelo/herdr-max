@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellResourceFacts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_pins: Option<BTreeMap<String, u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_pins: Option<BTreeMap<String, u64>>,
@@ -76,6 +78,7 @@ impl ClientShellResourceFacts {
             )
         }
         Some(Self {
+            server_version: get("server_version").and_then(|v| serde_json::from_value(v).ok()),
             workspace_pins: map(get("workspace_pins")),
             pane_pins: map(get("pane_pins")),
             workspace_heads: map(get("workspace_heads")),

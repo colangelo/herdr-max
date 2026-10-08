@@ -160,6 +160,10 @@ pub(crate) fn keybind_help_groups(
         (
             "panes",
             vec![
+                entry(
+                    binding_label(&keybinds.display_panes),
+                    "display pane labels",
+                ),
                 entry(binding_label(&keybinds.split_vertical), "split vertical"),
                 entry(
                     binding_label(&keybinds.split_horizontal),

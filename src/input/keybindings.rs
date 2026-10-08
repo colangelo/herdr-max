@@ -66,6 +66,7 @@ pub(crate) enum KeybindAction {
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
+    DisplayPanes,
     Help,
     Settings,
     ReloadConfig,
@@ -99,6 +100,7 @@ pub(crate) fn resolve_non_indexed_action(
 ) -> Option<KeybindAction> {
     for (bindings, action) in [
         (&keybinds.help, KeybindAction::Help),
+        (&keybinds.display_panes, KeybindAction::DisplayPanes),
         (&keybinds.settings, KeybindAction::Settings),
         (&keybinds.workspace_picker, KeybindAction::WorkspacePicker),
         (&keybinds.new_workspace, KeybindAction::NewWorkspace),

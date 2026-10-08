@@ -158,6 +158,22 @@ impl ClientShellState {
             self.reveal_navigation_workspace = true;
             self.reveal_mobile_workspace = true;
         }
+        if self
+            .last_composed_size
+            .is_some_and(|previous| previous != (cols, rows))
+        {
+            self.arm_pane_labels(false, std::time::Instant::now());
+        }
+        if matches!(
+            self.chrome_drag,
+            Some(
+                ClientChromeDrag::PaneSplit { .. }
+                    | ClientChromeDrag::SidebarWidth
+                    | ClientChromeDrag::SidebarSection
+            )
+        ) {
+            self.arm_pane_labels(false, std::time::Instant::now());
+        }
         self.last_composed_size = Some((cols, rows));
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
@@ -396,6 +412,13 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        if self.pane_labels_visible() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            for rect in super::display_panes::paint(&mut composed, layout, self, snapshot) {
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
         let has_selection = self
             .selection
             .as_ref()

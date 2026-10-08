@@ -13,6 +13,7 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) display_panes_duration: std::time::Duration,
     pub(super) show_pane_todos: bool,
     pub(super) todo_color: Option<ratatui::style::Color>,
     pub(super) follow_workspace: bool,
@@ -894,6 +895,8 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) pane_labels_until: Option<std::time::Instant>,
+    pub(super) pane_labels_explicit: bool,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1116,6 +1119,8 @@ impl ClientShellState {
             last_tab_bar_width: None,
             last_composed_size: None,
             last_composed_at: None,
+            pane_labels_until: None,
+            pane_labels_explicit: false,
             activity_deadline: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
@@ -1939,6 +1944,7 @@ impl ClientShellState {
             .into_iter()
             .chain(self.selection_repaint_deadline)
             .chain(self.activity_deadline)
+            .chain(self.pane_labels_until)
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)
