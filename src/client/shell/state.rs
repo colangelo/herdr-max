@@ -40,6 +40,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) sound_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
     pub(super) toast_delay_seconds: u64,
+    pub(super) herdr_toast: crate::config::HerdrToastConfig,
     pub(super) toast_position: crate::config::ToastHerdrPosition,
     pub(super) copy_on_select: bool,
     pub(super) clipboard_toast_enabled: bool,
@@ -766,7 +767,7 @@ pub(super) struct ClientPendingNotification {
 pub(super) struct ClientVisibleNotification {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) event: SemanticNotification,
-    pub(super) deadline: std::time::Instant,
+    pub(super) deadline: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

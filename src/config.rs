@@ -600,3 +600,5 @@ command = "echo one"
         assert_eq!(drawn.ui.host_cursor, HostCursorModeConfig::Drawn);
     }
 }
+
+pub(crate) use self::model::HerdrToastConfig;

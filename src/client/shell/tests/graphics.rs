@@ -164,7 +164,7 @@ fn notifications_and_clipboard_feedback_only_cover_their_drawn_corners() {
                     pane_id: None,
                     position: Some(position),
                 },
-                deadline: std::time::Instant::now(),
+                deadline: Some(std::time::Instant::now()),
             });
             state.compose(cols, rows).unwrap();
             let rect = state.hits.notification_toast;

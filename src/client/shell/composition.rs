@@ -528,13 +528,24 @@ impl ClientShellState {
                 };
             } else if let Some(notification) = self.visible_notification.as_ref() {
                 self.hits.notification_toast = if layout.mobile_header.is_empty() {
-                    notifications::render_visible_notification(
+                    notifications::render_visible_notification_for_source(
                         &mut composed,
                         Rect::new(0, 0, cols, rows),
+                        layout.pane_surface,
+                        (notification.endpoint_id == self.active_endpoint_id)
+                            .then(|| {
+                                notification.event.pane_id.as_deref().and_then(|id| {
+                                    self.hits
+                                        .panes
+                                        .iter()
+                                        .find(|pane| pane.pane_id == id)
+                                        .map(|pane| pane.inner_rect)
+                                })
+                            })
+                            .flatten(),
                         notification,
-                        self.config.toast_position,
+                        &self.config,
                         u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &self.config.palette,
                     )
                 } else {
                     notifications::render_mobile_notification_banner(

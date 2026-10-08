@@ -152,6 +152,7 @@ impl ClientShellConfig {
             sound_enabled: config.ui.sound.enabled,
             toast_delivery: config.ui.toast.delivery,
             toast_delay_seconds: config.ui.toast.delay_seconds,
+            herdr_toast: config.ui.toast.herdr,
             toast_position: config.ui.toast.herdr.position,
             copy_on_select: config.ui.copy_on_select,
             clipboard_toast_enabled: config.ui.toast.clipboard.enabled,
@@ -404,6 +405,7 @@ impl ClientShellConfig {
                 self.sound_enabled = ui.sound.enabled;
                 self.toast_delivery = ui.toast.delivery;
                 self.toast_delay_seconds = ui.toast.delay_seconds;
+                self.herdr_toast = ui.toast.herdr;
                 self.toast_position = ui.toast.herdr.position;
                 self.copy_on_select = ui.copy_on_select;
                 self.clipboard_toast_enabled = ui.toast.clipboard.enabled;
