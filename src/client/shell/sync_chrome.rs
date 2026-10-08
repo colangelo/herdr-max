@@ -1,3 +1,4 @@
+use super::render::display_width;
 use super::*;
 
 pub(super) fn paint(
