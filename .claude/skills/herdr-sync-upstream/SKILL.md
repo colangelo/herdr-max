@@ -145,7 +145,7 @@ Check the merged asset contains both sides' content, not just one.
 
 **Infra** (`justfile`, `.github/workflows/`, `scripts/`, `build.rs`): do a
 3-way `git merge-file` per file onto upstream's new layout
-(`git merge-file -p ours base theirs`; base = the file at `$LAST^2`,
+(`git merge-file -p ours base theirs`; base = the file at `$BASE`,
 theirs = upstream's new file). Re-apply the fork deltas, do not fight the diff:
 the `ZIG` export, the `release-ac`/beta flow, the macOS `windows-lint` skip,
 and the fork manifest at `distribution/latest.json` plus the
