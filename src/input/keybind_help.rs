@@ -165,6 +165,24 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
                 entry(binding_label(&keybinds.copy_mode), "copy mode"),
+                entry(binding_label(&keybinds.copy_mode_page_up), "scroll page up"),
+                entry(
+                    binding_label(&keybinds.copy_mode_half_page_up),
+                    "scroll half page up",
+                ),
+                entry(binding_label(&keybinds.copy_mode_line_up), "scroll line up"),
+                entry(
+                    binding_label(&keybinds.copy_mode_page_down),
+                    "scroll page down",
+                ),
+                entry(
+                    binding_label(&keybinds.copy_mode_half_page_down),
+                    "scroll half page down",
+                ),
+                entry(
+                    binding_label(&keybinds.copy_mode_line_down),
+                    "scroll line down",
+                ),
                 entry(binding_label(&keybinds.zoom), "zoom pane"),
                 entry(binding_label(&keybinds.resize_mode), "resize mode"),
                 entry(

@@ -387,16 +387,52 @@ impl ClientShellState {
         let key = self.input_leases.normalize_press(&lease_key, key);
         match key.kind {
             KeyEventKind::Press => {
+                self.scroll_entry_repeats.remove(&lease_key);
                 let initial_context = self.input_context();
                 let target = self.route_key_press(&key, outcome);
                 if let Some(target) = target.as_ref() {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
                 let resulting_context = self.input_context();
+                // A held scroll-entry chord continues in its destination
+                // mode. Other Prefix -> mode transitions stay suppressed.
+                let entry_action = if resulting_context.mode == ClientShellMode::Copy
+                    && matches!(
+                        initial_context.mode,
+                        ClientShellMode::Terminal | ClientShellMode::Prefix
+                    )
+                    && initial_context.overlay.is_none()
+                {
+                    let binding = if initial_context.mode == ClientShellMode::Prefix {
+                        crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, &key)
+                    } else {
+                        crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, &key)
+                    };
+                    match binding {
+                        Some(crate::input::KeybindMatch::Action(action))
+                            if super::copy_mode::copy_scroll_action(action).is_some() =>
+                        {
+                            Some(action)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if key.generated_text.is_none() || key.has_physical_identity() {
+                    if let Some(action) = entry_action {
+                        self.scroll_entry_repeats.insert(lease_key, action);
+                    }
+                }
+                let repeat_context = if entry_action.is_some() {
+                    &resulting_context
+                } else {
+                    &initial_context
+                };
                 let plan = self.input_leases.complete_press(
                     lease_key,
                     &key,
-                    Some(&initial_context),
+                    Some(repeat_context),
                     Some(&resulting_context),
                     target,
                 );
@@ -410,6 +446,7 @@ impl ClientShellState {
                 self.execute_repeat_plan(lease_key, key, plan, outcome);
             }
             KeyEventKind::Release => {
+                self.scroll_entry_repeats.remove(&lease_key);
                 let Some(lease) = self.take_release_lease(&lease_key, &key) else {
                     return;
                 };
@@ -493,6 +530,7 @@ impl ClientShellState {
             );
         }
         self.copy_input_queue.clear();
+        self.scroll_entry_repeats.clear();
     }
 
     fn execute_repeat_plan(
@@ -524,6 +562,10 @@ impl ClientShellState {
                         tracked,
                     ) {
                         break;
+                    }
+                    if let Some(action) = self.scroll_entry_repeats.get(&lease_key).copied() {
+                        self.record_binding(crate::input::KeybindMatch::Action(action), outcome);
+                        continue;
                     }
                     let repeated = key
                         .clone()
@@ -1064,6 +1106,7 @@ impl ClientShellState {
     fn input_context(&self) -> ClientInputContext {
         ClientInputContext {
             mode: self.mode,
+            copy_pane_id: self.copy_mode.as_ref().map(|copy| copy.pane_id.clone()),
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),

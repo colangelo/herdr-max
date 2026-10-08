@@ -159,6 +159,10 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if let Some((direction, amount)) = super::copy_mode::copy_scroll_action(action) {
+                    self.enter_scrolled_copy_mode(direction, amount, outcome);
+                    return;
+                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }
@@ -853,9 +857,9 @@ impl ClientShellState {
         action: crate::input::KeybindAction,
     ) -> Option<crate::api::schema::Method> {
         use crate::api::schema::{
-            Method, PaneDirection, PaneFocusDirectionParams, PaneResizeParams, PaneSplitParams,
-            PaneCloseParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
-            TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
+            Method, PaneCloseParams, PaneDirection, PaneFocusDirectionParams, PaneResizeParams,
+            PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
+            SplitDirection, TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
         };
         use crate::input::KeybindAction;
 

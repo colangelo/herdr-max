@@ -1,7 +1,61 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[derive(Clone, Copy)]
+pub(super) enum CopyScrollAmount {
+    Page,
+    HalfPage,
+    Line,
+}
+
+pub(super) fn copy_scroll_action(
+    action: crate::input::KeybindAction,
+) -> Option<(i8, CopyScrollAmount)> {
+    use crate::input::KeybindAction;
+    match action {
+        KeybindAction::CopyModePageUp => Some((-1, CopyScrollAmount::Page)),
+        KeybindAction::CopyModeHalfPageUp => Some((-1, CopyScrollAmount::HalfPage)),
+        KeybindAction::CopyModeLineUp => Some((-1, CopyScrollAmount::Line)),
+        KeybindAction::CopyModePageDown => Some((1, CopyScrollAmount::Page)),
+        KeybindAction::CopyModeHalfPageDown => Some((1, CopyScrollAmount::HalfPage)),
+        KeybindAction::CopyModeLineDown => Some((1, CopyScrollAmount::Line)),
+        _ => None,
+    }
+}
+
 impl ClientShellState {
+    pub(super) fn enter_scrolled_copy_mode(
+        &mut self,
+        direction: i8,
+        amount: CopyScrollAmount,
+        outcome: &mut ClientShellInput,
+    ) {
+        // A down gesture resumes a scrolled viewport, but must not open copy
+        // mode on an ordinary pane already displaying its live bottom.
+        if direction > 0 && self.copy_or_terminal_mode() != ClientShellMode::Copy {
+            let scrolled = self.focused_pane_id().is_some_and(|pane_id| {
+                self.hits
+                    .panes
+                    .iter()
+                    .find(|hit| hit.pane_id == pane_id)
+                    .and_then(|hit| hit.scroll)
+                    .is_some_and(|metrics| metrics.offset_from_bottom > 0)
+            });
+            if !scrolled {
+                return;
+            }
+        }
+        if !self.enter_copy_mode(outcome) {
+            return;
+        }
+        match amount {
+            CopyScrollAmount::Page => self.move_copy_page(direction, false, outcome),
+            CopyScrollAmount::HalfPage => self.move_copy_page(direction, true, outcome),
+            CopyScrollAmount::Line => self.scroll_copy_viewport_line(direction, outcome),
+        }
+        outcome.repaint = true;
+    }
+
     pub(super) fn reset_copy_pipeline(&mut self) {
         self.copy_session_generation = self.copy_session_generation.saturating_add(1);
         self.copy_operation_in_flight = false;
