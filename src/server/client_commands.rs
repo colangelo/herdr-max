@@ -31,6 +31,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.input.set",
     "pane.link.activate",
     "pane.link.resolve",
+    "pane.move",
     "pane.rename",
     "pane.resize",
     "pane.respawn",
@@ -340,6 +341,12 @@ mod tests {
         assert_eq!(
             actual.remove("pane.respawn").as_deref(),
             Some("b261b69cb75bc97794320ac121948b1c8d8740ce4996d2bfce9f6b1c184b6897")
+        );
+        // Fork (herdr-max): `pane.move` is additive, advertised so the client
+        // shell's pane-move picker and pane-move keys can move a pane.
+        assert_eq!(
+            actual.remove("pane.move").as_deref(),
+            Some("eaed63cf205db2dc043ecce9e1a79cdca7f6e2521b364226bbf3121affadce7c")
         );
         // Fork (herdr-max): the notification history methods are additive,
         // advertised so the client shell's notification center can read,
