@@ -37,12 +37,12 @@ pub(crate) fn toast_message_from_state_change(
                     .terminals
                     .get(&pane.attached_terminal_id)
                     .and_then(|terminal| terminal.effective_agent_label())?;
-                let kind = app::actions::notification_toast_for_state_change(
                 let agent_name = app::actions::notification_agent_name(
                     state,
                     &pane.attached_terminal_id,
                     agent_label,
                 );
+                let kind = app::actions::notification_toast_for_state_change(
                     suppress_active_tab_notifications,
                     prev_state,
                     new_state,

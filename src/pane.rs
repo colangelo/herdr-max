@@ -102,30 +102,6 @@ where
     })
 }
 
-const TERMINAL_COMPRESSION_IDLE: std::time::Duration = std::time::Duration::from_millis(250);
-const TERMINAL_COMPRESSION_STEP: std::time::Duration = std::time::Duration::from_millis(1);
-
-fn terminal_compression_permits() -> Arc<tokio::sync::Semaphore> {
-    static PERMITS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    PERMITS
-        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
-        .clone()
-}
-
-fn spawn_blocking_with_compression_permit<T, F>(
-    permit: tokio::sync::OwnedSemaphorePermit,
-    operation: F,
-) -> tokio::task::JoinHandle<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        operation()
-    })
-}
-
 fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     // Each pane is rendered by herdr's own terminal layer, not the outer terminal
     // that launched the app. Advertising the inherited TERM leaks the host terminal
@@ -1936,27 +1912,10 @@ async fn run_terminal_compression_task(
     }
 }
 
-#[derive(Clone)]
-struct TerminalCompressionWake {
-    notify: Arc<Notify>,
-    generation: Arc<AtomicU64>,
-}
 
 impl TerminalCompressionWake {
-    fn wake(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
-        self.notify.notify_one();
-    }
 }
 
-/// Drives libghostty-vt's caller-owned compression after terminal activity settles.
-struct TerminalCompressionTask {
-    wake: TerminalCompressionWake,
-    // Read only by the compression test, which runs on Linux and macOS.
-    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-    completed_passes: Arc<AtomicU64>,
-    handle: tokio::task::AbortHandle,
-}
 
 impl Drop for TerminalCompressionTask {
     fn drop(&mut self) {
@@ -1965,48 +1924,9 @@ impl Drop for TerminalCompressionTask {
 }
 
 impl TerminalCompressionTask {
-    fn spawn(pane_id: PaneId, terminal: Arc<PaneTerminal>) -> Self {
-        let wake = TerminalCompressionWake {
-            notify: Arc::new(Notify::new()),
-            generation: Arc::new(AtomicU64::new(0)),
-        };
-        let task_notify = wake.notify.clone();
-        let task_generation = wake.generation.clone();
-        #[cfg(test)]
-        let completed_passes = Arc::new(AtomicU64::new(0));
-        #[cfg(test)]
-        let task_completed_passes = completed_passes.clone();
-        let handle = tokio::spawn(async move {
-            run_terminal_compression_task(
-                pane_id,
-                terminal,
-                task_notify,
-                task_generation,
-                #[cfg(test)]
-                task_completed_passes,
-            )
-            .await;
-        })
-        .abort_handle();
-        Self {
-            wake,
-            #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-            completed_passes,
-            handle,
-        }
-    }
 
-    fn wake(&self) {
-        self.wake.wake();
-    }
 
-    fn notifier(&self) -> TerminalCompressionWake {
-        self.wake.clone()
-    }
 
-    fn abort(&self) {
-        self.handle.abort();
-    }
 
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     fn completed_passes(&self) -> u64 {
@@ -2014,109 +1934,6 @@ impl TerminalCompressionTask {
     }
 }
 
-async fn run_terminal_compression_task(
-    pane_id: PaneId,
-    terminal: Arc<PaneTerminal>,
-    notify: Arc<Notify>,
-    generation: Arc<AtomicU64>,
-    #[cfg(test)] completed_passes: Arc<AtomicU64>,
-) {
-    let mut observed_generation = generation.load(Ordering::Acquire);
-    let mut activity = loop {
-        match terminal.try_compression_activity() {
-            Ok(Some(activity)) => break activity,
-            Ok(None) => tokio::time::sleep(TERMINAL_COMPRESSION_IDLE).await,
-            Err(err) => {
-                warn!(pane = pane_id.raw(), err = %err, "failed to read terminal compression activity");
-                return;
-            }
-        }
-    };
-
-    'schedule: loop {
-        loop {
-            tokio::time::sleep(TERMINAL_COMPRESSION_IDLE).await;
-            let current = match terminal.try_compression_activity() {
-                Ok(Some(current)) => current,
-                Ok(None) => continue,
-                Err(err) => {
-                    warn!(pane = pane_id.raw(), err = %err, "failed to read terminal compression activity");
-                    return;
-                }
-            };
-            let current_generation = generation.load(Ordering::Acquire);
-            if activity == current && observed_generation == current_generation {
-                break;
-            }
-            activity = current;
-            observed_generation = current_generation;
-        }
-
-        loop {
-            let current_generation = generation.load(Ordering::Acquire);
-            if observed_generation != current_generation {
-                observed_generation = current_generation;
-                continue 'schedule;
-            }
-
-            let permit = match terminal_compression_permits().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return,
-            };
-            let current_generation = generation.load(Ordering::Acquire);
-            if observed_generation != current_generation {
-                observed_generation = current_generation;
-                continue 'schedule;
-            }
-
-            let terminal_for_step = terminal.clone();
-            let step = spawn_blocking_with_compression_permit(permit, move || {
-                terminal_for_step.try_compress_incremental_if_activity(activity)
-            })
-            .await;
-            let step = match step {
-                Ok(Ok(step)) => step,
-                Ok(Err(err)) => {
-                    warn!(pane = pane_id.raw(), err = %err, "failed to compress terminal scrollback");
-                    return;
-                }
-                Err(err) => {
-                    warn!(pane = pane_id.raw(), err = %err, "terminal compression worker failed");
-                    return;
-                }
-            };
-
-            match step {
-                TerminalCompressionStep::Busy => continue 'schedule,
-                TerminalCompressionStep::ActivityChanged(current) => {
-                    activity = current;
-                    observed_generation = generation.load(Ordering::Acquire);
-                    continue 'schedule;
-                }
-                TerminalCompressionStep::Compressed(
-                    crate::ghostty::TerminalCompressionResult::Unsupported,
-                ) => return,
-                TerminalCompressionStep::Compressed(
-                    crate::ghostty::TerminalCompressionResult::Pending,
-                ) => tokio::time::sleep(TERMINAL_COMPRESSION_STEP).await,
-                TerminalCompressionStep::Compressed(
-                    crate::ghostty::TerminalCompressionResult::Complete,
-                ) => {
-                    #[cfg(test)]
-                    completed_passes.fetch_add(1, Ordering::Release);
-                    loop {
-                        notify.notified().await;
-                        let current_generation = generation.load(Ordering::Acquire);
-                        if observed_generation != current_generation {
-                            observed_generation = current_generation;
-                            continue 'schedule;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this aborts async tasks and closes the PTY. An already-running bounded
@@ -4054,10 +3871,6 @@ impl PaneRuntime {
             .store(active, Ordering::Release);
     }
 
-    pub fn set_self_reported_agent_active(&self, active: bool) {
-        self.self_reported_agent_active
-            .store(active, Ordering::Release);
-    }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
         let previous = self

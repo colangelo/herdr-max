@@ -545,17 +545,7 @@ impl PaneTerminal {
         self.ghostty.detection_ansi()
     }
 
-    pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
-        self.ghostty.try_compression_activity()
-    }
 
-    pub(crate) fn try_compress_incremental_if_activity(
-        &self,
-        expected_activity: u64,
-    ) -> Result<TerminalCompressionStep, crate::ghostty::Error> {
-        self.ghostty
-            .try_compress_incremental_if_activity(expected_activity)
-    }
 
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_text_snapshot(lines)
@@ -2294,36 +2284,8 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
-    fn try_lock_core(&self) -> Option<std::sync::MutexGuard<'_, GhosttyPaneCore>> {
-        match self.core.try_lock() {
-            Ok(core) => Some(core),
-            Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-        }
-    }
 
-    pub(crate) fn try_compression_activity(&self) -> Result<Option<u64>, crate::ghostty::Error> {
-        let Some(core) = self.try_lock_core() else {
-            return Ok(None);
-        };
-        core.terminal.compression_activity().map(Some)
-    }
 
-    pub(crate) fn try_compress_incremental_if_activity(
-        &self,
-        expected_activity: u64,
-    ) -> Result<TerminalCompressionStep, crate::ghostty::Error> {
-        let Some(mut core) = self.try_lock_core() else {
-            return Ok(TerminalCompressionStep::Busy);
-        };
-        let activity = core.terminal.compression_activity()?;
-        if activity != expected_activity {
-            return Ok(TerminalCompressionStep::ActivityChanged(activity));
-        }
-        core.terminal
-            .compress_incremental()
-            .map(TerminalCompressionStep::Compressed)
-    }
 
     #[cfg(test)]
     pub fn recent_text(&self, lines: usize) -> String {

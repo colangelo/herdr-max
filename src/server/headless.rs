@@ -3410,16 +3410,6 @@ fn client_pane_input_releases_press(event: &protocol::ClientPaneInputEvent) -> b
         } | protocol::ClientPaneInputEvent::Mouse {
             kind: protocol::ClientMouseKind::Up(_),
             ..
-        if crate::ui::synchronized_output_holds_frame(
-            &self.app.state,
-            &self.app.terminal_runtimes,
-            sync_since,
-            Instant::now(),
-        ) {
-            // Fork issue 126: the full render holds the frame.
-            retained_fallback!("synchronized_output");
-        }
-
         }
     )
 }

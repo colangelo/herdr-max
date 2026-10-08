@@ -504,10 +504,6 @@ pub fn pane_shell_is_idle(child_pid: u32) -> bool {
     crate::platform::available_pane_shell(child_pid).is_some()
 }
 
-/// True when the pane's own shell is at its prompt with nothing running in it.
-pub fn pane_shell_is_idle(child_pid: u32) -> bool {
-    crate::platform::available_pane_shell(child_pid, is_nested_pty_wrapper).is_some()
-}
 
 fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
     let effective = process.argv0.as_deref().unwrap_or(&process.name);

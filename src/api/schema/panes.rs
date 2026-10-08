@@ -423,10 +423,6 @@ pub struct PaneReportAgentParams {
     /// first element must be a plain command name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_argv: Option<Vec<String>>,
-    /// Command that resumes this agent's session after a Herdr restart. The
-    /// first element must be a plain command name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_argv: Option<Vec<String>>,
 }
 
 /// What an agent waits for, as a source reports it (fork issue 157).

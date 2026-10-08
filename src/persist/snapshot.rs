@@ -126,8 +126,6 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_resume: Option<PaneAgentResumeSnapshot>,
     /// Launch-only flags of the pane's agent, added to its resume command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_launch: Option<PaneAgentLaunchSnapshot>,
@@ -198,12 +196,6 @@ pub struct PaneAgentLaunchSnapshot {
     pub started_at_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneAgentResumeSnapshot {
-    pub source: String,
-    pub agent: String,
-    pub argv: Vec<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneAgentSessionSnapshot {

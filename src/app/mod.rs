@@ -19,7 +19,6 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
-pub(crate) mod display_panes;
 mod git_refresh;
 mod ids;
 mod popup;
@@ -146,8 +145,6 @@ pub struct App {
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
-    startup_per_agent_delay: Duration,
-    next_agent_resume_at: Option<Instant>,
     /// How Codex panes are launched and named (`[agents.codex]`).
     pub(crate) codex_app_server: crate::codex_app_server::CodexAppServer,
     pub(crate) session_save_deadline: Option<Instant>,
@@ -201,29 +198,6 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 fn auto_updates_enabled(background_updates: bool) -> bool {
     background_updates && !cfg!(debug_assertions)
-    /// Copy mode holds a stable non-terminal context so held keys repeat
-    /// viewport/cursor motions; leaving copy mode changes the context and
-    /// stops the repeats (same transition guard as `Pane`/`Popup`).
-    Copy,
-    /// The alt-screen scroll passthrough mode holds its own stable
-    /// non-terminal context for the same reason, and a distinct one from
-    /// `Copy` so a transition between the two modes still stops the repeats.
-    AppScroll,
-    /// Every other mode — the overlays, prefix, onboarding — holds a context
-    /// keyed by the mode itself, so a held key repeats inside an overlay (list
-    /// motion, text-field typing) exactly as it does in a pane, and the press
-    /// that moves between overlays changes the context and stops the repeats.
-    /// Without this the lease table saw no context at all for an overlay and
-    /// suppressed every repeat: the first press worked, holding did nothing.
-    Ui(Mode),
-}
-
-impl TerminalInputContext {
-    /// Whether keys in this context dispatch through the terminal-key path
-    /// (toward a pane) rather than the app-level key path.
-    pub(crate) fn routes_to_terminal(&self) -> bool {
-        matches!(self, Self::Pane | Self::Popup(_))
-    }
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -625,7 +599,6 @@ impl App {
         });
 
         let mut state = AppState {
-            overlay,
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
@@ -668,28 +641,10 @@ impl App {
             extra_prefixes: config.extra_prefix_keys(),
             headless_size: config.headless_size(),
             agent_panel_sort,
-            status_spinner: config.ui.status_spinner,
-            status_spinner_interval: status_spinner_interval_from_config(
-                config.ui.status_spinner_ms,
-            ),
-            display_panes_duration: display_panes_duration_from_config(config.ui.display_panes_ms),
-            spinner_frame: 0,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             workspace_sort,
-            sort_motion_bubble: sort_motion_bubble_from_config(config.ui.sort_motion),
-            sort_motion_timing: sort_motion_timing_from_config(
-                config.ui.sort_motion_settle_ms,
-                config.ui.sort_motion_step_ms,
-                config.ui.sort_motion_easing,
-            ),
-            workspace_list_motion: crate::ui::list_motion::ListMotion::new(),
-            agent_panel_motion: crate::ui::list_motion::ListMotion::new(),
-            sidebar_style: config.ui.sidebar_style,
-            state_color_overrides: state_color_overrides_from_config(&config.ui.state_colors),
-            state_symbol_overrides: state_symbol_overrides_from_config(&config.ui.state_symbols),
-            notification_center_position: config.ui.notification_center_position,
             next_agent_state_change_seq: 0,
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
@@ -697,13 +652,8 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
-            show_pane_todo_indicator: config.ui.show_pane_todo_indicator,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
-            show_workspace_numbers: config.ui.show_workspace_numbers,
-            show_agent_numbers: config.ui.show_agent_numbers,
-            show_host: config.ui.show_host,
-            host_label: crate::platform::short_hostname(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
             cjk_ime_agent_filter_configured: !config.experimental.cjk_ime_agents.is_empty(),
             cjk_ime_agents: parse_cjk_ime_agents(&config.experimental.cjk_ime_agents),
@@ -713,62 +663,6 @@ impl App {
             shell_mode: config.terminal.shell_mode,
             new_terminal_cwd: config.terminal.new_cwd.clone(),
             pane_scrollback_limit_bytes: config.advanced.scrollback_limit_bytes,
-            workspace_number_color: config
-                .ui
-                .workspace_number_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            agent_number_color: config
-                .ui
-                .agent_number_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            workspace_number_prefix: config.ui.workspace_number_prefix.clone(),
-            agent_number_prefix: config.ui.agent_number_prefix.clone(),
-            pane_border_active_color: config
-                .ui
-                .pane_border_active_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            pane_border_inactive_color: config
-                .ui
-                .pane_border_inactive_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            pane_border_active_style: config.ui.pane_border_active_style,
-            pane_title_active_color: config
-                .ui
-                .pane_title_active_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            pane_title_inactive_color: config
-                .ui
-                .pane_title_inactive_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            pane_todo_color: config
-                .ui
-                .pane_todo_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            sidebar_active_border: config.ui.sidebar_active_border,
-            sidebar_overflow: config.ui.sidebar_overflow,
-            sidebar_fog: config.sidebar_fog().0,
-            sidebar_fog_tint: config.sidebar_fog().1,
-            sidebar_fog_style: config.sidebar_fog_style(),
-            sidebar_fade: config.sidebar_fade(),
-            pane_active_bg: config
-                .ui
-                .pane_active_bg
-                .as_deref()
-                .map(crate::config::parse_color),
-            pane_inactive_bg: config
-                .ui
-                .pane_inactive_bg
-                .as_deref()
-                .map(crate::config::parse_color),
-            dim_inactive_panes: config.ui.dim_inactive_panes,
-            inactive_pane_dim: config.inactive_pane_dim(),
             sound: config.ui.sound.clone(),
             toast_config: config.ui.toast.clone(),
             keybinds: config.keybinds(),

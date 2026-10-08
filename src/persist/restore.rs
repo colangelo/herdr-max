@@ -1143,21 +1143,7 @@ fn with_session_transcript(
     plan.with_claude_transcript(transcript)
 }
 
-fn saved_reported_resume(pane: &super::snapshot::PaneSnapshot) -> Option<&PaneAgentResumeSnapshot> {
-    pane.agent_resume
-        .as_ref()
-        .filter(|resume| crate::agent_resume::validate_resume_argv(&resume.argv).is_ok())
-}
 
-fn reported_resume_from_snapshot(
-    resume: &PaneAgentResumeSnapshot,
-) -> crate::agent_resume::ReportedAgentResume {
-    crate::agent_resume::ReportedAgentResume {
-        source: resume.source.clone(),
-        agent: resume.agent.clone(),
-        argv: resume.argv.clone(),
-    }
-}
 
 fn restore_plan_for_snapshot(
     session: &PaneAgentSessionSnapshot,
