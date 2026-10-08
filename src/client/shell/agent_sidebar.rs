@@ -11,6 +11,7 @@ use ratatui::{
 use super::*;
 
 pub(super) struct AgentRow {
+    pub(super) jump_index: usize,
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
@@ -113,10 +114,12 @@ pub(super) fn render_agent_panel_header(
         area.x,
         area.y + 1,
         area.width,
-        " agents",
-        Style::default()
-            .fg(config.palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " AGENTS"
+        } else {
+            " agents"
+        },
+        super::sidebar_chrome::header_style(config),
     );
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
         crate::config::AgentPanelSortConfig::Spaces => "grouped",
@@ -241,7 +244,12 @@ pub(super) fn agent_rows(
 ) -> Vec<AgentRow> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .enumerate()
+        .filter_map(|(index, pane_id)| {
+            let mut row = agent_row(snapshot, &pane_id, config, machine)?;
+            row.jump_index = index;
+            Some(row)
+        })
         .collect()
 }
 
@@ -311,6 +319,7 @@ pub(super) fn agent_row(
         state_text,
     );
     Some(AgentRow {
+        jump_index: 0,
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
@@ -340,7 +349,21 @@ pub(super) fn render_agent_row(
             .add_modifier(Modifier::BOLD)
     };
     let status_style = Style::default().fg(config.state_color(row.status));
+    let editorial = config.sidebar_style == crate::config::SidebarStyleConfig::Editorial;
+    let jump = config
+        .show_agent_numbers
+        .then(|| crate::config::jump_symbol(row.jump_index))
+        .flatten();
+    let label = super::sidebar_chrome::number_label(jump, &config.agent_number_prefix);
+    let number_color = config.agent_number_color.unwrap_or(palette.overlay0);
+    let bar =
+        u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left);
     let secondary = Style::default().fg(palette.overlay0);
+    let secondary = if editorial && !row.focused {
+        secondary.add_modifier(Modifier::DIM)
+    } else {
+        secondary
+    };
     let icon = (
         config.state_icon(row.status),
         Style::default().fg(config.state_color(row.status)),
@@ -354,8 +377,13 @@ pub(super) fn render_agent_row(
         row.rows.clone()
     };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
-        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        let indent = bar + if index == 0 { 1 } else { 3 };
+        let reserve = if editorial && index == 0 {
+            super::sidebar_chrome::number_reserve(&label, config.sidebar_active_border)
+        } else {
+            0
+        };
+        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(usize::from(indent)))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -364,13 +392,40 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width.saturating_sub(indent + reserve) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
+    if editorial {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            rect,
+            rect.y,
+            &label,
+            number_color,
+            config.sidebar_active_border,
+        );
+    } else if let Some(jump) = jump {
+        if rect.height > 1 {
+            buffer.set_stringn(
+                rect.x + bar + 1,
+                rect.y + 1,
+                jump.to_string(),
+                1,
+                Style::default().fg(number_color),
+            );
+        }
+    }
+    super::sidebar_chrome::draw_active_border(
+        buffer,
+        rect,
+        row.focused,
+        config,
+        config.agents.row_gap,
+    );
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

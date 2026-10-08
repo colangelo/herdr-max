@@ -113,6 +113,29 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            sidebar_style: config.ui.sidebar_style,
+            sidebar_active_border: config.ui.sidebar_active_border,
+            sidebar_border_style: config.ui.pane_border_active_style,
+            sidebar_border_color: config
+                .ui
+                .pane_border_active_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            show_workspace_numbers: config.ui.show_workspace_numbers,
+            show_agent_numbers: config.ui.show_agent_numbers,
+            workspace_number_color: config
+                .ui
+                .workspace_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            agent_number_color: config
+                .ui
+                .agent_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            workspace_number_prefix: config.ui.workspace_number_prefix.clone(),
+            agent_number_prefix: config.ui.agent_number_prefix.clone(),
+
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,
@@ -341,6 +364,29 @@ impl ClientShellConfig {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
+                self.sidebar_style = config.ui.sidebar_style;
+                self.sidebar_active_border = config.ui.sidebar_active_border;
+                self.sidebar_border_style = config.ui.pane_border_active_style;
+                self.sidebar_border_color = config
+                    .ui
+                    .pane_border_active_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.show_workspace_numbers = config.ui.show_workspace_numbers;
+                self.show_agent_numbers = config.ui.show_agent_numbers;
+                self.workspace_number_color = config
+                    .ui
+                    .workspace_number_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.agent_number_color = config
+                    .ui
+                    .agent_number_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.workspace_number_prefix = config.ui.workspace_number_prefix.clone();
+                self.agent_number_prefix = config.ui.agent_number_prefix.clone();
+
                 diagnostics.extend(ui.sound.diagnostics());
                 self.sidebar_width = ui.sidebar_width;
                 self.sidebar_min_width = ui.sidebar_min_width;
@@ -405,7 +451,13 @@ impl ClientShellConfig {
 
         let sidebar_width = if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
-                SidebarCollapsedModeConfig::Compact => 4,
+                SidebarCollapsedModeConfig::Compact => {
+                    4 + u16::from(matches!(
+                        self.sidebar_active_border,
+                        crate::config::SidebarActiveBorderConfig::Left
+                            | crate::config::SidebarActiveBorderConfig::Right
+                    ))
+                }
                 SidebarCollapsedModeConfig::Hidden => 0,
             }
         } else {

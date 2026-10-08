@@ -53,6 +53,8 @@ pub(crate) fn render_collapsed_sidebar(
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
+    let bar =
+        u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left);
     let selection_background = workspace_selection_background(palette);
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(buffer, area, palette);
@@ -86,21 +88,24 @@ pub(crate) fn render_collapsed_sidebar(
         };
         put_text(
             buffer,
-            rect.x,
+            rect.x.saturating_add(bar),
             rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            number_style,
+            rect.width.saturating_sub(bar).min(2),
+            &format!("{:<2}", crate::config::jump_symbol(index).unwrap_or(' ')),
+            number_style.fg(config
+                .workspace_number_color
+                .unwrap_or(number_style.fg.unwrap_or(palette.overlay0))),
         );
         let status = workspace.agent_status;
         put_text(
             buffer,
-            rect.x.saturating_add(2),
+            rect.x.saturating_add(bar + 2),
             rect.y,
-            rect.width.saturating_sub(2),
+            rect.width.saturating_sub(bar + 2),
             config.state_icon(status),
             Style::default().fg(config.state_color(status)),
         );
+        super::sidebar_chrome::draw_active_border(buffer, rect, workspace.focused, config, 0);
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -150,24 +155,25 @@ pub(crate) fn render_collapsed_sidebar(
         }
         put_text(
             buffer,
-            rect.x,
+            rect.x.saturating_add(bar),
             rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            Style::default().fg(if agent.focused {
+            rect.width.saturating_sub(bar).min(2),
+            &format!("{:<2}", crate::config::jump_symbol(index).unwrap_or(' ')),
+            Style::default().fg(config.agent_number_color.unwrap_or(if agent.focused {
                 palette.text
             } else {
                 palette.overlay0
-            }),
+            })),
         );
         put_text(
             buffer,
-            rect.x.saturating_add(2),
+            rect.x.saturating_add(bar + 2),
             rect.y,
-            rect.width.saturating_sub(2),
+            rect.width.saturating_sub(bar + 2),
             config.state_icon(agent.agent_status),
             Style::default().fg(config.state_color(agent.agent_status)),
         );
+        super::sidebar_chrome::draw_active_border(buffer, rect, agent.focused, config, 0);
         hits.agents.push((rect, pane_id));
     }
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
@@ -220,10 +226,12 @@ pub(crate) fn render_sidebar(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        " spaces",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " SPACES"
+        } else {
+            " spaces"
+        },
+        super::sidebar_chrome::header_style(config),
     );
 
     let entries = workspace_entries(snapshot, state.collapsed_groups);
@@ -340,7 +348,7 @@ pub(crate) fn render_sidebar(
             snapshot,
             entry.index,
             state.collapsed_groups,
-            palette,
+            config,
         );
         hits.workspaces.push(WorkspaceHit {
             rect,
@@ -491,6 +499,8 @@ pub(crate) fn workspace_entries(
             .filter(|worktree| grouped.contains(worktree.key.as_str()))
         else {
             entries.push(WorkspaceEntry {
+                visible_index: 0,
+                group_collapsed: None,
                 index,
                 indented: false,
                 last_child: false,
@@ -510,6 +520,8 @@ pub(crate) fn workspace_entries(
                 .is_some_and(|worktree| !worktree.is_linked_worktree)
         }) {
             entries.push(WorkspaceEntry {
+                visible_index: 0,
+                group_collapsed: None,
                 index: parent,
                 indented: false,
                 last_child: false,
@@ -525,6 +537,8 @@ pub(crate) fn workspace_entries(
                         .is_some_and(|worktree| worktree.is_linked_worktree)
             }) {
                 entries.push(WorkspaceEntry {
+                    visible_index: 0,
+                    group_collapsed: None,
                     index: active,
                     indented: true,
                     last_child: true,
@@ -544,11 +558,23 @@ pub(crate) fn workspace_entries(
             .collect::<Vec<_>>();
         for (child_index, child) in children.iter().enumerate() {
             entries.push(WorkspaceEntry {
+                visible_index: 0,
+                group_collapsed: None,
                 index: *child,
                 indented: true,
                 last_child: child_index + 1 == children.len(),
             });
         }
+    }
+    for (visible_index, entry) in entries.iter_mut().enumerate() {
+        entry.visible_index = visible_index;
+        entry.group_collapsed = snapshot.workspaces[entry.index]
+            .worktree
+            .as_ref()
+            .filter(|worktree| {
+                !worktree.is_linked_worktree && grouped.contains(worktree.key.as_str())
+            })
+            .map(|worktree| collapsed_groups.contains(&worktree.key));
     }
     entries
 }
@@ -606,11 +632,13 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
     snapshot: &ClientShellSnapshot,
     workspace_index: usize,
     collapsed_groups: &HashSet<String>,
-    palette: &Palette,
+    config: &ClientShellConfig,
 ) -> Option<(Rect, String)> {
     let key = parent_group_key(snapshot, workspace_index)?;
     let toggle = Rect::new(
-        workspace_rect.right().saturating_sub(1),
+        workspace_rect.x.saturating_add(u16::from(
+            config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left,
+        )),
         workspace_rect.y,
         1,
         1,
@@ -625,7 +653,7 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
         } else {
             "▾"
         },
-        Style::default().fg(palette.accent),
+        Style::default().fg(config.palette.accent),
     );
     Some((toggle, key))
 }
@@ -702,73 +730,23 @@ pub(in crate::client::shell) fn render_workspace_rows(
     dragged: bool,
     palette: &Palette,
 ) {
-    for (row_index, row) in rows.iter().enumerate() {
-        let y = area.y + row_index as u16;
-        if y >= area.bottom() {
-            break;
-        }
-        let mut x = area.x;
-        if entry.indented {
-            let prefix = if row_index == 0 {
-                if entry.last_child {
-                    "   └─ "
-                } else {
-                    "   ├─ "
-                }
-            } else if entry.last_child {
-                "        "
-            } else {
-                "   │    "
-            };
-            x = put_segment(
-                buffer,
-                x,
-                y,
-                area.right(),
-                prefix,
-                Style::default().fg(palette.overlay0),
-            );
-        } else if row_index == 0 {
-            x = x.saturating_add(1);
-        } else {
-            x = x.saturating_add(3);
-        }
-        let highlighted = focused || dragged;
-        let workspace_style = Style::default()
-            .fg(if highlighted {
-                palette.text
-            } else {
-                palette.subtext0
-            })
-            .add_modifier(if highlighted {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        let secondary_style = Style::default().fg(if focused {
-            palette.mauve
-        } else {
-            palette.overlay0
-        });
-        let spans = crate::ui::resolved_token_spans(
-            row,
-            (
-                config.state_icon(status),
-                Style::default().fg(config.state_color(status)),
-            ),
-            Style::default().fg(config.state_color(status)),
-            workspace_style,
-            secondary_style,
-            Style::default().fg(palette.overlay1),
-            palette,
-            area.right().saturating_sub(2).saturating_sub(x) as usize,
-        );
-        Paragraph::new(Line::from(spans)).render(
-            Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
-            buffer,
-        );
-    }
-
+    use crate::config::{SidebarActiveBorderConfig, SidebarStyleConfig};
+    let editorial = config.sidebar_style == SidebarStyleConfig::Editorial;
+    let jump = config
+        .show_workspace_numbers
+        .then(|| crate::config::jump_symbol(entry.visible_index))
+        .flatten();
+    let label = super::sidebar_chrome::number_label(jump, &config.workspace_number_prefix);
+    let number_color = config.workspace_number_color.unwrap_or(palette.overlay0);
+    let bar = u16::from(config.sidebar_active_border == SidebarActiveBorderConfig::Left);
+    let lead = if entry.indented {
+        3
+    } else if entry.group_collapsed.is_some() {
+        2
+    } else {
+        1
+    };
+    let secondary_lead: u16 = if entry.indented { 5 } else { 3 };
     let background = if selected {
         Some(workspace_selection_background(palette))
     } else if dragged {
@@ -778,11 +756,78 @@ pub(in crate::client::shell) fn render_workspace_rows(
     } else {
         None
     };
-    if let Some(background) = background {
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                buffer[(x, y)].set_bg(background);
+    if let Some(bg) = background {
+        buffer.set_style(area, Style::default().bg(bg));
+    }
+    for (row_index, row) in rows.iter().take(usize::from(area.height)).enumerate() {
+        let y = area.y + row_index as u16;
+        let indent = bar + if row_index == 0 { lead } else { secondary_lead };
+        if !editorial && row_index == 1 {
+            if let Some(jump) = jump {
+                buffer.set_stringn(
+                    area.x + bar + lead,
+                    y,
+                    jump.to_string(),
+                    1,
+                    Style::default().fg(number_color),
+                );
             }
         }
+        let name = Style::default()
+            .fg(if focused || selected || dragged {
+                palette.text
+            } else {
+                palette.subtext0
+            })
+            .add_modifier(Modifier::BOLD);
+        let secondary = Style::default().fg(if focused || selected {
+            palette.mauve
+        } else {
+            palette.overlay0
+        });
+        let secondary = if editorial && !(focused || selected) {
+            secondary.add_modifier(Modifier::DIM)
+        } else {
+            secondary
+        };
+        let reserve = if editorial && row_index == 0 {
+            super::sidebar_chrome::number_reserve(&label, config.sidebar_active_border)
+        } else {
+            0
+        };
+        let width = area.width.saturating_sub(indent + reserve);
+        let spans = crate::ui::resolved_token_spans(
+            row,
+            (
+                config.state_icon(status),
+                Style::default().fg(config.state_color(status)),
+            ),
+            Style::default()
+                .fg(config.state_color(status))
+                .add_modifier(Modifier::DIM),
+            name,
+            secondary,
+            secondary,
+            palette,
+            usize::from(width),
+        );
+        if width > 0 {
+            Paragraph::new(Line::from(spans)).render(
+                Rect::new(area.x.saturating_add(indent), y, width, 1),
+                buffer,
+            );
+        }
     }
+    if editorial {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            area,
+            area.y,
+            &label,
+            number_color,
+            config.sidebar_active_border,
+        );
+    }
+    // Span writes preserve the prefilled band; the active bar wins its own column.
+    super::sidebar_chrome::draw_active_border(buffer, area, focused, config, config.spaces.row_gap);
 }

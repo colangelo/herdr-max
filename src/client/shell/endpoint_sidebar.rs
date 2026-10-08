@@ -258,10 +258,12 @@ pub(super) fn render_expanded(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        " machines",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " MACHINES"
+        } else {
+            " machines"
+        },
+        super::sidebar_chrome::header_style(config),
     );
 
     let empty_collapsed_groups = HashSet::new();
@@ -491,11 +493,11 @@ pub(super) fn render_expanded(
                 }
                 let group_toggle = super::sidebar::render_parent_group_toggle(
                     buffer,
-                    rect,
+                    nested,
                     snapshot,
                     entry.index,
                     collapsed_groups,
-                    palette,
+                    config,
                 );
                 hits.workspaces.push(WorkspaceHit {
                     rect,

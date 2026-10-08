@@ -13,6 +13,17 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) sidebar_style: crate::config::SidebarStyleConfig,
+    pub(super) sidebar_active_border: crate::config::SidebarActiveBorderConfig,
+    pub(super) sidebar_border_style: crate::config::PaneBorderActiveStyleConfig,
+    pub(super) sidebar_border_color: Option<ratatui::style::Color>,
+    pub(super) show_workspace_numbers: bool,
+    pub(super) show_agent_numbers: bool,
+    pub(super) workspace_number_color: Option<ratatui::style::Color>,
+    pub(super) agent_number_color: Option<ratatui::style::Color>,
+    pub(super) workspace_number_prefix: String,
+    pub(super) agent_number_prefix: String,
+
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -987,6 +998,8 @@ pub(super) fn release_notes_state(
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceEntry {
+    pub(super) visible_index: usize,
+    pub(super) group_collapsed: Option<bool>,
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,

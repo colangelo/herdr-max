@@ -114,6 +114,8 @@ impl ClientShellState {
                     .iter()
                     .enumerate()
                     .map(|(index, _)| WorkspaceEntry {
+                        visible_index: index,
+                        group_collapsed: None,
                         index,
                         indented: false,
                         last_child: false,
