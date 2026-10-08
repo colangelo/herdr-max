@@ -247,6 +247,8 @@ pub(crate) fn render_sidebar(
         super::sidebar_chrome::header_style(config),
     );
 
+    render_host_label(buffer, workspace_area, snapshot, config);
+
     let entries = workspace_entries(snapshot, state.collapsed_groups);
     let body = Rect::new(
         workspace_area.x,
@@ -265,6 +267,7 @@ pub(crate) fn render_sidebar(
                 .get(entry.index)
                 .map(|workspace| {
                     workspace_rows(
+                        snapshot,
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
                         entry.indented,
@@ -348,7 +351,7 @@ pub(crate) fn render_sidebar(
             continue;
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
+        let rows = workspace_rows(snapshot, workspace, status, entry.indented, &config.spaces);
         let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16)
             .min(body.height.saturating_sub(reserve.top + reserve.bottom));
         if y.saturating_add(row_height) > bottom {
@@ -744,17 +747,57 @@ pub(in crate::client::shell) fn displayed_workspace_status(
         .unwrap_or(workspace.agent_status)
 }
 
+pub(super) fn render_host_label(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+) {
+    if !config.show_host || area.is_empty() {
+        return;
+    }
+    let Some(host) = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.host_label.as_deref())
+    else {
+        return;
+    };
+    let label = if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+        host.to_uppercase()
+    } else {
+        host.to_lowercase()
+    };
+    let width = super::render::display_width(&label);
+    if width == 0 || area.width < 7 + 2 + width + 1 {
+        return;
+    }
+    put_text(
+        buffer,
+        area.right() - width - 1,
+        area.y,
+        width,
+        &label,
+        super::sidebar_chrome::header_style(config),
+    );
+}
+
 pub(in crate::client::shell) fn workspace_rows(
+    snapshot: &ClientShellSnapshot,
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indented: bool,
     config: &SpacesSidebarConfig,
 ) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    let head = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.workspace_heads.as_ref())
+        .and_then(|heads| heads.get(&workspace.workspace_id))
+        .map(|head| head.label.as_str())
+        .or(workspace.branch.as_deref());
     let label = if indented && !workspace.custom_label {
-        workspace
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
+        head.and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
             .unwrap_or(&workspace.label)
     } else {
         &workspace.label
@@ -764,7 +807,7 @@ pub(in crate::client::shell) fn workspace_rows(
         config,
         crate::ui::SpaceTokenContext {
             workspace: label,
-            branch: workspace.branch.as_deref(),
+            branch: head,
             state_text: status_text(status),
             ahead_behind: workspace.git_ahead_behind,
             tokens: &token_values,
@@ -897,4 +940,75 @@ pub(in crate::client::shell) fn render_workspace_rows(
     }
     // Span writes preserve the prefilled band; the active bar wins its own column.
     super::sidebar_chrome::draw_active_border(buffer, area, focused, config, config.spaces.row_gap);
+}
+
+#[cfg(test)]
+mod head_host_tests {
+    use super::*;
+    #[test]
+    fn detached_head_keeps_second_row_without_reinterpreting_branch() {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.workspaces[0].branch = None;
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            workspace_heads: Some(
+                [(
+                    "ws_1".into(),
+                    crate::protocol::ClientWorkspaceHead {
+                        label: "rebase @a620c06".into(),
+                        short_oid: "a620c06".into(),
+                        operation: Some("rebase".into()),
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        let config = ClientShellConfig::from_config(&Config::default());
+        let rows = workspace_rows(
+            &snapshot,
+            &snapshot.workspaces[0],
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            &config.spaces,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().flatten().any(|token| matches!(&token.kind, crate::ui::ResolvedTokenKind::Branch(text) if text == "rebase @a620c06")));
+        assert!(snapshot.workspaces[0].branch.is_none());
+        snapshot.resource_facts = None;
+        let rows = workspace_rows(
+            &snapshot,
+            &snapshot.workspaces[0],
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            &config.spaces,
+        );
+        assert_eq!(rows.len(), 1, "older endpoints retain the no-branch layout");
+    }
+    #[test]
+    fn connected_host_casing_follows_header_and_narrow_or_disabled_hides_it() {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            host_label: Some("RemoteHost".into()),
+            ..Default::default()
+        });
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        for (style, expected) in [
+            (crate::config::SidebarStyleConfig::Editorial, "REMOTEHOST"),
+            (crate::config::SidebarStyleConfig::Default, "remotehost"),
+        ] {
+            config.sidebar_style = style;
+            let area = Rect::new(0, 0, 30, 1);
+            let mut buffer = Buffer::empty(area);
+            render_host_label(&mut buffer, area, &snapshot, &config);
+            let row: String = (0..30).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(row.ends_with(&format!("{expected} ")));
+        }
+        for (enabled, width) in [(false, 30), (true, 15)] {
+            config.show_host = enabled;
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            render_host_label(&mut buffer, area, &snapshot, &config);
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
+        }
+    }
 }

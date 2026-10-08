@@ -333,6 +333,7 @@ pub(super) fn render_expanded(
                         let workspace = snapshot.workspaces.get(entry.index)?;
                         Some(
                             super::sidebar::workspace_rows(
+                                snapshot,
                                 workspace,
                                 super::sidebar::displayed_workspace_status(
                                     snapshot,
@@ -499,6 +500,7 @@ pub(super) fn render_expanded(
                     collapsed_groups,
                 );
                 let tokens = super::sidebar::workspace_rows(
+                    snapshot,
                     workspace,
                     status,
                     entry.indented,

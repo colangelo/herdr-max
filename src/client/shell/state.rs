@@ -13,6 +13,7 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) show_host: bool,
     pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
     pub(super) display_panes_duration: std::time::Duration,
     pub(super) show_pane_todos: bool,
