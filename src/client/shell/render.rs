@@ -68,7 +68,6 @@ pub(super) fn render_mode_bar(
             palette.accent
         })
         .add_modifier(Modifier::BOLD);
-    let prefix = keybinds.primary_prefix_label();
     let prefix_rhs = |bindings: &crate::config::ActionKeybinds| {
         bindings
             .prefix_rhs_label()
@@ -83,30 +82,40 @@ pub(super) fn render_mode_bar(
         ]);
     } else {
         match mode {
-            ClientShellMode::Prefix => {
-                segments.extend([
-                    (" PREFIX ".to_owned(), mode_style),
-                    (" ".to_owned(), base),
-                    ("esc".to_owned(), key),
-                    (" cancel  ".to_owned(), base),
-                    (prefix, key),
-                    (" send prefix  ".to_owned(), base),
-                    (prefix_rhs(&keybinds.keybinds.workspace_picker), key),
-                    (" workspace nav  ".to_owned(), base),
-                    (prefix_rhs(&keybinds.keybinds.help), key),
-                    (" keybinds".to_owned(), base),
-                ]);
-            }
-            ClientShellMode::Navigate => {
+            ClientShellMode::Prefix | ClientShellMode::Navigate => {
                 segments.extend([
                     (" NAVIGATE ".to_owned(), mode_style),
-                    (" esc back  ".to_owned(), base),
-                    ("↑/↓".to_owned(), key),
-                    (" workspace  ".to_owned(), base),
-                    ("tab".to_owned(), key),
+                    (" ".to_owned(), base),
+                    ("esc".to_owned(), key),
+                    (" back  ".to_owned(), base),
+                    ("↑ / ↓".to_owned(), key),
+                    (" ws  ".to_owned(), base),
+                    ("⇥".to_owned(), key),
                     (" pane  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.goto), key),
+                    (" navigator  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.new_tab), key),
+                    (" new tab  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.split_vertical), key),
+                    (" split│  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.split_horizontal), key),
+                    (" split─  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.close_pane), key),
+                    (" close  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.zoom), key),
+                    (" zoom  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.resize_mode), key),
+                    (" resize  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.balance_panes), key),
+                    (" balance  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.next_layout), key),
+                    (" layout  ".to_owned(), base),
                     (prefix_rhs(&keybinds.keybinds.help), key),
-                    (" keybinds".to_owned(), base),
+                    (" keybinds  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.settings), key),
+                    (" settings  ".to_owned(), base),
+                    (prefix_rhs(&keybinds.keybinds.detach), key),
+                    (" detach".to_owned(), base),
                 ]);
             }
             ClientShellMode::Resize => {
@@ -390,4 +399,57 @@ pub(super) fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &s
 
 pub(super) fn display_width(text: &str) -> u16 {
     UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+}
+
+#[cfg(test)]
+mod port_prefix_bar_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_bar_matches_the_fork_navigate_chip_hints_and_binding_labels() {
+        for config in [
+            Config::default(),
+            toml::from_str::<Config>(
+                "[keys]\nbalance_panes = \"prefix+f11\"\nnext_layout = \"prefix+f12\"\n",
+            )
+            .unwrap(),
+        ] {
+            let state = ClientShellState::new(ClientShellConfig::from_config(&config));
+            let kb = &state.config.keybinds.keybinds;
+            let rhs = |binding: &crate::config::ActionKeybinds| {
+                binding.prefix_rhs_label().unwrap_or_else(|| "unset".into())
+            };
+            let expected = format!(
+                " NAVIGATE  esc back  ↑ / ↓ ws  ⇥ pane  {} navigator  {} new tab  {} split│  {} split─  {} close  {} zoom  {} resize  {} balance  {} layout  {} keybinds  {} settings  {} detach",
+                rhs(&kb.goto), rhs(&kb.new_tab), rhs(&kb.split_vertical),
+                rhs(&kb.split_horizontal), rhs(&kb.close_pane), rhs(&kb.zoom),
+                rhs(&kb.resize_mode), rhs(&kb.balance_panes), rhs(&kb.next_layout),
+                rhs(&kb.help), rhs(&kb.settings), rhs(&kb.detach),
+            );
+            for mode in [ClientShellMode::Prefix, ClientShellMode::Navigate] {
+                let area = Rect::new(0, 0, 300, 1);
+                let mut buffer = Buffer::empty(area);
+                assert_eq!(
+                    render_mode_bar(
+                        &mut buffer,
+                        area,
+                        mode,
+                        None,
+                        None,
+                        false,
+                        &state.config.keybinds,
+                        &state.config.palette,
+                    ),
+                    Some(area)
+                );
+                let text = (0..area.width)
+                    .map(|x| buffer[(x, 0)].symbol())
+                    .collect::<String>();
+                assert_eq!(text.trim_end(), expected);
+                assert_eq!(buffer[(1, 0)].bg, state.config.palette.accent);
+                assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
+                assert_eq!(buffer[(11, 0)].fg, state.config.palette.accent);
+            }
+        }
+    }
 }
