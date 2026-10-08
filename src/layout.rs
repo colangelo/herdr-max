@@ -300,8 +300,10 @@ impl TileLayout {
 
     /// Rebalance every split so all panes end up equally sized, preserving the
     /// tree shape and each split's orientation (tmux `even-*` semantics for a
-    /// BSP tree). Each split's first-child ratio becomes the fraction of leaves
-    /// under its first child, which yields equal-area leaves. Ratios are clamped
+    /// BSP tree). Each split's first-child ratio becomes the share of its own axis
+    /// that the first child needs: a pane counts one, a same-direction split the
+    /// sum of its children, a perpendicular split the larger of its children. So
+    /// `[a | (b / c)]` is 1:1 and `[a | (b | c)]` is 1:2. Ratios are clamped
     /// to `[0.1, 0.9]`, so a same-direction chain of more than ten panes cannot
     /// reach a perfect `1/N` on its innermost splits. Returns whether any ratio
     /// changed.
@@ -719,17 +721,39 @@ fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) -> bool {
     }
 }
 
+/// How many equal slots a subtree needs along `axis`: a pane is one, a split
+/// on `axis` is the sum of its children, a split across `axis` is the larger
+/// of its children (they share the same extent along `axis`).
+fn axis_weight(node: &Node, axis: Direction) -> usize {
+    match node {
+        Node::Pane(_) => 1,
+        Node::Split {
+            direction,
+            first,
+            second,
+            ..
+        } => {
+            let (a, b) = (axis_weight(first, axis), axis_weight(second, axis));
+            if *direction == axis {
+                a + b
+            } else {
+                a.max(b)
+            }
+        }
+    }
+}
+
 fn balance_node(node: &mut Node) {
     if let Node::Split {
+        direction,
         ratio,
         first,
         second,
-        ..
     } = node
     {
-        let first_leaves = count_panes(first) as f32;
-        let total_leaves = first_leaves + count_panes(second) as f32;
-        *ratio = (first_leaves / total_leaves).clamp(0.1, 0.9);
+        let first_weight = axis_weight(first, *direction) as f32;
+        let total = first_weight + axis_weight(second, *direction) as f32;
+        *ratio = (first_weight / total).clamp(0.1, 0.9);
         balance_node(first);
         balance_node(second);
     }
@@ -926,8 +950,23 @@ mod tests {
         assert_eq!(layout.focused(), before_focus);
     }
 
+    fn split(direction: Direction, first: Node, second: Node) -> Node {
+        Node::Split {
+            direction,
+            ratio: 0.3,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn balanced(root: Node) -> TileLayout {
+        let mut layout = TileLayout::from_saved(root, pane(1));
+        layout.balance();
+        layout
+    }
+
     #[test]
-    fn balance_sets_ratios_from_leaf_counts_and_equalizes_pane_areas() {
+    fn balance_weights_each_split_along_its_own_axis() {
         let mut layout = sample_layout();
         let before_focus = layout.focused();
 
@@ -939,30 +978,110 @@ mod tests {
         assert_eq!(splits[0].0, Direction::Horizontal);
         assert_eq!(splits[1].0, Direction::Vertical);
         assert_eq!(splits[2].0, Direction::Horizontal);
-        // root: pane(1) is 1 of 4 leaves -> 0.25; nested V: pane(2) is 1 of 3 ->
-        // 1/3; inner H: pane(3) vs pane(4) -> 0.5.
-        assert!((splits[0].1 - 0.25).abs() < f32::EPSILON);
-        assert!((splits[1].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        // root H: pane(1) needs 1 column, the right side needs 2 (3 | 4) -> 1/3;
+        // nested V: pane(2) is 1 row, the (3 | 4) row is 1 row -> 1/2; inner H -> 1/2.
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
         assert!((splits[2].1 - 0.5).abs() < f32::EPSILON);
 
-        // Count-weighted ratios yield equal-area leaves.
-        let area = Rect::new(0, 0, 100, 40);
-        let areas: Vec<u32> = layout
-            .panes(area)
-            .into_iter()
-            .map(|info| info.rect.width as u32 * info.rect.height as u32)
-            .collect();
-        assert_eq!(areas.len(), 4);
-        let target = area.width as u32 * area.height as u32 / 4;
-        for a in areas {
-            // Allow small rounding slack from integer cell rounding.
-            assert!(a.abs_diff(target) <= 40, "pane area {a} vs target {target}");
-        }
-
-        // Focus is untouched.
         assert_eq!(layout.focused(), before_focus);
         // Balancing an already-balanced layout reports no change.
         assert!(!layout.balance());
+    }
+
+    #[test]
+    fn balance_one_pane_beside_a_stacked_pair_splits_in_half() {
+        // [a | (b / c)]: the case from #170, 50/50 width and 50/50 height.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Vertical,
+                Node::Pane(pane(2)),
+                Node::Pane(pane(3)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 0.5).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        let rects = pane_rects(&layout);
+        assert_eq!(rects[0].1.width, 50);
+        assert_eq!(rects[0].1.height, 40);
+        assert_eq!(rects[1].1.height, 20);
+        assert_eq!(rects[2].1.height, 20);
+    }
+
+    #[test]
+    fn balance_same_direction_chain_still_gives_equal_columns() {
+        // [a | (b | c)]: three equal columns, as with leaf counts.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Horizontal,
+                Node::Pane(pane(2)),
+                Node::Pane(pane(3)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn balance_pane_beside_a_row_over_a_pane_gives_a_third() {
+        // [a | ((b | c) / d)]: the right side is two columns wide.
+        let layout = balanced(split(
+            Direction::Horizontal,
+            Node::Pane(pane(1)),
+            split(
+                Direction::Vertical,
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(2)),
+                    Node::Pane(pane(3)),
+                ),
+                Node::Pane(pane(4)),
+            ),
+        ));
+        let splits = split_snapshot(&layout);
+        assert!((splits[0].1 - 1.0 / 3.0).abs() < f32::EPSILON);
+        assert!((splits[1].1 - 0.5).abs() < f32::EPSILON);
+        assert!((splits[2].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn balance_is_idempotent_for_each_shape() {
+        let shapes = [
+            split(
+                Direction::Horizontal,
+                Node::Pane(pane(1)),
+                split(
+                    Direction::Vertical,
+                    Node::Pane(pane(2)),
+                    Node::Pane(pane(3)),
+                ),
+            ),
+            split(
+                Direction::Vertical,
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(1)),
+                    Node::Pane(pane(2)),
+                ),
+                split(
+                    Direction::Horizontal,
+                    Node::Pane(pane(3)),
+                    Node::Pane(pane(4)),
+                ),
+            ),
+        ];
+        for shape in shapes {
+            let mut layout = balanced(shape);
+            let once = split_snapshot(&layout);
+            assert!(!layout.balance());
+            assert_eq!(split_snapshot(&layout), once);
+        }
     }
 
     #[test]

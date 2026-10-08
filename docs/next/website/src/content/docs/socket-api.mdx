@@ -299,9 +299,10 @@ is `type: "layout_split_ratio_set"` with the updated portable `layout`.
 {"id":"req_ratio","method":"layout.set_split_ratio","params":{"tab_id":"w1:t1","path":[],"ratio":0.6}}
 ```
 
-`layout.balance` rebalances every split in a tab so all panes become equally
-sized, preserving the tree shape and each split's orientation (like tmux
-`even-horizontal`/`even-vertical`). Omit `tab_id` and `pane_id` to target the
+`layout.balance` rebalances every split in a tab, preserving the tree shape and
+each split's orientation. Each split shares its own axis between its two sides
+in proportion to the slots they need: a lone pane beside a stacked pair splits
+50/50, and three side-by-side panes get equal thirds. Omit `tab_id` and `pane_id` to target the
 active tab. The response is `type: "layout_balanced"` with the updated portable
 `layout`.
 
