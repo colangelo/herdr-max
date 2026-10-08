@@ -189,6 +189,10 @@ impl ClientShellState {
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }
+                if action == crate::input::KeybindAction::NextLayout {
+                    self.cycle_layout(outcome);
+                    return;
+                }
                 if let Some(method) = self.endpoint_method_for_action(action) {
                     self.push_endpoint_method(method, outcome);
                     return;

@@ -932,6 +932,8 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    /// Ephemeral presentation cursor for the next-layout action; presets mutate server state.
+    pub(super) layout_cycle_index: usize,
     pub(super) application_scroll: Option<super::application_scroll::ClientApplicationScroll>,
     pub(super) next_application_scroll_generation: u64,
     pub(super) retired_scroll_keys: HashSet<crate::input::InputLeaseKey<u8>>,
@@ -1111,6 +1113,7 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            layout_cycle_index: 0,
             machine_diagnostics: Default::default(),
             application_scroll: None,
             next_application_scroll_generation: 0,
