@@ -98,9 +98,7 @@ pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-
-impl ReportedAgentResume {
-}
+impl ReportedAgentResume {}
 
 impl AgentResumePlan {
     /// For a Claude session herdr resumes with the built-in
@@ -144,7 +142,6 @@ pub(crate) fn test_settings_file(name: &str) -> String {
     std::fs::write(&path, "{}").expect("write a test settings file");
     path.display().to_string()
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgentSession {

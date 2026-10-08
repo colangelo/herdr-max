@@ -439,8 +439,6 @@ impl TerminalState {
         self.persisted_agent_session = Some(persisted_session);
     }
 
-
-
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
         let reached_idle = self.agent_process_acquisition_pending && self.state == AgentState::Idle;
         let suppress_completion = reached_idle && self.recent_agent_process_exit.is_none();
@@ -2447,12 +2445,6 @@ impl TerminalState {
         }
     }
 
-
-
-
-
-
-
     /// Records the launch flags of `agent`'s process as detection first sees
     /// it. Without a command line (the OS would not say), a record of the same
     /// agent is kept: a restored pane's record describes the process restore
@@ -2548,16 +2540,6 @@ impl TerminalState {
             .as_ref()
             .filter(|resume| self.session_agent_matches_detected(&resume.agent))
     }
-
-    #[cfg(test)]
-    pub fn reported_resume(&self) -> Option<&crate::agent_resume::ReportedAgentResume> {
-        self.reported_resume.as_ref()
-    }
-
-
-
-
-
 
     fn hook_authority_is_effective(&self, authority: &HookAuthority) -> bool {
         !crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
@@ -6229,12 +6211,14 @@ mod tests {
     #[test]
     fn grok_new_session_does_not_replace_a_different_owner() {
         let mut terminal = test_terminal();
+        // Detecting a different agent drops the session of the one that left
+        // (fork issue 127), so the other owner's session is recorded after.
+        terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
         });
-        terminal.set_detected_state(Some(Agent::Grok), AgentState::Idle);
 
         let mutation = terminal.set_agent_session_ref_for_session_start(
             "herdr:grok".into(),

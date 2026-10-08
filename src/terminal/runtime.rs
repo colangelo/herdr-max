@@ -707,4 +707,3 @@ impl TerminalRuntime {
         self.0.last_input_at_ms()
     }
 }
-

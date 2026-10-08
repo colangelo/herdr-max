@@ -31,10 +31,6 @@ pub use self::{
     },
     tab::{NewPane, Tab},
 };
-// Production code only reads the operation through `DetachedHead::label`;
-// tests build the fact directly.
-#[cfg(test)]
-pub use self::git::GitOperation;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeSpaceMembership {

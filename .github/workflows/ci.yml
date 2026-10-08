@@ -40,7 +40,18 @@ jobs:
 
       - name: Validate commit subjects
         if: github.event_name == 'push'
-        run: python3 scripts/conventional_commits.py --range "${{ github.event.before }}..${{ github.event.after }}"
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        # fork: upstream syncs force-push master, making the before SHA unreachable;
+        # fall back to validating only the head commit subject in that case.
+        run: |
+          if git cat-file -e "$BEFORE_SHA" 2>/dev/null; then
+            python3 scripts/conventional_commits.py --range "$BEFORE_SHA..$AFTER_SHA"
+          else
+            echo "before SHA unreachable (force-push upstream sync); validating head commit only"
+            python3 scripts/conventional_commits.py "$(git log -1 --pretty=format:%s "$AFTER_SHA")"
+          fi
 
       - name: Validate PR title
         if: github.event_name == 'pull_request'

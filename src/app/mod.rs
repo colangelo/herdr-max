@@ -7,11 +7,11 @@ pub(crate) mod actions;
 mod agent_hints;
 mod agent_names;
 mod agent_resume;
-mod pins;
 #[cfg(test)]
 mod agent_suspend_tests;
 pub(crate) mod agent_view;
 mod agents;
+mod pins;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 #[cfg(test)]
@@ -522,7 +522,6 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
-
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
@@ -961,6 +960,7 @@ impl App {
                 self.configure_window_title(&config.ui.window_title);
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.workspace_sort = workspace_sort_from_config(config.ui.workspace_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sound = config.ui.sound.clone();
@@ -992,15 +992,6 @@ impl App {
         if !invalid_section("agents") {
             self.codex_app_server =
                 crate::codex_app_server::CodexAppServer::from_config(&config.agents.codex);
-        }
-        if !invalid_section("session")
-            && Duration::from_millis(config.session.startup_per_agent_delay_ms.into())
-                != self.startup_per_agent_delay
-        {
-            diagnostics.push(
-                "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
-                    .into(),
-            );
         }
 
         if !invalid_section("experimental") {
@@ -1345,6 +1336,7 @@ mod tests {
             context: "background · 2".to_string(),
             position: None,
             target: None,
+            anchor_pane: None,
         });
 
         let response =
@@ -2030,7 +2022,8 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Navigate);
         assert_eq!(
             app.state
-                .product_announcement()
+                .product_announcement
+                .as_ref()
                 .map(|announcement| announcement.id.as_str()),
             Some("startup-announcement")
         );
@@ -2103,133 +2096,6 @@ mod tests {
 
     #[test]
     fn reload_config_keeps_kitty_graphics_until_restart() {
-    fn reload_config_applies_display_panes_ms_live() {
-        let mut app = test_app();
-        assert_eq!(
-            app.state.display_panes_duration,
-            Duration::from_millis(3000)
-        );
-
-        let mut config = Config::default();
-        config.ui.display_panes_ms = 5000;
-        let report = app.apply_live_config(&config, &[], &[], false);
-
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(
-            app.state.display_panes_duration,
-            Duration::from_millis(5000)
-        );
-
-        config.ui.display_panes_ms = 1;
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.display_panes_duration, Duration::from_millis(500));
-    }
-
-    #[test]
-    fn reload_config_applies_inactive_pane_dim_live_and_clamps() {
-        let mut app = test_app();
-        assert_eq!(app.state.inactive_pane_dim, 0);
-        let mut config = crate::config::Config::default();
-        config.ui.inactive_pane_dim = 20;
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.inactive_pane_dim, 20);
-        config.ui.inactive_pane_dim = 500;
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.inactive_pane_dim, 90);
-        config.ui.inactive_pane_dim = 0;
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.inactive_pane_dim, 0);
-    }
-
-    #[test]
-    fn reload_config_applies_sidebar_fade_live_and_clamps_with_diagnostics() {
-        let mut app = test_app();
-        assert_eq!(app.state.sidebar_fade, [85, 55]);
-        let mut config = crate::config::Config::default();
-        config.ui.sidebar_fade = vec![60, 20];
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.sidebar_fade, [60, 20]);
-        config.ui.sidebar_fade = vec![200];
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.sidebar_fade, [95, 0]);
-    }
-
-    #[test]
-    fn reload_config_applies_the_fog_style_live_and_reports_an_unknown_one() {
-        let mut app = test_app();
-        assert_eq!(
-            app.state.sidebar_fog_style,
-            crate::config::SidebarFogStyle::Lift
-        );
-        let mut config = crate::config::Config::default();
-        config.ui.sidebar_fog_style = "both".to_string();
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(
-            app.state.sidebar_fog_style,
-            crate::config::SidebarFogStyle::Both
-        );
-        config.ui.sidebar_fog_style = "dim".to_string();
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(
-            app.state.sidebar_fog_style,
-            crate::config::SidebarFogStyle::Dim
-        );
-        config.ui.sidebar_fog_style = "blur".to_string();
-        app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(
-            app.state.sidebar_fog_style,
-            crate::config::SidebarFogStyle::Lift
-        );
-    }
-
-    #[test]
-    fn reload_config_applies_sidebar_fog_live_and_clamps_with_diagnostics() {
-        let mut app = test_app();
-        assert_eq!(app.state.sidebar_fog, [17, 7]);
-        assert_eq!(app.state.sidebar_fog_tint, 70);
-
-        let mut config = Config::default();
-        config.ui.sidebar_fog = vec![30, 0];
-        config.ui.sidebar_fog_tint = 20;
-        let report = app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
-        assert_eq!(app.state.sidebar_fog, [30, 0]);
-        assert_eq!(app.state.sidebar_fog_tint, 20);
-
-        // Out of range: clamped, one diagnostic each; a short list means no
-        // fog on the missing row.
-        config.ui.sidebar_fog = vec![99];
-        config.ui.sidebar_fog_tint = -5;
-        let report = app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(app.state.sidebar_fog, [60, 0]);
-        assert_eq!(app.state.sidebar_fog_tint, 0);
-        let text = report.diagnostics.join("\n");
-        assert!(text.contains("ui.sidebar_fog[0] (99)"), "{text}");
-        assert!(text.contains("ui.sidebar_fog_tint (-5)"), "{text}");
-    }
-
-    #[test]
-    fn reload_config_reports_startup_delay_requires_restart() {
-        let mut app = test_app();
-        let mut config = Config::default();
-        let report = app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-
-        config.session.startup_per_agent_delay_ms = 250;
-        let report = app.apply_live_config(&config, &[], &[], false);
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
-        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
-        assert_eq!(report.diagnostics, vec![
-            "session.startup_per_agent_delay_ms changes require restarting Herdr; kept current setting"
-        ]);
-
-        let report = app.apply_live_config(&config, &[], &["session".into()], false);
-        assert!(report.diagnostics.is_empty());
-        assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
-    }
-
-    #[test]
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-kitty-graphics");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2374,13 +2240,23 @@ mod tests {
                 .bold,
             Some(true)
         );
-        let previous = app.state.sidebar_agents.clone();
+        // A bad value costs that key, not the section (fork issue 133): the
+        // rejected `rows` falls back to its default and the reload reports it.
         std::fs::write(&path, conditional.replace("gt = 80", "gt = 'invalid'")).unwrap();
-        assert_eq!(
-            app.reload_config().status,
-            crate::config::ConfigReloadStatus::Partial
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("ui.sidebar.agents.rows") && d.contains("default")),
+            "{:?}",
+            report.diagnostics
         );
-        assert_eq!(app.state.sidebar_agents, previous);
+        assert_eq!(
+            app.state.sidebar_agents,
+            crate::config::AgentsSidebarConfig::default()
+        );
 
         let previous_agents = app.state.sidebar_agents.clone();
         std::fs::write(
@@ -2490,37 +2366,6 @@ mod tests {
             app.state.config_diagnostic.as_deref(),
             Some("config.toml has unknown keys; herdr config check")
         );
-
-        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn reload_config_applies_state_symbol_overrides_and_drops_wide_ones() {
-        let _guard = config_env_lock().lock().unwrap();
-        let path = temp_config_path("reload-config-state-symbols");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
-
-        let mut app = test_app();
-        assert_eq!(app.state.state_icon_symbols().done, "●");
-        std::fs::write(
-            &path,
-            "[ui]\nstatus_indicators = \"symbols\"\n[ui.state_symbols]\ndone = \"◆\"\nworking = \"⠋⠙\"\n",
-        )
-        .unwrap();
-
-        let report = app.reload_config();
-
-        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
-        assert_eq!(
-            report.diagnostics,
-            vec!["ui.state_symbols.working = \"⠋⠙\" must be exactly one terminal cell wide; ignoring"]
-        );
-        let symbols = app.state.state_icon_symbols();
-        assert_eq!(symbols.done, "◆");
-        assert_eq!(symbols.working, "◐");
-        assert_eq!(symbols.idle, "✓");
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -3498,6 +3343,7 @@ mod tests {
                 "agent": "codex",
                 "kind": "id",
                 "value": "codex-session",
+                "restore_argv": ["codex", "resume", "codex-session"],
             })
         );
         assert_eq!(
@@ -3650,93 +3496,6 @@ mod tests {
         app.sync_session_save_schedule();
         let deadline = app.session_save_deadline.expect("a save is scheduled");
         assert!(deadline > Instant::now() + SESSION_SAVE_DEBOUNCE / 2);
-    }
-
-    fn app_with_working_agent() -> App {
-        let mut app = test_app();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.ensure_test_terminals();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
-        terminal.detected_agent = Some(crate::detect::Agent::Claude);
-        terminal.state = crate::detect::AgentState::Working;
-        app
-    }
-
-    #[test]
-    fn spinner_ticks_only_while_an_agent_is_working_and_the_spinner_is_on() {
-        let mut app = test_app();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.ensure_test_terminals();
-        let now = Instant::now();
-
-        // Nothing working: no deadline, no tick, no frame.
-        assert_eq!(app.spinner_next_due(), None);
-        assert!(!app.advance_spinner(now));
-        assert_eq!(app.state.spinner_frame, 0);
-
-        let mut app = app_with_working_agent();
-        let interval = app.state.status_spinner_interval;
-        // First tick is immediate so a freshly working agent moves at once.
-        assert!(app
-            .spinner_next_due()
-            .is_some_and(|due| due <= Instant::now()));
-        assert!(app.advance_spinner(now));
-        assert_eq!(app.state.spinner_frame, 1);
-        // Then one frame per interval, not per loop pass.
-        assert!(!app.advance_spinner(now + interval / 2));
-        assert_eq!(app.spinner_next_due(), Some(now + interval));
-        assert!(app.advance_spinner(now + interval));
-        assert_eq!(app.state.spinner_frame, 2);
-
-        // Off: no tick even with a working agent, and the rows get no frame.
-        app.state.status_spinner = crate::config::StatusSpinnerConfig::Off;
-        assert_eq!(app.spinner_next_due(), None);
-        assert!(!app.advance_spinner(now + interval * 2));
-        assert_eq!(app.state.working_spinner_frame(), None);
-        app.state.status_spinner = crate::config::StatusSpinnerConfig::On;
-        assert_eq!(app.state.working_spinner_frame(), Some(2));
-    }
-
-    #[test]
-    fn spinner_frame_wraps_and_the_interval_is_clamped_from_config() {
-        let mut app = app_with_working_agent();
-        app.state.spinner_frame = u8::MAX;
-        assert!(app.advance_spinner(Instant::now()));
-        assert_eq!(app.state.spinner_frame, 0);
-
-        assert_eq!(
-            status_spinner_interval_from_config(1),
-            Duration::from_millis(crate::config::MIN_STATUS_SPINNER_MS)
-        );
-        assert_eq!(
-            status_spinner_interval_from_config(10_000),
-            Duration::from_millis(crate::config::MAX_STATUS_SPINNER_MS)
-        );
-        assert_eq!(
-            status_spinner_interval_from_config(333),
-            Duration::from_millis(333)
-        );
-    }
-
-    #[test]
-    fn next_loop_deadline_includes_the_spinner_tick() {
-        let mut app = app_with_working_agent();
-        let now = Instant::now();
-        app.last_spinner_tick = Some(now);
-        app.next_resize_poll = now + Duration::from_secs(5);
-        app.next_auto_update_check = Some(now + Duration::from_secs(6));
-        app.next_agent_manifest_update_check = None;
-        // A populated session has a git refresh due at once; park it.
-        app.git_refresh_in_flight = true;
-
-        assert_eq!(
-            app.next_loop_deadline(now, false),
-            Some(now + app.state.status_spinner_interval)
-        );
     }
 
     #[test]

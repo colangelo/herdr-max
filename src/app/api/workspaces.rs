@@ -708,6 +708,7 @@ mod tests {
             WorkspaceCloseParams {
                 workspace_id: app.public_workspace_id(1),
                 close_group: true,
+                force: false,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();

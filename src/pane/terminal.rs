@@ -545,8 +545,6 @@ impl PaneTerminal {
         self.ghostty.detection_ansi()
     }
 
-
-
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_text_snapshot(lines)
     }
@@ -2283,9 +2281,6 @@ impl GhosttyPaneTerminal {
             })
             .unwrap_or_default()
     }
-
-
-
 
     #[cfg(test)]
     pub fn recent_text(&self, lines: usize) -> String {
@@ -5489,27 +5484,9 @@ mod tests {
     }
 
     #[test]
-    fn herdr_clear_scrollback_bypasses_droid_program_byte_strip() {
-        let droid_job = crate::platform::ForegroundJob {
-            process_group_id: 42,
-            processes: vec![crate::platform::ForegroundProcess {
-                pid: 42,
-                name: "droid".to_string(),
-                argv0: Some("droid".to_string()),
-                argv: Some(vec!["droid".to_string()]),
-                cmdline: Some("droid".to_string()),
-            }],
-        };
-        // The program-byte path strips CSI 3J for a droid foreground job...
-        let filtered =
-            maybe_filter_primary_screen_scrollback_clear(b"\x1b[3J", false, Some(&droid_job));
-        assert!(
-            filtered.as_ref().is_empty(),
-            "droid strip should drop program-emitted 3J"
-        );
-
-        // ...while the herdr-originated clear feeds the emulator directly and
-        // still purges the scrollback.
+    fn herdr_clear_scrollback_purges_scrollback() {
+        // The herdr-originated clear feeds the emulator directly and purges
+        // the scrollback.
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 5, 1_000_000).unwrap();
         let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();

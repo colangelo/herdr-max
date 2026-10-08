@@ -297,6 +297,34 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // Fork (herdr-max): the close methods carry an optional `force` that skips the
+        // open-todos refusal. Old clients omit it and get the v1 behavior; the new
+        // shapes are frozen here so any further change still fails.
+        for (method, digest) in [
+            (
+                "pane.close",
+                "36b7fbb91571620bf8a5933c0e18b5ed6ecbfcaad72be91bca1773cdb9306f5e",
+            ),
+            (
+                "tab.close",
+                "4bd575541bd0b24cad7f6da0e06105ee87a0e8bbf6e189718c6437417aeae08c",
+            ),
+            (
+                "workspace.close",
+                "508d4409a530158b98432cccffb62a7ca4f7d3cb308b6db2989739f8325fdb46",
+            ),
+        ] {
+            let actual_digest = actual.remove(method);
+            assert_eq!(
+                actual_digest.as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
+        let mut expected = expected;
+        for method in ["pane.close", "tab.close", "workspace.close"] {
+            expected.remove(method);
+        }
 
         assert_eq!(
             actual, expected,

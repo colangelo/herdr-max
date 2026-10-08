@@ -572,7 +572,7 @@ fn server_survives_hangup_and_logs_why_it_stops() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     let pid = spawned.child.process_id().expect("server pid") as libc::pid_t;
 
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
@@ -609,7 +609,7 @@ fn server_stop_request_logs_its_caller() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
 
     let mut stream = UnixStream::connect(&api_socket).unwrap();
     writeln!(

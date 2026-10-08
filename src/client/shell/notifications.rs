@@ -141,9 +141,9 @@ pub(super) fn render_notification_card(
         | crate::config::ToastHerdrPosition::BottomRight => area
             .bottom()
             .saturating_sub(height.saturating_add(top_offset)),
-        crate::config::ToastHerdrPosition::Center => {
-            area.y.saturating_add(area.height.saturating_sub(height) / 2)
-        }
+        crate::config::ToastHerdrPosition::Center => area
+            .y
+            .saturating_add(area.height.saturating_sub(height) / 2),
     }
     .clamp(area.y, max_y);
     let rect = Rect::new(x, y, width, height);

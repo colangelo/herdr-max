@@ -23,13 +23,13 @@ use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
 // Fork-aware update check: point at this fork's own checked-in manifests served
-// via raw GitHub, not upstream herdr.dev. `website/preview.json` is maintained by
-// the fork's preview workflow; `website/latest.json` is rewritten by the
-// `release-ac` publish step on each stable fork release.
+// via raw GitHub, not upstream herdr.dev. `distribution/latest.json` is rewritten
+// by the release workflow on each stable fork release (which also keeps a copy at
+// `website/latest.json` for binaries from before the v0.9.3 sync).
 const STABLE_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/latest.json";
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/colangelo/herdr-max/master/website/preview.json";
+    "https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
@@ -3399,6 +3399,7 @@ mod tests {
                     health_check: true,
                     ssh_agent_registration: false,
                 }),
+                exe: None,
             },
         };
         let decisions = confirm_running_server_update_action(
@@ -3923,6 +3924,28 @@ mod tests {
         assert!(!first_windows_stable_is_pending(&with_windows, true, true));
     }
 
+    /// Fork manifest: the binary/version is the base semver, but releases are
+    /// tagged `v{version}-ac` (optionally `-ac.N`) on colangelo/herdr. Right
+    /// after an upstream sync the file is still upstream's (herdrdev assets,
+    /// `v{version}` tags) until the fork release flow rewrites it.
+    fn assert_release_url(url: &str, version: &str, target: &str) {
+        if url.contains("github.com/herdrdev/herdr/") {
+            assert!(
+                url.contains(&format!("/releases/download/v{version}/")),
+                "unexpected release URL for {version} {target}: {url}"
+            );
+        } else {
+            assert!(
+                url.contains("github.com/colangelo/herdr"),
+                "expected a fork asset URL for {version} {target}: {url}"
+            );
+            assert!(
+                url.contains(&format!("/releases/download/v{version}-ac")),
+                "unexpected release URL for {version} {target}: {url}"
+            );
+        }
+    }
+
     #[test]
     fn checked_in_distribution_manifest_matches_update_schema() {
         #[derive(Deserialize)]
@@ -3966,16 +3989,7 @@ mod tests {
                 Some(64),
                 "missing SHA-256 checksum for {target}"
             );
-            // Fork manifest: the binary/version is the base semver, but releases
-            // are tagged `v{version}-ac` (optionally `-ac.N`) on colangelo/herdr.
-            assert!(
-                url.contains("github.com/colangelo/herdr/"),
-                "expected a fork asset URL for {target}: {url}"
-            );
-            assert!(
-                url.contains(&format!("/releases/download/v{}-ac", manifest.version)),
-                "unexpected release URL for {target}: {url}"
-            );
+            assert_release_url(url, &manifest.version, target);
             assert!(
                 url.ends_with(&format!("herdr-{target}")),
                 "unexpected asset name for {target}: {url}"
@@ -4009,14 +4023,7 @@ mod tests {
                 let asset: AssetRef = serde_json::from_value(asset)
                     .unwrap_or_else(|_| panic!("invalid asset for {version} {target}"));
                 let url = &asset.url;
-                assert!(
-                    url.contains("github.com/colangelo/herdr/"),
-                    "expected a fork asset URL for {version} {target}: {url}"
-                );
-                assert!(
-                    url.contains(&format!("/releases/download/v{version}-ac")),
-                    "unexpected release URL for {version} {target}: {url}"
-                );
+                assert_release_url(url, version, target);
                 assert!(
                     url.ends_with(&format!("herdr-{target}")),
                     "unexpected asset name for {version} {target}: {url}"

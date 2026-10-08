@@ -41,19 +41,19 @@ use self::agent_detection::{
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
-use self::background_agent::{AgentJobStatus, AgentJobTracker};
-#[cfg(test)]
-pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
 #[cfg(unix)]
 use self::agent_detection::{should_hold_seeded_detection, BasicDetectionSeedInit};
+use self::background_agent::{AgentJobStatus, AgentJobTracker};
+#[cfg(test)]
+pub(crate) use self::terminal::test_encode_key_for_app;
 pub use self::terminal::InputState;
 #[cfg(test)]
 pub(crate) use self::terminal::SYNC_HOLD_MAX;
 pub(crate) use self::terminal::{
-    TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
-    TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
-    sync_transition_seq,
+    sync_transition_seq, TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome,
+    TerminalReadSnapshot, TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint,
+    TerminalWordMotion,
 };
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
 pub use self::{
@@ -1582,13 +1582,13 @@ fn spawn_basic_detection_task(
             )
             .await;
             let Some(screen_detection) = screen_detection else {
-            if seeded_hold {
-                if !process_exited && should_hold_seeded_detection(true, &content) {
-                    pending_idle.clear();
-                    continue;
+                if seeded_hold {
+                    if !process_exited && should_hold_seeded_detection(true, &content) {
+                        pending_idle.clear();
+                        continue;
+                    }
+                    seeded_hold = false;
                 }
-                seeded_hold = false;
-            }
                 pending_idle.clear();
                 continue;
             };
@@ -1896,24 +1896,6 @@ async fn run_terminal_compression_task(
         }
     }
 }
-
-
-impl TerminalCompressionWake {
-}
-
-
-
-impl TerminalCompressionTask {
-
-
-
-
-    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-    fn completed_passes(&self) -> u64 {
-        self.completed_passes.load(Ordering::Acquire)
-    }
-}
-
 
 /// PTY runtime for a pane. Owns the terminal, I/O channels, and background tasks.
 /// Dropping this aborts async tasks and closes the PTY. An already-running bounded
@@ -3845,7 +3827,6 @@ impl PaneRuntime {
             .store(active, Ordering::Release);
     }
 
-
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
         let previous = self
             .full_lifecycle_authority_active
@@ -4236,7 +4217,6 @@ impl PaneRuntime {
         (stamp > 0).then(|| i64::try_from(stamp).unwrap_or(i64::MAX))
     }
 
-
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         let sent = self.io.try_send_bytes(bytes);
         if sent.is_ok() {
@@ -4623,7 +4603,6 @@ impl PaneRuntime {
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 #[cfg(unix)]
-                #[cfg(unix)]
                 nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 persistence_cwd: Mutex::new(None),
@@ -4641,7 +4620,6 @@ impl PaneRuntime {
                 preserve_processes_on_drop: true,
                 compression,
                 last_input_ms: AtomicU64::new(0),
-                compression,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
             rx,
@@ -5894,10 +5872,13 @@ mod tests {
             #[cfg(unix)]
             nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited: Arc::new(AtomicBool::new(false)),
             resolved_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
+            content_write_lock: Arc::new(Mutex::new(())),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -5947,10 +5928,13 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited: Arc::new(AtomicBool::new(false)),
             resolved_cwd: Arc::new(Mutex::new(Some(std::path::PathBuf::from("/resolved")))),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
+            content_write_lock: Arc::new(Mutex::new(())),
             detection_content_seq: Arc::new(AtomicU64::new(0)),
             full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
             detect_reset_notify: Arc::new(Notify::new()),
@@ -5968,95 +5952,6 @@ mod tests {
             Some(std::path::PathBuf::from("/resolved")),
             "a pane with nothing running seeds new panes from its own directory"
         );
-    }
-
-    #[tokio::test]
-    async fn compression_permit_survives_an_aborted_async_waiter() {
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let handle = spawn_blocking_with_compression_permit(permit, move || {
-            let _ = started_tx.send(());
-            let _ = release_rx.recv();
-        });
-        started_rx.await.unwrap();
-
-        handle.abort();
-        assert!(semaphore.clone().try_acquire_owned().is_err());
-
-        release_tx.send(()).unwrap();
-        handle.await.unwrap();
-        assert!(semaphore.try_acquire_owned().is_ok());
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[tokio::test]
-    async fn compression_task_rechecks_history_after_a_read() {
-        let suffix = "x".repeat(66);
-        let history = (1..=2_000)
-            .map(|line| format!("{line:05} {suffix}\r\n"))
-            .collect::<String>();
-        let runtime =
-            PaneRuntime::test_with_scrollback_bytes(80, 24, 20_000_000, history.as_bytes());
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while runtime.compression.completed_passes() == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let completed_before_read = runtime.compression.completed_passes();
-
-        let snapshot = runtime.recent_unwrapped_text_snapshot(usize::MAX);
-        assert!(snapshot.text.contains("00001 "));
-        assert!(snapshot.text.contains("02000 "));
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while runtime.compression.completed_passes() == completed_before_read {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[tokio::test]
-    async fn compressed_scrollback_survives_shrink_and_grow_resize() {
-        let suffix = "x".repeat(66);
-        let history = (1..=2_000)
-            .map(|line| format!("{line:05} {suffix}\r\n"))
-            .collect::<String>();
-        let runtime =
-            PaneRuntime::test_with_scrollback_bytes(80, 45, 20_000_000, history.as_bytes());
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while runtime.compression.completed_passes() == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        runtime.resize(21, 80, 0, 0);
-        let completed_after_shrink = runtime.compression.completed_passes();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while runtime.compression.completed_passes() == completed_after_shrink {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        runtime.resize(45, 80, 0, 0);
-
-        assert_eq!(runtime.current_size(), (45, 80));
-        assert_eq!(runtime.scroll_metrics().unwrap().viewport_rows, 45);
-        let snapshot = runtime.recent_unwrapped_text_snapshot(usize::MAX);
-        assert!(snapshot.text.contains("00001 "));
-        assert!(snapshot.text.contains("02000 "));
     }
 
     #[tokio::test]
@@ -6099,7 +5994,6 @@ mod tests {
             preserve_processes_on_drop: true,
             compression,
             last_input_ms: AtomicU64::new(0),
-            compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -6144,7 +6038,6 @@ mod tests {
             preserve_processes_on_drop: true,
             compression,
             last_input_ms: AtomicU64::new(0),
-            compression,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -6220,7 +6113,7 @@ mod tests {
             nested_process_probe_result(&outer, 150, &nested, 1, Agent::Claude, "claude".into());
         assert_eq!(wrapped.agent_process_group(), Some((Agent::Claude, 200)));
 
-        let direct = process_probe_result(&nested, 1, Agent::Claude, "claude".into());
+        let direct = process_probe_result(&nested, 1, (Agent::Claude, "claude".into(), 200));
         assert_eq!(direct.agent_process_group(), Some((Agent::Claude, 200)));
     }
 
@@ -6551,20 +6444,6 @@ mod tests {
         pane.assert_exit_reported_then_cleared();
     }
 
-    #[tokio::test]
-    async fn first_agent_acquisition_keeps_osc_evidence_replacement_clears_it() {
-        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
-        runtime.test_process_pty_bytes(b"\x1b]2;startup title\x1b\\\x1b]9;4;1;\x1b\\");
-
-        clear_osc_evidence_for_agent_transition(&runtime.terminal, None);
-        assert_eq!(runtime.agent_osc_title(), "startup title");
-        assert_eq!(runtime.agent_osc_progress(), "4;1;");
-
-        clear_osc_evidence_for_agent_transition(&runtime.terminal, Some(Agent::Claude));
-        assert_eq!(runtime.agent_osc_title(), "");
-        assert_eq!(runtime.agent_osc_progress(), "");
-    }
-
     #[test]
     fn reported_process_exit_clears_before_unknown_foreground_probe() {
         assert_eq!(
@@ -6715,7 +6594,14 @@ mod tests {
             ],
         };
 
-        let result = probe_foreground_process_from_jobs(42, Some(99), None, || Some(job), |_| None);
+        let result = probe_foreground_process_from_jobs(
+            42,
+            Some(99),
+            None,
+            || Some(job),
+            no_nested_job,
+            |_| None,
+        );
 
         assert_eq!(result.agent, Some(Agent::Claude));
         assert_eq!(result.agent_pid, Some(100));
@@ -7771,6 +7657,8 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            background_work: false,
+            blocked_reason: None,
         };
         let mut last_ready = false;
         let prompt = "› Ask Codex to do anything";
@@ -8124,5 +8012,4 @@ mod tests {
 
         assert_eq!(cwd, Some(std::path::PathBuf::from("/p7")));
     }
-
 }

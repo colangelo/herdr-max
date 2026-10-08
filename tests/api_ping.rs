@@ -330,7 +330,7 @@ fn spawned_server_ignores_inherited_pane_env() {
             None => std::env::remove_var(name),
         }
     }
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let value = send_request(
         &socket_path,
@@ -402,7 +402,7 @@ fn shutdown_preserves_session_after_shell_is_signaled() {
     let socket_path = runtime_dir.join("herdr.sock");
 
     let mut child = spawn_herdr_with_shell(&config_home, &runtime_dir, &socket_path, "/bin/sh");
-    wait_for_socket(&socket_path, Duration::from_secs(5));
+    wait_for_socket(&socket_path);
 
     let created = send_request(
         &socket_path,

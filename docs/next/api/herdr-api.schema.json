@@ -47,6 +47,16 @@
             "kind": {
               "$ref": "#/schemas/event/$defs/AgentSessionRefKind"
             },
+            "restore_argv": {
+              "description": "The command a restore would run in this pane now (herdr adds\n`--remote` for panes on its Codex app server). Absent when the pane\nwould not restore an agent, for example because the session on record\nbelongs to an agent that no longer runs there.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "source": {
               "type": "string"
             },
@@ -78,6 +88,31 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "BlockedReason": {
+          "description": "Why an agent is blocked, as far as herdr can tell (fork issue 137). A\nmanifest rule names it with `blocked_reason`; a blocked state from a rule\nthat names none, or from a hook report, is `Other`.",
+          "oneOf": [
+            {
+              "const": "question",
+              "description": "The agent asked the user a question and waits for the answer.",
+              "type": "string"
+            },
+            {
+              "const": "permission",
+              "description": "The agent waits for approval to run a tool or command.",
+              "type": "string"
+            },
+            {
+              "const": "form",
+              "description": "The agent shows a form or selection that needs input.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "Blocked for a reason herdr cannot name.",
+              "type": "string"
+            }
+          ]
         },
         "EventData": {
           "oneOf": [
@@ -723,6 +758,39 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "notification": {
+                  "$ref": "#/schemas/event/$defs/NotificationInfo"
+                },
+                "type": {
+                  "const": "notification_posted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "notification"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Emitted once per mutating `todo.*` call, naming the affected pane. The\ntodos themselves are read back with `todo.list` so the event stays small\nand consumers see one shape.",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "todo_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -753,7 +821,65 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "notification_posted",
+            "todo_changed"
+          ],
+          "type": "string"
+        },
+        "NotificationInfo": {
+          "description": "One entry of the server-owned notification log as exposed over the API.",
+          "properties": {
+            "context": {
+              "type": "string"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "$ref": "#/schemas/event/$defs/NotificationKind"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "posted_at_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read": {
+              "default": false,
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "title",
+            "context",
+            "posted_at_unix"
+          ],
+          "type": "object"
+        },
+        "NotificationKind": {
+          "enum": [
+            "needs_attention",
+            "finished",
+            "update_installed"
           ],
           "type": "string"
         },
@@ -777,6 +903,25 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
+            },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/BlockedReason"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why the agent is blocked: `question`, `permission`, `form` or\n`other`. Present only while `agent_status` is `blocked`."
+            },
+            "blocked_since": {
+              "description": "When the pane entered its current blocked spell, in unix\nmilliseconds. Present only while `agent_status` is `blocked`; it does\nnot move while the pane stays blocked and restarts after a server\nrestore or live handoff.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "cwd": {
               "type": [
@@ -805,8 +950,20 @@
                 "null"
               ]
             },
+            "last_input_at_unix": {
+              "description": "When input from a user or caller last reached the pane, in unix\nseconds. Absent when none has been recorded; treat that as unknown.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
+            },
+            "pinned": {
+              "description": "Pinned agents sit at the top of the agent panel in pin order.",
+              "type": "boolean"
             },
             "restore_error": {
               "type": [
@@ -834,6 +991,10 @@
                 "type": "string"
               },
               "type": "object"
+            },
+            "synced": {
+              "description": "The pane's tab syncs input and this pane is in the synced set.",
+              "type": "boolean"
             },
             "tab_id": {
               "type": "string"
@@ -1038,7 +1199,8 @@
         "TabInfo": {
           "properties": {
             "agent_status": {
-              "$ref": "#/schemas/event/$defs/AgentStatus"
+              "$ref": "#/schemas/event/$defs/AgentStatus",
+              "description": "Aggregated over every pane in the tab by display ranking, so a tab\ncontaining a working agent reports `working` even when a sibling pane\nhas finished unseen. Blocked still outranks working. This is the state\nthe tab *is*, not the one that most wants attention."
             },
             "focused": {
               "type": "boolean"
@@ -1055,6 +1217,10 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "sync": {
+              "description": "Input typed into one pane goes to every synced pane of the tab.",
+              "type": "boolean"
             },
             "tab_id": {
               "type": "string"
@@ -1080,7 +1246,8 @@
               "type": "string"
             },
             "agent_status": {
-              "$ref": "#/schemas/event/$defs/AgentStatus"
+              "$ref": "#/schemas/event/$defs/AgentStatus",
+              "description": "Aggregated over every pane in the workspace by display ranking, so a\nworkspace containing a working agent reports `working` even when a\nsibling pane has finished unseen. Blocked still outranks working. This\nis the state the workspace *is*, not the one that most wants attention."
             },
             "focused": {
               "type": "boolean"
@@ -1097,6 +1264,10 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "pinned": {
+              "description": "Pinned workspaces sit at the top of the workspace list in pin order.",
+              "type": "boolean"
             },
             "tab_count": {
               "format": "uint",
@@ -1228,6 +1399,31 @@
     },
     "request": {
       "$defs": {
+        "AgentHintKind": {
+          "description": "What an agent waits for, as a source reports it (fork issue 157).",
+          "oneOf": [
+            {
+              "const": "question",
+              "description": "The agent asked the user a question.",
+              "type": "string"
+            },
+            {
+              "const": "permission",
+              "description": "The agent waits for approval to run a tool or command.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentListParams": {
+          "description": "`agent.list` parameters. `input_box` asks for each Claude Code agent's input\nbox draft, which reads every such pane's screen, so it is off by default\n(fork issue 146).",
+          "properties": {
+            "input_box": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1291,6 +1487,11 @@
             },
             "strip_ansi": {
               "default": true,
+              "type": "boolean"
+            },
+            "strip_dim": {
+              "default": false,
+              "description": "Leave out faint (SGR 2) cells, for every source (fork issue 146).",
               "type": "boolean"
             },
             "target": {
@@ -2228,6 +2429,24 @@
           ],
           "type": "object"
         },
+        "LayoutBalanceParams": {
+          "description": "Rebalance every split in a layout so all panes become equally sized. Targets\na layout by `tab_id` or `pane_id`; with neither, the active tab is used.",
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "LayoutExportParams": {
           "properties": {
             "pane_id": {
@@ -2323,6 +2542,50 @@
             }
           ]
         },
+        "LayoutPreset": {
+          "description": "A tmux-style layout preset that rebuilds the pane tree.",
+          "oneOf": [
+            {
+              "const": "even_horizontal",
+              "description": "One equal-width row of panes.",
+              "type": "string"
+            },
+            {
+              "const": "even_vertical",
+              "description": "One equal-height column of panes.",
+              "type": "string"
+            },
+            {
+              "const": "tiled",
+              "description": "A near-square grid.",
+              "type": "string"
+            }
+          ]
+        },
+        "LayoutSetPresetParams": {
+          "description": "Rebuild a layout into a preset (`even_horizontal` / `even_vertical` /\n`tiled`). Targets a layout by `tab_id` or `pane_id`; with neither, the\nactive tab is used.",
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "preset": {
+              "$ref": "#/schemas/request/$defs/LayoutPreset"
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "preset"
+          ],
+          "type": "object"
+        },
         "LayoutSetSplitRatioParams": {
           "properties": {
             "pane_id": {
@@ -2352,6 +2615,20 @@
             "path",
             "ratio"
           ],
+          "type": "object"
+        },
+        "NotificationMarkSeenParams": {
+          "description": "Params for `notification.mark_seen`: an `id` marks that one entry read,\nno `id` marks every entry read.",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "NotificationShowParams": {
@@ -2455,6 +2732,21 @@
                 "string",
                 "null"
               ]
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "PaneCloseParams": {
+          "description": "`pane.close`. Without `force`, a close that would drop open todos or a\nworktree group is refused with `confirmation_required`; with it, the pane\ncloses and the result lists the todos it dropped.",
+          "properties": {
+            "force": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
             }
           },
           "required": [
@@ -2831,6 +3123,11 @@
             "strip_ansi": {
               "default": true,
               "type": "boolean"
+            },
+            "strip_dim": {
+              "default": false,
+              "description": "Leave out faint (SGR 2) cells, for every source (fork issue 146).",
+              "type": "boolean"
             }
           },
           "required": [
@@ -2997,6 +3294,67 @@
           ],
           "type": "object"
         },
+        "PaneReportHintParams": {
+          "description": "A source's claim that an agent waits on the user, or the end of it. A hint\nis evidence for the pane's state, not a state: it raises `blocked` with the\nreason and ages out unless it is repeated.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "clear": {
+              "default": false,
+              "description": "End the source's hint.",
+              "type": "boolean"
+            },
+            "id": {
+              "description": "The source's own id for the dialog.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentHintKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the agent waits for. Required unless `clear` is set."
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "description": "Per-source ordering: a report with a `seq` not above the last accepted\none is ignored. A wall-clock based value survives a restart of the\nsource.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "ttl_ms": {
+              "description": "How long the hint lives without being repeated, in milliseconds.\nDefault 15000, at most 60000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent"
+          ],
+          "type": "object"
+        },
         "PaneReportMetadataParams": {
           "properties": {
             "agent": {
@@ -3105,6 +3463,21 @@
           },
           "required": [
             "direction"
+          ],
+          "type": "object"
+        },
+        "PaneRespawnParams": {
+          "description": "`pane.respawn`. Without `force`, a respawn that would stop a running\nprocess or that leaves open todos behind is refused with\n`confirmation_required`; with it, the pane respawns and the result says\nwhat it went ahead over.",
+          "properties": {
+            "force": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
           ],
           "type": "object"
         },
@@ -3287,6 +3660,22 @@
               ]
             },
             "target_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "PaneSyncParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/SyncMode",
+              "default": "toggle",
+              "description": "`on` puts the pane in the synced set, `off` takes it out. The pane's\ntab must already sync (`sync_not_active` otherwise)."
+            },
+            "pane_id": {
               "type": [
                 "string",
                 "null"
@@ -4267,8 +4656,55 @@
                 "type"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "notification.posted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "todo.changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SyncMode": {
+          "enum": [
+            "toggle",
+            "on",
+            "off"
+          ],
+          "type": "string"
+        },
+        "TabCloseParams": {
+          "description": "`tab.close`, with the same `force` as `pane.close`.",
+          "properties": {
+            "force": {
+              "type": "boolean"
+            },
+            "tab_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tab_id"
+          ],
+          "type": "object"
         },
         "TabCreateParams": {
           "properties": {
@@ -4346,6 +4782,22 @@
           ],
           "type": "object"
         },
+        "TabSyncParams": {
+          "properties": {
+            "mode": {
+              "$ref": "#/schemas/request/$defs/SyncMode",
+              "default": "toggle"
+            },
+            "tab_id": {
+              "description": "The tab to change; the tab on screen when absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "TabTarget": {
           "properties": {
             "tab_id": {
@@ -4362,13 +4814,150 @@
             "top-left",
             "top-right",
             "bottom-left",
-            "bottom-right"
+            "bottom-right",
+            "center"
           ],
           "type": "string"
+        },
+        "TodoAddParams": {
+          "properties": {
+            "link_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TodoPriority"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        "TodoClearParams": {
+          "description": "Params for `todo.clear`: `done_only` keeps the outstanding todos.",
+          "properties": {
+            "done_only": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "TodoListParams": {
+          "description": "Params for `todo.list`: a `pane_id` scopes the result to one pane, no\n`pane_id` returns every pane's todos.",
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "TodoPriority": {
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ],
+          "type": "string"
+        },
+        "TodoRemoveParams": {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "id"
+          ],
+          "type": "object"
+        },
+        "TodoUpdateParams": {
+          "description": "Params for `todo.update`. Every optional field left out keeps its current\nvalue; `clear_link` removes the link and wins over `link_pane_id`.",
+          "properties": {
+            "clear_link": {
+              "type": "boolean"
+            },
+            "done": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "link_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TodoPriority"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "id"
+          ],
+          "type": "object"
         },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
+              "type": "boolean"
+            },
+            "force": {
+              "description": "Close even when panes have open todos; the result lists them.",
               "type": "boolean"
             },
             "workspace_id": {
@@ -4860,6 +5449,134 @@
         {
           "properties": {
             "method": {
+              "const": "notification.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "notification.mark_seen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/NotificationMarkSeenParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "notification.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "todo.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TodoListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "todo.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TodoAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "todo.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TodoUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "todo.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TodoRemoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "todo.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TodoClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "client.window_title.set",
               "type": "string"
             },
@@ -4973,6 +5690,38 @@
           "properties": {
             "method": {
               "const": "workspace.focus",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.pin",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.unpin",
               "type": "string"
             },
             "params": {
@@ -5212,6 +5961,22 @@
         {
           "properties": {
             "method": {
+              "const": "tab.sync",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TabSyncParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "tab.move",
               "type": "string"
             },
@@ -5232,7 +5997,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/TabTarget"
+              "$ref": "#/schemas/request/$defs/TabCloseParams"
             }
           },
           "required": [
@@ -5248,7 +6013,7 @@
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/EmptyParams"
+              "$ref": "#/schemas/request/$defs/AgentListParams"
             }
           },
           "required": [
@@ -5388,6 +6153,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.pin",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.unpin",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.start",
               "type": "string"
             },
@@ -5500,6 +6297,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.sync",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSyncParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.layout",
               "type": "string"
             },
@@ -5569,6 +6382,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/LayoutSetSplitRatioParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.balance",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutBalanceParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.set_preset",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutSetPresetParams"
             }
           },
           "required": [
@@ -5980,6 +6825,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_hint",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportHintParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.clear_agent_authority",
               "type": "string"
             },
@@ -6012,11 +6873,43 @@
         {
           "properties": {
             "method": {
-              "const": "pane.close",
+              "const": "pane.clear_scrollback",
               "type": "string"
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.respawn",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneRespawnParams"
             }
           },
           "required": [
@@ -6561,6 +7454,25 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/BlockedReason"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why the agent is blocked: `question`, `permission`, `form` or\n`other`. Present only while `agent_status` is `blocked`."
+            },
+            "blocked_since": {
+              "description": "When the pane entered its current blocked spell, in unix\nmilliseconds. Present only while `agent_status` is `blocked`; it does\nnot move while the pane stays blocked and restarts after a server\nrestore or live handoff.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "completion_seq": {
               "description": "The current idle transition completed work, independently of who has viewed it.",
               "format": "uint64",
@@ -6591,6 +7503,17 @@
                 "null"
               ]
             },
+            "input_box": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentInputBox"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The input box's draft for a Claude Code agent whose screen shows one.\nAlways filled by `agent get`; `agent list` fills it only with\n`input_box: true`. Never worked out by detection or rendering; absent\nwhen no box is on screen."
+            },
             "interactive_ready": {
               "type": "boolean"
             },
@@ -6603,8 +7526,23 @@
                 "null"
               ]
             },
+            "name_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentNameSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when `name` is not an explicit herdr name but stands in for one:\n`title` when it comes from the agent's terminal title. Absent for an\nexplicit name (fork issue 130)."
+            },
             "pane_id": {
               "type": "string"
+            },
+            "pinned": {
+              "description": "Pinned agents sit at the top of the agent panel in pin order.",
+              "type": "boolean"
             },
             "revision": {
               "format": "uint64",
@@ -6675,6 +7613,19 @@
           ],
           "type": "object"
         },
+        "AgentInputBox": {
+          "description": "What is typed in an agent's input box (fork issue 146).",
+          "properties": {
+            "text": {
+              "description": "The draft, without the prompt marker. Faint text (a grey suggestion, a\ncommand's argument hint) is not part of it; a pasted-text placeholder\nis. Empty for an empty box.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
         "AgentManifestInfo": {
           "properties": {
             "active_version": {
@@ -6736,6 +7687,16 @@
           ],
           "type": "object"
         },
+        "AgentNameSource": {
+          "description": "Where an agent's reported `name` comes from when it is not an explicit\nherdr name (fork issue 130).",
+          "oneOf": [
+            {
+              "const": "title",
+              "description": "The agent's terminal title (its stripped form).",
+              "type": "string"
+            }
+          ]
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -6743,6 +7704,16 @@
             },
             "kind": {
               "$ref": "#/schemas/success_response/$defs/AgentSessionRefKind"
+            },
+            "restore_argv": {
+              "description": "The command a restore would run in this pane now (herdr adds\n`--remote` for panes on its Codex app server). Absent when the pane\nwould not restore an agent, for example because the session on record\nbelongs to an agent that no longer runs there.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "source": {
               "type": "string"
@@ -6776,6 +7747,31 @@
           ],
           "type": "string"
         },
+        "BlockedReason": {
+          "description": "Why an agent is blocked, as far as herdr can tell (fork issue 137). A\nmanifest rule names it with `blocked_reason`; a blocked state from a rule\nthat names none, or from a hook report, is `Other`.",
+          "oneOf": [
+            {
+              "const": "question",
+              "description": "The agent asked the user a question and waits for the answer.",
+              "type": "string"
+            },
+            {
+              "const": "permission",
+              "description": "The agent waits for approval to run a tool or command.",
+              "type": "string"
+            },
+            {
+              "const": "form",
+              "description": "The agent shows a form or selection that needs input.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "Blocked for a reason herdr cannot name.",
+              "type": "string"
+            }
+          ]
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -6783,6 +7779,25 @@
             "no_foreground_client"
           ],
           "type": "string"
+        },
+        "ClosedPaneTodos": {
+          "description": "The open todos a forced close dropped with their pane.",
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "todos": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/TodoInfo"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "pane_id",
+            "todos"
+          ],
+          "type": "object"
         },
         "ConfigReloadStatus": {
           "enum": [
@@ -7436,6 +8451,39 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "notification": {
+                  "$ref": "#/schemas/success_response/$defs/NotificationInfo"
+                },
+                "type": {
+                  "const": "notification_posted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "notification"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Emitted once per mutating `todo.*` call, naming the affected pane. The\ntodos themselves are read back with `todo.list` so the event stays small\nand consumers see one shape.",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "todo_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -7481,7 +8529,9 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "notification_posted",
+            "todo_changed"
           ],
           "type": "string"
         },
@@ -7774,6 +8824,62 @@
             }
           ]
         },
+        "NotificationInfo": {
+          "description": "One entry of the server-owned notification log as exposed over the API.",
+          "properties": {
+            "context": {
+              "type": "string"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/NotificationKind"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "posted_at_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read": {
+              "default": false,
+              "type": "boolean"
+            },
+            "title": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "title",
+            "context",
+            "posted_at_unix"
+          ],
+          "type": "object"
+        },
+        "NotificationKind": {
+          "enum": [
+            "needs_attention",
+            "finished",
+            "update_installed"
+          ],
+          "type": "string"
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -7886,6 +8992,25 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "blocked_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/BlockedReason"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Why the agent is blocked: `question`, `permission`, `form` or\n`other`. Present only while `agent_status` is `blocked`."
+            },
+            "blocked_since": {
+              "description": "When the pane entered its current blocked spell, in unix\nmilliseconds. Present only while `agent_status` is `blocked`; it does\nnot move while the pane stays blocked and restarts after a server\nrestore or live handoff.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "cwd": {
               "type": [
                 "string",
@@ -7913,8 +9038,20 @@
                 "null"
               ]
             },
+            "last_input_at_unix": {
+              "description": "When input from a user or caller last reached the pane, in unix\nseconds. Absent when none has been recorded; treat that as unknown.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "pane_id": {
               "type": "string"
+            },
+            "pinned": {
+              "description": "Pinned agents sit at the top of the agent panel in pin order.",
+              "type": "boolean"
             },
             "restore_error": {
               "type": [
@@ -7942,6 +9079,10 @@
                 "type": "string"
               },
               "type": "object"
+            },
+            "synced": {
+              "description": "The pane's tab syncs input and this pane is in the synced set.",
+              "type": "boolean"
             },
             "tab_id": {
               "type": "string"
@@ -8275,8 +9416,28 @@
               },
               "type": "array"
             },
+            "nested_foreground_process_group_id": {
+              "description": "The foreground job of the PTY a recognised wrapper (such as `atuin\npty-proxy`) runs the pane's shell in. Absent for an unwrapped pane.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "nested_foreground_processes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PaneProcessInfoProcess"
+              },
+              "type": "array"
+            },
             "pane_id": {
               "type": "string"
+            },
+            "shell_at_prompt": {
+              "default": false,
+              "description": "The pane's shell, directly or behind a recognised wrapper, is alone at\nthe front of its terminal: nothing is running in the pane.",
+              "type": "boolean"
             },
             "shell_pid": {
               "format": "uint32",
@@ -9180,6 +10341,20 @@
                   ],
                   "default": null
                 },
+                "exe": {
+                  "description": "Path of the binary the server runs, so an attached client left on\nan older build can re-exec onto it after a live update. Absent when\nthe OS lookup fails or on an older server.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "hostname": {
+                  "description": "Short host name of the machine running the server. Absent when the\nOS lookup fails.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "protocol": {
                   "format": "uint32",
                   "minimum": 0,
@@ -9720,6 +10895,38 @@
             },
             {
               "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutDescription"
+                },
+                "type": {
+                  "const": "layout_balanced",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutDescription"
+                },
+                "type": {
+                  "const": "layout_preset_applied",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "neighbor": {
                   "$ref": "#/schemas/success_response/$defs/PaneNeighborResult"
                 },
@@ -9986,6 +11193,174 @@
                 "type",
                 "shown",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "notifications": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/NotificationInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "notification_list",
+                  "type": "string"
+                },
+                "unread_count": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "type",
+                "notifications",
+                "unread_count"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "changed": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "notification_mark_seen",
+                  "type": "string"
+                },
+                "unread_count": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "type",
+                "changed",
+                "unread_count"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "cleared": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "notification_cleared",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "cleared"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "todos": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TodoInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "todo_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "todos"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "todo": {
+                  "$ref": "#/schemas/success_response/$defs/TodoInfo"
+                },
+                "type": {
+                  "const": "todo",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "todo"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "removed": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "todo_cleared",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "removed"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A forced close: the open todos of every pane it closed.",
+              "properties": {
+                "closed_todos": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClosedPaneTodos"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "closed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "closed_todos"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A forced respawn: the process it stopped, if one was running, and the\nopen todos the pane still carries.",
+              "properties": {
+                "open_todos": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TodoInfo"
+                  },
+                  "type": "array"
+                },
+                "stopped_process": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/StoppedProcess"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "respawned",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "open_todos"
               ],
               "type": "object"
             },
@@ -10534,10 +11909,31 @@
           ],
           "type": "string"
         },
+        "StoppedProcess": {
+          "description": "The program a forced respawn stopped: the pane's foreground program (looked\nfor behind a wrapper such as atuin's pty-proxy), or the pane shell's pid\nwith no name when the platform cannot tell.",
+          "properties": {
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pid"
+          ],
+          "type": "object"
+        },
         "TabInfo": {
           "properties": {
             "agent_status": {
-              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+              "$ref": "#/schemas/success_response/$defs/AgentStatus",
+              "description": "Aggregated over every pane in the tab by display ranking, so a tab\ncontaining a working agent reports `working` even when a sibling pane\nhas finished unseen. Blocked still outranks working. This is the state\nthe tab *is*, not the one that most wants attention."
             },
             "focused": {
               "type": "boolean"
@@ -10554,6 +11950,10 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "sync": {
+              "description": "Input typed into one pane goes to every synced pane of the tab.",
+              "type": "boolean"
             },
             "tab_id": {
               "type": "string"
@@ -10573,13 +11973,83 @@
           ],
           "type": "object"
         },
+        "TodoInfo": {
+          "description": "One pane todo as exposed over the API. `pane_id` is the owning pane, so a\nwhole-session `todo.list` stays unambiguous.",
+          "properties": {
+            "created_at_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "done": {
+              "type": "boolean"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "link_alive": {
+              "default": false,
+              "description": "Always serialized: a client rendering a dead link needs to tell \"no\nlink\" from \"link whose target is gone\", and both carry no `link_pane_id`.",
+              "type": "boolean"
+            },
+            "link_label": {
+              "description": "Label captured when the link was made, so a dead link can still say what\nit meant.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "link_pane_id": {
+              "description": "Public id of the linked pane while it still resolves. Absent once the\ntarget is gone, which is what makes the link dead.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "priority": {
+              "$ref": "#/schemas/success_response/$defs/TodoPriority"
+            },
+            "text": {
+              "type": "string"
+            },
+            "updated_at_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id",
+            "id",
+            "text",
+            "done",
+            "priority",
+            "created_at_unix",
+            "updated_at_unix"
+          ],
+          "type": "object"
+        },
+        "TodoPriority": {
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ],
+          "type": "string"
+        },
         "WorkspaceInfo": {
           "properties": {
             "active_tab_id": {
               "type": "string"
             },
             "agent_status": {
-              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+              "$ref": "#/schemas/success_response/$defs/AgentStatus",
+              "description": "Aggregated over every pane in the workspace by display ranking, so a\nworkspace containing a working agent reports `working` even when a\nsibling pane has finished unseen. Blocked still outranks working. This\nis the state the workspace *is*, not the one that most wants attention."
             },
             "focused": {
               "type": "boolean"
@@ -10596,6 +12066,10 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "pinned": {
+              "description": "Pinned workspaces sit at the top of the workspace list in pin order.",
+              "type": "boolean"
             },
             "tab_count": {
               "format": "uint",

@@ -400,17 +400,6 @@ fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
     );
 }
 
-/// The pid a test shell wrote with `echo READY $$ > marker`. The shell creates
-/// the file before `echo` writes into it, so the file existing is not enough:
-/// wait for the finished line (fork issue 156).
-fn wait_for_pid_marker(path: &Path) -> u32 {
-    let text = wait_for_file_contains(path, "\n", Duration::from_secs(10));
-    text.split_whitespace()
-        .last()
-        .and_then(|pid| pid.parse().ok())
-        .unwrap_or_else(|| panic!("{} held no pid: {text:?}", path.display()))
-}
-
 fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     let mut last_text = String::new();
@@ -685,7 +674,7 @@ fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
     let api_socket = runtime_dir.join("herdr.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     register_runtime_dir(&runtime_dir);
 
     let created = request(
@@ -777,7 +766,7 @@ fn live_handoff_carries_more_panes_than_one_scm_rights_message() {
     let api_socket = runtime_dir.join("herdr.sock");
 
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_socket(&api_socket);
     register_runtime_dir(&runtime_dir);
     let server_pid = spawned
         .child
@@ -1709,7 +1698,7 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     ));
     // Creation acknowledges the PTY, not an idle interactive shell. A real
     // shell command must execute before this raw agent.start request.
-    support::wait_for_file(&ready_marker, Duration::from_secs(5));
+    support::wait_for_file(&ready_marker);
 
     // `agent.start` needs the pane's shell to be its foreground process, and a
     // just-created pane may still be starting it; the server answers
