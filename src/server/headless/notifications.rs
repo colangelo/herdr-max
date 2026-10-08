@@ -360,6 +360,17 @@ impl HeadlessServer {
                 self.send_to_foreground_client(ServerMessage::Clipboard { data });
                 false
             }
+            AppEvent::AgentHintReported { .. } | AppEvent::AgentHintExpired { .. } => {
+                // Hints use the same effective transition as screen evidence:
+                // whichever arrives first emits attention, the other is a no-op.
+                self.sync_foreground_client_state();
+                let pane_updates = self.app.handle_internal_event_with_pane_updates(ev);
+                for update in &pane_updates {
+                    self.forward_semantic_agent_notification(update);
+                    self.forward_pane_state_update_notifications_to_clients(update);
+                }
+                !pane_updates.is_empty()
+            }
             AppEvent::StateChanged { pane_id, agent, .. } => {
                 // Capture toast before handling.
                 let toast_before = self.app.state.toast.clone();
