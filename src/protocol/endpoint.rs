@@ -106,11 +106,40 @@ pub struct EndpointServerWelcome {
     pub error: Option<EndpointHandshakeError>,
 }
 
+/// The JSON envelope adds optional facts while the core serde graph stays frozen.
+#[derive(Serialize)]
+struct SnapshotJson<'a> {
+    #[serde(flatten)]
+    snapshot: &'a ClientShellSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_facts: &'a Option<super::ClientShellResourceFacts>,
+}
+
 pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<ServerMessage> {
     Ok(ServerMessage::EndpointControl {
         kind: ENDPOINT_SNAPSHOT_KIND.into(),
-        data: serde_json::to_string(snapshot)?,
+        data: serde_json::to_string(&SnapshotJson {
+            snapshot,
+            resource_facts: &snapshot.resource_facts,
+        })?,
     })
+}
+
+pub fn decode_snapshot(data: &str) -> serde_json::Result<ClientShellSnapshot> {
+    // Decode required fields with their unchanged core contract. The second pass
+    // ignores all core values rather than cloning an entire resource projection.
+    #[derive(Deserialize)]
+    struct OptionalFacts {
+        #[serde(default)]
+        resource_facts: Option<serde_json::Value>,
+    }
+    let mut snapshot: ClientShellSnapshot = serde_json::from_str(data)?;
+    let extension: OptionalFacts = serde_json::from_str(data)?;
+    snapshot.resource_facts = extension
+        .resource_facts
+        .as_ref()
+        .and_then(super::ClientShellResourceFacts::decode);
+    Ok(snapshot)
 }
 
 pub fn agent_completions_message(
@@ -224,6 +253,7 @@ mod tests {
 
     fn snapshot() -> ClientShellSnapshot {
         ClientShellSnapshot {
+            resource_facts: None,
             boot_id: "boot".into(),
             revision: 1,
             config_diagnostic: None,
@@ -416,5 +446,36 @@ mod tests {
         value["future_service"] = serde_json::json!("v2");
         let decoded: EndpointServerWelcome = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, welcome);
+    }
+    #[test]
+    fn optional_resource_facts_round_trip_only_through_snapshot_json() {
+        let mut snapshot = snapshot();
+        let core = bincode::serde::encode_to_vec(&snapshot, bincode::config::standard()).unwrap();
+        snapshot.resource_facts = Some(super::super::ClientShellResourceFacts {
+            workspace_pins: Some([(String::from("workspace"), 4)].into_iter().collect()),
+            ..Default::default()
+        });
+        assert_eq!(
+            core,
+            bincode::serde::encode_to_vec(&snapshot, bincode::config::standard()).unwrap()
+        );
+        let ServerMessage::EndpointControl { data, .. } = snapshot_message(&snapshot).unwrap()
+        else {
+            panic!("snapshot JSON");
+        };
+        assert_eq!(decode_snapshot(&data).unwrap(), snapshot);
+        let core_json = serde_json::to_string(&snapshot).unwrap();
+        assert!(decode_snapshot(&core_json)
+            .unwrap()
+            .resource_facts
+            .is_none());
+        let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        value["resource_facts"] = serde_json::json!(false);
+        assert!(decode_snapshot(&value.to_string())
+            .unwrap()
+            .resource_facts
+            .is_none());
+        value.as_object_mut().unwrap().remove("boot_id");
+        assert!(decode_snapshot(&value.to_string()).is_err());
     }
 }
