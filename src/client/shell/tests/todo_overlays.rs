@@ -746,3 +746,28 @@ fn keybind_help_lists_the_todo_actions_and_chords() {
         Some("ctrl+t")
     );
 }
+
+#[test]
+fn the_wheel_scrolls_what_is_under_the_pointer_and_the_editor_stays() {
+    let wheel = |state: &mut ClientShellState| {
+        state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    let mut bare = state();
+    let without = wheel(&mut bare);
+
+    let mut state = state();
+    bind(&mut state, KeybindAction::AddPaneTodo);
+    state.compose(W, H).unwrap();
+    let with = wheel(&mut state);
+    edit(&state);
+    assert_eq!(
+        format!("{:?}", with.actions),
+        format!("{:?}", without.actions),
+        "the wheel does what it does with no editor open"
+    );
+}
