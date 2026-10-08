@@ -761,7 +761,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             .agents
             .first()
             .map(|(_, pane_id)| pane_id.as_str()),
-        Some("pane_2")
+        Some("pane_1")
     );
     let body = state.hits.agent_body;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {

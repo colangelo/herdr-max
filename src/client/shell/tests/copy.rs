@@ -2315,7 +2315,14 @@ fn copied_feedback_centers_in_its_source_pane_with_public_identity() {
     config.ui.toast.clipboard.position = crate::config::ToastClipboardPosition::Pane;
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_snapshot(Box::new(snapshot()));
-    state.set_pane_surface(surface());
+    let mut source = surface();
+    let layout = state.layout(110, 40);
+    let area = Rect::new(0, 0, layout.pane_surface.width, layout.pane_surface.height);
+    source.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::empty(area), None, &[]);
+    source.panes[0].rect.width = area.width;
+    source.panes[0].rect.height = area.height;
+    source.panes[0].inner_rect = source.panes[0].rect;
+    state.set_pane_surface(source);
     state.compose(110, 40).unwrap();
     let pane = state.hits.panes[0].inner_rect;
     state.show_copy_feedback_for(

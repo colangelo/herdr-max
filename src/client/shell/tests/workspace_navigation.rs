@@ -371,7 +371,7 @@ fn single_machine_compact_navigation_hides_inactive_collapsed_group_children() {
         .iter()
         .any(|hit| hit.workspace_id == "ws_3"));
     enter_navigation(&mut state);
-    for id in ["ws_2", "ws_2"] {
+    for id in ["ws_2", "ws_1"] {
         preview_key(&mut state, b"\x1b[B");
         assert_selected(&state, &ClientEndpointId::Local, id);
     }

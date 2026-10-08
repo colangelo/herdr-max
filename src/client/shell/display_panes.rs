@@ -389,15 +389,15 @@ mod tests {
             Some(p.red)
         );
         let narrow = summary_spans(
-            Rect::new(0, 0, 90, 30),
-            Rect::new(26, 0, 64, 29),
+            Rect::new(0, 0, 70, 30),
+            Rect::new(26, 0, 44, 29),
             2,
             true,
             false,
             "server-build",
             p,
             chip,
-            90,
+            70,
         );
         let text: String = narrow.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("any key close"));
