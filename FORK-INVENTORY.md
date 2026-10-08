@@ -47,6 +47,7 @@ deliberate difference from upstream's contract or names).
 | update-manifest | divergent | updates read `distribution/latest.json` on the fork repo; the release flow also writes `website/latest.json` for 0.8.x-ac binaries | `c42f9068` |
 | claude-integration | carried | fork hook events (UserPromptSubmit, Stop, SubagentStop skip) in the claude hook; integration version 11 | `9fa78ab2` |
 | release-channel | carried | `-ac` releases, beta channel, own Homebrew tap, ZIG pin, macOS windows-lint skip | `c42f9068` |
+| claude-background-shell | divergent | a Claude pane whose only activity is a background shell reads working; upstream 987b070f (#3468) removed that rule, the fork keeps it until #172's background mark replaces it | `db30c77a` |
 | handoff-compat | divergent | handoff manifest keeps the fork layout (`agent_state` string + `hook_agent_state`) so 0.8.x-ac servers hand off into this build | `src/handoff_runtime.rs` |
 | input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input` |
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels | `port/chrome` |
