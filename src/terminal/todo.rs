@@ -114,6 +114,15 @@ impl TerminalState {
         &self.todos
     }
 
+    /// Changes whenever any todo of this pane changes.
+    pub fn todo_revision(&self) -> u64 {
+        self.todo_revision
+    }
+
+    fn touch_todos(&mut self) {
+        self.todo_revision = self.todo_revision.wrapping_add(1);
+    }
+
     pub fn add_todo(
         &mut self,
         text: &str,
@@ -136,6 +145,7 @@ impl TerminalState {
         };
         self.next_todo_id += 1;
         self.todos.push(todo.clone());
+        self.touch_todos();
         Ok(todo)
     }
 
@@ -163,7 +173,9 @@ impl TerminalState {
             todo.link = link;
         }
         todo.updated_at_unix = now_unix;
-        Ok(todo.clone())
+        let todo = todo.clone();
+        self.touch_todos();
+        Ok(todo)
     }
 
     pub fn remove_todo(&mut self, id: u64) -> Result<(), TodoError> {
@@ -172,6 +184,7 @@ impl TerminalState {
         if self.todos.len() == before {
             return Err(TodoError::NotFound);
         }
+        self.touch_todos();
         Ok(())
     }
 
@@ -183,7 +196,11 @@ impl TerminalState {
         } else {
             self.todos.clear();
         }
-        before - self.todos.len()
+        let removed = before - self.todos.len();
+        if removed > 0 {
+            self.touch_todos();
+        }
+        removed
     }
 
     /// Presentation order: not-done before done, then priority descending, then
@@ -214,6 +231,7 @@ impl TerminalState {
     /// Restore path only: mutable access for the link post-pass, which cannot
     /// resolve cross-pane targets until every restored pane has an id.
     pub(crate) fn todos_mut(&mut self) -> &mut Vec<PaneTodo> {
+        self.touch_todos();
         &mut self.todos
     }
 
@@ -222,6 +240,7 @@ impl TerminalState {
         let highest = todos.iter().map(|todo| todo.id).max().unwrap_or(0);
         self.next_todo_id = next_todo_id.max(highest + 1);
         self.todos = todos;
+        self.touch_todos();
     }
 }
 
@@ -232,6 +251,36 @@ mod tests {
 
     fn terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), std::path::PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn every_change_moves_the_todo_revision_and_a_refused_one_does_not() {
+        let mut t = terminal();
+        let mut last = t.todo_revision();
+        let mut moved = |t: &TerminalState| {
+            let moved = t.todo_revision() != last;
+            last = t.todo_revision();
+            moved
+        };
+
+        let todo = t.add_todo("a", TodoPriority::Normal, None, 1).unwrap();
+        assert!(moved(&t));
+        t.update_todo(
+            todo.id,
+            TodoUpdate {
+                text: Some("b".into()),
+                ..TodoUpdate::default()
+            },
+            2,
+        )
+        .unwrap();
+        assert!(moved(&t), "an edited text keeps the counts but is a change");
+        assert!(t.add_todo("  ", TodoPriority::Normal, None, 3).is_err());
+        assert!(!moved(&t));
+        assert_eq!(t.clear_todos(true), 0);
+        assert!(!moved(&t), "a clear that removed nothing is no change");
+        t.remove_todo(todo.id).unwrap();
+        assert!(moved(&t));
     }
 
     #[test]

@@ -650,6 +650,57 @@ impl ClientShellState {
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
                 None
+            } else if let ClientShellOverlay::NotificationCenter(center) = overlay {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                let rendered = super::notification_center::render_notification_center(
+                    &mut composed,
+                    center,
+                    layout.tab_bar,
+                    self.hits.notification_indicator,
+                    self.config.notification_center_position,
+                    now_unix,
+                    &self.config.palette,
+                );
+                if let Some(rendered) = rendered.as_ref() {
+                    occlusion.cover(rendered.outer);
+                }
+                self.hits.notification_center = rendered;
+                None
+            } else if let ClientShellOverlay::TodoPanel(panel) = overlay {
+                // The panel hangs from its pane, so it is drawn against the
+                // pane's rect rather than centred like the other overlays.
+                let anchor = self
+                    .hits
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == panel.pane_id)
+                    .map_or(layout.pane_surface, |pane| pane.rect);
+                let rendered = super::todo_panel::render_todo_panel(
+                    &mut composed,
+                    panel,
+                    anchor,
+                    self.config.pane_todo_color,
+                    &self.config.palette,
+                );
+                if let Some(rendered) = rendered.as_ref() {
+                    occlusion.cover(rendered.outer);
+                }
+                self.hits.todo_panel = rendered;
+                None
+            } else if let ClientShellOverlay::TodoEdit(edit) = overlay {
+                let rendered = super::todo_edit::render_todo_edit(
+                    &mut composed,
+                    edit,
+                    self.config.pane_todo_color,
+                    &self.config.palette,
+                );
+                if let Some(rendered) = rendered.as_ref() {
+                    occlusion.cover(rendered.popup);
+                }
+                self.hits.todo_edit = rendered;
+                None
             } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
                 let rendered = render::render_global_menu(
                     &mut composed,

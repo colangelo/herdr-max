@@ -51,6 +51,9 @@ pub(crate) enum KeybindAction {
     SplitVertical,
     SplitHorizontal,
     ClosePane,
+    RespawnPane,
+    OpenPaneTodos,
+    AddPaneTodo,
     EditScrollback,
     ClearPane,
     CopyMode,
@@ -74,6 +77,7 @@ pub(crate) enum KeybindAction {
     Settings,
     ReloadConfig,
     OpenNotificationTarget,
+    OpenNotificationCenter,
     Detach,
     OpenNavigator,
 }
@@ -164,6 +168,9 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.split_vertical, KeybindAction::SplitVertical),
         (&keybinds.split_horizontal, KeybindAction::SplitHorizontal),
         (&keybinds.close_pane, KeybindAction::ClosePane),
+        (&keybinds.respawn_pane, KeybindAction::RespawnPane),
+        (&keybinds.open_pane_todos, KeybindAction::OpenPaneTodos),
+        (&keybinds.add_pane_todo, KeybindAction::AddPaneTodo),
         (&keybinds.zoom, KeybindAction::Zoom),
         (&keybinds.resize_mode, KeybindAction::EnterResizeMode),
         (&keybinds.resize_pane_left, KeybindAction::ResizePaneLeft),
@@ -175,6 +182,10 @@ pub(crate) fn resolve_non_indexed_action(
         (
             &keybinds.open_notification_target,
             KeybindAction::OpenNotificationTarget,
+        ),
+        (
+            &keybinds.open_notification_center,
+            KeybindAction::OpenNotificationCenter,
         ),
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),

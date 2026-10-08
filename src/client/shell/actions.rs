@@ -62,6 +62,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if action == crate::input::KeybindAction::OpenNotificationCenter {
+                    self.open_notification_center(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::OpenNotificationTarget {
                     self.focus_visible_notification(outcome);
                     return;
@@ -135,6 +139,25 @@ impl ClientShellState {
                 }
                 if action == crate::input::KeybindAction::RenamePane {
                     self.open_rename_pane_overlay();
+                    outcome.repaint = true;
+                    return;
+                }
+                if matches!(
+                    action,
+                    crate::input::KeybindAction::OpenPaneTodos
+                        | crate::input::KeybindAction::AddPaneTodo
+                ) {
+                    let focused = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_pane_id.clone());
+                    if let Some(pane_id) = focused {
+                        if action == crate::input::KeybindAction::OpenPaneTodos {
+                            self.open_todo_panel(pane_id, outcome);
+                        } else {
+                            self.open_todo_editor(pane_id, None, None);
+                        }
+                    }
                     outcome.repaint = true;
                     return;
                 }
@@ -398,6 +421,7 @@ impl ClientShellState {
                 .map(|pane| pane.workspace_id.clone()),
             _ => None,
         };
+        let force_target = super::force_confirm::force_target_for(&method);
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let request_id = format!("client-shell:{request_id}");
@@ -407,6 +431,7 @@ impl ClientShellState {
                 boot_id: snapshot.boot_id.clone(),
                 method_name,
                 confirmation_workspace_id,
+                force_target,
                 kind,
             },
         );
@@ -553,7 +578,11 @@ impl ClientShellState {
                     _ => (
                         ClientEndpointNoticeKind::Rejected,
                         format!("{}:{code}", pending.method_name),
-                        "Action rejected",
+                        if matches!(pending.kind, PendingEndpointKind::TodoSave { .. }) {
+                            "todo save failed"
+                        } else {
+                            "Action rejected"
+                        },
                         error.message.clone(),
                     ),
                 };
@@ -829,14 +858,62 @@ impl ClientShellState {
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
             }
+            PendingEndpointKind::NotificationList { summary } => {
+                return (
+                    self.handle_notification_list_result(summary, result),
+                    Vec::new(),
+                );
+            }
+            PendingEndpointKind::NotificationMutation => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_notification_mutation_result(result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
+            }
+            PendingEndpointKind::TodoList {
+                pane_id,
+                revision,
+                panes,
+            } => {
+                let repaint = self.handle_todo_list_result(&pane_id, revision, panes, result);
+                return (repaint, Vec::new());
+            }
+            PendingEndpointKind::TodoMutation { pane_id } => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_todo_mutation_result(&pane_id, result.is_ok(), &mut outcome);
+                return (true, outcome.actions);
+            }
+            PendingEndpointKind::TodoSave {
+                pane_id,
+                todo_id,
+                follow,
+            } => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_todo_save_result(
+                    &pane_id,
+                    todo_id,
+                    follow,
+                    result.is_ok(),
+                    &mut outcome,
+                );
+                return (true, outcome.actions);
+            }
             kind => {
                 let mut outcome = ClientShellInput::default();
                 let repaint = self.handle_worktree_endpoint_result(kind, result, &mut outcome);
                 return (repaint || outcome.repaint, outcome.actions);
             }
         }
+        let mut forced = ClientShellInput::default();
         let repaint = match result {
             Ok(_) => false,
+            Err(error)
+                if error.code.as_deref() == Some("confirmation_required")
+                    && pending.force_target.as_ref().is_some_and(|target| {
+                        self.open_force_confirmation(target, boot_id, &error.message, &mut forced)
+                    }) =>
+            {
+                true
+            }
             Err(error)
                 if self.config.confirm_close
                     && error.code.as_deref() == Some("confirmation_required")
@@ -849,7 +926,7 @@ impl ClientShellState {
             }
             Err(_) => true,
         };
-        (repaint, Vec::new())
+        (repaint || forced.repaint, forced.actions)
     }
 
     pub(super) fn endpoint_method_for_action(
@@ -1059,6 +1136,12 @@ impl ClientShellState {
                 pane_id: focused_pane.clone()?,
                 force: false,
             })),
+            KeybindAction::RespawnPane => {
+                Some(Method::PaneRespawn(crate::api::schema::PaneRespawnParams {
+                    pane_id: focused_pane.clone()?,
+                    force: false,
+                }))
+            }
             KeybindAction::CyclePaneNext | KeybindAction::CyclePanePrevious => {
                 let focused_tab = focused_tab?;
                 let panes = snapshot

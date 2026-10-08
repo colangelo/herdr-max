@@ -217,6 +217,9 @@ pub struct TerminalState {
     pub launch_argv: Option<Vec<String>>,
     pub(crate) todos: Vec<crate::terminal::todo::PaneTodo>,
     pub(crate) next_todo_id: u64,
+    /// Bumped on every todo change, so a client can tell its cached list is
+    /// stale even when the counts did not move (an edited text, say).
+    pub(crate) todo_revision: u64,
     /// The pane's last-input time carried over a restore, in unix ms. The live
     /// time is on the pane runtime; `pane_last_input_at_ms` reads the newer.
     pub(crate) restored_last_input_at_ms: Option<i64>,
@@ -284,6 +287,7 @@ impl TerminalState {
             launch_argv: None,
             todos: Vec::new(),
             next_todo_id: 1,
+            todo_revision: 0,
             restored_last_input_at_ms: None,
             pin_order: None,
             respawn_shell_on_exit: false,

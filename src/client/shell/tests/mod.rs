@@ -11,6 +11,7 @@ mod text_editing;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {
+        resource_facts: None,
         boot_id: "boot-1".into(),
         revision: 1,
         config_diagnostic: None,
@@ -258,6 +259,7 @@ mod close_tab;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
+mod force_confirm;
 mod graphics;
 mod input_conformance;
 #[path = "input.rs"]
@@ -266,5 +268,7 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
+mod notification_center;
 mod popup_focus_projection;
 mod startup_overlays;
+mod todo_overlays;

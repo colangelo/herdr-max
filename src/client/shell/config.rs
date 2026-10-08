@@ -147,6 +147,12 @@ impl ClientShellConfig {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             confirm_close: config.ui.confirm_close,
+            pane_todo_color: config
+                .ui
+                .pane_todo_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            notification_center_position: config.ui.notification_center_position,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),

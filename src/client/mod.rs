@@ -2285,6 +2285,9 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        shell.tick_todo_panel(&mut outcome);
+                        shell.tick_notification_center(&mut outcome);
+                        shell.tick_todo_editor(&mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;
