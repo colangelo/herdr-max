@@ -382,6 +382,8 @@ impl ClientShellState {
             )
         };
         if mode_bar == Some(layout.tab_bar) {
+            self.hits.notification_indicator = Rect::default();
+            self.hits.todo_board = Rect::default();
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();
@@ -412,6 +414,18 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        if layout.mobile_header.is_empty() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            if let Some(rect) = super::tab_indicators::paint_floating(
+                &mut composed,
+                snapshot,
+                &self.config,
+                &mut self.hits,
+            ) {
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
         if self.mode == ClientShellMode::Terminal && !self.pane_labels_visible() {
             let mut composed = frame.to_ratatui_buffer()?;
             if let Some(rect) = super::sync_chrome::paint(
@@ -427,6 +441,15 @@ impl ClientShellState {
         if self.pane_labels_visible() {
             let mut composed = frame.to_ratatui_buffer()?;
             for rect in super::display_panes::paint(&mut composed, layout, self, snapshot) {
+                if !rect
+                    .intersection(self.hits.notification_indicator)
+                    .is_empty()
+                {
+                    self.hits.notification_indicator = Rect::default();
+                }
+                if !rect.intersection(self.hits.todo_board).is_empty() {
+                    self.hits.todo_board = Rect::default();
+                }
                 occlusion.cover(rect);
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);

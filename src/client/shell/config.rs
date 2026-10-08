@@ -113,6 +113,7 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            notification_center_position: config.ui.notification_center_position,
             show_pane_todos: config.ui.show_pane_todo_indicator,
             todo_color: config
                 .ui
@@ -394,6 +395,7 @@ impl ClientShellConfig {
                 self.display_panes_duration = std::time::Duration::from_millis(
                     crate::config::clamp_display_panes_ms(ui.display_panes_ms),
                 );
+                self.notification_center_position = ui.notification_center_position;
                 self.show_pane_todos = ui.show_pane_todo_indicator;
                 self.todo_color = ui
                     .pane_todo_color

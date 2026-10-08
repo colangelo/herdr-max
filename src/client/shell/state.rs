@@ -13,6 +13,7 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
     pub(super) display_panes_duration: std::time::Duration,
     pub(super) show_pane_todos: bool,
     pub(super) todo_color: Option<ratatui::style::Color>,
@@ -111,6 +112,8 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) notification_indicator: Rect,
+    pub(super) todo_board: Rect,
     pub(super) pane_todos: Vec<(Rect, String)>,
     pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,
