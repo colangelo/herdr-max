@@ -38,9 +38,12 @@ fn indexed_label(bindings: &[IndexedKeybind]) -> String {
     let mut parts = Vec::new();
     let mut index = 0;
     while index < bindings.len() {
-        if let Some(prefix) = indexed_range_prefix(&bindings[index..]) {
+        if let Some(prefix) = indexed_range_prefix(&bindings[index..], b'1', 9) {
             parts.push(format!("{prefix}1..9"));
             index += 9;
+        } else if let Some(prefix) = indexed_range_prefix(&bindings[index..], b'a', 26) {
+            parts.push(format!("{prefix}a..z"));
+            index += 26;
         } else {
             parts.push(bindings[index].label.clone());
             index += 1;
@@ -49,12 +52,12 @@ fn indexed_label(bindings: &[IndexedKeybind]) -> String {
     parts.join(" / ")
 }
 
-fn indexed_range_prefix(bindings: &[IndexedKeybind]) -> Option<&str> {
-    let run = bindings.get(..9)?;
-    let prefix = run[0].label.strip_suffix('1')?;
+fn indexed_range_prefix(bindings: &[IndexedKeybind], start: u8, len: usize) -> Option<&str> {
+    let run = bindings.get(..len)?;
+    let prefix = run[0].label.strip_suffix(char::from(start))?;
     for (offset, binding) in run.iter().enumerate() {
-        let digit = char::from(b'1' + offset as u8);
-        if binding.label.strip_suffix(digit) != Some(prefix) {
+        let symbol = char::from(start + offset as u8);
+        if binding.label.strip_suffix(symbol) != Some(prefix) {
             return None;
         }
     }
