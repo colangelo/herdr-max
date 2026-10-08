@@ -159,6 +159,10 @@ impl ClientShellState {
                     }
                     return;
                 }
+                if let Some((direction, amount)) = super::copy_mode::copy_scroll_action(action) {
+                    self.enter_scrolled_copy_mode(direction, amount, outcome);
+                    return;
+                }
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }

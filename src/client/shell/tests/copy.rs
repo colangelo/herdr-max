@@ -1,5 +1,106 @@
 use super::*;
 
+fn viewport_copy_state(offset: u64) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut pane_surface = surface();
+    pane_surface.panes[0].scroll = Some(crate::protocol::PaneSurfaceScrollMetrics {
+        offset_from_bottom: offset,
+        max_offset_from_bottom: 20,
+        viewport_rows: 2,
+    });
+    state.set_pane_surface(pane_surface);
+    state.compose(106, 20).unwrap();
+    assert!(state.enter_copy_mode(&mut ClientShellInput::default()));
+    state
+}
+
+fn copy_ctrl(state: &mut ClientShellState, ch: char) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char(ch),
+        KeyModifiers::CONTROL,
+    ))])
+}
+
+#[test]
+fn copy_mode_ctrl_g_jumps_to_the_bottom_like_capital_g() {
+    let mut state = viewport_copy_state(10);
+    let outcome = copy_ctrl(&mut state, 'g');
+    let copy = state.copy_mode.as_ref().unwrap();
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    assert_eq!(copy.offset_from_bottom, 0);
+    assert_eq!(copy.cursor.row, 21);
+    assert_eq!(copy.entry_offset_from_bottom, 10);
+    assert!(outcome.requests.is_empty());
+    assert!(matches!(&outcome.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+        if matches!(&request.method, crate::api::schema::Method::PaneScroll(params)
+            if params.offset_from_bottom == 0)));
+}
+
+#[test]
+fn copy_mode_ctrl_k_scrolls_viewport_and_anchors_cursor() {
+    let mut state = viewport_copy_state(0);
+    state.copy_mode.as_mut().unwrap().cursor.row = 20;
+    let outcome = copy_ctrl(&mut state, 'k');
+    let copy = state.copy_mode.as_ref().unwrap();
+    assert_eq!(copy.offset_from_bottom, 1);
+    assert_eq!(copy.cursor.row, 20, "absolute buffer row stays anchored");
+    assert!(outcome.requests.is_empty());
+    assert!(matches!(&outcome.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+        if matches!(&request.method, crate::api::schema::Method::PaneScroll(params)
+            if params.offset_from_bottom == 1)));
+    let queued = copy_ctrl(&mut state, 'k');
+    assert!(
+        queued.actions.is_empty(),
+        "scroll requests coalesce while pending"
+    );
+    let copy = state.copy_mode.as_ref().unwrap();
+    assert_eq!(copy.offset_from_bottom, 2);
+    assert_eq!(copy.cursor.row, 19, "cursor clamps to the new bottom edge");
+    assert_eq!(state.pane_scroll_queued.get("pane_1"), Some(&2));
+}
+
+#[test]
+fn copy_mode_ctrl_j_scrolls_back_toward_bottom_and_clamps_cursor() {
+    let mut state = viewport_copy_state(2);
+    state.copy_mode.as_mut().unwrap().cursor.row = 18;
+    copy_ctrl(&mut state, 'j');
+    let copy = state.copy_mode.as_ref().unwrap();
+    assert_eq!(copy.offset_from_bottom, 1);
+    assert_eq!(copy.cursor.row, 19, "cursor clamps to the new top edge");
+    copy_ctrl(&mut state, 'j');
+    assert_eq!(state.copy_mode.as_ref().unwrap().offset_from_bottom, 0);
+}
+
+#[test]
+fn copy_mode_ctrl_j_at_bottom_and_ctrl_k_at_history_top_are_noops() {
+    for (offset, key) in [(0, 'j'), (20, 'k')] {
+        let mut state = viewport_copy_state(offset);
+        let before = state.copy_mode.clone();
+        let outcome = copy_ctrl(&mut state, key);
+        assert_eq!(state.copy_mode, before);
+        assert!(outcome.actions.is_empty());
+        assert!(outcome.requests.is_empty());
+    }
+}
+
+#[test]
+fn copy_viewport_chords_edit_search_instead_of_scrolling_it() {
+    let mut state = viewport_copy_state(2);
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('/'),
+        KeyModifiers::empty(),
+    ))]);
+    state.insert_copy_search_text("query");
+    let outcome = copy_ctrl(&mut state, 'k');
+    let copy = state.copy_mode.as_ref().unwrap();
+    assert_eq!(copy.offset_from_bottom, 2);
+    assert!(outcome.actions.is_empty());
+    assert!(outcome.requests.is_empty());
+}
+
 #[test]
 fn pasted_help_and_copy_queries_normalize_single_line_text() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

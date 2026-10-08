@@ -1,7 +1,61 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[derive(Clone, Copy)]
+pub(super) enum CopyScrollAmount {
+    Page,
+    HalfPage,
+    Line,
+}
+
+pub(super) fn copy_scroll_action(
+    action: crate::input::KeybindAction,
+) -> Option<(i8, CopyScrollAmount)> {
+    use crate::input::KeybindAction;
+    match action {
+        KeybindAction::CopyModePageUp => Some((-1, CopyScrollAmount::Page)),
+        KeybindAction::CopyModeHalfPageUp => Some((-1, CopyScrollAmount::HalfPage)),
+        KeybindAction::CopyModeLineUp => Some((-1, CopyScrollAmount::Line)),
+        KeybindAction::CopyModePageDown => Some((1, CopyScrollAmount::Page)),
+        KeybindAction::CopyModeHalfPageDown => Some((1, CopyScrollAmount::HalfPage)),
+        KeybindAction::CopyModeLineDown => Some((1, CopyScrollAmount::Line)),
+        _ => None,
+    }
+}
+
 impl ClientShellState {
+    pub(super) fn enter_scrolled_copy_mode(
+        &mut self,
+        direction: i8,
+        amount: CopyScrollAmount,
+        outcome: &mut ClientShellInput,
+    ) {
+        // A down gesture resumes a scrolled viewport, but must not open copy
+        // mode on an ordinary pane already displaying its live bottom.
+        if direction > 0 && self.copy_or_terminal_mode() != ClientShellMode::Copy {
+            let scrolled = self.focused_pane_id().is_some_and(|pane_id| {
+                self.hits
+                    .panes
+                    .iter()
+                    .find(|hit| hit.pane_id == pane_id)
+                    .and_then(|hit| hit.scroll)
+                    .is_some_and(|metrics| metrics.offset_from_bottom > 0)
+            });
+            if !scrolled {
+                return;
+            }
+        }
+        if !self.enter_copy_mode(outcome) {
+            return;
+        }
+        match amount {
+            CopyScrollAmount::Page => self.move_copy_page(direction, false, outcome),
+            CopyScrollAmount::HalfPage => self.move_copy_page(direction, true, outcome),
+            CopyScrollAmount::Line => self.scroll_copy_viewport_line(direction, outcome),
+        }
+        outcome.repaint = true;
+    }
+
     pub(super) fn reset_copy_pipeline(&mut self) {
         self.copy_session_generation = self.copy_session_generation.saturating_add(1);
         self.copy_operation_in_flight = false;
@@ -194,6 +248,18 @@ impl ClientShellState {
             }
             (KeyCode::Char('d'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_copy_page(1, true, outcome);
+                return;
+            }
+            (KeyCode::Char('k'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_copy_viewport_line(-1, outcome);
+                return;
+            }
+            (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_copy_viewport_line(1, outcome);
+                return;
+            }
+            (KeyCode::Char('g'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_copy_history(false, outcome);
                 return;
             }
             _ => {}
@@ -537,6 +603,36 @@ impl ClientShellState {
                 .min(total_rows.saturating_sub(1).min(u32::MAX as usize) as u32);
         }
         self.reveal_copy_cursor(outcome, false);
+        self.sync_copy_selection();
+        outcome.repaint = true;
+    }
+
+    /// Move the viewport without moving the absolute cursor unless it would
+    /// leave the visible buffer range (the fork's Ctrl-K/Ctrl-J behavior).
+    fn scroll_copy_viewport_line(&mut self, direction: i8, outcome: &mut ClientShellInput) {
+        let Some(copy_mode) = self.copy_mode.as_mut() else {
+            return;
+        };
+        let next_offset = if direction < 0 {
+            copy_mode
+                .offset_from_bottom
+                .saturating_add(1)
+                .min(copy_mode.max_offset_from_bottom)
+        } else {
+            copy_mode.offset_from_bottom.saturating_sub(1)
+        };
+        if next_offset == copy_mode.offset_from_bottom {
+            return;
+        }
+        copy_mode.offset_from_bottom = next_offset;
+        let top = copy_mode
+            .max_offset_from_bottom
+            .saturating_sub(next_offset)
+            .min(u32::MAX as usize) as u32;
+        let bottom = top.saturating_add(u32::from(copy_mode.geometry.1.saturating_sub(1)));
+        copy_mode.cursor.row = copy_mode.cursor.row.clamp(top, bottom);
+        let pane_id = copy_mode.pane_id.clone();
+        self.push_pane_scroll_offset(pane_id, next_offset, outcome);
         self.sync_copy_selection();
         outcome.repaint = true;
     }

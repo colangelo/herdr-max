@@ -652,6 +652,20 @@ impl ClientShellState {
                 self.accept_navigator_selection(outcome);
                 return;
             }
+            // Searchable fork lists reserve these chords before text editing:
+            // Ctrl-K moves the list here, while ordinary fields keep its kill.
+            if modifiers == KeyModifiers::CONTROL {
+                let delta = match code {
+                    KeyCode::Char('k' | 'p') => Some(-1),
+                    KeyCode::Char('j' | 'n') => Some(1),
+                    _ => None,
+                };
+                if let Some(delta) = delta {
+                    self.move_navigator_selection(delta);
+                    outcome.repaint = true;
+                    return;
+                }
+            }
             if search_focused {
                 if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
                     if let Some(content_changed) = navigator.query.handle_key(key) {
@@ -663,14 +677,14 @@ impl ClientShellState {
                         return;
                     }
                 }
-                if code == KeyCode::Up
+                if code == KeyCode::Up && modifiers.is_empty()
                     || code == KeyCode::Char('p') && modifiers == KeyModifiers::CONTROL
                 {
                     self.move_navigator_selection(-1);
                     outcome.repaint = true;
                     return;
                 }
-                if code == KeyCode::Down
+                if code == KeyCode::Down && modifiers.is_empty()
                     || code == KeyCode::Char('n') && modifiers == KeyModifiers::CONTROL
                 {
                     self.move_navigator_selection(1);

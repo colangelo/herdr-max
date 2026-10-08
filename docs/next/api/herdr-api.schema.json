@@ -2714,6 +2714,20 @@
           ],
           "type": "string"
         },
+        "PaneApplicationScrollIntent": {
+          "description": "Application-owned alternate-screen scroll input, distinct from host history\noffsets and ordinary typed input that may fan out to a sync group.",
+          "enum": [
+            "wheel_up",
+            "wheel_down",
+            "page_up",
+            "page_down",
+            "home",
+            "end",
+            "ctrl_home",
+            "ctrl_end"
+          ],
+          "type": "string"
+        },
         "PaneClearAgentAuthorityParams": {
           "properties": {
             "pane_id": {
@@ -3487,6 +3501,28 @@
             "pane"
           ],
           "type": "string"
+        },
+        "PaneScrollApplicationParams": {
+          "properties": {
+            "count": {
+              "default": 1,
+              "format": "uint16",
+              "maximum": 64,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "intent": {
+              "$ref": "#/schemas/request/$defs/PaneApplicationScrollIntent"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "intent"
+          ],
+          "type": "object"
         },
         "PaneScrollParams": {
           "properties": {
@@ -6494,6 +6530,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneScrollParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.scroll_application",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneScrollApplicationParams"
             }
           },
           "required": [

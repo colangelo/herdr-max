@@ -348,6 +348,23 @@ last member leaves the tab in sync mode (`sync` still true) for about three
 seconds, then it ends on its own; adding a member in that time cancels it. Sync is runtime
 state: it is not saved, and it is off after a restart or a live handoff.
 
+`pane.scroll_application` sends a scroll intent to an application that owns
+the alternate screen. It targets only the supplied pane, independent of a
+typed-input sync group:
+
+```json
+{"id":"req_scroll_app","method":"pane.scroll_application","params":{"pane_id":"w1:p1","intent":"wheel_up","count":1}}
+```
+
+The intents are `wheel_up`, `wheel_down`, `page_up`, `page_down`, `home`,
+`end`, `ctrl_home`, and `ctrl_end`. `count` defaults to 1 and accepts 1–64.
+Wheel intents use the pane application's current mouse or alternate-scroll
+mode. Unsupported wheel intents and intents arriving after the application
+leaves the alternate screen are dropped; they never scroll host history.
+Generated keys form complete taps when the application requests key-release
+events. Client-shell callers must advertise/check this method separately;
+unavailable, hidden, popup-blocked or stale targets cannot receive its input.
+
 `pane.clear` purges the target pane's saved scrollback with tmux
 `clear-history` semantics. The visible screen contents and the running process
 are untouched, and the call is a safe no-op when the scrollback is already

@@ -2,6 +2,40 @@ use std::collections::HashMap;
 
 use super::*;
 
+#[test]
+fn application_scroll_is_a_separate_bounded_intent_method() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "scroll", "method": "pane.scroll_application",
+        "params": {"pane_id": "pane_1", "intent": "wheel_up"},
+    }))
+    .unwrap();
+    let Method::PaneScrollApplication(params) = request.method else {
+        panic!("scroll intent");
+    };
+    assert_eq!(params.count, 1);
+    assert_eq!(params.intent, PaneApplicationScrollIntent::WheelUp);
+    for intent in [
+        "page_up",
+        "page_down",
+        "home",
+        "end",
+        "ctrl_home",
+        "ctrl_end",
+        "wheel_down",
+    ] {
+        assert!(serde_json::from_value::<Request>(serde_json::json!({
+            "id": "scroll", "method": "pane.scroll_application",
+            "params": {"pane_id": "pane_1", "intent": intent, "count": 64},
+        }))
+        .is_ok());
+    }
+    assert!(serde_json::from_value::<Request>(serde_json::json!({
+        "id": "scroll", "method": "pane.scroll_application",
+        "params": {"pane_id": "pane_1", "intent": "type_text"},
+    }))
+    .is_err());
+}
+
 fn protocol_schema_entry<T: schemars::JsonSchema>(name: &str) -> serde_json::Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
     rewrite_schema_refs(&mut schema, name);

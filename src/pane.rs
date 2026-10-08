@@ -4195,6 +4195,14 @@ impl PaneRuntime {
         self.terminal.encode_terminal_key(key)
     }
 
+    pub(crate) fn encode_application_scroll(
+        &self,
+        intent: crate::api::schema::PaneApplicationScrollIntent,
+        count: u16,
+    ) -> Option<Vec<u8>> {
+        self.terminal.encode_application_scroll(intent, count)
+    }
+
     fn stamp_input(&self) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

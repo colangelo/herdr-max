@@ -757,6 +757,7 @@ pub(super) enum ClientInputTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
+    pub(super) copy_pane_id: Option<String>,
     pub(super) overlay: Option<ClientShellOverlayKind>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
@@ -937,6 +938,8 @@ pub(crate) struct ClientShellState {
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     pub(super) input_leases: ClientInputLeases,
+    pub(super) scroll_entry_repeats:
+        HashMap<crate::input::InputLeaseKey<u8>, crate::input::KeybindAction>,
     pub(super) popup_pending: bool,
     pub(super) popup_pending_deadline: Option<std::time::Instant>,
     pub(super) next_request_id: u64,
@@ -1105,6 +1108,7 @@ impl ClientShellState {
             copy_feedback_deadline: None,
             host_mouse_pixels: None,
             input_leases: ClientInputLeases::default(),
+            scroll_entry_repeats: HashMap::new(),
             popup_pending: false,
             popup_pending_deadline: None,
             next_request_id: 1,
