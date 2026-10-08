@@ -18,6 +18,9 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "integration.install",
     "integration.list",
     "layout.set_split_ratio",
+    "notification.clear",
+    "notification.list",
+    "notification.mark_seen",
     "pane.clear",
     "pane.close",
     "pane.copy_motion",
@@ -333,6 +336,29 @@ mod tests {
             actual.remove("pane.respawn").as_deref(),
             Some("b261b69cb75bc97794320ac121948b1c8d8740ce4996d2bfce9f6b1c184b6897")
         );
+        // Fork (herdr-max): the notification history methods are additive,
+        // advertised so the client shell's notification center can read,
+        // mark and clear the server's log.
+        for (method, digest) in [
+            (
+                "notification.clear",
+                "99389f77880f4a2eb52734c68fa532dc6180a86e6a5b72dfa2097fc47f0adcda",
+            ),
+            (
+                "notification.list",
+                "80408223ff7602a272b849d37bb3ce13c5f4e63ed65215212832e2646f02b2b9",
+            ),
+            (
+                "notification.mark_seen",
+                "d16c91275200eb583eba45eb8a85230524ffeeb2cd19b30e1a395c1c1734fb79",
+            ),
+        ] {
+            assert_eq!(
+                actual.remove(method).as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
         // Fork (herdr-max): the pane todo methods are additive, advertised so
         // the client shell's todo panel and editor can read and change todos.
         for (method, digest) in [

@@ -376,6 +376,7 @@ fn resource_facts(
         notifications: Some(protocol::ClientNotificationSummary {
             total: app.state.notification_log.len(),
             unread: app.state.notification_log.unread_count(),
+            latest_id: app.state.notification_log.latest_id(),
         }),
         workspace_sort: Some(
             match app.state.workspace_sort {

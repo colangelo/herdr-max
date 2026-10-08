@@ -55,6 +55,11 @@ pub struct ClientTabSync {
 pub struct ClientNotificationSummary {
     pub total: usize,
     pub unread: usize,
+    /// The newest entry's id: a client holding the history fetches it again
+    /// when it moves, which a full log's counts alone would miss. Older
+    /// endpoints send none (0).
+    #[serde(default)]
+    pub latest_id: u64,
 }
 
 impl ClientShellResourceFacts {
