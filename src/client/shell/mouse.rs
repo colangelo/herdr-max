@@ -1713,7 +1713,7 @@ impl ClientShellState {
                         }
                         self.accept_navigator_selection(outcome);
                     } else if !super::contains(self.hits.navigator_popup, point) {
-                        self.overlay = None;
+                        self.dismiss_navigator();
                         outcome.repaint = true;
                     }
                 }

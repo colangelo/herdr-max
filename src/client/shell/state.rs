@@ -360,6 +360,17 @@ pub(super) enum ClientNavigatorTarget {
         endpoint_id: ClientEndpointId,
         pane_id: String,
     },
+    /// The link picker's "no link" row.
+    ClearLink,
+}
+
+/// What the navigator is open for: going to a pane, or choosing the pane a
+/// todo links to (fork bc502abd).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ClientNavigatorPurpose {
+    #[default]
+    Goto,
+    TodoLink,
 }
 
 #[derive(Clone, Debug)]
@@ -370,18 +381,26 @@ pub(super) struct ClientNavigatorRow {
     pub(super) detail: String,
     pub(super) agent: Option<String>,
     pub(super) status: Option<crate::api::schema::AgentStatus>,
+    /// A pane row's status column: "{agent} · {state}" or "shell".
+    pub(super) status_text: String,
     pub(super) stale: bool,
     pub(super) current: bool,
     pub(super) target: ClientNavigatorTarget,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct ClientNavigatorOverlay {
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
     pub(super) selected: Option<ClientNavigatorTarget>,
     pub(super) scroll: usize,
     pub(super) filter: Option<ClientNavigatorFilter>,
+    pub(super) purpose: ClientNavigatorPurpose,
+    /// The todo editor the link picker was opened from, restored on close.
+    pub(super) suspended_todo_edit: Option<Box<super::todo_edit::ClientTodoEditOverlay>>,
+    /// Measured once at open over every row, so a query never resizes the box.
+    pub(super) content_width: u16,
+    pub(super) status_width: u16,
 }
 
 #[derive(Debug)]

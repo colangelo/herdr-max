@@ -708,6 +708,100 @@ fn render_rename_overlay(
     })
 }
 
+pub(super) const NAVIGATOR_MIN_WIDTH: u16 = 73;
+const NAVIGATOR_MAX_WIDTH: u16 = 120;
+const NAVIGATOR_STATUS_MAX_COLUMNS: u16 = 40;
+/// The label room a row keeps before its status column gives way.
+const NAVIGATOR_LABEL_FLOOR: u16 = 28;
+/// "unknown" and "blocked" and "working": the widest state word.
+const NAVIGATOR_LONGEST_STATE_WORD: u16 = 7;
+
+fn navigator_filter_status(filter: ClientNavigatorFilter) -> crate::api::schema::AgentStatus {
+    use crate::api::schema::AgentStatus;
+    match filter {
+        ClientNavigatorFilter::Blocked => AgentStatus::Blocked,
+        ClientNavigatorFilter::Working => AgentStatus::Working,
+        ClientNavigatorFilter::Idle => AgentStatus::Idle,
+        ClientNavigatorFilter::Done => AgentStatus::Done,
+    }
+}
+
+/// A row's label as drawn: tree indent and connector, the current marker,
+/// the state dot and, in the link picker, the pane's id before its name.
+/// Returns where the id starts and the id, so it can be drawn dim.
+pub(super) fn navigator_row_label(
+    rows: &[ClientNavigatorRow],
+    ix: usize,
+    purpose: ClientNavigatorPurpose,
+) -> (String, Option<(u16, String)>) {
+    let r = &rows[ix];
+    let is_pane = matches!(r.target, ClientNavigatorTarget::Pane { .. });
+    let connector = if !is_pane {
+        ""
+    } else if rows
+        .get(ix + 1)
+        .is_some_and(|next| matches!(next.target, ClientNavigatorTarget::Pane { .. }))
+    {
+        "├─ "
+    } else {
+        "└─ "
+    };
+    let padding = usize::from(r.depth.saturating_sub(u8::from(is_pane))) * 2 + 1;
+    let indent = format!("{:padding$}{connector}", "");
+    let current = if r.current { "◆ " } else { "" };
+    let status = r.status.map(status_dot).unwrap_or_default();
+    let status_separator = if status.is_empty() { "" } else { " " };
+    let lead = format!("{indent}{current}{status}{status_separator}");
+    match &r.target {
+        ClientNavigatorTarget::Pane { pane_id, .. }
+            if purpose == ClientNavigatorPurpose::TodoLink =>
+        {
+            let id = format!("{pane_id} ");
+            (
+                format!("{lead}{id}{}", r.label),
+                Some((display_width(&lead), id)),
+            )
+        }
+        _ => (format!("{lead}{}", r.label), None),
+    }
+}
+
+/// The width a status counts for: its text, with a trailing state word
+/// counted as the widest one, so the column does not move as states change.
+pub(in crate::client::shell) fn navigator_status_measure(text: &str) -> u16 {
+    let width = display_width(text);
+    for word in ["blocked", "working", "done", "idle", "unknown"] {
+        if text.ends_with(&format!(" · {word}")) {
+            return width - display_width(word) + NAVIGATOR_LONGEST_STATE_WORD;
+        }
+    }
+    width
+}
+
+/// Measure the box once, over every row: the widest label, plus the status
+/// column (0 when no row has a status), plus the border.
+pub(in crate::client::shell) fn navigator_columns(
+    rows: &[ClientNavigatorRow],
+    purpose: ClientNavigatorPurpose,
+) -> (u16, u16) {
+    let labels = (0..rows.len())
+        .map(|ix| display_width(&navigator_row_label(rows, ix, purpose).0) + 1)
+        .max()
+        .unwrap_or(0);
+    let measure = rows
+        .iter()
+        .filter(|row| row.status.is_some())
+        .map(|row| navigator_status_measure(&row.status_text))
+        .max()
+        .unwrap_or(0);
+    let status = if measure == 0 {
+        0
+    } else {
+        (measure + 2).min(NAVIGATOR_STATUS_MAX_COLUMNS)
+    };
+    (labels + status + 2, status)
+}
+
 fn render_navigator_overlay(
     b: &mut Buffer,
     n: &ClientNavigatorOverlay,
@@ -716,7 +810,11 @@ fn render_navigator_overlay(
     p: &Palette,
 ) -> Option<OverlayRender> {
     let a = b.area;
-    let width = a.width.saturating_sub(4).min(116);
+    let linking = n.purpose == ClientNavigatorPurpose::TodoLink;
+    let width = n
+        .content_width
+        .clamp(NAVIGATOR_MIN_WIDTH, NAVIGATOR_MAX_WIDTH)
+        .min(a.width);
     let height = a.height.saturating_sub(2).min(42);
     if width < 4 || height < 9 {
         return None;
@@ -734,71 +832,98 @@ fn render_navigator_overlay(
         q.x + 2,
         q.y,
         q.width.saturating_sub(4),
-        " Go to ",
+        if linking { " Link to " } else { " Go to " },
         Style::default().fg(p.accent).bg(p.panel_bg),
     );
     let rows = super::aggregate_navigation::navigator_rows(endpoints, active_endpoint_id, n);
-    let search = if n.search_focused {
-        " / ".to_owned()
-    } else if let Some(f) = n.filter {
-        format!(
-            " / {}",
-            match f {
-                ClientNavigatorFilter::Blocked => "blocked",
-                ClientNavigatorFilter::Working => "working",
-                ClientNavigatorFilter::Idle => "idle",
-                ClientNavigatorFilter::Done => "done",
-            }
-        )
-    } else if n.query.is_empty() {
-        " / search agents and terminals".to_owned()
-    } else {
-        format!(" / {}", n.query)
-    };
-    let terminal_count = rows
-        .iter()
-        .filter(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
-        .count();
-    let count = format!(
-        "{terminal_count} {}",
-        if terminal_count == 1 {
-            "terminal"
-        } else {
-            "terminals"
-        }
-    );
+    // The fork's search row: " / " (accent when focused), then the state
+    // chip, the query or the placeholder, and the pane count at the right,
+    // dropped rather than cut when the query reaches it.
     put_text(
         b,
         i.x,
         i.y,
-        i.width.saturating_sub(display_width(&count) + 1),
-        &search,
-        Style::default()
-            .fg(if n.search_focused { p.text } else { p.overlay0 })
-            .bg(p.panel_bg),
+        i.width.min(3),
+        " / ",
+        if n.search_focused {
+            Style::default()
+                .fg(p.accent)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0).bg(p.panel_bg)
+        },
     );
+    let text_x = i.x + i.width.min(3);
+    let text_room = i.right().saturating_sub(text_x);
+    let used = if let Some(filter) = n.filter.filter(|_| !n.search_focused) {
+        let status = navigator_filter_status(filter);
+        let chip = format!("{} {}", status_dot(status), status_text(status));
+        put_text(
+            b,
+            text_x,
+            i.y,
+            text_room,
+            &chip,
+            Style::default()
+                .fg(status_color(status, p))
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        display_width(&chip)
+    } else if n.query.is_empty() && !n.search_focused {
+        let placeholder = if linking {
+            "search panes to link"
+        } else {
+            "search panes"
+        };
+        put_text(
+            b,
+            text_x,
+            i.y,
+            text_room,
+            placeholder,
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+        display_width(placeholder)
+    } else {
+        put_text(
+            b,
+            text_x,
+            i.y,
+            text_room,
+            &n.query,
+            Style::default().fg(p.text).bg(p.panel_bg),
+        );
+        display_width(&n.query)
+    };
     let cursor = if n.search_focused {
         text_editor::render(
             b,
-            Rect::new(
-                i.x + 3,
-                i.y,
-                i.width.saturating_sub(4 + display_width(&count)),
-                1,
-            ),
+            Rect::new(text_x, i.y, text_room.saturating_sub(1), 1),
             &n.query,
             Style::default().fg(p.text).bg(p.panel_bg),
         )
     } else {
         None
     };
-    put_right_text(
-        b,
-        i,
-        i.y,
-        &count,
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
+    let pane_count =
+        super::aggregate_navigation::navigator_pane_count(endpoints, active_endpoint_id, n);
+    let count = format!(
+        "{pane_count} {}",
+        if pane_count == 1 { "pane" } else { "panes" }
     );
+    let count_width = display_width(&count);
+    if 3 + used + 1 + count_width < i.width {
+        put_text(
+            b,
+            i.right() - 1 - count_width,
+            i.y,
+            count_width,
+            &count,
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+    }
     put_text(
         b,
         i.x,
@@ -882,23 +1007,21 @@ fn render_navigator_overlay(
         let connector_x = rect.x + padding;
         let indent = format!("{:width$}{connector}", "", width = usize::from(padding));
         let current = if r.current { "◆ " } else { "" };
-        let status = r.status.map(status_dot).unwrap_or_default();
-        let status_separator = if status.is_empty() { "" } else { " " };
-        let label = format!("{indent}{current}{status}{status_separator}{}", r.label);
+        let (label, id_at) = navigator_row_label(&rows, ix, n.purpose);
         let st = if r.status.is_none() {
             st.add_modifier(Modifier::BOLD)
         } else {
             st
         };
         b.set_style(rect, st);
+        // One status column, as measured at open; labels give way first,
+        // down to the floor the labels themselves need.
         let columns = if r.status.is_some() {
-            if rect.width >= 64 {
-                24
-            } else if rect.width >= 36 {
-                12
-            } else {
-                0
-            }
+            let labels = n
+                .content_width
+                .saturating_sub(n.status_width + 2)
+                .min(NAVIGATOR_LABEL_FLOOR);
+            n.status_width.min(rect.width.saturating_sub(labels))
         } else {
             0
         };
@@ -910,6 +1033,20 @@ fn render_navigator_overlay(
             &label,
             st,
         );
+        if let Some((at, id)) = id_at.as_ref().filter(|_| !r.stale && ix != selected) {
+            let x = rect.x.saturating_add(*at);
+            put_text(
+                b,
+                x,
+                rect.y,
+                rect.right()
+                    .saturating_sub(columns)
+                    .saturating_sub(x)
+                    .min(display_width(id)),
+                id,
+                st.fg(p.overlay0),
+            );
+        }
         if is_pane {
             put_text(
                 b,
@@ -939,33 +1076,21 @@ fn render_navigator_overlay(
                 status_dot(status),
                 status_style,
             );
-            let meta_style = if r.stale || ix == selected {
-                st
-            } else {
-                st.fg(p.overlay0)
-            };
             if columns > 0 {
-                put_text(
-                    b,
-                    rect.right() - columns + 1,
-                    rect.y,
-                    11,
-                    r.agent.as_deref().unwrap_or("terminal"),
-                    meta_style,
+                let text = format!(
+                    " {}",
+                    crate::ui::text::truncate_end(
+                        &r.status_text,
+                        usize::from(columns.saturating_sub(2))
+                    )
                 );
-            }
-            if columns == 24 {
                 put_text(
                     b,
-                    rect.right() - 11,
+                    rect.right() - columns,
                     rect.y,
-                    11,
-                    if r.agent.is_some() {
-                        status_text(status)
-                    } else {
-                        "shell"
-                    },
-                    meta_style,
+                    columns,
+                    &text,
+                    status_style,
                 );
             }
         }
@@ -1028,18 +1153,43 @@ fn render_navigator_overlay(
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
-    put_text(
-        b,
-        i.x,
-        i.bottom() - 1,
-        i.width,
-        if n.search_focused {
-            " search type · move ↑↓/ctrl+j/k/n/p · open enter · back esc"
-        } else {
-            " ↑↓/j/k rows · ←→ workspace · / search · a/b/w/i/d filter · enter open · esc close"
-        },
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
-    );
+    let accept = if linking { "link" } else { "switch" };
+    let hints: &[(&str, &str)] = if n.search_focused {
+        &[
+            ("enter", accept),
+            ("^j/^k/↑↓", "move"),
+            ("ctrl+u", "clear"),
+            ("esc", "back"),
+        ]
+    } else {
+        &[
+            ("enter", accept),
+            ("/", "search"),
+            ("b/w/i/d/a", "states"),
+            ("j/k/^j/^k/↑↓", "move"),
+            ("esc", "close"),
+        ]
+    };
+    let mut x = i.x;
+    for (index, (key, text)) in hints.iter().enumerate() {
+        let lead = if index == 0 { " " } else { "  " };
+        for (part, style) in [
+            (lead, Style::default().bg(p.panel_bg)),
+            (
+                *key,
+                Style::default()
+                    .fg(p.accent)
+                    .bg(p.panel_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            (" ", Style::default().bg(p.panel_bg)),
+            (*text, Style::default().fg(p.overlay0).bg(p.panel_bg)),
+        ] {
+            let width = display_width(part).min(i.right().saturating_sub(x));
+            put_text(b, x, i.bottom() - 1, width, part, style);
+            x = x.saturating_add(width);
+        }
+    }
     Some(OverlayRender {
         area: q,
         primary: Rect::default(),

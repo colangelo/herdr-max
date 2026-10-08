@@ -565,8 +565,10 @@ impl ClientShellState {
                 }
                 return;
             }
-            // The link picker (ctrl+l) arrives with the navigator port.
-            KeyCode::Char('l' | 'L') if ctrl => return,
+            KeyCode::Char('l' | 'L') if ctrl => {
+                self.open_todo_link_picker();
+                return;
+            }
             _ => {}
         }
         let Some(edit) = self.todo_edit_mut() else {
@@ -635,7 +637,7 @@ impl ClientShellState {
                 edit.priority = next_priority(edit.priority);
             }
         } else if super::contains(rows.link, point) {
-            // The link picker arrives with the navigator port.
+            self.open_todo_link_picker();
         } else if super::contains(rows.done, point) {
             if let Some(edit) = self.todo_edit_mut() {
                 if edit.todo_id.is_some() {
@@ -647,5 +649,53 @@ impl ClientShellState {
         } else {
             self.close_todo_editor(outcome);
         }
+    }
+
+    /// ctrl+l or a click on the link row: the navigator opens as the link
+    /// picker with this editor parked inside it (fork bc502abd).
+    fn open_todo_link_picker(&mut self) {
+        match self.overlay.take() {
+            Some(ClientShellOverlay::TodoEdit(edit)) => {
+                self.open_navigator_for(ClientNavigatorPurpose::TodoLink, Some(Box::new(edit)));
+            }
+            other => self.overlay = other,
+        }
+    }
+
+    /// The link picker's Enter: a pane row stages that pane, the "no link"
+    /// row stages clearing it, and either returns to the editor. Space and
+    /// machine rows link nothing and leave the picker open.
+    pub(super) fn accept_todo_link(&mut self, target: ClientNavigatorTarget) {
+        let link = match target {
+            ClientNavigatorTarget::ClearLink => TodoEditLink::Clear,
+            ClientNavigatorTarget::Pane { pane_id, .. } => {
+                let label = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::Navigator(navigator)) => {
+                        render::client_navigator_rows(
+                            &self.endpoints,
+                            &self.active_endpoint_id,
+                            navigator,
+                        )
+                        .into_iter()
+                        .find(|row| {
+                            matches!(&row.target, ClientNavigatorTarget::Pane { pane_id: id, .. } if *id == pane_id)
+                        })
+                        .map(|row| row.label)
+                        .unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+                TodoEditLink::Set { pane_id, label }
+            }
+            ClientNavigatorTarget::Machine { .. } | ClientNavigatorTarget::Workspace { .. } => {
+                return
+            }
+        };
+        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+            if let Some(edit) = navigator.suspended_todo_edit.as_mut() {
+                edit.link = link;
+            }
+        }
+        self.dismiss_navigator();
     }
 }

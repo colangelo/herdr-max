@@ -191,20 +191,54 @@ impl ClientShellState {
     }
 
     pub(super) fn open_navigator_overlay(&mut self) {
+        self.open_navigator_for(ClientNavigatorPurpose::Goto, None);
+    }
+
+    /// Open the navigator to go somewhere, or as the todo link picker with
+    /// the editor it was opened from parked inside it.
+    pub(super) fn open_navigator_for(
+        &mut self,
+        purpose: ClientNavigatorPurpose,
+        suspended_todo_edit: Option<Box<super::todo_edit::ClientTodoEditOverlay>>,
+    ) {
         let mut navigator = ClientNavigatorOverlay {
             query: TextEditor::default(),
             search_focused: false,
             selected: None,
             scroll: 0,
             filter: None,
+            purpose,
+            suspended_todo_edit,
+            content_width: 0,
+            status_width: 0,
         };
         let rows =
             render::client_navigator_rows(&self.endpoints, &self.active_endpoint_id, &navigator);
-        navigator.selected = rows
-            .iter()
-            .find(|row| row.current)
-            .map(|row| row.target.clone());
+        (navigator.content_width, navigator.status_width) =
+            render::navigator_columns(&rows, purpose);
+        navigator.selected = match purpose {
+            ClientNavigatorPurpose::Goto => rows
+                .iter()
+                .find(|row| row.current)
+                .map(|row| row.target.clone()),
+            // Never open on the "no link" row, so a stray Enter cannot clear.
+            ClientNavigatorPurpose::TodoLink => rows
+                .iter()
+                .find(|row| matches!(row.target, ClientNavigatorTarget::Pane { .. }))
+                .or_else(|| rows.get(1))
+                .or_else(|| rows.first())
+                .map(|row| row.target.clone()),
+        };
         self.overlay = Some(ClientShellOverlay::Navigator(navigator));
+    }
+
+    /// Close the navigator; the link picker returns to its editor instead.
+    pub(super) fn dismiss_navigator(&mut self) {
+        let parked = match self.overlay.as_mut() {
+            Some(ClientShellOverlay::Navigator(navigator)) => navigator.suspended_todo_edit.take(),
+            _ => return,
+        };
+        self.overlay = parked.map(|edit| ClientShellOverlay::TodoEdit(*edit));
     }
 
     pub(super) fn move_navigator_selection(&mut self, delta: isize) {
@@ -288,7 +322,19 @@ impl ClientShellState {
         let Some(target) = target else {
             return;
         };
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::Navigator(ClientNavigatorOverlay {
+                purpose: ClientNavigatorPurpose::TodoLink,
+                ..
+            }))
+        ) {
+            self.accept_todo_link(target);
+            outcome.repaint = true;
+            return;
+        }
         let activated = match target {
+            ClientNavigatorTarget::ClearLink => false,
             ClientNavigatorTarget::Machine { endpoint_id } => {
                 self.activate_endpoint(endpoint_id, outcome)
             }
@@ -657,13 +703,25 @@ impl ClientShellState {
                     ..
                 }))
             );
+            // Esc steps back one stage at a time: leave the search, clear
+            // the query, drop the state chip, close.
             if code == KeyCode::Esc {
-                if search_focused {
-                    if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                let mut close = false;
+                if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+                    if search_focused {
                         navigator.search_focused = false;
+                    } else if !navigator.query.is_empty() {
+                        navigator.query.clear();
+                        navigator.selected = None;
+                    } else if navigator.filter.is_some() {
+                        navigator.filter = None;
+                        navigator.selected = None;
+                    } else {
+                        close = true;
                     }
-                } else {
-                    self.overlay = None;
+                }
+                if close {
+                    self.dismiss_navigator();
                 }
                 outcome.repaint = true;
                 return;

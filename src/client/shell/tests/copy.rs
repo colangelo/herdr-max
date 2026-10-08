@@ -1310,7 +1310,9 @@ fn navigator_searches_ancestor_context_and_keeps_split_agents_individually_actio
     };
     navigator.query.clear();
     let frame = state.compose(160, 48).expect("navigator");
-    assert_eq!(state.hits.navigator_popup.width, 116);
+    // Fork (herdr-max): the navigator is as wide as its rows, from 73 to 120
+    // columns, instead of filling the window.
+    assert_eq!(state.hits.navigator_popup.width, 73);
     let pane_rows = state
         .hits
         .navigator_rows
@@ -1831,7 +1833,8 @@ fn navigator_owns_search_mouse_selection_and_stable_target_focus() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(navigator_text.contains("client-shell"));
-    assert!(navigator_text.contains("terminal"));
+    // Fork (herdr-max): a pane with no agent says "shell" in the status column.
+    assert!(navigator_text.contains("shell"));
     assert!(!navigator_text.contains("pane 1"));
 
     let search = state.hits.navigator_search;
