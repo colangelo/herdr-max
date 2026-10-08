@@ -173,6 +173,9 @@ impl ClientShellState {
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             return Some(self.compose_unavailable(cols, rows).into());
         }
+        if self.config.follow_workspace && self.mode != ClientShellMode::Navigate {
+            self.reveal_focused_workspace = true;
+        }
         let snapshot = self.snapshot.as_deref()?;
         // Do not compose a retained surface while waiting for its matching snapshot or
         // connection generation.

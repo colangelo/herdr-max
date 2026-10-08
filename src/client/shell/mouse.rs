@@ -1041,6 +1041,7 @@ impl ClientShellState {
                         let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                         if next != self.workspace_scroll {
                             self.workspace_scroll = next;
+                            self.config.follow_workspace = false;
                             outcome.repaint = true;
                         }
                     }
@@ -1057,6 +1058,7 @@ impl ClientShellState {
                         let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                         if next != self.agent_scroll {
                             self.agent_scroll = next;
+                            self.config.follow_agent = false;
                             outcome.repaint = true;
                         }
                     }
@@ -1919,6 +1921,7 @@ impl ClientShellState {
                 let next = self.agent_scroll.saturating_sub(1);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
+                    self.config.follow_agent = false;
                     outcome.repaint = true;
                 }
             }
@@ -1929,6 +1932,7 @@ impl ClientShellState {
                     .min(self.hits.agent_max_scroll);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
+                    self.config.follow_agent = false;
                     outcome.repaint = true;
                 }
             }
@@ -1936,6 +1940,7 @@ impl ClientShellState {
                 let next = self.workspace_scroll.saturating_sub(1);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
+                    self.config.follow_workspace = false;
                     outcome.repaint = true;
                 }
             }
@@ -1946,6 +1951,7 @@ impl ClientShellState {
                     .min(self.hits.workspace_max_scroll);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
+                    self.config.follow_workspace = false;
                     outcome.repaint = true;
                 }
             }
@@ -1957,6 +1963,11 @@ impl ClientShellState {
                     .find(|(rect, _, _, _)| super::contains(*rect, point))
                     .copied()
                 {
+                    if agents {
+                        self.config.follow_agent = false;
+                    } else {
+                        self.config.follow_workspace = false;
+                    }
                     let (scroll, max) = if agents {
                         (&mut self.agent_scroll, self.hits.agent_max_scroll)
                     } else {
@@ -2032,6 +2043,7 @@ impl ClientShellState {
                             let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                             if next != self.workspace_scroll {
                                 self.workspace_scroll = next;
+                                self.config.follow_workspace = false;
                                 outcome.repaint = true;
                             }
                         }
@@ -2056,6 +2068,7 @@ impl ClientShellState {
                             let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                             if next != self.agent_scroll {
                                 self.agent_scroll = next;
+                                self.config.follow_agent = false;
                                 outcome.repaint = true;
                             }
                         }

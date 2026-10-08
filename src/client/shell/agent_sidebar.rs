@@ -219,6 +219,18 @@ pub(super) fn render_agent_list<T>(
             }
         })
         .collect::<Vec<_>>();
+    if config.follow_agent {
+        if let Some(target) = rows.iter().position(&exempt) {
+            *agent_scroll = super::sidebar_overflow::reveal_start(
+                &row_heights,
+                &gaps,
+                body.height,
+                *agent_scroll,
+                target,
+                config.sidebar_overflow.edge_rows(),
+            );
+        }
+    }
     let (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
         &row_heights,
         &gaps,

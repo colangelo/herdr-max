@@ -113,6 +113,8 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            follow_workspace: true,
+            follow_agent: true,
             host_background: None,
             sidebar_overflow: config.ui.sidebar_overflow,
             sidebar_fog: config.sidebar_fog().0,

@@ -13,6 +13,8 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) follow_workspace: bool,
+    pub(super) follow_agent: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
     pub(super) sidebar_overflow: crate::config::SidebarOverflowConfig,
     pub(super) sidebar_fog: [u32; crate::config::SIDEBAR_FOG_ROWS],
@@ -1292,6 +1294,8 @@ impl ClientShellState {
         self.tab_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
+        self.config.follow_agent = true;
+        self.config.follow_workspace = true;
         self.tab_scroll = 0;
         self.mobile_switcher_scroll = 0;
         self.reveal_focused_workspace = true;
@@ -1475,6 +1479,15 @@ impl ClientShellState {
             != snapshot.focused_workspace_id.as_deref()
         {
             self.reveal_focused_workspace = true;
+            self.config.follow_workspace = true;
+        }
+        if self
+            .snapshot
+            .as_deref()
+            .and_then(|current| current.focused_pane_id.as_deref())
+            != snapshot.focused_pane_id.as_deref()
+        {
+            self.config.follow_agent = true;
         }
         if tab_layout_changed
             || self
