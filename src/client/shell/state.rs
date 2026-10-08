@@ -43,6 +43,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
     pub(super) state_presentation: super::state_presentation::StatePresentation,
+    pub(super) status_spinner: crate::config::StatusSpinnerConfig,
+    pub(super) status_spinner_interval: std::time::Duration,
+    pub(super) spinner_frame: u8,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
@@ -923,6 +926,7 @@ pub(crate) struct ClientShellState {
     pub(super) last_tab_bar_width: Option<u16>,
     pub(super) last_composed_size: Option<(u16, u16)>,
     pub(super) last_composed_at: Option<std::time::Instant>,
+    pub(super) activity_deadline: Option<std::time::Instant>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
@@ -1107,6 +1111,7 @@ impl ClientShellState {
             last_tab_bar_width: None,
             last_composed_size: None,
             last_composed_at: None,
+            activity_deadline: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],
@@ -1917,6 +1922,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.activity_deadline)
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

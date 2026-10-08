@@ -172,7 +172,18 @@ pub(crate) fn render_collapsed_sidebar(
             rect.x.saturating_add(bar + 2),
             rect.y,
             rect.width.saturating_sub(bar + 2),
-            config.state_icon(agent.agent_status),
+            config.state_presentation.agent_icon(
+                agent.agent_status,
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|f| f.background_activity.as_ref())
+                    .and_then(|f| f.get(&agent.pane_id))
+                    .copied()
+                    .unwrap_or(false),
+                agent.state_change_seq,
+                config,
+            ),
             Style::default().fg(config.state_color(agent.agent_status)),
         );
         super::sidebar_chrome::draw_active_border(buffer, rect, agent.focused, config, 0);

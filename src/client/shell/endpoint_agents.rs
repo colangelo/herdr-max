@@ -21,12 +21,24 @@ pub(super) fn render_collapsed(
             rect.x,
             rect.y,
             rect.width,
-            &format!("{initial}{}", config.state_icon(row.agent.status)),
+            &format!(
+                "{initial}{}",
+                config.state_presentation.agent_icon(
+                    row.agent.status,
+                    row.agent.background_work,
+                    row.agent.state_change_seq,
+                    config
+                )
+            ),
             Style::default()
                 .fg(if row.stale {
                     config.palette.overlay0
                 } else {
-                    config.state_color(row.agent.status)
+                    config.state_presentation.agent_color(
+                        row.agent.status,
+                        row.agent.background_work,
+                        &config.palette,
+                    )
                 })
                 .add_modifier(if row.stale {
                     Modifier::DIM

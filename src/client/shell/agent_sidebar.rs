@@ -11,6 +11,8 @@ use ratatui::{
 use super::*;
 
 pub(super) struct AgentRow {
+    pub(super) state_change_seq: u64,
+    pub(super) background_work: bool,
     pub(super) jump_index: usize,
     pub(super) pin_rank: Option<usize>,
     pub(super) pane_id: String,
@@ -360,6 +362,14 @@ pub(super) fn agent_row(
         state_text,
     );
     Some(AgentRow {
+        state_change_seq: agent.state_change_seq,
+        background_work: snapshot
+            .resource_facts
+            .as_ref()
+            .and_then(|f| f.background_activity.as_ref())
+            .and_then(|f| f.get(&agent.pane_id))
+            .copied()
+            .unwrap_or(false),
         jump_index: 0,
         pin_rank: None,
         pane_id: agent.pane_id.clone(),
@@ -390,7 +400,11 @@ pub(super) fn render_agent_row(
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD)
     };
-    let status_style = Style::default().fg(config.state_color(row.status));
+    let status_style = Style::default().fg(config.state_presentation.agent_color(
+        row.status,
+        row.background_work,
+        palette,
+    ));
     let editorial = config.sidebar_style == crate::config::SidebarStyleConfig::Editorial;
     let jump = config
         .show_agent_numbers
@@ -407,8 +421,17 @@ pub(super) fn render_agent_row(
         secondary
     };
     let icon = (
-        config.state_icon(row.status),
-        Style::default().fg(config.state_color(row.status)),
+        config.state_presentation.agent_icon(
+            row.status,
+            row.background_work,
+            row.state_change_seq,
+            config,
+        ),
+        Style::default().fg(config.state_presentation.agent_color(
+            row.status,
+            row.background_work,
+            palette,
+        )),
     );
     let rows = if row.rows.is_empty() {
         vec![vec![crate::ui::ResolvedToken {

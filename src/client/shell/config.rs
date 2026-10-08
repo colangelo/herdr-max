@@ -155,6 +155,14 @@ impl ClientShellConfig {
             agents: config.ui.sidebar.agents.clone(),
             agent_panel_sort: config.ui.agent_panel_sort,
             state_presentation: super::state_presentation::StatePresentation::from_config(config),
+            status_spinner: config.ui.status_spinner,
+            status_spinner_interval: std::time::Duration::from_millis(
+                config.ui.status_spinner_ms.clamp(
+                    crate::config::MIN_STATUS_SPINNER_MS,
+                    crate::config::MAX_STATUS_SPINNER_MS,
+                ),
+            ),
+            spinner_frame: 0,
             status_indicators: config.ui.status_indicators,
             sound_enabled: config.ui.sound.enabled,
             toast_delivery: config.ui.toast.delivery,
@@ -414,6 +422,12 @@ impl ClientShellConfig {
                 self.agent_panel_sort = ui.agent_panel_sort;
                 self.state_presentation =
                     super::state_presentation::StatePresentation::from_config(config);
+                self.status_spinner = ui.status_spinner;
+                self.status_spinner_interval =
+                    std::time::Duration::from_millis(ui.status_spinner_ms.clamp(
+                        crate::config::MIN_STATUS_SPINNER_MS,
+                        crate::config::MAX_STATUS_SPINNER_MS,
+                    ));
                 self.status_indicators = ui.status_indicators;
                 self.sound_enabled = ui.sound.enabled;
                 self.toast_delivery = ui.toast.delivery;

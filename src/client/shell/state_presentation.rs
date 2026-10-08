@@ -56,6 +56,42 @@ impl StatePresentation {
             .unwrap_or_else(|| status_icon(status, style))
     }
 
+    pub(super) fn agent_icon(
+        &self,
+        status: AgentStatus,
+        background: bool,
+        seq: u64,
+        config: &ClientShellConfig,
+    ) -> &str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        if status != AgentStatus::Working {
+            return self.icon(status, config.status_indicators);
+        }
+        let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
+            .then_some(config.spinner_frame.wrapping_add(seq as u8));
+        if background {
+            return if frame.is_some_and(|frame| (frame / 8) % 2 == 1) {
+                self.symbols.background_alt.as_deref().unwrap_or("◆")
+            } else {
+                self.symbols.background.as_deref().unwrap_or("■")
+            };
+        }
+        frame
+            .map(|frame| FRAMES[usize::from(frame) % FRAMES.len()])
+            .unwrap_or_else(|| self.icon(status, config.status_indicators))
+    }
+    pub(super) fn agent_color(
+        &self,
+        status: AgentStatus,
+        background: bool,
+        palette: &Palette,
+    ) -> Color {
+        if status == AgentStatus::Working && background {
+            self.colors[5].unwrap_or_else(|| self.color(status, palette))
+        } else {
+            self.color(status, palette)
+        }
+    }
     pub(super) fn color(&self, status: AgentStatus, palette: &Palette) -> Color {
         let index = match status {
             AgentStatus::Working => 0,
@@ -111,5 +147,47 @@ mod tests {
         );
         assert_eq!(shell.state_icon(AgentStatus::Working), "w");
         assert_eq!(shell.state_color(AgentStatus::Blocked), shell.palette.red);
+    }
+    #[test]
+    fn working_animation_and_background_pulse_match_fork_frames_and_static_fallback() {
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, false, 0, &config),
+            "⠋"
+        );
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, false, 1, &config),
+            "⠙"
+        );
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, true, 0, &config),
+            "■"
+        );
+        config.spinner_frame = 8;
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, true, 0, &config),
+            "◆"
+        );
+        config.status_spinner = crate::config::StatusSpinnerConfig::Off;
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, true, 0, &config),
+            "■"
+        );
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Working, false, 0, &config),
+            "●"
+        );
     }
 }
