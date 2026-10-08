@@ -1,0 +1,19 @@
+# Implementation plan
+
+Work on `port/input`, issue #171, route r-1008-07. Each step is a coherent commit with tests/help and applicable staged future docs. No pushes. Until test-clean tag lands, binary checking is the lead-approved narrower check; test failures in stripped base are recorded, not bypassed or called passing.
+
+1. Characterize current client/config behavior; retained parser and prefix support are verification work. Fix help/index routing only where the fork behavior is missing (`b1314a5b`, `4bb0e60b`; prefix `73a00623` superseded).
+2. Route `44136623` warnings through client config startup/reload and endpoint/local key source paths; preserve server command manifest behavior.
+3. Port `a7c61149` and `f39e4732` in `client/shell/copy_mode.rs` using absolute cursor coordinates and coalesced `pane.scroll`; fork tests become pure shell tests.
+4. Add surviving copy-entry key fields to `input/keybindings.rs`, client action handling and help; direction/granularity helper preserves entry restore and repeat contexts (`c84f5ea6`, `2af23387`).
+5. Before new API, review method/codec strategy and input lifecycle in a read-only roundtable. Add new scroll-intent schema/dispatch in a focused module, advertise it, freeze its shape separately; test encoded wheel/key results and runtime screen-loss guards (`1ea137a2`, `e56cd1fb`, `68714373`, `f3ae069d`, `9e1608f9`).
+6. Add pinned client SCROLL state/module, mode routing/ASCII policy, instruction bar and tests. Keep direct copy mode unchanged, prefix exits SCROLL, focus/boot loss aborts. Preserve leased repeat mechanics; scope synthetic key completion to runtime's event protocol.
+7. Wire retained layout balance and preset API; local preset-cycle index, server geometry reconciliation, current `26537d32` pure weighting. Wire clear-history by separate name (fix inherited duplicate pane.clear rename); then respawn and simple move controls, each separately.
+8. Reuse runtime `Tab::sync`/pin state. Optional named controls share existing EndpointControl envelope; existing frozen surfaces/snapshot structs remain unchanged. Newly advertised APIs carry separately frozen expectations.
+9. Typed fanout occurs behind shell-client ownership and popup/view checks, encodes each target independently, pins original held recipients, and excludes SCROLL intent/mouse/popups. Port fork sync channel/group tests and add new client lifecycle tests.
+10. Client toggle, right-click membership, explicit pairs and pins target stable endpoint-qualified IDs. Chrome supplies drawing; smallest named marker/state helpers can be introduced here with progress pointers for deduplication. Priority-sort drag gate retains normal focus/drop guards.
+11. Wire chrome resize display/edge-row/clipboard feedback helpers when available; otherwise record exact cross-seat dependency and continue independent tasks. Retain high-frequency hidden-source/repaint exits.
+12. After daily-use checks pass, integrate common list/editor deltas and overlay-seat features; no new legacy AppState overlay framework. Tests preserve inside blank/near-miss/outside precedence and actual hover repaint.
+13. Rebase test-clean tag, run targeted suites/`just check` and compatibility fixtures. Any visible deviation must have an architecture reason in DIFFERENCES.md; no blanket parity claim without its input/render evidence. Lead owns live-beta aggregate cutover.
+
+Protected oracles: `pane_key_release_keeps_the_press_target`, `queued_copy_keys_preserve_prefix_order`, `copy_mode_repeat_during_projection_gap_stays_active`, all frozen generation-1 endpoint/surface tests and `advertised_client_shell_method_shapes_stay_at_the_v1_contract`; actual headless input/view/popup/geometry tests. New topic tests listed in tasks and original study. Broad lifecycle/identity tests use available AppState/Workspace invariants.
