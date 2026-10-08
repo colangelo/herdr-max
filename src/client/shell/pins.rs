@@ -135,7 +135,7 @@ pub(super) fn marker_rect(rect: Rect, lead: u16, config: &ClientShellConfig) -> 
 }
 pub(super) fn workspace_marker(
     rect: Rect,
-    entry: WorkspaceEntry,
+    entry: &WorkspaceEntry,
     config: &ClientShellConfig,
 ) -> Option<Rect> {
     entry.pin_rank?;

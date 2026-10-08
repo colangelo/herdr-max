@@ -1,7 +1,7 @@
 use super::render::display_width;
 use super::*;
 use crate::config::NotificationCenterPositionConfig;
-use crate::ui::pane_todo_indicator::{todo_priority_color, TodoDisplaySummary};
+use crate::ui::{todo_priority_color, TodoDisplaySummary};
 
 fn label(glyph: char, count: usize) -> String {
     match count {
@@ -151,7 +151,7 @@ mod tests {
         let mut hits = ShellHitMap::default();
         let mut scroll = 0;
         let mut reveal = false;
-        super::super::tabs::render_tab_bar(
+        super::super::render::render_tab_bar(
             &mut buffer,
             area,
             &snapshot,

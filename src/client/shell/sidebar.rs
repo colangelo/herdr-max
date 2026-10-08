@@ -108,15 +108,6 @@ pub(crate) fn render_collapsed_sidebar(
             Style::default().fg(config.state_color(status)),
         );
         super::sidebar_chrome::draw_active_border(buffer, rect, workspace.focused, config, 0);
-        if let Some(marker) = super::pins::workspace_marker(rect, entry, config) {
-            hits.pin_markers.push((
-                marker,
-                state.active_endpoint_id.clone(),
-                crate::api::schema::Method::WorkspaceUnpin(crate::api::schema::WorkspaceTarget {
-                    workspace_id: workspace.workspace_id.clone(),
-                }),
-            ));
-        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -404,6 +395,15 @@ pub(crate) fn render_sidebar(
             state.collapsed_groups,
             config,
         );
+        if let Some(marker) = super::pins::workspace_marker(rect, entry, config) {
+            hits.pin_markers.push((
+                marker,
+                state.active_endpoint_id.clone(),
+                crate::api::schema::Method::WorkspaceUnpin(crate::api::schema::WorkspaceTarget {
+                    workspace_id: workspace.workspace_id.clone(),
+                }),
+            ));
+        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
