@@ -46,9 +46,7 @@ impl ClientShellState {
             return false;
         }
         if let KeyCode::Char(digit @ '1'..='9') = key.code {
-            let mut panes = self.hits.panes.iter().collect::<Vec<_>>();
-            panes.sort_by_key(|pane| (pane.rect.y, pane.rect.x));
-            if let Some(pane) = panes.get((digit as usize) - ('1' as usize)) {
+            if let Some(pane) = self.hits.panes.get((digit as usize) - ('1' as usize)) {
                 self.push_endpoint_method(
                     crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
                         pane_id: pane.pane_id.clone(),
@@ -139,8 +137,9 @@ pub(super) fn paint(
 ) -> Vec<Rect> {
     let mut covered = Vec::new();
     let p = &state.config.palette;
-    let mut panes = state.hits.panes.iter().collect::<Vec<_>>();
-    panes.sort_by_key(|pane| (pane.rect.y, pane.rect.x));
+    // The surface preserves the server tile traversal used by the fork's
+    // pane_infos. Geometric sorting changes numbering for mixed column splits.
+    let panes = &state.hits.panes;
     for (index, pane) in panes.iter().enumerate() {
         let inner = pane.inner_rect.intersection(buffer.area);
         if inner.is_empty() {

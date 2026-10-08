@@ -292,7 +292,7 @@ fn resize_summary_survives_composition_with_connected_version() {
 }
 
 #[test]
-fn display_panes_digits_follow_reading_order_and_key_releases_keep_labels_open() {
+fn display_panes_digits_follow_server_layout_order_and_key_releases_keep_labels_open() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut snapshot = snapshot();
     let pane = snapshot.panes[0].clone();
@@ -331,7 +331,7 @@ fn display_panes_digits_follow_reading_order_and_key_releases_keep_labels_open()
         .collect();
     state.set_pane_surface(surface);
     state.compose(140, 30).unwrap();
-    for digit in '1'..='9' {
+    for (digit, expected) in ('1'..='9').zip((1..=9).rev()) {
         state.arm_pane_labels(true, std::time::Instant::now());
         let release = state.handle_raw_events(vec![RawInputEvent::Key(
             crate::input::TerminalKey::new(KeyCode::Char('i'), KeyModifiers::NONE)
@@ -347,7 +347,7 @@ fn display_panes_digits_follow_reading_order_and_key_releases_keep_labels_open()
         )]);
         assert!(!state.pane_labels_explicit);
         assert!(
-            matches!(&press.actions[..], [ClientShellAction::Endpoint { request, .. }] if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == format!("pane_{digit}")))
+            matches!(&press.actions[..], [ClientShellAction::Endpoint { request, .. }] if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == format!("pane_{expected}")))
         );
         let release = state.handle_raw_events(vec![RawInputEvent::Key(
             crate::input::TerminalKey::new(KeyCode::Char(digit), KeyModifiers::NONE)
