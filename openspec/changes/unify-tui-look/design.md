@@ -111,12 +111,31 @@ question tool use the same ones. Done items may be struck through and dim (todos
 - **Modals that end a task use a button row instead:** centred chips, `↵ label` primary in
   `accent` with dark bold text, the rest in `surface0` with bold `text`, two spaces apart. A view
   never has both a key bar and a button row.
-- **A mode bar takes its mode's own colour.** The bottom bar of a mode (NAVIGATE, PREFIX, PANES,
-  RESIZE) shows one filled chip, the mode name, with dark bold text. Its keys are bold in the same
-  colour. NAVIGATE and PREFIX use `accent`, PANES uses `red` (`#f38ba8`, the soft red
-  `display_panes.rs` uses today), and RESIZE uses `mauve`, as upstream draws it. Everything else
-  in the bar stays dim, with no second chip. Outside mode bars, keys are always `accent`. ac chose
-  this on 2026-10-08 so that an alternate mode is easy to tell apart at a glance.
+- **A mode bar uses the mode's colour** (see Mode colour below).
+
+### Mode colour
+
+A mode that has its own colour **keeps it**. Its chip and its keys use that colour, so you can
+tell a mode apart at a glance. The layout is the same for every mode: one filled chip with the
+mode name in dark bold text, keys bold in the mode's colour, labels dim, secondary information as
+dim labels, and **no second chip**. `accent` is the colour for modes without one of their own,
+and for everything that is not a mode bar. A future mode (green, orange…) picks a palette colour
+that no other mode uses and keeps it. ac set this rule on 2026-10-08: *"for an alt-modality like
+the one in D i prefer it in red"*, and *"there is also the sync mode that is yellow, right? there
+could be a green one maybe, an orange, it depends, but in that case the color should be kept"*.
+
+The modes today, as the code draws them:
+
+| Mode | Colour | Hex | 256 | Where |
+|---|---|---|---|---|
+| PREFIX, SCROLL, COPY, NAVIGATE | `accent` | `#89b4fa` | 111 | `src/ui/menus.rs` (`mode_style`) |
+| PANES (display panes) | `red` | `#f38ba8` | 211 | `src/ui/display_panes.rs` (`mode_chip_style`) |
+| RESIZE | `mauve` | `#cba6f7` | 183 | `src/ui/display_panes.rs`; upstream `client/shell/render.rs` |
+| SYNC (`SYNC N panes`) | `SYNC_YELLOW` | `#ffd60a` | 220 | `src/ui.rs` (`SYNC_YELLOW` in `src/app/state.rs`) |
+
+SYNC's yellow is a fixed colour, not the palette's soft `yellow` (`#f9e2af`). It stays as it is,
+because a mode keeps its colour. Mode colours are a separate set from the state colours: on a
+mode bar, red means "PANES mode", not "failed".
 
 ### Text, numbers, truncation
 
@@ -165,7 +184,7 @@ question tool use the same ones. Done items may be struck through and dim (todos
    `#f38ba8` (256: 211). ac, 2026-10-08: *"for an alt-modality like the one in D i prefer it in red.
    keep your design but in that modality use the current red (that's not intese) where it's
    blue"*. So the clash this fixes is the second chip, not the colour: each mode keeps its own
-   colour (see Footer, mode bars).
+   colour (see Mode colour).
 10. **The todos/notes panel loses its inner frame.** The count moves to the title row, search
     moves to the subtitle row, and the preview moves under the list, after a rule. `↵ open pane`
     becomes the accent primary button, the same as `↵ apply` in settings. The bullet glyphs
@@ -600,7 +619,9 @@ AAAAAAAAAA ddd dddd  kkk ddddddddd  kkk dddd  k dddddddd
 ```
 
 
-AFTER (one red chip, bold red keys, `version` as a dim label; NAVIGATE below keeps its blue):
+AFTER (one red chip, bold red keys, `version` as a dim label; NAVIGATE below keeps its blue).
+The SYNC chip (`SYNC 2 panes`, yellow `#ffd60a`) needs no mockup. It already is a single chip in
+its own colour, and under the Mode colour rule it stays exactly as it is.
 
 ```text
  PANES   window 316x55 · panes 284x54  1-3 focus  any key close  version 0.8.2-ac-beta.145-dybala   

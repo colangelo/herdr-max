@@ -78,12 +78,19 @@ end with a button row instead: centred chips, the `↵` primary chip in `accent`
 - **THEN** `↵ open pane` is the accent primary chip and `spc toggle`, `c clear done`, `esc close`
   are `surface0` chips
 
-### Requirement: A mode bar has one chip in its mode's colour
+### Requirement: A mode keeps its own colour
 
-A mode bar SHALL show exactly one filled chip, the mode name, with dark bold text on the mode's own
-colour: `accent` for NAVIGATE and PREFIX, `red` (`#f38ba8`, 256-colour 211) for PANES, and `mauve`
-for RESIZE. Its keys SHALL be bold in the same colour. Every other label in the bar SHALL be dim
-text, with no second chip. Outside a mode bar, keys SHALL be bold `accent`.
+A mode that has its own colour SHALL keep it. Its bar SHALL show exactly one filled chip, the mode
+name, with dark bold text on that colour, and its keys SHALL be bold in the same colour. Every other
+label in the bar SHALL be dim text, with no second chip. A mode without a colour of its own, and
+everything that is not a mode bar, SHALL use `accent`. A new mode SHALL pick a palette colour that
+no other mode uses.
+
+#### Scenario: Today's mode colours
+
+- **WHEN** each mode's bar is drawn
+- **THEN** PREFIX, SCROLL, COPY and NAVIGATE use `accent`, PANES uses `red` (`#f38ba8`,
+  256-colour 211), RESIZE uses `mauve`, and SYNC uses `SYNC_YELLOW` (`#ffd60a`, 256-colour 220)
 
 #### Scenario: PANES bar
 
@@ -95,6 +102,11 @@ text, with no second chip. Outside a mode bar, keys SHALL be bold `accent`.
 
 - **WHEN** navigate mode is on
 - **THEN** `NAVIGATE` is an accent chip and its keys are bold accent
+
+#### Scenario: SYNC chip
+
+- **WHEN** a tab is syncing input to two panes
+- **THEN** the `SYNC 2 panes` chip keeps its yellow `#ffd60a` and is not recoloured to `accent`
 
 ### Requirement: Lost connection is shown in place
 

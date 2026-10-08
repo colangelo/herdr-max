@@ -7,6 +7,7 @@ Planned 2026-10-08. Issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/
 - [x] 1.3 `openspec validate unify-tui-look --strict`
 - [x] 1.4 ac approves the mockups, through the coordinator `herdr`, on 2026-10-08: *"i like the new look, but for an alt-modality like the one in D i prefer it in red."* and *"keep your design but in that modality use the current red (that's not intese) where it's blue"*
 - [x] 1.5 apply ac's change: mode bars take their mode's colour (PANES = soft red `#f38ba8`/211); decision 9, the Footer rule, mockup D and the spec updated
+- [x] 1.6 apply ac's add-on, 2026-10-08: *"there is also the sync mode that is yellow, right? there could be a green one maybe, an orange, it depends, but in that case the color should be kept"*. Added the general Mode colour rule and the mode → colour table (SYNC keeps `#ffd60a`), and noted SYNC under mockup D
 
 ## 2. Phase 2: asks pane (CONTEXT repo, branch `feat/asks-tui-herdr-style`, `context` reviews and merges)
 
