@@ -1078,7 +1078,9 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 4)).unwrap();
         terminal
-            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
             .unwrap();
         assert_eq!(
             terminal.backend().buffer()[(0, 1)].fg,
@@ -1087,7 +1089,9 @@ mod tests {
         ws.tabs[target].toggle_pane_sync(id, std::time::Instant::now());
         assert!(ws.tabs[target].sync_ending());
         terminal
-            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
             .unwrap();
         assert_eq!(
             terminal.backend().buffer()[(0, 1)].fg,
@@ -1095,7 +1099,9 @@ mod tests {
         );
         ws.tabs[target].set_sync(false);
         terminal
-            .draw(|frame| render_pane_borders(&app, &ws, target, &[info.clone()], &[], frame))
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
             .unwrap();
         assert_eq!(
             terminal.backend().buffer()[(0, 1)].fg,
