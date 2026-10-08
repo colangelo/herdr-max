@@ -565,14 +565,29 @@ impl ClientShellState {
                 self.config.clipboard_toast_position,
                 self.hits.notification_toast,
             );
-            occlusion.cover(crate::ui::render_copy_feedback_buffer(
-                &mut composed,
-                feedback_area,
-                feedback,
-                offset,
-                self.config.clipboard_toast_position,
-                &self.config.palette,
-            ));
+            let drawn = if self.config.clipboard_toast_position
+                == crate::config::ToastClipboardPosition::Pane
+            {
+                crate::ui::render_copy_feedback_buffer_for_source(
+                    &mut composed,
+                    feedback_area,
+                    self.copy_feedback_pane(),
+                    feedback,
+                    offset,
+                    self.config.clipboard_toast_position,
+                    &self.config.palette,
+                )
+            } else {
+                crate::ui::render_copy_feedback_buffer(
+                    &mut composed,
+                    feedback_area,
+                    feedback,
+                    offset,
+                    self.config.clipboard_toast_position,
+                    &self.config.palette,
+                )
+            };
+            occlusion.cover(drawn);
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.popup = None;

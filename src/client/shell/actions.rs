@@ -304,7 +304,9 @@ impl ClientShellState {
                     content_revision,
                 },
             ),
-            PendingEndpointKind::SelectionCopy,
+            PendingEndpointKind::SelectionCopy {
+                endpoint_id: self.active_endpoint_id.clone(),
+            },
             outcome,
         );
     }
@@ -640,12 +642,16 @@ impl ClientShellState {
                 let repaint = self.complete_pane_scroll(pane_id, serial, result, &mut outcome);
                 return (repaint, outcome.actions);
             }
-            PendingEndpointKind::SelectionCopy => {
+            PendingEndpointKind::SelectionCopy { endpoint_id } => {
                 return match result {
-                    Ok(crate::api::schema::ResponseResult::PaneSelection { text, .. })
+                    Ok(crate::api::schema::ResponseResult::PaneSelection { pane_id, text })
                         if !text.is_empty() =>
                     {
-                        let repaint = self.show_copy_feedback(std::time::Instant::now());
+                        let repaint = self.show_copy_feedback_for(
+                            Some(pane_id),
+                            Some(endpoint_id),
+                            std::time::Instant::now(),
+                        );
                         (
                             repaint,
                             vec![ClientShellAction::ClipboardWrite(text.into_bytes())],

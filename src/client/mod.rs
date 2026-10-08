@@ -1948,7 +1948,7 @@ async fn run_client_loop(
                             let (width, height) = state.reported_size;
                             let frame = state.shell.as_mut().and_then(|shell| {
                                 shell
-                                    .show_copy_feedback(std::time::Instant::now())
+                                    .show_forwarded_copy_feedback(&data, std::time::Instant::now())
                                     .then(|| shell.compose(width, height))
                                     .flatten()
                             });
@@ -2051,6 +2051,16 @@ async fn run_client_loop(
                             continue;
                         }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
+                            Ok(endpoint::EndpointControlMessage::ClipboardOrigin(origin)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.cache_clipboard_origin(
+                                        &endpoint_id,
+                                        Some(generation),
+                                        origin,
+                                    );
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::AgentViewProjection(
                                 projection,

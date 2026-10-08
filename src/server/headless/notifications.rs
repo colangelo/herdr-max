@@ -331,10 +331,32 @@ impl HeadlessServer {
                 }
                 false
             }
-            AppEvent::ClipboardWrite { content, .. } => {
+            AppEvent::ClipboardWrite {
+                content,
+                source_pane,
+            } => {
                 // Clipboard writes are client-local side effects. Forward them only to
                 // the foreground client instead of broadcasting to every attached client.
                 let data = base64::engine::general_purpose::STANDARD.encode(content.as_slice());
+                if let Some(pane_id) = source_pane.and_then(|pane| {
+                    self.app
+                        .state
+                        .workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, ws)| {
+                            ws.pane_state(pane)
+                                .and_then(|_| self.app.public_pane_id(index, pane))
+                        })
+                }) {
+                    if let Ok(origin) = protocol::endpoint::clipboard_origin_message(
+                        &self.client_shell_boot_id,
+                        pane_id,
+                        &data,
+                    ) {
+                        self.send_to_foreground_client(origin);
+                    }
+                }
                 self.send_to_foreground_client(ServerMessage::Clipboard { data });
                 false
             }

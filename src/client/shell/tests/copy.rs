@@ -2308,3 +2308,32 @@ fn copy_mode_repeat_during_projection_gap_stays_active() {
         );
     }
 }
+
+#[test]
+fn copied_feedback_centers_in_its_source_pane_with_public_identity() {
+    let mut config = Config::default();
+    config.ui.toast.clipboard.position = crate::config::ToastClipboardPosition::Pane;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(110, 40).unwrap();
+    let pane = state.hits.panes[0].inner_rect;
+    state.show_copy_feedback_for(
+        Some("pane_1".into()),
+        Some(ClientEndpointId::Local),
+        std::time::Instant::now(),
+    );
+    let frame = state.compose(110, 40).unwrap();
+    let x = pane.x + (pane.width - 23) / 2;
+    let y = pane.y + (pane.height - 3) / 2;
+    let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+    assert_eq!(cell.symbol, "┌");
+    assert_eq!(
+        cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.green)
+    );
+    state.copy_feedback.as_mut().unwrap().endpoint_id = None;
+    let frame = state.compose(110, 40).unwrap();
+    let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+    assert_ne!(cell.symbol, "┌", "unknown origin uses corner fallback");
+}

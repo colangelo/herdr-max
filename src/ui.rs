@@ -39,7 +39,10 @@ pub(crate) use self::sidebar::{
     ResolvedToken, ResolvedTokenKind, SpaceTokenContext,
 };
 use self::status::copy_feedback_rect;
-pub(crate) use self::status::{render_config_diagnostic_buffer, render_copy_feedback_buffer};
+pub(crate) use self::status::{
+    render_config_diagnostic_buffer, render_copy_feedback_buffer,
+    render_copy_feedback_buffer_for_source,
+};
 pub(crate) use self::tab_surface::{
     compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
     tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,

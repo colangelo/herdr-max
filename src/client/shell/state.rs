@@ -660,7 +660,9 @@ pub(super) enum PendingEndpointKind {
     WorktreeRemove {
         forced: bool,
     },
-    SelectionCopy,
+    SelectionCopy {
+        endpoint_id: ClientEndpointId,
+    },
     PaneScroll {
         pane_id: String,
         serial: u64,
@@ -952,7 +954,14 @@ pub(crate) struct ClientShellState {
     pub(super) pane_scroll_in_flight: HashMap<String, u64>,
     pub(super) pane_scroll_queued: HashMap<String, usize>,
     pub(super) pane_scroll_targets: HashMap<String, usize>,
-    pub(super) copy_feedback: Option<crate::app::state::CopyFeedback>,
+    pub(super) copy_feedback: Option<super::feedback::ClientCopyFeedback>,
+    pub(super) clipboard_origins: HashMap<
+        ClientEndpointId,
+        (
+            Option<u64>,
+            crate::protocol::endpoint::EndpointClipboardOrigin,
+        ),
+    >,
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     pub(super) input_leases: ClientInputLeases,
@@ -1124,6 +1133,7 @@ impl ClientShellState {
             pane_scroll_queued: HashMap::new(),
             pane_scroll_targets: HashMap::new(),
             copy_feedback: None,
+            clipboard_origins: HashMap::new(),
             copy_feedback_deadline: None,
             host_mouse_pixels: None,
             input_leases: ClientInputLeases::default(),
@@ -1312,6 +1322,7 @@ impl ClientShellState {
         }
         self.reset_copy_pipeline();
         self.copy_feedback = None;
+        self.clipboard_origins.clear();
         self.copy_feedback_deadline = None;
         self.host_mouse_pixels = None;
         self.dismissed_product_announcement = None;
@@ -1841,15 +1852,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
-        if !self.config.clipboard_toast_enabled {
-            return false;
-        }
-        self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
-            source_pane: None,
-        });
-        self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
-        true
+        self.show_copy_feedback_for(None, None, now)
     }
 
     pub(crate) fn tick_copy_feedback(&mut self, now: std::time::Instant) -> bool {
