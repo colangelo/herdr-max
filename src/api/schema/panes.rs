@@ -175,6 +175,9 @@ pub struct LayoutSetSplitRatioParams {
     pub pane_id: Option<String>,
     pub path: Vec<bool>,
     pub ratio: f32,
+    // A mouse drag: panes on each side of the border resize proportionally.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proportional: bool,
 }
 
 /// Rebalance every split in a layout so all panes become equally sized. Targets

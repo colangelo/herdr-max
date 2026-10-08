@@ -1429,6 +1429,7 @@ fn authority_mutation_requests_round_trip() {
             pane_id: None,
             path: vec![false, true],
             ratio: 0.6,
+            proportional: false,
         }),
     };
     let json = serde_json::to_value(&split_ratio).unwrap();

@@ -2363,6 +2363,7 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
                         pane_id: None,
                         path: Vec::new(),
                         ratio: 0.8,
+                        proportional: false,
                     },
                 ),
             },
