@@ -369,12 +369,6 @@ impl TerminalRuntime {
         self.0.synchronized_output_state()
     }
 
-    /// Whether a frame built from `since` must not show this pane (fork issue
-    /// 126); see `SYNC_HOLD_MAX` in `src/pane/terminal.rs`.
-    pub fn synchronized_frame_held(&self, since: u64, now: std::time::Instant) -> bool {
-        self.0.synchronized_frame_held(since, now)
-    }
-
     pub fn visible_text(&self) -> String {
         self.0.visible_text()
     }

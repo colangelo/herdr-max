@@ -1390,6 +1390,28 @@ async fn popup_synchronized_output_waits_for_complete_frame() {
     shutdown_test_runtimes(&mut server);
 }
 
+// Fork issue 126: a block that never ends stops holding the surface.
+#[tokio::test]
+async fn synchronized_output_stops_holding_the_surface_after_the_cap() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_matching_test_shell(&mut server, 7);
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "baseline");
+
+    write_shared_test_pane(&mut server, pane_id, b"\x1b[?2026h\rSTUCK");
+    server.render_and_stream();
+    assert!(
+        render.try_recv().is_err(),
+        "mid-block surface was published"
+    );
+
+    std::thread::sleep(crate::pane::SYNC_HOLD_MAX + Duration::from_millis(20));
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "surface after the cap");
+    shutdown_test_runtimes(&mut server);
+}
+
 #[tokio::test]
 async fn zoom_hidden_synchronized_pane_does_not_block_surface() {
     let mut server = test_headless_server();
