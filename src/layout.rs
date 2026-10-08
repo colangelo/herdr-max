@@ -1679,4 +1679,38 @@ mod tests {
         assert!(layout.close_focused());
         assert_eq!(layout.focused(), pane(2));
     }
+
+    fn ratioed(ratio: f32, first: Node, second: Node) -> Node {
+        Node::Split {
+            direction: Direction::Horizontal,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    /// ac's shape (#175), `Split(Split(left, Split(c1, c2)), c3)`, 100 columns
+    /// wide: left 20, c1 30, c2 30, c3 20.
+    fn left_then_two_then_one() -> TileLayout {
+        let inner = ratioed(0.5, Node::Pane(pane(2)), Node::Pane(pane(3)));
+        let outer = ratioed(0.25, Node::Pane(pane(1)), inner);
+        TileLayout::from_saved(ratioed(0.8, outer, Node::Pane(pane(4))), pane(1))
+    }
+
+    fn widths(layout: &TileLayout) -> Vec<u16> {
+        pane_rects(layout).iter().map(|(_, rect)| rect.width).collect()
+    }
+
+    #[test]
+    fn set_ratio_at_moves_one_border_and_leaves_panes_outside_its_split_alone() {
+        // Characterization of today's behaviour (#175): the left|c1 border is
+        // the first split of the left subtree, so only left, c1 and c2 change;
+        // c3 keeps its 20 columns.
+        let mut layout = left_then_two_then_one();
+        assert_eq!(widths(&layout), vec![20, 30, 30, 20]);
+
+        assert!(layout.set_ratio_at(&[false], 0.5));
+
+        assert_eq!(widths(&layout), vec![40, 20, 20, 20]);
+    }
 }
