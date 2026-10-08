@@ -1209,10 +1209,16 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
         .iter()
         .filter(|hit| hit.endpoint_id == remote_id)
         .collect::<Vec<_>>();
-    assert_eq!(visible_remote.len(), 3);
-    let gap_y = visible_remote[1].rect.bottom();
-    assert_eq!(visible_remote[2].rect.y, gap_y + 1);
-    assert!(visible_remote[2].rect.bottom() <= state.hits.workspace_body.bottom());
+    assert_eq!(
+        visible_remote.len(),
+        2,
+        "the reserved overflow summary leaves two complete rows"
+    );
+    assert_eq!(visible_remote[0].workspace_id, "ws_2");
+    assert_eq!(visible_remote[1].workspace_id, "ws_3");
+    let gap_y = visible_remote[0].rect.bottom();
+    assert_eq!(visible_remote[1].rect.y, gap_y + 1);
+    assert!(visible_remote[1].rect.bottom() <= state.hits.workspace_body.bottom());
     assert!(state
         .hits
         .workspaces
