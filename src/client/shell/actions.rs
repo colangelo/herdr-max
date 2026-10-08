@@ -1193,6 +1193,9 @@ impl ClientShellState {
             KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
                 pane_id: focused_pane?,
             })),
+            KeybindAction::ClearScrollback => Some(Method::PaneClearScrollback(PaneTarget {
+                pane_id: focused_pane?,
+            })),
             KeybindAction::BalancePanes => Some(Method::LayoutBalance(
                 crate::api::schema::LayoutBalanceParams {
                     tab_id: Some(focused_tab?),

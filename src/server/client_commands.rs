@@ -24,6 +24,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "notification.list",
     "notification.mark_seen",
     "pane.clear",
+    "pane.clear_scrollback",
     "pane.close",
     "pane.copy_motion",
     "pane.copy_search",
@@ -312,6 +313,10 @@ mod tests {
         assert_eq!(
             actual.remove("pane.clear").as_deref(),
             Some("0301d288ba198ddaa427dd7421c71911cccaf4ea03544531efa8b67ca21b08f6")
+        );
+        assert_eq!(
+            actual.remove("pane.clear_scrollback").as_deref(),
+            Some("7fae135ef10aeb8ebff20aeaedcb1fac3a560f16a277da00f2866d3ebb2877b8")
         );
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),

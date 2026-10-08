@@ -169,6 +169,10 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.rename_pane), "rename pane"),
                 entry(binding_label(&keybinds.edit_scrollback), "edit scrollback"),
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
+                entry(
+                    binding_label(&keybinds.clear_scrollback),
+                    "clear scrollback",
+                ),
                 entry(binding_label(&keybinds.balance_panes), "balance panes"),
                 entry(binding_label(&keybinds.next_layout), "cycle layout"),
                 entry(binding_label(&keybinds.open_pane_todos), "pane todos"),
