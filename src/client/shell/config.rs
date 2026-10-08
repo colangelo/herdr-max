@@ -113,6 +113,13 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            host_background: None,
+            sidebar_overflow: config.ui.sidebar_overflow,
+            sidebar_fog: config.sidebar_fog().0,
+            sidebar_fog_tint: config.sidebar_fog().1,
+            sidebar_fade: config.sidebar_fade(),
+            sidebar_fog_style: config.sidebar_fog_style(),
+
             sidebar_style: config.ui.sidebar_style,
             sidebar_active_border: config.ui.sidebar_active_border,
             sidebar_border_style: config.ui.pane_border_active_style,
@@ -365,6 +372,12 @@ impl ClientShellConfig {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
+                self.sidebar_overflow = config.ui.sidebar_overflow;
+                self.sidebar_fog = config.sidebar_fog().0;
+                self.sidebar_fog_tint = config.sidebar_fog().1;
+                self.sidebar_fade = config.sidebar_fade();
+                self.sidebar_fog_style = config.sidebar_fog_style();
+
                 self.sidebar_style = config.ui.sidebar_style;
                 self.sidebar_active_border = config.ui.sidebar_active_border;
                 self.sidebar_border_style = config.ui.pane_border_active_style;

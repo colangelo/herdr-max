@@ -13,6 +13,13 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
+    pub(super) sidebar_overflow: crate::config::SidebarOverflowConfig,
+    pub(super) sidebar_fog: [u32; crate::config::SIDEBAR_FOG_ROWS],
+    pub(super) sidebar_fog_tint: u32,
+    pub(super) sidebar_fade: [u32; crate::config::SIDEBAR_FOG_ROWS],
+    pub(super) sidebar_fog_style: crate::config::SidebarFogStyle,
+
     pub(super) sidebar_style: crate::config::SidebarStyleConfig,
     pub(super) sidebar_active_border: crate::config::SidebarActiveBorderConfig,
     pub(super) sidebar_border_style: crate::config::PaneBorderActiveStyleConfig,
@@ -96,6 +103,7 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,

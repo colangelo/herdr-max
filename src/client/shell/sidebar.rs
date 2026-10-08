@@ -275,29 +275,32 @@ pub(crate) fn render_sidebar(
                 .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
         })
         .collect::<Vec<_>>();
-    let mut metrics = super::scroll::list_scroll_metrics(
+    let (mut metrics, mut reserve, mut count) = super::sidebar_overflow::list_metrics(
         &row_heights,
         &gaps,
         body.height,
         *state.workspace_scroll,
+        config.sidebar_overflow.edge_rows(),
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
         if let Some(target) = entries
             .iter()
             .position(|entry| snapshot.workspaces[entry.index].focused)
         {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+            *state.workspace_scroll = super::sidebar_overflow::reveal_start(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
                 target,
+                config.sidebar_overflow.edge_rows(),
             );
-            metrics = super::scroll::list_scroll_metrics(
+            (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
+                config.sidebar_overflow.edge_rows(),
             );
         }
     }
@@ -308,15 +311,36 @@ pub(crate) fn render_sidebar(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+    let items = entries
+        .iter()
+        .map(|entry| {
+            super::sidebar_overflow::item(
+                displayed_workspace_status(
+                    snapshot,
+                    &snapshot.workspaces[entry.index],
+                    state.collapsed_groups,
+                ),
+                entry.pin_rank,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (entry_position, entry) in entries
+        .iter()
+        .enumerate()
+        .skip(*state.workspace_scroll)
+        .take(count)
+    {
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
+        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16)
+            .min(body.height.saturating_sub(reserve.top + reserve.bottom));
+        if y.saturating_add(row_height) > bottom {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
@@ -324,6 +348,11 @@ pub(crate) fn render_sidebar(
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+        visible.push(super::sidebar_overflow::VisibleItem {
+            index: entry_position,
+            rect,
+            exempt: workspace.focused || selected || dragged,
+        });
         if selected {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
         } else if dragged {
@@ -365,6 +394,15 @@ pub(crate) fn render_sidebar(
         y = y.saturating_add(row_height + gap);
     }
 
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *state.workspace_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, false, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;

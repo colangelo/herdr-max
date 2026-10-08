@@ -323,6 +323,7 @@ pub(super) fn render_shell(
         );
     }
     if !config.mouse_capture {
+        hits.overflow_edges.clear();
         hits.sidebar_divider = Rect::default();
         hits.sidebar_section_divider = Rect::default();
         hits.workspace_scrollbar = Rect::default();

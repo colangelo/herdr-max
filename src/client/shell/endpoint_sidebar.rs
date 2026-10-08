@@ -392,20 +392,22 @@ pub(super) fn render_expanded(
             Row::Endpoint(_) => false,
         });
         if let Some(selected_row) = selected_row {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+            *state.workspace_scroll = super::sidebar_overflow::reveal_start(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
                 selected_row,
+                config.sidebar_overflow.edge_rows(),
             );
         }
     }
-    let metrics = super::scroll::list_scroll_metrics(
+    let (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
         &row_heights,
         &gaps,
         body.height,
         *state.workspace_scroll,
+        config.sidebar_overflow.edge_rows(),
     );
     hits.workspace_max_scroll = metrics.max_offset_from_bottom;
     hits.workspace_scroll_metrics = Some(metrics);
@@ -414,15 +416,47 @@ pub(super) fn render_expanded(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (row_index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
+    let items = rows
+        .iter()
+        .map(|row| match row {
+            Row::Endpoint(_) => {
+                super::sidebar_overflow::item(crate::api::schema::AgentStatus::Unknown, None)
+            }
+            Row::Workspace { endpoint, entry } => state.endpoints[*endpoint]
+                .snapshot
+                .as_deref()
+                .map(|snapshot| {
+                    super::sidebar_overflow::item(
+                        snapshot.workspaces[entry.index].agent_status,
+                        entry.pin_rank,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    super::sidebar_overflow::item(crate::api::schema::AgentStatus::Unknown, None)
+                }),
+        })
+        .collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (row_index, row) in rows
+        .iter()
+        .enumerate()
+        .skip(*state.workspace_scroll)
+        .take(count)
+    {
         match row {
             Row::Endpoint(index) => {
-                if y >= body.bottom() {
+                if y >= bottom {
                     break;
                 }
                 let endpoint = &state.endpoints[*index];
                 let rect = Rect::new(body.x, y, content_width, 1);
+                visible.push(super::sidebar_overflow::VisibleItem {
+                    index: row_index,
+                    rect,
+                    exempt: &state.endpoints[*index].endpoint_id == state.active_endpoint_id,
+                });
                 let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
                 let marker = if collapsed { "▸" } else { "▾" };
                 let status_badge = render_endpoint_row(
@@ -470,8 +504,9 @@ pub(super) fn render_expanded(
                     entry.indented,
                     &config.spaces,
                 );
-                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-                if y.saturating_add(height) > body.bottom() {
+                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16)
+                    .min(body.height.saturating_sub(reserve.top + reserve.bottom));
+                if y.saturating_add(height) > bottom {
                     break;
                 }
                 let rect = Rect::new(body.x, y, content_width, height);
@@ -484,6 +519,11 @@ pub(super) fn render_expanded(
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
+                });
+                visible.push(super::sidebar_overflow::VisibleItem {
+                    index: row_index,
+                    rect,
+                    exempt: selected || (endpoint_active && workspace.focused),
                 });
                 super::sidebar::render_workspace_rows(
                     buffer,
@@ -527,6 +567,15 @@ pub(super) fn render_expanded(
             }
         }
     }
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *state.workspace_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, false, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;

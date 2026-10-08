@@ -1950,6 +1950,26 @@ impl ClientShellState {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, agents, above, page)) = self
+                    .hits
+                    .overflow_edges
+                    .iter()
+                    .find(|(rect, _, _, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    let (scroll, max) = if agents {
+                        (&mut self.agent_scroll, self.hits.agent_max_scroll)
+                    } else {
+                        (&mut self.workspace_scroll, self.hits.workspace_max_scroll)
+                    };
+                    *scroll = if above {
+                        scroll.saturating_sub(page)
+                    } else {
+                        scroll.saturating_add(page).min(max)
+                    };
+                    outcome.repaint = true;
+                    return;
+                }
                 if self.selection.take().is_some() {
                     outcome.repaint = true;
                 }

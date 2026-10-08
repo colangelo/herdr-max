@@ -68,6 +68,8 @@ pub(super) fn render_expanded(
         agent_scroll,
         hits,
         |row| row.agent.rows.len(),
+        |row| super::sidebar_overflow::item(row.agent.status, row.agent.pin_rank),
+        |row| row.agent.focused,
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
             if row.stale {
@@ -109,12 +111,13 @@ impl ClientShellState {
         if let Some(last) = gaps.last_mut() {
             *last = 0;
         }
-        self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
+        self.agent_scroll = super::sidebar_overflow::reveal_start(
             &heights,
             &gaps,
             body_height,
             self.agent_scroll,
             target,
+            self.config.sidebar_overflow.edge_rows(),
         );
     }
 }

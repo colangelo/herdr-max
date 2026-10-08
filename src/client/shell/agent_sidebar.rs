@@ -90,6 +90,8 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| row.rows.len(),
+        |row| super::sidebar_overflow::item(row.status, row.pin_rank),
+        |row| row.focused,
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
@@ -172,6 +174,8 @@ pub(super) fn render_agent_list<T>(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
+    edge_item: impl Fn(&T) -> super::sidebar_overflow::EdgeItem,
+    exempt: impl Fn(&T) -> bool,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
 ) {
     let body = Rect::new(
@@ -213,8 +217,13 @@ pub(super) fn render_agent_list<T>(
             }
         })
         .collect::<Vec<_>>();
-    let metrics =
-        super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *agent_scroll);
+    let (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
+        &row_heights,
+        &gaps,
+        body.height,
+        *agent_scroll,
+        config.sidebar_overflow.edge_rows(),
+    );
     hits.agent_max_scroll = metrics.max_offset_from_bottom;
     hits.agent_scroll_metrics = Some(metrics);
     *agent_scroll = metrics
@@ -222,13 +231,22 @@ pub(super) fn render_agent_list<T>(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
-        let height = row_heights[index].min(body.height);
-        if y.saturating_add(height) > body.bottom() {
+    let items = rows.iter().map(edge_item).collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (index, row) in rows.iter().enumerate().skip(*agent_scroll).take(count) {
+        let height =
+            row_heights[index].min(body.height.saturating_sub(reserve.top + reserve.bottom));
+        if y.saturating_add(height) > bottom {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, height);
+        visible.push(super::sidebar_overflow::VisibleItem {
+            index,
+            rect,
+            exempt: exempt(row),
+        });
         render_row(buffer, rect, row, hits);
         y = y
             .saturating_add(height)
@@ -239,6 +257,15 @@ pub(super) fn render_agent_list<T>(
             });
     }
 
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *agent_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, true, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.agent_scrollbar = track;

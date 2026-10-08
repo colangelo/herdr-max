@@ -34,6 +34,7 @@ mod render;
 mod scroll;
 mod settings;
 mod sidebar_chrome;
+mod sidebar_overflow;
 mod state;
 mod state_presentation;
 mod surface_patch;
