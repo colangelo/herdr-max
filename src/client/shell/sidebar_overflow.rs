@@ -758,6 +758,7 @@ mod client_adapter_tests {
         config.ui.sidebar_fog_style = "both".into();
         let mut config = ClientShellConfig::from_config(&config);
         config.palette.sidebar_bg = Color::Reset;
+        config.palette.text = Color::Rgb(210, 210, 210);
         config.host_background = Some(crate::terminal_theme::RgbColor {
             r: 10,
             g: 10,
