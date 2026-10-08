@@ -180,40 +180,52 @@ fn a_respawn_refused_only_for_a_process_does_not_mention_todos() {
     assert!(!detail.contains("outstanding"), "{detail}");
 }
 
+fn refuse_with(
+    state: &mut ClientShellState,
+    request_id: &str,
+    message: &str,
+) -> (bool, Vec<ClientShellAction>) {
+    state.handle_endpoint_result(
+        "boot-1",
+        request_id,
+        Err(ClientShellEndpointError {
+            code: Some("confirmation_required".into()),
+            message: message.into(),
+        }),
+    )
+}
+
+/// The fork never asked about todos on a tab close: a refusal that is only
+/// about todos is answered with the forced close, no dialog.
 #[test]
-fn a_tab_close_refused_for_todos_asks_and_forces() {
+fn a_tab_close_refused_for_todos_is_forced_without_asking() {
     let mut state = state();
     let mut projected = snapshot();
     let mut tab = projected.tabs[0].clone();
     tab.tab_id = "tab_2".into();
-    tab.label = "logs".into();
     tab.focused = false;
     projected.tabs.push(tab);
     state.set_snapshot(Box::new(projected));
     let mut outcome = ClientShellInput::default();
     state.request_tab_close("tab_2".into(), &mut outcome);
-    let (id, _) = only_method(&outcome);
+    let (id, method) = only_method(&outcome);
+    assert!(matches!(method, Method::TabClose(ref params) if !params.force));
 
-    refuse(
+    let (_, actions) = refuse_with(
         &mut state,
         &id,
-        "this tab still has 3 open todos (pane_2: a; pane_2: b; pane_2: c)",
+        "this tab still has 3 open todos (pane_2: a)",
     );
 
-    assert_eq!(
-        confirm_text(&state),
-        (
-            "Close tab with unfinished todos?".to_owned(),
-            "logs - 3 outstanding todos".to_owned()
-        )
-    );
-    let (_, forced) = only_method(&state.handle_input_bytes(b"\r"));
-    assert!(matches!(forced, Method::TabClose(ref params)
-        if params.tab_id == "tab_2" && params.force));
+    assert!(state.overlay.is_none());
+    assert!(matches!(actions.as_slice(),
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, Method::TabClose(params)
+                if params.tab_id == "tab_2" && params.force)));
 }
 
 #[test]
-fn a_confirmed_workspace_close_refused_for_todos_asks_again_and_forces() {
+fn a_confirmed_workspace_close_refused_for_todos_is_forced_without_asking_again() {
     let mut state = state();
     let mut outcome = ClientShellInput::default();
     state.request_workspace_close("ws_1".into(), None, &mut outcome);
@@ -224,22 +236,17 @@ fn a_confirmed_workspace_close_refused_for_todos_asks_again_and_forces() {
     let (id, method) = only_method(&state.handle_input_bytes(b"\r"));
     assert!(matches!(method, Method::WorkspaceClose(ref params) if !params.force));
 
-    refuse(
+    let (_, actions) = refuse_with(
         &mut state,
         &id,
         "this workspace still has 1 open todo (pane_1: a)",
     );
 
-    assert_eq!(
-        confirm_text(&state),
-        (
-            "Close workspace with unfinished todos?".to_owned(),
-            "client-shell - 1 outstanding todo".to_owned()
-        )
-    );
-    let (_, forced) = only_method(&state.handle_input_bytes(b"\r"));
-    assert!(matches!(forced, Method::WorkspaceClose(ref params)
-        if params.workspace_id == "ws_1" && params.force));
+    assert!(state.overlay.is_none());
+    assert!(matches!(actions.as_slice(),
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(&request.method, Method::WorkspaceClose(params)
+                if params.workspace_id == "ws_1" && params.force)));
 }
 
 #[test]

@@ -98,7 +98,9 @@ impl ClientShellState {
         }
     }
 
-    /// Open the confirmation for a refused close or respawn. Returns false when
+    /// Answer a refused close or respawn: a pane close or respawn opens the
+    /// fork's confirmation, a tab or workspace close is forced at once.
+    /// Returns false when
     /// the refusal is not one a forced resend answers, so the caller can treat
     /// it as before (a worktree-group close keeps its own confirmation).
     pub(super) fn open_force_confirmation(
@@ -106,6 +108,7 @@ impl ClientShellState {
         target: &ClientForceTarget,
         boot_id: &str,
         message: &str,
+        outcome: &mut ClientShellInput,
     ) -> bool {
         let todos = refused_open_todo_count(message);
         let (title, detail) = match target {
@@ -129,40 +132,22 @@ impl ClientShellState {
                     format!("{label} - {}", outstanding(count)),
                 )
             }
-            ClientForceTarget::TabClose { tab_id } => {
-                let Some(count) = todos else {
+            // The fork never asked about todos on a tab or workspace close:
+            // the user already chose to close it (after the ordinary
+            // confirm_close dialog where that applies), so a refusal that is
+            // only about todos is answered with the forced close at once.
+            ClientForceTarget::TabClose { .. } | ClientForceTarget::WorkspaceClose { .. } => {
+                if todos.is_none() {
                     return false;
-                };
-                let label = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.tabs.iter().find(|tab| &tab.tab_id == tab_id))
-                    .map(|tab| tab.label.clone())
-                    .unwrap_or_else(|| "this tab".to_owned());
-                (
-                    "Close tab with unfinished todos?",
-                    format!("{label} - {}", outstanding(count)),
-                )
-            }
-            ClientForceTarget::WorkspaceClose { workspace_id, .. } => {
-                let Some(count) = todos else {
-                    return false;
-                };
-                let label = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| {
-                        snapshot
-                            .workspaces
-                            .iter()
-                            .find(|workspace| &workspace.workspace_id == workspace_id)
-                    })
-                    .map(|workspace| workspace.label.clone())
-                    .unwrap_or_else(|| "this workspace".to_owned());
-                (
-                    "Close workspace with unfinished todos?",
-                    format!("{label} - {}", outstanding(count)),
-                )
+                }
+                self.accept_force_confirmation(
+                    ClientForceConfirmation {
+                        target: target.clone(),
+                        boot_id: boot_id.to_owned(),
+                    },
+                    outcome,
+                );
+                return true;
             }
         };
         let Some(workspace_id) = self.force_target_workspace(target) else {

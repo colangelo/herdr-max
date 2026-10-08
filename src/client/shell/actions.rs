@@ -833,12 +833,13 @@ impl ClientShellState {
                 return (repaint || outcome.repaint, outcome.actions);
             }
         }
+        let mut forced = ClientShellInput::default();
         let repaint = match result {
             Ok(_) => false,
             Err(error)
                 if error.code.as_deref() == Some("confirmation_required")
                     && pending.force_target.as_ref().is_some_and(|target| {
-                        self.open_force_confirmation(target, boot_id, &error.message)
+                        self.open_force_confirmation(target, boot_id, &error.message, &mut forced)
                     }) =>
             {
                 true
@@ -855,7 +856,7 @@ impl ClientShellState {
             }
             Err(_) => true,
         };
-        (repaint, Vec::new())
+        (repaint || forced.repaint, forced.actions)
     }
 
     pub(super) fn endpoint_method_for_action(
