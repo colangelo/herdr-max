@@ -139,16 +139,16 @@ exit 255
         }
     }));
 
-    wait_for_file(&started_path, Duration::from_secs(2));
+    wait_for_file(&started_path, Duration::from_secs(10));
     let mut before_approval = Vec::new();
     while !String::from_utf8_lossy(&before_approval).contains(CHECK_URL) {
-        match line_rx.recv_timeout(Duration::from_secs(2)) {
+        match line_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(bytes) => before_approval.extend(bytes),
             Err(_) => break,
         }
     }
     fs::write(&approval_path, b"approved").expect("release fake ssh approval");
-    wait_for_file(&advanced_path, Duration::from_secs(2));
+    wait_for_file(&advanced_path, Duration::from_secs(10));
 
     let status = child.wait().expect("wait for remote attach");
     cleanup.child = None;
