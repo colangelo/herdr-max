@@ -151,12 +151,190 @@ impl ReexecPlan {
     }
 }
 
+/// What to do about the server's build after a handoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Follow {
+    /// Same build, unknown build, or already exec'd for this server build.
+    Stay,
+    /// The builds differ. `target` is the binary to exec, `None` when none was
+    /// found or this platform cannot exec.
+    Restart {
+        build: ClientBuild,
+        target: Option<std::path::PathBuf>,
+    },
+}
+
+/// The decision from the server's reported build and binary. Pure: `exists`
+/// stands in for the filesystem and nothing is exec'd.
+pub(crate) fn follow_server(
+    client: &str,
+    server_version: Option<&str>,
+    server_exe: Option<&str>,
+    guard: Option<&str>,
+    own_exe: Option<&std::path::Path>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Follow {
+    let ReexecDecision::Reexec(build) = decide(client, server_version, guard) else {
+        return Follow::Stay;
+    };
+    #[cfg(unix)]
+    let target = own_exe.and_then(|own| target_binary(server_exe, own, exists));
+    #[cfg(not(unix))]
+    let target = {
+        let _ = (server_exe, own_exe, exists);
+        None
+    };
+    Follow::Restart { build, target }
+}
+
+/// After a live update ended this client's session, replace it with the
+/// server's binary when the builds differ (fork issue 165): a client left on an
+/// old build parses `config.toml` with an old schema and runs on default
+/// client-side settings. The terminal is already restored; argv, environment
+/// and tty carry over through `exec`. Returns when it stays (same build) or
+/// when it could not exec; the client then reattaches in-process and the next
+/// session's banner tells the user to detach and reattach (`take_update_notice`).
+pub(super) fn reexec_onto_server_build() {
+    let Some(status) = read_server_status_after_handoff() else {
+        return;
+    };
+    let client_version = crate::build_info::version();
+    let guard = std::env::var(REEXEC_ENV_VAR).ok();
+    let own = std::env::current_exe().ok();
+    let follow = follow_server(
+        &client_version,
+        status.version.as_deref(),
+        status.exe.as_deref(),
+        guard.as_deref(),
+        own.as_deref(),
+        |path| path.exists(),
+    );
+    let Follow::Restart { build, target } = follow else {
+        return;
+    };
+    let server_version = status.version.unwrap_or_default();
+    #[cfg(unix)]
+    if let Some(target) = target {
+        let argv: Vec<OsString> = std::env::args_os().collect();
+        let plan = plan(target, &argv);
+        eprintln!(
+            "herdr: the client ({client_version}) is {} than the server ({server_version}); restarting it onto {}",
+            if build == ClientBuild::Newer {
+                "newer"
+            } else {
+                "older"
+            },
+            plan.program.display()
+        );
+        use std::os::unix::process::CommandExt as _;
+        // `exec` returns only when it failed.
+        let err = plan.command(&server_version).exec();
+        tracing::warn!(error = %err, program = %plan.program.display(), "client re-exec onto the server build failed");
+    }
+    #[cfg(not(unix))]
+    let _ = (build, target);
+    let notice = format!(
+        "client ({client_version}) is on a different build than the server ({server_version}); detach and reattach to update"
+    );
+    if let Ok(mut pending) = UPDATE_NOTICE.lock() {
+        *pending = Some(notice.clone());
+    }
+    tracing::warn!(
+        client = %client_version,
+        server = %server_version,
+        "client is on a different build than the server and could not re-exec"
+    );
+}
+
+/// The banner a client that stays on a different build than the server shows in
+/// its next session (a live-handoff reattach is in-process, so the terminal is
+/// free for it only once the session starts).
+static UPDATE_NOTICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `diagnostic` with the pending update notice appended, which is consumed.
+pub(super) fn with_update_notice(diagnostic: Option<String>) -> Option<String> {
+    let notice = UPDATE_NOTICE
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take());
+    match (diagnostic, notice) {
+        (Some(diagnostic), Some(notice)) => Some(format!("{diagnostic}; {notice}")),
+        (diagnostic, notice) => diagnostic.or(notice),
+    }
+}
+
+/// The new server's version and binary, once its API socket answers (it can
+/// lag the client socket by a moment after a handoff).
+fn read_server_status_after_handoff() -> Option<crate::api::RuntimeStatus> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(Some(status)) = crate::api::read_runtime_status_at(
+            &crate::api::socket_path(),
+            std::time::Duration::from_secs(1),
+        ) {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const OLD: &str = "0.8.2-ac-beta.120-koopmeiners";
     const NEW: &str = "0.8.2-ac-beta.137-bonucci";
+
+    #[test]
+    fn a_client_that_stays_on_another_build_shows_one_banner_in_its_next_session() {
+        assert_eq!(
+            with_update_notice(Some("config".into())),
+            Some("config".into())
+        );
+        *UPDATE_NOTICE.lock().expect("notice lock") = Some("update".into());
+        assert_eq!(
+            with_update_notice(Some("config".into())).as_deref(),
+            Some("config; update")
+        );
+        // Consumed: the next session starts clean.
+        assert_eq!(with_update_notice(None), None);
+        *UPDATE_NOTICE.lock().expect("notice lock") = Some("update".into());
+        assert_eq!(with_update_notice(None).as_deref(), Some("update"));
+    }
+
+    #[test]
+    fn the_call_site_follows_a_differing_server_build_only_once() {
+        let own = std::path::Path::new("/usr/local/bin/herdr-beta");
+        let follow = |server: Option<&str>, guard: Option<&str>| {
+            follow_server(
+                OLD,
+                server,
+                Some("/usr/local/bin/herdr-beta"),
+                guard,
+                Some(own),
+                |_| true,
+            )
+        };
+        assert_eq!(follow(Some(OLD), None), Follow::Stay);
+        assert_eq!(follow(None, None), Follow::Stay);
+        assert_eq!(follow(Some(NEW), Some(NEW)), Follow::Stay);
+        let Follow::Restart { build, target } = follow(Some(NEW), None) else {
+            panic!("an older client restarts onto a newer server");
+        };
+        assert_eq!(build, ClientBuild::Older);
+        #[cfg(unix)]
+        assert_eq!(target, Some(PathBuf::from("/usr/local/bin/herdr-beta")));
+        #[cfg(not(unix))]
+        assert_eq!(target, None);
+        // No binary to exec: the call site falls back to the message.
+        assert!(matches!(
+            follow_server(OLD, Some(NEW), None, None, Some(own), |_| false),
+            Follow::Restart { target: None, .. }
+        ));
+    }
 
     #[test]
     fn the_decision_covers_same_older_newer_and_unknown() {

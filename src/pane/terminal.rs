@@ -1,6 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -198,16 +197,6 @@ pub(crate) struct GhosttyPaneTerminal {
 /// frame before herdr draws the pane as it is (fork issue 126).
 pub(crate) const SYNC_HOLD_MAX: Duration = Duration::from_millis(200);
 
-/// Counts synchronized-update begins and ends across every pane. Each pane
-/// keeps the count of its own last one, so a frame that read the count before
-/// it was built can tell a pane that began or ended a block while it was built.
-static SYNC_TRANSITIONS: AtomicU64 = AtomicU64::new(0);
-
-/// The synchronized-update count now; read it before building a frame.
-pub(crate) fn sync_transition_seq() -> u64 {
-    SYNC_TRANSITIONS.load(Ordering::Acquire)
-}
-
 pub(crate) struct GhosttyPaneCore {
     #[cfg(test)]
     pub dirty_collection_hook: Option<Box<dyn FnOnce() + Send>>,
@@ -233,8 +222,6 @@ pub(crate) struct GhosttyPaneCore {
     windows_powershell_prompt_cwd_reporting: bool,
     /// When the open synchronized update began; `None` outside one.
     sync_began_at: Option<Instant>,
-    /// [`SYNC_TRANSITIONS`] at this pane's last begin or end.
-    sync_transition_seq: u64,
 }
 
 pub(crate) struct PaneTerminal {
@@ -510,10 +497,6 @@ impl PaneTerminal {
 
     pub(crate) fn synchronized_output_state(&self) -> (bool, u64) {
         self.ghostty.synchronized_output_state()
-    }
-
-    pub fn synchronized_frame_held(&self, since: u64, now: Instant) -> bool {
-        self.ghostty.synchronized_frame_held(since, now)
     }
 
     pub fn visible_text(&self) -> String {
@@ -1236,7 +1219,6 @@ impl GhosttyPaneTerminal {
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
                 sync_began_at: None,
-                sync_transition_seq: 0,
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -2052,19 +2034,6 @@ impl GhosttyPaneTerminal {
         effective_cursor_state(&mut core, current)
     }
 
-    /// Whether a frame whose build started at transition count `since` must
-    /// not show this pane: its synchronized update is open and younger than
-    /// [`SYNC_HOLD_MAX`], or it began or ended one after `since` (fork issue
-    /// 126). One lock, no allocation.
-    pub fn synchronized_frame_held(&self, since: u64, now: Instant) -> bool {
-        self.core.lock().is_ok_and(|core| {
-            core.sync_transition_seq > since
-                || core
-                    .sync_began_at
-                    .is_some_and(|began| now < began + SYNC_HOLD_MAX)
-        })
-    }
-
     pub fn synchronized_output_active(&self) -> bool {
         self.core
             .lock()
@@ -2077,16 +2046,31 @@ impl GhosttyPaneTerminal {
             .unwrap_or(false)
     }
 
+    /// Whether a surface must not show this pane, and the epoch that changes
+    /// whenever a synchronized update begins or ends. A frame that read the
+    /// epoch before it was built and reads another one after was torn.
+    ///
+    /// The pane is held only while its synchronized update is younger than
+    /// [`SYNC_HOLD_MAX`] (fork issue 126): an app that never ends its block
+    /// must not freeze the screen. The block's begin schedules a render at
+    /// that deadline. One lock, no allocation.
     pub(crate) fn synchronized_output_state(&self) -> (bool, u64) {
+        self.synchronized_output_state_at(Instant::now())
+    }
+
+    fn synchronized_output_state_at(&self, now: Instant) -> (bool, u64) {
         self.core
             .lock()
             .map(|core| {
-                (
-                    core.terminal
-                        .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
-                        .unwrap_or(false),
-                    core.synchronized_output_epoch,
-                )
+                let active = core
+                    .terminal
+                    .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
+                    .unwrap_or(false);
+                let held = active
+                    && core
+                        .sync_began_at
+                        .is_none_or(|began| now < began + SYNC_HOLD_MAX);
+                (held, core.synchronized_output_epoch)
             })
             .unwrap_or((true, 0))
     }
@@ -2710,8 +2694,7 @@ fn effective_cursor_state(
         .reported_cursor(current, Instant::now())
 }
 
-/// Tracks this pane's synchronized updates after a write: when the open one
-/// began, and the transition count at each begin or end. A begin and its end
+/// Tracks when this pane's open synchronized update began. A begin and its end
 /// inside one write are atomic under the core lock and change nothing; an end
 /// followed by a new begin in one write starts the hold clock again. Returns
 /// whether a block began, so the write can ask for a render at
@@ -2722,14 +2705,12 @@ fn observe_synchronized_output(core: &mut GhosttyPaneCore, active: bool, bytes: 
         (true, true) => contains_synchronized_output_begin(bytes),
         (true, false) => {
             core.sync_began_at = None;
-            core.sync_transition_seq = SYNC_TRANSITIONS.fetch_add(1, Ordering::AcqRel) + 1;
             return false;
         }
         (false, false) => false,
     };
     if began {
         core.sync_began_at = Some(Instant::now());
-        core.sync_transition_seq = SYNC_TRANSITIONS.fetch_add(1, Ordering::AcqRel) + 1;
     }
     began
 }
@@ -6594,52 +6575,43 @@ mod tests {
         assert_eq!(pane_terminal.synchronized_output_state(), (false, 2));
     }
 
-    // Fork issue 126: the hold state a frame reads.
+    // Fork issue 126: the hold state a surface capture reads.
     #[test]
-    fn synchronized_output_holds_frames_until_it_ends_or_times_out() {
+    fn synchronized_output_holds_until_it_ends_or_times_out() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         let pane_terminal = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
         let pane_id = PaneId::from_raw(1);
-        let since = sync_transition_seq();
-        assert!(!pane_terminal.synchronized_frame_held(since, Instant::now()));
+        assert_eq!(
+            pane_terminal.synchronized_output_state_at(Instant::now()),
+            (false, 0)
+        );
 
         let begin = pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026h", &tx);
         assert_eq!(begin.render_delay, Some(SYNC_HOLD_MAX), "timeout render");
         let now = Instant::now();
-        let after_begin = sync_transition_seq();
-        assert!(after_begin > since);
-        assert!(pane_terminal.synchronized_frame_held(since, now));
-        assert!(
-            pane_terminal.synchronized_frame_held(after_begin, now),
-            "mid-block holds whatever the count"
-        );
-        assert!(
-            !pane_terminal.synchronized_frame_held(after_begin, now + SYNC_HOLD_MAX),
+        assert_eq!(pane_terminal.synchronized_output_state_at(now), (true, 1));
+        assert_eq!(
+            pane_terminal.synchronized_output_state_at(now + SYNC_HOLD_MAX),
+            (false, 1),
             "a stuck block stops holding"
         );
 
         let body = pane_terminal.process_pty_bytes(pane_id, 0, b"hello", &tx);
         assert_eq!(body.render_delay, None, "one timeout render per block");
-        let mid = sync_transition_seq();
 
         pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026l", &tx);
-        let now = Instant::now();
-        assert!(
-            pane_terminal.synchronized_frame_held(mid, now),
-            "an end during the build voids the frame"
+        assert_eq!(
+            pane_terminal.synchronized_output_state_at(now),
+            (false, 2),
+            "the end releases the hold and changes the epoch"
         );
-        let after_end = sync_transition_seq();
-        assert!(!pane_terminal.synchronized_frame_held(after_end, now));
 
         pane_terminal.process_pty_bytes(pane_id, 0, b"plain output", &tx);
-        assert!(
-            !pane_terminal.synchronized_frame_held(after_end, Instant::now()),
-            "plain output is no transition"
-        );
         pane_terminal.process_pty_bytes(pane_id, 0, b"\x1b[?2026hwhole\x1b[?2026l", &tx);
-        assert!(
-            !pane_terminal.synchronized_frame_held(after_end, Instant::now()),
+        assert_eq!(
+            pane_terminal.synchronized_output_state_at(Instant::now()),
+            (false, 2),
             "a block inside one write is atomic"
         );
     }

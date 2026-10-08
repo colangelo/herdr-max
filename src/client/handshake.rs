@@ -242,6 +242,13 @@ pub(super) fn do_handshake(
         "failed to clear client handshake read timeout",
     )?;
 
+    // A server in the middle of a live handoff refuses with a shutdown.
+    if let ServerMessage::ServerShutdown { reason } = &welcome {
+        return Err(ClientError::ServerShutdown {
+            reason: reason.clone(),
+        });
+    }
+
     if endpoint_shell {
         let ServerMessage::EndpointControl { kind, data } = welcome else {
             return Err(ClientError::Protocol(protocol::FramingError::Io(

@@ -203,6 +203,13 @@ pub struct DetachedHead {
 }
 
 impl DetachedHead {
+    pub(crate) fn operation_name(&self) -> Option<&'static str> {
+        self.operation.map(|operation| match operation {
+            GitOperation::Rebase => "rebase",
+            GitOperation::Bisect => "bisect",
+        })
+    }
+
     /// What the sidebar prints in the branch slot: `@a620c06`, or
     /// `rebase @a620c06` / `bisect @a620c06` while that operation runs.
     pub fn label(&self) -> String {

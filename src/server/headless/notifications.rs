@@ -695,6 +695,20 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::AgentHintReported { .. } | AppEvent::AgentHintExpired { .. } => {
+                // A hint raises or releases Blocked ahead of the screen (fork
+                // issue 165): its effective transition must ring and toast like
+                // any other state change. In the default arm it changed state
+                // and told nobody, and the screen read that followed saw
+                // Blocked already and rang nothing either.
+                self.sync_foreground_client_state();
+                let updates = self.app.handle_internal_event_with_pane_updates(ev);
+                for update in &updates {
+                    self.forward_semantic_agent_notification(update);
+                    self.forward_pane_state_update_notifications_to_clients(update);
+                }
+                true
+            }
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }

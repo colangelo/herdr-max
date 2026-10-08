@@ -626,6 +626,7 @@ impl ClientShellState {
         matches!(
             self.overlay.as_ref(),
             Some(ClientShellOverlay::Rename(_))
+                | Some(ClientShellOverlay::TodoEdit(_))
                 | Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
                         creating: false,

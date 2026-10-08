@@ -50,12 +50,11 @@ pub(crate) use self::terminal::test_encode_key_for_app;
 pub use self::terminal::InputState;
 #[cfg(test)]
 pub(crate) use self::terminal::SYNC_HOLD_MAX;
-pub(crate) use self::terminal::{
-    sync_transition_seq, TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome,
-    TerminalReadSnapshot, TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint,
-    TerminalWordMotion,
-};
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+pub(crate) use self::terminal::{
+    TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
+    TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
+};
 pub use self::{
     state::PaneState,
     terminal::{ScrollMetrics, TerminalCursorState},
@@ -4038,12 +4037,6 @@ impl PaneRuntime {
 
     pub(crate) fn synchronized_output_state(&self) -> (bool, u64) {
         self.terminal.synchronized_output_state()
-    }
-
-    /// Whether a frame built from `since` must not show this pane (fork issue
-    /// 126); see `SYNC_HOLD_MAX` in `src/pane/terminal.rs`.
-    pub fn synchronized_frame_held(&self, since: u64, now: std::time::Instant) -> bool {
-        self.terminal.synchronized_frame_held(since, now)
     }
 
     pub fn visible_text(&self) -> String {

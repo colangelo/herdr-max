@@ -811,6 +811,12 @@ impl NotificationLog {
         self.last_id
     }
 
+    /// The id the newest post got; moves on every post, even once the log is
+    /// full and the counts stay put.
+    pub fn latest_id(&self) -> u64 {
+        self.last_id
+    }
+
     pub fn entries_newest_first(&self) -> impl Iterator<Item = &NotificationEntry> {
         self.entries.iter().rev()
     }
