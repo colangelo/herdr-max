@@ -22,6 +22,7 @@ pub(super) fn render_collapsed(
     let palette = &config.palette;
     super::render::render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
+    let empty_groups = HashSet::new();
     let mut total_rows = 0usize;
     let mut selected_row = None;
     let reveal = std::mem::take(state.reveal_navigation_workspace);
@@ -31,19 +32,25 @@ pub(super) fn render_collapsed(
             continue;
         }
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
+            let entries = super::sidebar::workspace_entries(
+                snapshot,
+                collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                    .unwrap_or(&empty_groups),
+            );
             if reveal {
                 if let Some(target) = state
                     .selected_workspace_id
                     .filter(|target| target.endpoint_id == endpoint.endpoint_id)
                 {
-                    selected_row = snapshot
-                        .workspaces
+                    selected_row = entries
                         .iter()
-                        .position(|workspace| workspace.workspace_id == target.workspace_id)
+                        .position(|entry| {
+                            snapshot.workspaces[entry.index].workspace_id == target.workspace_id
+                        })
                         .map(|index| total_rows + index);
                 }
             }
-            total_rows += snapshot.workspaces.len();
+            total_rows += entries.len();
         }
     }
     let height = usize::from(workspace_area.height);
@@ -121,7 +128,12 @@ pub(super) fn render_collapsed(
         let Some(snapshot) = endpoint.snapshot.as_deref() else {
             continue;
         };
-        for workspace in &snapshot.workspaces {
+        let entries = super::sidebar::workspace_entries(
+            snapshot,
+            collapsed_groups_for_endpoint(state, &endpoint.endpoint_id).unwrap_or(&empty_groups),
+        );
+        for entry in &entries {
+            let workspace = &snapshot.workspaces[entry.index];
             if skip > 0 {
                 skip -= 1;
                 continue;
@@ -151,7 +163,10 @@ pub(super) fn render_collapsed(
                 );
             }
             let stale = endpoint.status != ClientEndpointStatus::Online;
-            let number = format!(" {}", workspace.number);
+            let number = format!(
+                " {}",
+                crate::config::jump_symbol(entry.visible_index).unwrap_or(' ')
+            );
             let number_width = super::render::display_width(&number).min(rect.width);
             let dim = if stale {
                 Modifier::DIM

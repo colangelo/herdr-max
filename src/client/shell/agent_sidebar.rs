@@ -12,6 +12,7 @@ use super::*;
 
 pub(super) struct AgentRow {
     pub(super) jump_index: usize,
+    pub(super) pin_rank: Option<usize>,
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
@@ -22,32 +23,40 @@ pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
 ) -> Vec<String> {
-    if snapshot.agent_view_label.is_some() {
-        return snapshot
+    let mut ids = if snapshot.agent_view_label.is_some() {
+        snapshot
             .agent_order
             .iter()
-            .filter(|pane_id| {
-                snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.pane_id == pane_id.as_str())
-            })
+            .filter(|id| snapshot.agents.iter().any(|agent| &agent.pane_id == *id))
             .cloned()
-            .collect();
-    }
-    let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
-    if sort == crate::config::AgentPanelSortConfig::Priority {
-        agents.sort_by_key(|agent| {
-            (
-                std::cmp::Reverse(status_priority(agent.agent_status)),
-                std::cmp::Reverse(agent.state_change_seq),
-            )
+            .collect::<Vec<_>>()
+    } else {
+        let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+        if sort == crate::config::AgentPanelSortConfig::Priority {
+            agents.sort_by_key(|agent| {
+                (
+                    std::cmp::Reverse(status_priority(agent.agent_status)),
+                    std::cmp::Reverse(agent.state_change_seq),
+                )
+            });
+        }
+        agents
+            .into_iter()
+            .map(|agent| agent.pane_id.clone())
+            .collect()
+    };
+    if snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|f| f.pane_pins.as_ref())
+        .is_some_and(|pins| !pins.is_empty())
+    {
+        ids.sort_by_key(|id| {
+            let pin = super::pins::pane_pin(snapshot, id);
+            (pin.is_none(), pin.unwrap_or(u64::MAX))
         });
     }
-    agents
-        .into_iter()
-        .map(|agent| agent.pane_id.clone())
-        .collect()
+    ids
 }
 
 pub(super) fn render_agent_panel(
@@ -242,12 +251,17 @@ pub(super) fn agent_rows(
     config: &ClientShellConfig,
     machine: Option<&str>,
 ) -> Vec<AgentRow> {
+    let mut pin_rank = 0;
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .enumerate()
         .filter_map(|(index, pane_id)| {
             let mut row = agent_row(snapshot, &pane_id, config, machine)?;
             row.jump_index = index;
+            if super::pins::pane_pin(snapshot, &row.pane_id).is_some() {
+                row.pin_rank = Some(pin_rank);
+                pin_rank += 1;
+            }
             Some(row)
         })
         .collect()
@@ -320,6 +334,7 @@ pub(super) fn agent_row(
     );
     Some(AgentRow {
         jump_index: 0,
+        pin_rank: None,
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
@@ -398,6 +413,17 @@ pub(super) fn render_agent_row(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
+    }
+    if let Some(rank) = row.pin_rank {
+        if rect.width > bar {
+            buffer.set_stringn(
+                rect.x + bar,
+                rect.y,
+                "↑",
+                1,
+                Style::default().fg(super::pins::marker_color(rank)),
+            );
+        }
     }
     if editorial {
         super::sidebar_chrome::draw_number(

@@ -130,6 +130,7 @@ mod tests {
         let config = ClientShellConfig::from_config(&config);
         let area = Rect::new(0, 0, 16, 2);
         let entry = WorkspaceEntry {
+            pin_rank: None,
             visible_index: 9,
             group_collapsed: None,
             index: 0,

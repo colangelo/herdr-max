@@ -50,6 +50,7 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    collapsed_groups: &HashSet<String>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -59,12 +60,13 @@ pub(crate) fn render_collapsed_sidebar(
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
-    for (index, workspace) in snapshot
-        .workspaces
+    let entries = workspace_entries(snapshot, collapsed_groups);
+    for (index, entry) in entries
         .iter()
         .take(workspace_area.height as usize)
         .enumerate()
     {
+        let workspace = &snapshot.workspaces[entry.index];
         let rect = Rect::new(
             workspace_area.x,
             workspace_area.y + index as u16,
@@ -499,6 +501,7 @@ pub(crate) fn workspace_entries(
             .filter(|worktree| grouped.contains(worktree.key.as_str()))
         else {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
                 visible_index: 0,
                 group_collapsed: None,
                 index,
@@ -520,6 +523,7 @@ pub(crate) fn workspace_entries(
                 .is_some_and(|worktree| !worktree.is_linked_worktree)
         }) {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
                 visible_index: 0,
                 group_collapsed: None,
                 index: parent,
@@ -537,6 +541,7 @@ pub(crate) fn workspace_entries(
                         .is_some_and(|worktree| worktree.is_linked_worktree)
             }) {
                 entries.push(WorkspaceEntry {
+                    pin_rank: None,
                     visible_index: 0,
                     group_collapsed: None,
                     index: active,
@@ -558,6 +563,7 @@ pub(crate) fn workspace_entries(
             .collect::<Vec<_>>();
         for (child_index, child) in children.iter().enumerate() {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
                 visible_index: 0,
                 group_collapsed: None,
                 index: *child,
@@ -566,6 +572,7 @@ pub(crate) fn workspace_entries(
             });
         }
     }
+    super::pins::order_workspaces(snapshot, &grouped, &mut entries);
     for (visible_index, entry) in entries.iter_mut().enumerate() {
         entry.visible_index = visible_index;
         entry.group_collapsed = snapshot.workspaces[entry.index]
@@ -815,6 +822,17 @@ pub(in crate::client::shell) fn render_workspace_rows(
             Paragraph::new(Line::from(spans)).render(
                 Rect::new(area.x.saturating_add(indent), y, width, 1),
                 buffer,
+            );
+        }
+    }
+    if let Some(rank) = entry.pin_rank {
+        if area.width > bar + lead - 1 {
+            buffer.set_stringn(
+                area.x + bar + lead - 1,
+                area.y,
+                "↑",
+                1,
+                Style::default().fg(super::pins::marker_color(rank)),
             );
         }
     }

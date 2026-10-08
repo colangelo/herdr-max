@@ -116,6 +116,14 @@ pub(crate) fn keybind_help_groups(
                 ),
                 entry(binding_label(&keybinds.goto), "session navigator"),
                 entry(binding_label(&keybinds.new_workspace), "new workspace"),
+                entry(
+                    binding_label(&keybinds.toggle_pin_workspace),
+                    "pin / unpin space",
+                ),
+                entry(
+                    binding_label(&keybinds.toggle_pin_agent),
+                    "pin / unpin agent",
+                ),
                 entry(binding_label(&keybinds.new_worktree), "new worktree"),
                 entry(binding_label(&keybinds.open_worktree), "open worktree"),
                 entry(
@@ -280,5 +288,17 @@ mod tests {
         let global = &groups[0].1;
         assert_eq!(global[0].0, "ctrl+space / ctrl+s");
         assert_eq!(global[0].1, "prefix mode");
+    }
+    #[test]
+    fn pin_actions_are_discoverable_even_when_unbound() {
+        let groups = keybind_help_groups(&Keybinds::default(), &[]);
+        for name in ["pin / unpin space", "pin / unpin agent"] {
+            let (keys, _) = groups
+                .iter()
+                .flat_map(|(_, entries)| entries)
+                .find(|(_, label)| label.as_ref() == name)
+                .expect("pin help entry");
+            assert_eq!(keys, "unset");
+        }
     }
 }

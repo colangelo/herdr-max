@@ -522,6 +522,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
+    TogglePin,
     Rename,
     Close,
     NewWorktree,
@@ -543,6 +544,7 @@ pub(super) enum ClientContextMenuAction {
 pub(super) enum ClientContextMenuTarget {
     Workspace {
         workspace_id: String,
+        pinned: Option<bool>,
         is_git: bool,
         is_linked_worktree: bool,
         has_worktree_children: bool,
@@ -552,6 +554,11 @@ pub(super) enum ClientContextMenuTarget {
     Tab {
         tab_id: String,
         workspace_id: String,
+    },
+    Agent {
+        pane_id: String,
+        workspace_id: String,
+        pinned: Option<bool>,
     },
     Pane {
         pane_id: String,
@@ -998,6 +1005,7 @@ pub(super) fn release_notes_state(
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceEntry {
+    pub(super) pin_rank: Option<usize>,
     pub(super) visible_index: usize,
     pub(super) group_collapsed: Option<bool>,
     pub(super) index: usize,

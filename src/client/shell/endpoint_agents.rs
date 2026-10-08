@@ -153,6 +153,7 @@ fn agent_rows(
         .flatten()
         .collect::<HashMap<_, _>>();
 
+    let mut pin_ranks = HashMap::<ClientEndpointId, usize>::new();
     super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,
@@ -164,6 +165,13 @@ fn agent_rows(
         let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
         let mut agent = rendered_rows.remove(&key)?;
         agent.jump_index = index;
+        if super::pins::pane_pin(row.endpoint.snapshot, &agent.pane_id).is_some() {
+            let rank = pin_ranks
+                .entry(row.endpoint.endpoint_id.clone())
+                .or_default();
+            agent.pin_rank = Some(*rank);
+            *rank += 1;
+        }
         agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
         Some(EndpointAgentRow {
             endpoint_id: row.endpoint.endpoint_id.clone(),

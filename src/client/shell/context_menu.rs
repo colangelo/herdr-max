@@ -5,7 +5,7 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
+        let mut items = match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -50,6 +50,7 @@ impl ClientContextMenuOverlay {
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
             ],
+            ClientContextMenuTarget::Agent { .. } => vec![item("Rename pane", Action::RenamePane)],
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -79,7 +80,19 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+        };
+        let pinned = match &self.target {
+            ClientContextMenuTarget::Workspace { pinned, .. }
+            | ClientContextMenuTarget::Agent { pinned, .. } => *pinned,
+            _ => None,
+        };
+        if let Some(pinned) = pinned {
+            items.insert(
+                0,
+                item(if pinned { "Unpin" } else { "Pin" }, Action::TogglePin),
+            );
         }
+        items
     }
 }
 
@@ -110,12 +123,44 @@ impl ClientShellState {
         });
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
+                pinned: snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|f| f.workspace_pins.as_ref())
+                    .map(|pins| pins.contains_key(&workspace_id)),
                 workspace_id,
                 is_git: worktree.is_some() || workspace.branch.is_some(),
                 is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
                 has_worktree_children,
                 close_group,
                 collapsed,
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
+    pub(super) fn open_agent_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let Some(agent) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+        else {
+            return;
+        };
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent {
+                workspace_id: agent.workspace_id.clone(),
+                pinned: snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|f| f.pane_pins.as_ref())
+                    .map(|pins| pins.contains_key(&pane_id)),
+                pane_id,
             },
             x,
             y,
@@ -197,6 +242,18 @@ impl ClientShellState {
                 close_group,
                 ..
             } => self.activate_workspace_context_action(workspace_id, close_group, action, outcome),
+            ClientContextMenuTarget::Agent {
+                pane_id,
+                workspace_id,
+                ..
+            } => self.activate_pane_context_action(
+                pane_id,
+                workspace_id,
+                None,
+                false,
+                action,
+                outcome,
+            ),
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
@@ -229,6 +286,7 @@ impl ClientShellState {
         use crate::input::KeybindAction;
 
         match action {
+            ClientContextMenuAction::TogglePin => self.toggle_workspace_pin(workspace_id, outcome),
             ClientContextMenuAction::Rename => {
                 let label = self
                     .snapshot
@@ -365,11 +423,13 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         use crate::api::schema::{
-            Method, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget, PaneSplitParams,
-            PaneCloseParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
+            Method, PaneCloseParams, PaneInputSetParams, PaneRenameParams, PaneRightClickTarget,
+            PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
+            SplitDirection,
         };
 
         match action {
+            ClientContextMenuAction::TogglePin => self.toggle_agent_pin(pane_id, outcome),
             ClientContextMenuAction::RenamePane => {
                 let label = self.snapshot.as_deref().and_then(|snapshot| {
                     snapshot
@@ -447,12 +507,13 @@ impl ClientShellState {
                 }),
                 outcome,
             ),
-            ClientContextMenuAction::ClosePane => {
-                self.push_endpoint_method(Method::PaneClose(PaneCloseParams {
+            ClientContextMenuAction::ClosePane => self.push_endpoint_method(
+                Method::PaneClose(PaneCloseParams {
                     pane_id,
                     force: false,
-                }), outcome)
-            }
+                }),
+                outcome,
+            ),
             _ => {}
         }
     }

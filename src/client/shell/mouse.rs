@@ -1843,6 +1843,26 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                let agent = self
+                    .hits
+                    .endpoint_agents
+                    .iter()
+                    .find(|(rect, endpoint, _)| {
+                        endpoint == &self.active_endpoint_id && super::contains(*rect, point)
+                    })
+                    .map(|(_, _, id)| id.clone())
+                    .or_else(|| {
+                        self.hits
+                            .agents
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .map(|(_, id)| id.clone())
+                    });
+                if let Some(pane_id) = agent {
+                    self.open_agent_context_menu(pane_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let tab_id = self
                     .hits
                     .tabs

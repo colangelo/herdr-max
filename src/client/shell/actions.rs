@@ -24,6 +24,7 @@ impl ClientShellState {
                     && matches!(
                         action,
                         crate::input::KeybindAction::RenameWorkspace
+                            | crate::input::KeybindAction::TogglePinWorkspace
                             | crate::input::KeybindAction::CloseWorkspace
                     )
                 {
@@ -41,6 +42,22 @@ impl ClientShellState {
                         | crate::input::KeybindAction::RemoveWorktree
                 ) {
                     self.begin_worktree_action(action, outcome);
+                    return;
+                }
+                if action == crate::input::KeybindAction::TogglePinWorkspace {
+                    if let Some(id) = self.workspace_action_id() {
+                        self.toggle_workspace_pin(id, outcome);
+                    }
+                    return;
+                }
+                if action == crate::input::KeybindAction::TogglePinAgent {
+                    if let Some(id) = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|s| s.focused_pane_id.clone())
+                    {
+                        self.toggle_agent_pin(id, outcome);
+                    }
                     return;
                 }
                 if action == crate::input::KeybindAction::OpenNavigator {
@@ -853,9 +870,9 @@ impl ClientShellState {
         action: crate::input::KeybindAction,
     ) -> Option<crate::api::schema::Method> {
         use crate::api::schema::{
-            Method, PaneDirection, PaneFocusDirectionParams, PaneResizeParams, PaneSplitParams,
-            PaneCloseParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
-            TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
+            Method, PaneCloseParams, PaneDirection, PaneFocusDirectionParams, PaneResizeParams,
+            PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
+            SplitDirection, TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
         };
         use crate::input::KeybindAction;
 
