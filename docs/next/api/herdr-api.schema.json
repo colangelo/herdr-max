@@ -11864,6 +11864,23 @@
               "type": "object"
             },
             {
+              "description": "Answer to a `pane.report_agent_session` that was well formed but changed\nnothing, so a caller can tell it from the plain `ok` of an applied report.\n`reason` is `kept_existing_session` when the pane's current session\nstays (a `startup` report may not replace it) or `stale_report` when a\nnewer report from the same source already won.",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "report_not_applied",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "ok",

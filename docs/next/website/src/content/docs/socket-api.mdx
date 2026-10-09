@@ -930,6 +930,8 @@ Both methods accept an optional `resume_argv` array with the command that resume
 }
 ```
 
+An applied report answers `{"type": "ok"}`. A well-formed report that changes nothing answers `{"type": "report_not_applied", "reason": "kept_existing_session"}` when the pane's current session stays (for example a `startup` report that would replace it) or `"reason": "stale_report"` when a newer report from the same source already won, so a tool can tell it from an applied one.
+
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
 
 ```json

@@ -1697,8 +1697,9 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    super::send_ok_request(Method::PaneReportAgentSession(
-        PaneReportAgentSessionParams {
+    let response = super::send_request(&Request {
+        id: "cli:request".into(),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
             pane_id,
             source,
             agent,
@@ -1707,8 +1708,34 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
             agent_session_path,
             session_start_source,
             resume_argv,
-        },
-    ))
+        }),
+    })?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+    // Still success (a report that changes nothing is by design), but say so on
+    // stderr: hook stdout can be read as agent context, stderr cannot.
+    if let Some(notice) = session_report_notice(&response) {
+        eprintln!("{notice}");
+    }
+    Ok(0)
+}
+
+/// One-line explanation when the server answered a session report with
+/// `report_not_applied`; `None` for an applied report or an older server.
+fn session_report_notice(response: &serde_json::Value) -> Option<String> {
+    let result = response.get("result")?;
+    if result.get("type")?.as_str()? != "report_not_applied" {
+        return None;
+    }
+    let reason = result.get("reason").and_then(serde_json::Value::as_str);
+    Some(match reason {
+        Some("kept_existing_session") => "kept existing session".to_string(),
+        Some("stale_report") => "ignored stale report".to_string(),
+        Some(other) => format!("report not applied: {other}"),
+        None => "report not applied".to_string(),
+    })
 }
 
 fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
@@ -2140,33 +2167,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_pane_send_text_args_defaults_chunk_delay() {
-        let parsed = parse_pane_send_text_args(&args(&["p1", "x", "--chunk", "8"])).unwrap();
-        assert_eq!(
-            parsed.chunk.map(|pacing| pacing.delay),
-            Some(std::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS))
-        );
-    }
-
-    #[test]
-    fn parse_pane_send_text_args_double_dash_keeps_option_words_as_text() {
-        let parsed =
-            parse_pane_send_text_args(&args(&["p1", "--chunk", "4", "--", "--chunk", "9"]))
-                .unwrap();
-        assert_eq!(parsed.text, "--chunk 9");
-        assert_eq!(parsed.chunk.map(|pacing| pacing.max_bytes), Some(4));
-    }
-
-    #[test]
-    fn parse_pane_send_text_args_rejects_bad_chunk_options() {
-        for (form, needle) in [
-            (args(&["p1"]), "usage"),
-            (args(&["p1", "--chunk", "300"]), "usage"),
-            (args(&["p1", "x", "--chunk"]), "missing value for --chunk"),
-            (args(&["p1", "x", "--chunk", "0"]), "at least 1"),
-            (
-                args(&["p1", "x", "--chunk", "-3"]),
-    #[test]
     fn parse_pane_send_text_args_accepts_chunk_options_before_the_pane() {
         for form in [
             args(&["--chunk", "300", "p1", "hi", "there"]),
@@ -2192,6 +2192,34 @@ mod tests {
         assert_eq!(parsed.text, "--chunk");
     }
 
+    #[test]
+    fn parse_pane_send_text_args_defaults_chunk_delay() {
+        let parsed = parse_pane_send_text_args(&args(&["p1", "x", "--chunk", "8"])).unwrap();
+        assert_eq!(
+            parsed.chunk.map(|pacing| pacing.delay),
+            Some(std::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS))
+        );
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_double_dash_keeps_option_words_as_text() {
+        let parsed =
+            parse_pane_send_text_args(&args(&["p1", "--chunk", "4", "--", "--chunk", "9"]))
+                .unwrap();
+        assert_eq!(parsed.text, "--chunk 9");
+        assert_eq!(parsed.chunk.map(|pacing| pacing.max_bytes), Some(4));
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_rejects_bad_chunk_options() {
+        for (form, needle) in [
+            (args(&["p1"]), "usage"),
+            (args(&["p1", "--chunk", "300"]), "usage"),
+            (args(&["--chunk", "300", "p1"]), "usage"),
+            (args(&["p1", "x", "--chunk"]), "missing value for --chunk"),
+            (args(&["p1", "x", "--chunk", "0"]), "at least 1"),
+            (
+                args(&["p1", "x", "--chunk", "-3"]),
                 "invalid value for --chunk",
             ),
             (args(&["p1", "x", "--chunk-delay", "5"]), "requires --chunk"),
@@ -2206,6 +2234,39 @@ mod tests {
     }
 
     #[test]
+    fn session_report_notice_names_a_report_that_changed_nothing() {
+        let kept = serde_json::json!({
+            "id": "cli:request",
+            "result": {"type": "report_not_applied", "reason": "kept_existing_session"}
+        });
+        assert_eq!(
+            session_report_notice(&kept).as_deref(),
+            Some("kept existing session")
+        );
+
+        let stale = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "stale_report"}
+        });
+        assert_eq!(
+            session_report_notice(&stale).as_deref(),
+            Some("ignored stale report")
+        );
+
+        let unknown = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "something_new"}
+        });
+        assert_eq!(
+            session_report_notice(&unknown).as_deref(),
+            Some("report not applied: something_new")
+        );
+
+        assert_eq!(
+            session_report_notice(&serde_json::json!({"result": {"type": "ok"}})),
+            None
+        );
+    }
+
+    #[test]
     fn split_utf8_chunks_respects_byte_limit_and_round_trips() {
         let text = "a".repeat(1000);
         let pieces = split_utf8_chunks(&text, 300);
@@ -2215,7 +2276,6 @@ mod tests {
         );
         assert_eq!(pieces.concat(), text);
     }
-            (args(&["--chunk", "300", "p1"]), "usage"),
 
     #[test]
     fn split_utf8_chunks_never_cuts_a_multibyte_character() {

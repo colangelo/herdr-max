@@ -322,6 +322,14 @@ pub enum ResponseResult {
         active: bool,
         projection_revision: u64,
     },
+    /// Answer to a `pane.report_agent_session` that was well formed but changed
+    /// nothing, so a caller can tell it from the plain `ok` of an applied report.
+    /// `reason` is `kept_existing_session` when the pane's current session
+    /// stays (a `startup` report may not replace it) or `stale_report` when a
+    /// newer report from the same source already won.
+    ReportNotApplied {
+        reason: String,
+    },
     Ok {},
 }
 
