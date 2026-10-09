@@ -1573,3 +1573,31 @@ fn open_pane_is_always_the_accent_primary_and_the_rest_are_surface0() {
         );
     }
 }
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_todo_board() {
+    let mut state = state_with(session(&[("board", &[""])]));
+    open_with(
+        &mut state,
+        vec![
+            todo(
+                "w0:p1",
+                1,
+                "the plan\nsecond line of the plan",
+                TodoPriority::High,
+                false,
+            ),
+            open_todo("w0:p1", 2, "check the 403 on login"),
+            todo("w0:p1", 3, "read the plan", TodoPriority::Normal, true),
+        ],
+    );
+    let frame = state.compose(W, H).expect("frame");
+    let outer = layout(&state).outer;
+    super::tui_look::capture(
+        "todos/notes board",
+        &frame,
+        outer.y..outer.bottom(),
+        &state.config.palette,
+    );
+}

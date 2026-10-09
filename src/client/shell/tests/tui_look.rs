@@ -83,3 +83,119 @@ fn the_announcement_footer_is_a_key_bar() {
         "label"
     );
 }
+
+// -- captures for review (run with `--run-ignored only --no-capture -E 'test(capture_)'`) ----------
+
+/// Print `rows` of `frame` twice: as 24-bit ANSI to look at in a terminal, and as a paint map with one
+/// code per cell (`A` accent fill, `P` red fill, `M` mauve fill, `Y` sync yellow fill, `U` surface0
+/// fill, `k` accent text, `p` red text, `m` mauve text, `d` dim, `s` rule, `.` other text).
+pub(super) fn capture(name: &str, frame: &FrameData, rows: std::ops::Range<u16>, p: &Palette) {
+    let c = crate::protocol::color_to_u32;
+    let ansi = |packed: u32, ground: u8| -> String {
+        if packed >> 24 == 0x02 {
+            format!(
+                "\x1b[{ground};2;{};{};{}m",
+                (packed >> 16) & 0xff,
+                (packed >> 8) & 0xff,
+                packed & 0xff
+            )
+        } else {
+            String::new()
+        }
+    };
+    println!("=== {name} ===");
+    let mut map = Vec::new();
+    for y in rows {
+        let mut line = String::new();
+        let mut paint = String::new();
+        for x in 0..frame.width {
+            let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+            line.push_str(&ansi(cell.fg, 38));
+            line.push_str(&ansi(cell.bg, 48));
+            line.push_str(&cell.symbol);
+            line.push_str("\x1b[0m");
+            let code = if cell.bg == c(p.accent) {
+                'A'
+            } else if cell.bg == c(p.red) {
+                'P'
+            } else if cell.bg == c(p.mauve) {
+                'M'
+            } else if cell.bg == c(crate::app::state::SYNC_YELLOW) {
+                'Y'
+            } else if cell.bg == c(p.surface0) && p.surface0 != p.panel_bg {
+                'U'
+            } else if cell.symbol.trim().is_empty() {
+                ' '
+            } else if cell.fg == c(p.accent) {
+                'k'
+            } else if cell.fg == c(p.red) {
+                'p'
+            } else if cell.fg == c(p.mauve) {
+                'm'
+            } else if cell.fg == c(p.overlay0) {
+                'd'
+            } else if cell.fg == c(p.surface1) {
+                's'
+            } else {
+                '.'
+            };
+            paint.push(code);
+        }
+        println!("{line}");
+        map.push(paint);
+    }
+    println!("--- paint map ---");
+    for row in map {
+        println!("{}", row.trim_end());
+    }
+}
+
+fn composed_bar(mode: ClientShellMode, explicit_labels: bool, sync: bool) -> (FrameData, Palette) {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snap = snapshot();
+    if sync {
+        let tab = snap.focused_tab_id.clone().unwrap();
+        snap.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            tab_sync: Some(
+                [(
+                    tab,
+                    crate::protocol::ClientTabSync {
+                        members: vec!["w1:p1".into(), "w1:p2".into()],
+                        ending: false,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+    }
+    state.set_snapshot(Box::new(snap));
+    state.set_endpoint_server_version(&ClientEndpointId::Local, Some("0.9.3-ac-beta".into()));
+    let layout = state.layout(140, 12);
+    let mut surface = surface();
+    let area = Rect::new(0, 0, layout.pane_surface.width, layout.pane_surface.height);
+    surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::empty(area), None, &[]);
+    surface.panes[0].rect.width = area.width;
+    surface.panes[0].rect.height = area.height;
+    surface.panes[0].inner_rect = surface.panes[0].rect;
+    state.set_pane_surface(surface);
+    state.mode = mode;
+    if explicit_labels {
+        state.arm_pane_labels(true, std::time::Instant::now());
+    }
+    let frame = state.compose(140, 12).unwrap();
+    (frame, state.config.palette)
+}
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_mode_bars() {
+    let (frame, p) = composed_bar(ClientShellMode::Navigate, true, false);
+    capture("PANES bar (display panes)", &frame, 11..12, &p);
+    let (frame, p) = composed_bar(ClientShellMode::Resize, false, false);
+    capture("RESIZE bar", &frame, 11..12, &p);
+    let (frame, p) = composed_bar(ClientShellMode::Terminal, false, true);
+    capture("SYNC chip", &frame, 11..12, &p);
+    let (frame, p) = composed_bar(ClientShellMode::Navigate, false, false);
+    capture("NAVIGATE bar", &frame, 11..12, &p);
+}

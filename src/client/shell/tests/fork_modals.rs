@@ -1235,3 +1235,12 @@ fn settings_moves_on_every_shared_chord() {
         );
     }
 }
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_keybind_help_footer() {
+    let mut state = state_at(80, 25);
+    state.overlay = Some(help_overlay(false));
+    let frame = state.compose(80, 25).expect("frame");
+    super::tui_look::capture("keybind help", &frame, 1..23, &state.config.palette);
+}
