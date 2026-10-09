@@ -659,6 +659,26 @@ fn server_stop_then_restart_restores_pane_history() {
     cleanup_spawned_herdr(restarted, base);
 }
 
+/// The fork renames a session file it cannot read to `session.<stamp>.bak.json`
+/// instead of leaving it for the next save to overwrite (fork commit 5537f88c,
+/// `preserve_unusable_session`). Upstream's version of the test below asserted
+/// the file stayed at `session.json`; what matters is that its bytes survive,
+/// at that path or in a preserved copy.
+fn original_survives(data_dir: &Path, original: &[u8]) -> bool {
+    if fs::read(data_dir.join("session.json")).is_ok_and(|bytes| bytes == original) {
+        return true;
+    }
+    fs::read_dir(data_dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("session.")
+                && name.ends_with(".bak.json")
+                && fs::read(entry.path()).is_ok_and(|bytes| bytes == original)
+        })
+    })
+}
+
 #[test]
 fn unloaded_session_survives_autosave_and_shutdown_when_recovery_is_blocked() {
     let base = unique_test_dir();
@@ -686,13 +706,13 @@ fn unloaded_session_survives_autosave_and_shutdown_when_recovery_is_blocked() {
                 .is_ok_and(|log| log.contains("event=\"persist.save\""))
         }
     ));
-    assert_eq!(fs::read(&session_path).unwrap(), original);
+    assert!(original_survives(&data_dir, original));
 
     assert!(run_cli(&socket_path, &["server", "stop"]).status.success());
     let pid = herdr.child.process_id();
     assert!(herdr.child.wait().unwrap().success());
     unregister_spawned_herdr_pid(pid);
-    assert_eq!(fs::read(&session_path).unwrap(), original);
+    assert!(original_survives(&data_dir, original));
     cleanup_spawned_herdr(herdr, base);
 }
 
