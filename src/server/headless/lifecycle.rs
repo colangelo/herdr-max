@@ -154,13 +154,13 @@ impl HeadlessServer {
             return Err(err);
         }
 
-        let mut stream = match crate::server::handoff::accept_and_validate_on(
+        let (mut stream, fd_transport) = match crate::server::handoff::accept_and_validate_on(
             listener,
             &socket_path,
             &token,
             &manifest,
         ) {
-            Ok(stream) => stream,
+            Ok(validated) => validated,
             Err(err) => {
                 for fd in fds {
                     let _ = unsafe { libc::close(fd) };
@@ -171,7 +171,8 @@ impl HeadlessServer {
             }
         };
 
-        let send_result = crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds);
+        let send_result =
+            crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds, fd_transport);
         for fd in fds {
             let _ = unsafe { libc::close(fd) };
         }

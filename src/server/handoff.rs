@@ -27,6 +27,16 @@ const OWNED_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 // batch stays well below both limits and the number of panes stays unbounded.
 #[cfg(unix)]
 const FDS_PER_MESSAGE: usize = 64;
+// An importer that announces this capability receives descriptors in batches of
+// any size. One that announces nothing predates batching: it reads them with a
+// single recvmsg, so they must all arrive in one message.
+#[cfg(unix)]
+const FD_BATCHES_CAPABILITY: &str = "fd-batches";
+// The most descriptors one SCM_RIGHTS message carries on every supported
+// platform (Linux's SCM_MAX_FD), so the most panes a pre-batching importer can
+// take.
+#[cfg(unix)]
+const SINGLE_MESSAGE_FD_LIMIT: usize = 253;
 #[cfg(unix)]
 pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
 #[cfg(unix)]
@@ -54,6 +64,58 @@ pub(crate) struct HandoffManifest {
     /// manifests written before this field existed.
     #[serde(default)]
     pub client_size: Option<(u16, u16)>,
+    /// Asks the importer to list its transport capabilities when it validates
+    /// the manifest. An importer that predates the field ignores it and
+    /// answers a bare `validated`, which tells the exporter it is that old.
+    #[serde(default)]
+    pub announce_capabilities: bool,
+}
+
+/// How the exporter sends descriptors to the importer it validated with.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FdTransport {
+    /// Batches of [`FDS_PER_MESSAGE`], so any number of panes moves.
+    Batches,
+    /// One message holding every descriptor, for an importer from before
+    /// batching.
+    SingleMessage,
+}
+
+/// The transport an importer's validation line allows for `panes` panes. A
+/// pre-batching importer that could not take them all in one message is
+/// refused here, before any descriptor moves, so the exporter rolls back with
+/// every pane intact.
+#[cfg(unix)]
+fn fd_transport_for(validated: &str, panes: usize) -> io::Result<FdTransport> {
+    let mut words = validated.split_whitespace();
+    if words.next() != Some("validated") {
+        return Err(io::Error::other("handoff import did not validate manifest"));
+    }
+    if words.any(|capability| capability == FD_BATCHES_CAPABILITY) {
+        return Ok(FdTransport::Batches);
+    }
+    if panes > SINGLE_MESSAGE_FD_LIMIT {
+        let excess = panes - SINGLE_MESSAGE_FD_LIMIT;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "the target build can't receive more than {SINGLE_MESSAGE_FD_LIMIT} panes in a live handoff and this session has {panes}; close {excess} pane{} or hand off to a newer build",
+                if excess == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    Ok(FdTransport::SingleMessage)
+}
+
+/// What the importer answers once the manifest checks out.
+#[cfg(unix)]
+fn validated_line(manifest: &HandoffManifest) -> String {
+    if manifest.announce_capabilities {
+        format!("validated {FD_BATCHES_CAPABILITY}\n")
+    } else {
+        "validated\n".to_owned()
+    }
 }
 
 #[cfg(unix)]
@@ -156,7 +218,7 @@ pub(crate) fn accept_and_validate_on(
     socket_path: &Path,
     token: &str,
     manifest: &HandoffManifest,
-) -> io::Result<UnixStream> {
+) -> io::Result<(UnixStream, FdTransport)> {
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
@@ -175,16 +237,18 @@ pub(crate) fn accept_and_validate_on(
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let validated = read_line_unbuffered(&mut stream)?;
-    if validated.trim_end() != "validated" {
-        return Err(io::Error::other("handoff import did not validate manifest"));
-    }
+    let transport = fd_transport_for(&validated, manifest.panes.len())?;
     let _ = std::fs::remove_file(socket_path);
-    Ok(stream)
+    Ok((stream, transport))
 }
 
 #[cfg(unix)]
-pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd]) -> io::Result<()> {
-    send_fds(stream, fds)?;
+pub(crate) fn send_fds_and_wait_restored(
+    stream: &mut UnixStream,
+    fds: &[RawFd],
+    transport: FdTransport,
+) -> io::Result<()> {
+    send_fds(stream, fds, transport)?;
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let restored = read_line_unbuffered(&mut *stream)?;
@@ -269,7 +333,7 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
-    stream.write_all(b"validated\n")?;
+    stream.write_all(validated_line(&manifest).as_bytes())?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
     Ok(ReceivedHandoff {
@@ -326,6 +390,7 @@ pub(crate) fn manifest_for(
         panes,
         api_window_title,
         client_size,
+        announce_capabilities: true,
     }
 }
 
@@ -387,7 +452,10 @@ fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
 }
 
 #[cfg(unix)]
-fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
+fn send_fds(stream: &UnixStream, fds: &[RawFd], transport: FdTransport) -> io::Result<()> {
+    if transport == FdTransport::SingleMessage {
+        return send_fd_batch(stream, fds);
+    }
     for batch in fds.chunks(FDS_PER_MESSAGE) {
         send_fd_batch(stream, batch)?;
     }
@@ -439,7 +507,9 @@ fn close_raw_fds(fds: &[RawFd]) {
 fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
     let mut out: Vec<RawFd> = Vec::with_capacity(expected);
     while out.len() < expected {
-        let wanted = (expected - out.len()).min(FDS_PER_MESSAGE);
+        // Room for every remaining descriptor: a pre-batching exporter sends
+        // them all in one message, and a smaller buffer would truncate it.
+        let wanted = expected - out.len();
         let batch = match recv_fd_batch(stream, wanted) {
             Ok(batch) => batch,
             Err(err) => {
@@ -548,6 +618,240 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             last_client_size: None,
+        }
+    }
+
+    /// `n` real descriptors (all on /dev/null), as a handoff moves pane PTYs.
+    /// Both ends of a transfer hold up to `n` at once, so callers keep `2 * n`
+    /// under macOS's default limit of 256 open descriptors.
+    fn dev_null_fds(n: usize) -> Vec<RawFd> {
+        use std::os::fd::IntoRawFd;
+        (0..n)
+            .map(|_| {
+                std::fs::File::open("/dev/null")
+                    .expect("/dev/null should open")
+                    .into_raw_fd()
+            })
+            .collect()
+    }
+
+    /// The pre-batching importer's receive (fork 26537d32), kept verbatim in
+    /// behaviour: one recvmsg that must carry every descriptor.
+    fn pre_batching_recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
+        let mut byte = [0u8; 1];
+        let mut iov = [libc::iovec {
+            iov_base: byte.as_mut_ptr() as *mut libc::c_void,
+            iov_len: byte.len(),
+        }];
+        let fd_bytes = expected * std::mem::size_of::<RawFd>();
+        let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(fd_bytes as u32) as usize }];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = iov.as_mut_ptr();
+        msg.msg_iovlen = iov.len() as _;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = control.len() as _;
+        if unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(io::Error::other("handoff fd control message was truncated"));
+        }
+        let mut out = Vec::new();
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            if !cmsg.is_null() {
+                let data_len =
+                    ((*cmsg).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
+                let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+                for idx in 0..data_len / std::mem::size_of::<RawFd>() {
+                    out.push(*data.add(idx));
+                }
+            }
+        }
+        if out.len() != expected {
+            close_raw_fds(&out);
+            return Err(io::Error::other(format!(
+                "expected {expected} handoff fds, received fewer"
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Send `n` descriptors with `send` and receive them with `recv` over a
+    /// socket pair; the count received, or the receiver's error.
+    fn transfer(
+        n: usize,
+        send: impl FnOnce(&UnixStream, &[RawFd]) -> io::Result<()> + Send + 'static,
+        recv: impl FnOnce(&UnixStream, usize) -> io::Result<Vec<RawFd>>,
+    ) -> io::Result<usize> {
+        let (sender, receiver) = UnixStream::pair().expect("socket pair");
+        let fds = dev_null_fds(n);
+        let sending = std::thread::spawn(move || {
+            let result = send(&sender, &fds);
+            close_raw_fds(&fds);
+            result
+        });
+        let received = recv(&receiver, n);
+        sending
+            .join()
+            .expect("sender thread")
+            .expect("send should succeed");
+        let received = received?;
+        close_raw_fds(&received);
+        Ok(received.len())
+    }
+
+    #[test]
+    fn a_pre_batching_importer_with_too_many_panes_is_refused_before_any_descriptor_moves() {
+        let panes = SINGLE_MESSAGE_FD_LIMIT + 1;
+        let err = fd_transport_for("validated\n", panes)
+            .expect_err("an importer that takes one message cannot take this many");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        let reason = err.to_string();
+        assert!(
+            reason.contains("can't receive more than 253 panes")
+                && reason.contains("this session has 254")
+                && reason.contains("close 1 pane ")
+                && reason.contains("hand off to a newer build"),
+            "{reason}"
+        );
+        // The refusal is the validation step's answer: accept_and_validate_on
+        // returns it, so the exporter rolls back before send_fds runs.
+        assert!(fd_transport_for("validated\n", SINGLE_MESSAGE_FD_LIMIT).is_ok());
+    }
+
+    #[test]
+    fn a_pre_batching_importer_takes_more_than_one_batch_in_a_single_message() {
+        let panes = FDS_PER_MESSAGE + 1;
+        assert_eq!(
+            fd_transport_for("validated\n", panes).unwrap(),
+            FdTransport::SingleMessage
+        );
+        let moved = transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::SingleMessage),
+            pre_batching_recv_fds,
+        )
+        .expect("an old importer receives every pane in one message");
+        assert_eq!(moved, panes);
+    }
+
+    #[test]
+    fn the_batched_transport_is_what_breaks_a_pre_batching_importer() {
+        // The mismatch this negotiation exists for: batches reach a single
+        // recvmsg as only their first message.
+        let err = transfer(
+            FDS_PER_MESSAGE + 1,
+            |stream, fds| send_fds(stream, fds, FdTransport::Batches),
+            pre_batching_recv_fds,
+        )
+        .expect_err("an old importer cannot take batches");
+        assert!(err.to_string().contains("received fewer"), "{err}");
+    }
+
+    #[test]
+    fn importers_that_announce_batches_take_any_number_of_panes() {
+        // Past the single-message limit the capability is all that matters.
+        assert_eq!(
+            fd_transport_for("validated fd-batches\n", SINGLE_MESSAGE_FD_LIMIT + 47).unwrap(),
+            FdTransport::Batches
+        );
+        // Two batches and part of a third, staying under macOS's default
+        // limit of 256 open descriptors for both ends together.
+        let panes = FDS_PER_MESSAGE + 36;
+        let moved = transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::Batches),
+            recv_fds,
+        )
+        .expect("new to new moves every batch");
+        assert_eq!(moved, panes);
+    }
+
+    #[test]
+    fn a_pre_batching_exporter_reaches_a_new_importer_above_one_batch() {
+        // The old exporter sent every descriptor in one message.
+        let panes = FDS_PER_MESSAGE + 36;
+        let moved = transfer(panes, send_fd_batch, recv_fds)
+            .expect("a new importer has room for an old exporter's single message");
+        assert_eq!(moved, panes);
+    }
+
+    #[test]
+    fn up_to_one_batch_moves_both_ways_as_before() {
+        let panes = FDS_PER_MESSAGE;
+        let new_to_old = transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::SingleMessage),
+            pre_batching_recv_fds,
+        )
+        .unwrap();
+        let old_to_new = transfer(panes, send_fd_batch, recv_fds).unwrap();
+        let new_to_new = transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::Batches),
+            recv_fds,
+        )
+        .unwrap();
+        assert_eq!((new_to_old, old_to_new, new_to_new), (panes, panes, panes));
+    }
+
+    #[test]
+    fn the_importer_announces_batches_only_when_the_exporter_asks() {
+        let manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None, None);
+        assert!(manifest.announce_capabilities);
+        assert_eq!(validated_line(&manifest), "validated fd-batches\n");
+
+        // An exporter from before the field sends a manifest without it; the
+        // importer answers the bare line that exporter checks for.
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("announce_capabilities");
+        let older: HandoffManifest = serde_json::from_value(value).unwrap();
+        assert!(!older.announce_capabilities);
+        assert_eq!(validated_line(&older), "validated\n");
+
+        assert!(fd_transport_for("ready\n", 1).is_err());
+    }
+
+    #[test]
+    fn the_handshake_negotiates_the_transport_end_to_end() {
+        for (announcing_importer, expected) in [
+            (true, FdTransport::Batches),
+            (false, FdTransport::SingleMessage),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "herdr-handoff-190-{}-{announcing_importer}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let socket = dir.join("handoff.sock");
+            let listener = bind_listener(&socket).unwrap();
+            let manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None, None);
+            let importer_socket = socket.clone();
+            let importer = std::thread::spawn(move || {
+                if announcing_importer {
+                    receive(&importer_socket, "token").map(|received| received.fds.len())
+                } else {
+                    // An importer from before the capability: it reads the
+                    // manifest and answers the bare line whatever it asked.
+                    let mut stream = UnixStream::connect(&importer_socket)?;
+                    stream.write_all(b"token\n")?;
+                    read_line_unbuffered(&mut stream)?;
+                    stream.write_all(b"validated\n")?;
+                    Ok(0)
+                }
+            });
+            let (_stream, transport) =
+                accept_and_validate_on(listener, &socket, "token", &manifest).unwrap();
+            assert_eq!(
+                transport, expected,
+                "announcing_importer={announcing_importer}"
+            );
+            assert_eq!(importer.join().unwrap().unwrap(), 0);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
