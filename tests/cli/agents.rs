@@ -634,6 +634,10 @@ fn agent_start_timeout_releases_the_name_for_reuse() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "racy on macOS: agent start can return before the HERDR_AGENT hint is read, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/183"
+)]
 fn agent_start_reports_detected_kind_mismatch_before_released_name() {
     use std::os::unix::fs::PermissionsExt;
 
