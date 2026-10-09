@@ -43,6 +43,8 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.selection.read",
     "pane.split",
     "pane.swap",
+    "pane.sync",
+    "pane.sync_pair",
     "pane.zoom",
     "product_announcement.dismiss",
     "release_notes.dismiss",
@@ -52,6 +54,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "tab.sync",
     "todo.add",
     "todo.clear",
     "todo.list",
@@ -302,6 +305,27 @@ mod tests {
         )))
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
+        // Freeze these first sync advertisements separately from the published fixture.
+        for (method, digest) in [
+            (
+                "pane.sync",
+                "d06e7589cfa7f46706005ce162827db7bb309c0028dc4e108a4f3a4368388cbd",
+            ),
+            (
+                "pane.sync_pair",
+                "af7e6ee03b6835ea8d3d2ae3ed4ba0b5f66b515f7294bc90c2941e09d5b331a4",
+            ),
+            (
+                "tab.sync",
+                "9caed2d73b24ee76b5feeeb5cdfc2f0b854e77b0a7030f57df05225b2ad49ed5",
+            ),
+        ] {
+            assert_eq!(
+                actual.remove(method).as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
         assert_eq!(
             actual.remove("layout.balance").as_deref(),
             Some("2612679bd673608105f286c9b53ecd56333fbebe2c4cd4c52a4c47e2861c6246")

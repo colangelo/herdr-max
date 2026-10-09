@@ -179,6 +179,8 @@ pub enum Method {
     PaneZoom(PaneZoomParams),
     #[serde(rename = "pane.sync")]
     PaneSync(PaneSyncParams),
+    #[serde(rename = "pane.sync_pair")]
+    PaneSyncPair(PaneSyncPairParams),
     #[serde(rename = "pane.layout")]
     PaneLayout(PaneLayoutParams),
     #[serde(rename = "pane.process_info")]
