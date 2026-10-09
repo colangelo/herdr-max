@@ -544,6 +544,11 @@ impl PaneTerminal {
         self.ghostty.recent_unwrapped_ansi(lines)
     }
 
+    #[cfg(unix)]
+    pub fn handoff_cursor_tail(&self) -> String {
+        self.ghostty.handoff_cursor_tail()
+    }
+
     pub(crate) fn recent_unwrapped_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_unwrapped_ansi_snapshot(lines)
     }
@@ -2409,6 +2414,19 @@ impl GhosttyPaneTerminal {
         self.recent_unwrapped_ansi_snapshot(lines).text
     }
 
+    /// What to write after the text dump of [`Self::recent_unwrapped_ansi`] so a terminal seeded with it
+    /// has its cursor where this one does. The dump drops the blank rows under the last line, so a cursor
+    /// waiting on the fresh row after a full line (the usual state of a printing pane) would come back at
+    /// the end of that line and the next output would join it (fork issue 180).
+    #[cfg(unix)]
+    pub fn handoff_cursor_tail(&self) -> String {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| handoff_cursor_tail_for_terminal(&core.terminal).ok())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn recent_unwrapped_ansi_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.core
             .lock()
@@ -3197,6 +3215,41 @@ fn ghostty_recent_ansi_for_terminal(
         false,
         unwrap,
     )
+}
+
+#[cfg(unix)]
+fn handoff_cursor_tail_for_terminal(
+    terminal: &crate::ghostty::Terminal,
+) -> Result<String, crate::ghostty::Error> {
+    if terminal.active_screen()? != crate::ghostty::ActiveScreen::Primary {
+        return Ok(String::new());
+    }
+    let total_rows = terminal.total_rows()?;
+    let rows = usize::from(terminal.rows()?);
+    if total_rows == 0 || rows == 0 {
+        return Ok(String::new());
+    }
+    let viewport_start = total_rows.saturating_sub(rows);
+    let cursor_row = viewport_start
+        .saturating_add(usize::from(terminal.cursor_y()?))
+        .min(total_rows.saturating_sub(1));
+    let mut last_content_row = None;
+    for row in (viewport_start..total_rows).rev() {
+        if !ghostty_screen_row(terminal, row as u32)?.trim().is_empty() {
+            last_content_row = Some(row);
+            break;
+        }
+    }
+    // An empty screen was not dumped, and a cursor on the last line already sits where the dump ends.
+    let Some(last_content_row) = last_content_row.filter(|last| cursor_row > *last) else {
+        return Ok(String::new());
+    };
+    let mut tail = "\r\n".repeat(cursor_row - last_content_row);
+    let column = terminal.cursor_x()?;
+    if column > 0 {
+        tail.push_str(&format!("\x1b[{}G", u32::from(column) + 1));
+    }
+    Ok(tail)
 }
 
 fn ghostty_recent_read_range(

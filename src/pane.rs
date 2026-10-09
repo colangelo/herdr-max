@@ -2822,7 +2822,14 @@ impl PaneRuntime {
             return None;
         }
         self.snapshot_history().map(|history| {
-            truncate_handoff_history(history, crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE)
+            let mut history = truncate_handoff_history(
+                history,
+                crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE,
+            );
+            if !history.is_empty() {
+                history.push_str(&self.terminal.handoff_cursor_tail());
+            }
+            history
         })
     }
 
@@ -5782,6 +5789,57 @@ mod tests {
         let history = runtime.handoff_history_ansi().unwrap();
 
         assert!(history.contains("handoff-primary-history"));
+    }
+
+    /// The history is a text dump that drops the blank row the cursor waits on after a full line, so
+    /// the next output joined the last line: `tick 25tick 26`.
+    /// https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/180
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_history_keeps_the_line_break_before_the_cursor() {
+        let old = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, b"tick 24\r\ntick 25\r\n");
+        let history = old.handoff_history_ansi().unwrap();
+
+        let mut replayed = history.into_bytes();
+        replayed.extend_from_slice(b"tick 26\r\n");
+        let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
+
+        assert_eq!(
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
+            "tick 24\ntick 25\ntick 26"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_history_leaves_a_cursor_on_its_line_where_it_is() {
+        let old = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, b"one\r\n$ ");
+        let history = old.handoff_history_ansi().unwrap();
+
+        let mut replayed = history.into_bytes();
+        replayed.extend_from_slice(b"ls\r\n");
+        let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
+
+        assert_eq!(
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
+            "one\n$ ls"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_history_keeps_a_cursor_that_is_several_blank_rows_down() {
+        let old = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, b"top\r\n\r\n\r\n");
+        let history = old.handoff_history_ansi().unwrap();
+
+        let mut replayed = history.into_bytes();
+        replayed.extend_from_slice(b"next");
+        let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
+
+        assert_eq!(
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
+            "top\n\n\nnext"
+        );
     }
 
     #[cfg(unix)]
