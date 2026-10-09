@@ -24,7 +24,9 @@ if (-not [string]::IsNullOrWhiteSpace($payload.agent_id)) { exit 0 }
 # runs these hooks too (fork issue 143); it is not the pane's agent. Claude sets
 # this entrypoint for a print-mode run.
 if ($env:CLAUDE_CODE_ENTRYPOINT -eq "sdk-cli") { exit 0 }
-if ($payload.hook_event_name -eq "SubagentStop") { exit 0 }
+# Upstream c5051933: only Claude's own, exactly-spelled events count (the fork
+# installs SessionStart, UserPromptSubmit and Stop).
+if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or @("SessionStart", "UserPromptSubmit", "Stop") -cnotcontains $payload.hook_event_name) { exit 0 }
 
 $sessionId = $payload.session_id
 if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
