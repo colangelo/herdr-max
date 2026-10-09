@@ -67,6 +67,9 @@ fn run_shell_hook_with_env(
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // macOS hands back an accepted socket that inherited the listener's
+                    // non-blocking mode; the read below has to wait for the request.
+                    stream.set_nonblocking(false).unwrap();
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
