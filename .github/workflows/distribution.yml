@@ -61,6 +61,15 @@ jobs:
       - name: Test documentation lifecycle
         run: bun test scripts/docs/*.test.ts
 
+      # Fork: the docs manifests pin upstream release tags and the preview
+      # snapshot commit, which this repository does not carry. Pushing v* tags
+      # here would start release.yml, so fetch them from upstream read-only.
+      - name: Fetch upstream docs provenance
+        run: |
+          git fetch --no-tags https://github.com/herdrdev/herdr.git \
+            $(jq -r '.. | objects | select(has("commit")) | "refs/tags/\(.tag):refs/tags/\(.tag)"' docs/versions/manifest.json) \
+            "$(jq -r .commit distribution/preview.json)"
+
       - name: Validate published contract
         run: |
           python3 scripts/agent_detection_manifest_check.py --require-published
