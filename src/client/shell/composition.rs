@@ -864,7 +864,7 @@ impl ClientShellState {
                 let rendered = super::todo_board::render_todo_board(
                     &mut composed,
                     board,
-                    self.config.pane_todo_color,
+                    self.config.todo_color,
                     &self.config.palette,
                 );
                 let cursor = rendered.as_ref().and_then(|(_, cursor)| cursor.clone());
