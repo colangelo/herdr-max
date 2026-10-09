@@ -100,7 +100,7 @@ fn search_text(entry: &MoveEntry) -> String {
 }
 
 /// Every word of the query is somewhere in the text, ignoring case.
-fn matches_query(text: &str, query: &str) -> bool {
+pub(super) fn matches_query(text: &str, query: &str) -> bool {
     let text = text.to_lowercase();
     query
         .to_lowercase()
@@ -286,7 +286,7 @@ impl ClientMovePickerOverlay {
 }
 
 /// The smallest scroll that keeps `index` inside a `visible`-row window.
-fn reveal_scroll(scroll: usize, index: usize, visible: usize, len: usize) -> usize {
+pub(super) fn reveal_scroll(scroll: usize, index: usize, visible: usize, len: usize) -> usize {
     if visible == 0 {
         return 0;
     }
@@ -302,7 +302,7 @@ fn reveal_scroll(scroll: usize, index: usize, visible: usize, len: usize) -> usi
 
 /// The fork's pane name: its title, manual label, terminal title, agent
 /// name, agent, else "pane N".
-fn pane_display_label(
+pub(super) fn pane_display_label(
     snapshot: &ClientShellSnapshot,
     pane: &crate::protocol::ClientShellPane,
 ) -> String {
@@ -323,16 +323,19 @@ fn pane_display_label(
     .map(str::trim)
     .find(|label| !label.is_empty())
     .map(str::to_owned)
-    .unwrap_or_else(|| {
-        let suffix = pane
-            .pane_id
-            .rsplit_once(":p")
-            .map_or(pane.pane_id.as_str(), |(_, suffix)| suffix);
-        match crate::workspace::decode_public_number(suffix) {
-            Some(number) => format!("pane {number}"),
-            None => format!("pane {suffix}"),
-        }
-    })
+    .unwrap_or_else(|| pane_id_label(&pane.pane_id))
+}
+
+/// "pane N" from a public pane id: what a pane with no name of its own is
+/// called, and what a pane the snapshot does not hold is called.
+pub(super) fn pane_id_label(pane_id: &str) -> String {
+    let suffix = pane_id
+        .rsplit_once(":p")
+        .map_or(pane_id, |(_, suffix)| suffix);
+    match crate::workspace::decode_public_number(suffix) {
+        Some(number) => format!("pane {number}"),
+        None => format!("pane {suffix}"),
+    }
 }
 
 /// "2 blocked · 1 working · 1 done", or empty.
@@ -901,10 +904,42 @@ fn render_search(
     picker: &ClientMovePickerOverlay,
     p: &Palette,
 ) -> Option<crate::protocol::CursorState> {
+    let n = picker.destination_count();
+    let count = format!(
+        "{n} {}",
+        if n == 1 {
+            "destination"
+        } else {
+            "destinations"
+        }
+    );
+    render_search_row(
+        b,
+        row,
+        &picker.search,
+        picker.search_focused,
+        "search destinations",
+        &count,
+        p,
+    )
+}
+
+/// A search row shared by the list overlays: ` / `, the query or its
+/// placeholder, the count at the row's end. Returns the caret's cell while the
+/// search is focused.
+pub(super) fn render_search_row(
+    b: &mut Buffer,
+    row: Rect,
+    search: &TextField,
+    focused: bool,
+    placeholder: &str,
+    count: &str,
+    p: &Palette,
+) -> Option<crate::protocol::CursorState> {
     if row.width == 0 || row.height == 0 {
         return None;
     }
-    let slash = if picker.search_focused {
+    let slash = if focused {
         Style::default()
             .fg(p.accent)
             .bg(p.panel_bg)
@@ -915,9 +950,8 @@ fn render_search(
     put_text(b, row.x, row.y, 3.min(row.width), " / ", slash);
     let text_x = row.x + 3.min(row.width);
     let room = row.right().saturating_sub(text_x);
-    let query = picker.search.text();
+    let query = search.text();
     let used = if query.is_empty() {
-        let placeholder = "search destinations";
         put_text(
             b,
             text_x,
@@ -938,29 +972,19 @@ fn render_search(
         );
         3 + display_width(query).min(room)
     };
-    let n = picker.destination_count();
-    let count = format!(
-        "{n} {}",
-        if n == 1 {
-            "destination"
-        } else {
-            "destinations"
-        }
-    );
-    let count_width = display_width(&count);
+    let count_width = display_width(count);
     if used + 1 + count_width < row.width {
         put_text(
             b,
             row.right() - 1 - count_width,
             row.y,
             count_width,
-            &count,
+            count,
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
-    picker.search_focused.then(|| crate::protocol::CursorState {
-        x: (row.x as usize + 3 + picker.search.cursor_column()).min(usize::from(row.right() - 1))
-            as u16,
+    focused.then(|| crate::protocol::CursorState {
+        x: (row.x as usize + 3 + search.cursor_column()).min(usize::from(row.right() - 1)) as u16,
         y: row.y,
         visible: true,
         shape: 0,
@@ -1105,7 +1129,7 @@ pub(super) fn render_move_picker(
 
 /// The fork's `list_chord`: what moves the selection rather than editing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Chord {
+pub(super) enum Chord {
     Prev,
     Next,
     HalfPageUp,
@@ -1116,7 +1140,11 @@ enum Chord {
 
 /// While the search has focus plain letters are text; otherwise `j`/`k` and
 /// `ctrl+u`/`ctrl+d` move too.
-fn list_chord(code: KeyCode, modifiers: KeyModifiers, plain_chars_are_text: bool) -> Option<Chord> {
+pub(super) fn list_chord(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    plain_chars_are_text: bool,
+) -> Option<Chord> {
     let bare = modifiers.is_empty();
     let ctrl = modifiers == KeyModifiers::CONTROL;
     match code {

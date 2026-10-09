@@ -500,6 +500,9 @@ impl ClientShellState {
         if self.insert_move_picker_text(text) {
             return true;
         }
+        if self.insert_todo_board_text(text) {
+            return true;
+        }
         match self.overlay.as_mut() {
             Some(ClientShellOverlay::Rename(rename)) => {
                 rename.input.insert(text);
@@ -537,6 +540,9 @@ impl ClientShellState {
                 return self.route_todo_panel_key(key, outcome)
             }
             Some(ClientShellOverlay::TodoEdit(_)) => return self.route_todo_edit_key(key, outcome),
+            Some(ClientShellOverlay::TodoBoard(_)) => {
+                return self.route_todo_board_key(key, outcome)
+            }
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_key(key, outcome)
             }

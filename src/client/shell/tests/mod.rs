@@ -277,6 +277,7 @@ mod navigator_overlays;
 mod notification_center;
 mod popup_focus_projection;
 mod startup_overlays;
+mod todo_board;
 mod todo_overlays;
 
 #[test]

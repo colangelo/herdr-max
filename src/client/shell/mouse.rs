@@ -722,8 +722,29 @@ impl ClientShellState {
             Some(ClientShellOverlay::TodoPanel(_)) => {
                 return self.route_todo_panel_mouse(mouse, outcome);
             }
+            // The fork's editor lets the wheel through: it scrolls whatever
+            // is under the pointer, behind the modal, and the editor stays.
+            Some(ClientShellOverlay::TodoEdit(_))
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                ) =>
+            {
+                let editor = self.overlay.take();
+                self.handle_mouse(mouse, outcome);
+                if self.overlay.is_none() {
+                    self.overlay = editor;
+                }
+                return;
+            }
             Some(ClientShellOverlay::TodoEdit(_)) => {
                 return self.route_todo_edit_mouse(mouse, outcome);
+            }
+            Some(ClientShellOverlay::TodoBoard(_)) => {
+                return self.route_todo_board_mouse(mouse, outcome);
             }
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_mouse(mouse, outcome);
