@@ -128,10 +128,6 @@ impl TextField {
         display_width(&self.text[self.line_start()..self.cursor])
     }
 
-    pub(crate) fn lines(&self) -> impl Iterator<Item = &str> {
-        self.text.split('\n')
-    }
-
     pub(crate) fn line_count(&self) -> usize {
         self.text.matches('\n').count() + 1
     }
@@ -919,7 +915,6 @@ mod tests {
         assert_eq!(field.line_count(), 2);
         assert_eq!(field.cursor_line(), 1);
         assert_eq!(field.cursor_column(), 3);
-        assert_eq!(field.lines().collect::<Vec<_>>(), vec!["one", "two"]);
         // The limit counts newlines like any other character.
         assert_eq!(field.char_count(), 7);
     }

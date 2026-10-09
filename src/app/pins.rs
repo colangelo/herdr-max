@@ -42,14 +42,6 @@ impl AppState {
         true
     }
 
-    /// Pin an unpinned space, unpin a pinned one. `true` when pinned now.
-    pub(crate) fn toggle_pin_workspace(&mut self, ws_idx: usize) -> bool {
-        if self.unpin_workspace(ws_idx) {
-            return false;
-        }
-        self.pin_workspace(ws_idx)
-    }
-
     /// The terminal behind a pane, mutably. The pin lives on the terminal, so
     /// it follows the agent when the pane moves between tabs and spaces.
     fn pane_terminal_mut(
@@ -96,14 +88,6 @@ impl AppState {
         self.mark_session_dirty();
         true
     }
-
-    /// Pin an unpinned agent, unpin a pinned one. `true` when pinned now.
-    pub(crate) fn toggle_pin_agent(&mut self, pane_id: PaneId) -> bool {
-        if self.unpin_agent(pane_id) {
-            return false;
-        }
-        self.pin_agent(pane_id)
-    }
 }
 
 #[cfg(test)]
@@ -142,15 +126,6 @@ mod tests {
         assert!(state.pin_workspace(0));
         assert_eq!(state.workspaces[1].pin_order, Some(2));
         assert_eq!(state.workspaces[0].pin_order, Some(3), "re-pinned last");
-    }
-
-    #[test]
-    fn toggle_flips_and_reports_the_new_state() {
-        let mut state = three_spaces();
-        assert!(state.toggle_pin_workspace(1));
-        assert!(!state.toggle_pin_workspace(1));
-        assert_eq!(state.workspaces[1].pin_order, None);
-        assert!(!state.toggle_pin_workspace(9), "no such space");
     }
 
     #[test]

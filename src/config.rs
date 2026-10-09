@@ -28,12 +28,11 @@ pub use self::{
         Config, ConfigReloadReport, ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig,
         NotificationCenterPositionConfig, PaneBorderActiveStyleConfig, PaneBordersConfig,
         ShellModeConfig, SidebarActiveBorderConfig, SidebarCollapsedModeConfig, SidebarFogStyle,
-        SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, SortMotionEasingConfig,
-        StateColorsConfig, StateSymbolsConfig, StatusIndicatorStyle, StatusSpinnerConfig,
-        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
-        ToastHerdrPosition, ToastHerdrSize, ToastPaneFeedback, UpdateChannelConfig,
-        WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS, MAX_TOAST_DELAY_SECONDS,
-        MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
+        SidebarOverflowConfig, SidebarStyleConfig, SortMotionConfig, StateSymbolsConfig,
+        StatusIndicatorStyle, StatusSpinnerConfig, TabBarPositionConfig, ToastClipboardPosition,
+        ToastConfig, ToastDelivery, ToastHerdrPosition, ToastHerdrSize, ToastPaneFeedback,
+        UpdateChannelConfig, WorkspaceSortConfig, MAX_DISPLAY_PANES_MS, MAX_STATUS_SPINNER_MS,
+        MAX_TOAST_DELAY_SECONDS, MIN_DISPLAY_PANES_MS, MIN_STATUS_SPINNER_MS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -47,10 +46,9 @@ pub use self::{
 
 pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::write::{update_file_at, write_edit, ConfigEdit};
-// `AppState::test_new` seeds the spinner interval from the default; production
-// construction reads the value from `Config` instead.
-#[cfg(test)]
-pub use self::model::{DEFAULT_DISPLAY_PANES_MS, DEFAULT_STATUS_SPINNER_MS};
+// wired by the client sidebar motion port (issue 171 tier-2)
+#[allow(unused_imports)]
+pub use self::model::{SortMotionEasingConfig, DEFAULT_STATUS_SPINNER_MS};
 #[cfg(test)]
 pub(crate) use self::sidebar::SidebarTokenTruncate;
 
