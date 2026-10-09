@@ -134,6 +134,13 @@ pub struct PaneSyncParams {
     pub mode: super::SyncMode,
 }
 
+/// Start input synchronization for two explicit panes in the same tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSyncPairParams {
+    pub source_pane_id: String,
+    pub target_pane_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PaneLayoutParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

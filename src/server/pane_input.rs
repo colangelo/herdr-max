@@ -222,6 +222,15 @@ pub(super) fn apply_client_popup_input_events(
     apply_client_terminal_input_events(runtime, events, false)
 }
 
+/// Typed sync has already classified host Page keys at the origin. Peers
+/// encode the forwarded key even when their own shell has host scrollback.
+pub(super) fn apply_client_typed_input_events(
+    runtime: &crate::terminal::TerminalRuntime,
+    events: &[ClientPaneInputEvent],
+) -> Result<(), String> {
+    apply_client_terminal_input_events(runtime, events, false)
+}
+
 fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],

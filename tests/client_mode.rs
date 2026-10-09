@@ -1114,7 +1114,8 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
                 .unwrap();
                 false
             }),
-            "remote reconnect {cycle} must restore visible input and preserve the shell"
+            "remote reconnect {cycle} must restore visible input and preserve the shell: {}",
+            screen_text()
         );
     }
 
@@ -1129,11 +1130,13 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         .to_string(),
     );
     assert_eq!(created["result"]["type"], "workspace_created");
-    assert!(wait_until(
-        Duration::from_secs(10),
-        Duration::from_millis(20),
-        || screen_text().contains("local-online")
-    ));
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            screen_text().contains("local-online")
+        }),
+        "Local recovery must show its workspace: {}",
+        screen_text()
+    );
 
     support::stop_spawned_herdr(&mut *local.child);
     local.close_master();

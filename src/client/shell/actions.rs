@@ -20,6 +20,13 @@ impl ClientShellState {
                 self.persist_chrome_preferences(outcome);
             }
             crate::input::KeybindMatch::Action(action) => {
+                if matches!(action, crate::input::KeybindAction::FocusAgent(_))
+                    && !self.indexed_navigation_target_exists(&crate::input::KeybindMatch::Action(
+                        action,
+                    ))
+                {
+                    return;
+                }
                 if self.workspace_preview_action_blocked()
                     && matches!(
                         action,
@@ -1276,6 +1283,9 @@ impl ClientShellState {
                 mode: PaneZoomMode::Toggle,
             })),
             KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
+                pane_id: focused_pane?,
+            })),
+            KeybindAction::ClearScrollback => Some(Method::PaneClearScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),
             KeybindAction::BalancePanes => Some(Method::LayoutBalance(

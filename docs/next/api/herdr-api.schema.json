@@ -3704,6 +3704,22 @@
           },
           "type": "object"
         },
+        "PaneSyncPairParams": {
+          "description": "Start input synchronization for two explicit panes in the same tab.",
+          "properties": {
+            "source_pane_id": {
+              "type": "string"
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_pane_id",
+            "target_pane_id"
+          ],
+          "type": "object"
+        },
         "PaneSyncParams": {
           "properties": {
             "mode": {
@@ -6338,6 +6354,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneSyncParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.sync_pair",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSyncPairParams"
             }
           },
           "required": [
