@@ -2186,8 +2186,8 @@ mod tests {
 
     #[test]
     fn parse_pane_send_text_args_double_dash_before_the_pane_ends_options() {
-        let parsed = parse_pane_send_text_args(&args(&["--chunk", "4", "--", "p1", "--chunk"]))
-            .unwrap();
+        let parsed =
+            parse_pane_send_text_args(&args(&["--chunk", "4", "--", "p1", "--chunk"])).unwrap();
         assert_eq!(parsed.pane_id, "p1");
         assert_eq!(parsed.text, "--chunk");
     }
