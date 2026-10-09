@@ -6,7 +6,8 @@ pub(crate) mod mouse;
 mod parse;
 
 pub(crate) use keybind_help::{
-    filter_keybind_help_groups, keybind_help_groups, keybind_help_text_char,
+    command_table, filter_keybind_help_groups, keybind_help_groups, keybind_help_text_char,
+    CommandAction, CommandGroup,
 };
 pub(crate) use keybindings::{
     resolve_custom_command, resolve_direct_binding, resolve_indexed_action,
