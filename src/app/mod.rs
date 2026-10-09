@@ -7,6 +7,7 @@ pub(crate) mod actions;
 mod agent_hints;
 mod agent_names;
 mod agent_resume;
+mod agent_resume_retry;
 #[cfg(test)]
 mod agent_suspend_tests;
 pub(crate) mod agent_view;
