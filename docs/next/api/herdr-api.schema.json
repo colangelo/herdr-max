@@ -2600,6 +2600,9 @@
               },
               "type": "array"
             },
+            "proportional": {
+              "type": "boolean"
+            },
             "ratio": {
               "format": "float",
               "type": "number"

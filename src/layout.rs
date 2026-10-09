@@ -317,6 +317,66 @@ impl TileLayout {
         set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
     }
 
+    /// Move the border of the split at `path` to `ratio` of that split's own
+    /// extent, the way a mouse drag does. Panes on each side of the border
+    /// along the split's axis resize proportionally: a run of same-direction
+    /// splits is one row, so panes outside the dragged split but in the same
+    /// row share the change instead of keeping their size. Splits across the
+    /// axis are untouched and count as one slot. Pane ids, focus and tree shape
+    /// are preserved; every ratio stays within `[0.1, 0.9]`. Returns whether
+    /// `path` names a split.
+    pub fn drag_border_at(&mut self, path: &[bool], ratio: f32) -> bool {
+        let ratio = ratio.clamp(0.1, 0.9);
+        let Some(Node::Split { direction, .. }) = node_at(&self.root, path) else {
+            return false;
+        };
+        let direction = *direction;
+        // The row's top: climb while the parent splits along the same axis.
+        let mut top = path.len();
+        while top > 0
+            && matches!(node_at(&self.root, &path[..top - 1]), Some(Node::Split { direction: d, .. }) if *d == direction)
+        {
+            top -= 1;
+        }
+        let relative = &path[top..];
+        let Some(row) = node_at(&self.root, &path[..top]) else {
+            return false;
+        };
+        let mut widths = Vec::new();
+        let mut dragged = DraggedSplit::default();
+        collect_row_slots(
+            row,
+            direction,
+            Some(relative),
+            1.0,
+            &mut widths,
+            &mut dragged,
+        );
+        let (start, count, first_count) = (dragged.start, dragged.count, dragged.first_count);
+        let split_at = start + first_count;
+        let left: f32 = widths[..split_at].iter().sum();
+        let right: f32 = widths[split_at..].iter().sum();
+        let span: f32 = widths[start..start + count].iter().sum();
+        let before: f32 = widths[..start].iter().sum();
+        let new_left = before + ratio * span;
+        if left <= f32::EPSILON || right <= f32::EPSILON {
+            return set_ratio_at(&mut self.root, path, ratio);
+        }
+        let (left_scale, right_scale) = (new_left / left, (1.0 - new_left) / right);
+        for (index, width) in widths.iter_mut().enumerate() {
+            *width *= if index < split_at {
+                left_scale
+            } else {
+                right_scale
+            };
+        }
+        let Some(row) = node_at_mut(&mut self.root, &path[..top]) else {
+            return false;
+        };
+        assign_row_ratios(row, direction, &widths);
+        true
+    }
+
     /// Rebalance every split so all panes end up equally sized, preserving the
     /// tree shape and each split's orientation (tmux `even-*` semantics for a
     /// BSP tree). Each split's first-child ratio becomes the share of its own axis
@@ -727,6 +787,104 @@ fn set_ratio_at(node: &mut Node, path: &[bool], new_ratio: f32) -> bool {
         }
     } else {
         false
+    }
+}
+
+fn node_at<'a>(node: &'a Node, path: &[bool]) -> Option<&'a Node> {
+    match (node, path.split_first()) {
+        (_, None) => Some(node),
+        (Node::Split { first, second, .. }, Some((&to_second, rest))) => {
+            node_at(if to_second { second } else { first }, rest)
+        }
+        _ => None,
+    }
+}
+
+fn node_at_mut<'a>(node: &'a mut Node, path: &[bool]) -> Option<&'a mut Node> {
+    match (node, path.split_first()) {
+        (node, None) => Some(node),
+        (Node::Split { first, second, .. }, Some((&to_second, rest))) => {
+            node_at_mut(if to_second { second } else { first }, rest)
+        }
+        _ => None,
+    }
+}
+
+/// Where the dragged split sits among a row's slots.
+#[derive(Default)]
+struct DraggedSplit {
+    /// Index of the dragged split's first slot.
+    start: usize,
+    /// How many slots the dragged split covers.
+    count: usize,
+    /// How many of those belong to its first child.
+    first_count: usize,
+}
+
+/// Flatten a row of same-`axis` splits into the share of the row each slot
+/// takes. A slot is a pane or a split across `axis`. `along` is the path from
+/// `node` to the dragged split while the walk is still on it.
+fn collect_row_slots(
+    node: &Node,
+    axis: Direction,
+    along: Option<&[bool]>,
+    share: f32,
+    widths: &mut Vec<f32>,
+    dragged: &mut DraggedSplit,
+) {
+    match node {
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } if *direction == axis => {
+            let first_start = widths.len();
+            let (first_along, second_along) = match along {
+                Some([false, rest @ ..]) => (Some(rest), None),
+                Some([true, rest @ ..]) => (None, Some(rest)),
+                _ => (None, None),
+            };
+            collect_row_slots(first, axis, first_along, share * ratio, widths, dragged);
+            let second_start = widths.len();
+            collect_row_slots(
+                second,
+                axis,
+                second_along,
+                share * (1.0 - ratio),
+                widths,
+                dragged,
+            );
+            if along.is_some_and(<[bool]>::is_empty) {
+                *dragged = DraggedSplit {
+                    start: first_start,
+                    count: widths.len() - first_start,
+                    first_count: second_start - first_start,
+                };
+            }
+        }
+        _ => widths.push(share),
+    }
+}
+
+/// Write a row's new slot shares back as split ratios, keeping its shape.
+/// Returns how many slots `node` covers.
+fn assign_row_ratios(node: &mut Node, axis: Direction, widths: &[f32]) -> usize {
+    match node {
+        Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } if *direction == axis => {
+            let first_count = assign_row_ratios(first, axis, widths);
+            let second_count = assign_row_ratios(second, axis, &widths[first_count..]);
+            let first_share: f32 = widths[..first_count].iter().sum();
+            let second_share: f32 = widths[first_count..first_count + second_count].iter().sum();
+            *ratio = (first_share / (first_share + second_share)).clamp(0.1, 0.9);
+            first_count + second_count
+        }
+        _ => 1,
     }
 }
 
@@ -1678,5 +1836,144 @@ mod tests {
         assert_eq!(layout.focused(), pane(4));
         assert!(layout.close_focused());
         assert_eq!(layout.focused(), pane(2));
+    }
+
+    fn ratioed(ratio: f32, first: Node, second: Node) -> Node {
+        Node::Split {
+            direction: Direction::Horizontal,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    /// ac's shape (#175), `Split(Split(left, Split(c1, c2)), c3)`, 100 columns
+    /// wide: left 20, c1 30, c2 30, c3 20.
+    fn left_then_two_then_one() -> TileLayout {
+        let inner = ratioed(0.5, Node::Pane(pane(2)), Node::Pane(pane(3)));
+        let outer = ratioed(0.25, Node::Pane(pane(1)), inner);
+        TileLayout::from_saved(ratioed(0.8, outer, Node::Pane(pane(4))), pane(1))
+    }
+
+    fn widths(layout: &TileLayout) -> Vec<u16> {
+        pane_rects(layout)
+            .iter()
+            .map(|(_, rect)| rect.width)
+            .collect()
+    }
+
+    #[test]
+    fn set_ratio_at_moves_one_border_and_leaves_panes_outside_its_split_alone() {
+        // Characterization of today's behaviour (#175): the left|c1 border is
+        // the first split of the left subtree, so only left, c1 and c2 change;
+        // c3 keeps its 20 columns.
+        let mut layout = left_then_two_then_one();
+        assert_eq!(widths(&layout), vec![20, 30, 30, 20]);
+
+        assert!(layout.set_ratio_at(&[false], 0.5));
+
+        assert_eq!(widths(&layout), vec![40, 20, 20, 20]);
+    }
+
+    #[test]
+    fn dragging_a_border_resizes_every_pane_on_each_side_proportionally() {
+        // #175: left|c1 moves from 20 to 40; c1, c2 and c3 share the 60 left in
+        // the ratio they had (30:30:20 -> 22.5:22.5:15), so c3 shrinks too.
+        let mut layout = left_then_two_then_one();
+
+        assert!(layout.drag_border_at(&[false], 0.5));
+
+        let widths = widths(&layout);
+        assert_eq!(widths[0], 40);
+        assert_eq!(widths[3], 15);
+        assert_eq!(widths[1] + widths[2], 45);
+        assert!(widths[1].abs_diff(widths[2]) <= 1, "{widths:?}");
+    }
+
+    #[test]
+    fn dragging_the_outer_border_scales_the_whole_far_side() {
+        // The same row dragged at its root: c3 | everything-else, c3 grows from
+        // 20 to 40 and left, c1, c2 shrink together (20:30:30 -> 15:22.5:22.5).
+        let mut layout = left_then_two_then_one();
+
+        assert!(layout.drag_border_at(&[], 0.6));
+
+        let widths = widths(&layout);
+        assert_eq!(widths[3], 40);
+        assert_eq!(widths[0] + widths[1] + widths[2], 60);
+        assert_eq!(widths[0], 15);
+    }
+
+    #[test]
+    fn dragging_in_a_four_column_row_scales_the_other_three() {
+        let ids = [pane(1), pane(2), pane(3), pane(4)];
+        let mut layout =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(1));
+        assert_eq!(widths(&layout), vec![25, 25, 25, 25]);
+
+        assert!(layout.drag_border_at(&[], 0.4));
+
+        assert_eq!(widths(&layout), vec![40, 20, 20, 20]);
+    }
+
+    #[test]
+    fn dragging_the_second_border_of_three_columns_scales_both_sides() {
+        let ids = [pane(1), pane(2), pane(3)];
+        let mut layout =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(2));
+        let before = widths(&layout);
+        assert_eq!(before.iter().sum::<u16>(), 100);
+
+        // Path [true] is the (2 | 3) split; its border moves right. Everything
+        // left of the border (1 and 2) grows together, 3 shrinks.
+        assert!(layout.drag_border_at(&[true], 0.75));
+
+        let after = widths(&layout);
+        assert_eq!(after.iter().sum::<u16>(), 100);
+        assert!(after[0] > before[0], "{after:?}");
+        assert!(after[1] > before[1], "{after:?}");
+        assert!(after[2] < before[2], "{after:?}");
+    }
+
+    #[test]
+    fn dragging_leaves_perpendicular_splits_and_focus_untouched() {
+        let mut layout = sample_layout();
+        let focus = layout.focused();
+        let ids_before = layout.pane_ids();
+        let before = split_snapshot(&layout);
+
+        assert!(layout.drag_border_at(&[], 0.5));
+
+        let after = split_snapshot(&layout);
+        assert!((after[0].1 - 0.5).abs() < 0.01, "{after:?}");
+        assert_eq!(after[1], before[1]);
+        assert_eq!(after[2], before[2]);
+        assert_eq!(layout.focused(), focus);
+        assert_eq!(layout.pane_ids(), ids_before);
+    }
+
+    #[test]
+    fn dragging_a_two_pane_row_matches_setting_the_ratio() {
+        let ids = [pane(1), pane(2)];
+        let mut dragged =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(1));
+        let mut set =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(1));
+
+        assert!(dragged.drag_border_at(&[], 0.7));
+        assert!(set.set_ratio_at(&[], 0.7));
+
+        assert_eq!(widths(&dragged), widths(&set));
+    }
+
+    #[test]
+    fn dragging_clamps_the_ratio_and_rejects_a_missing_split() {
+        let mut layout = left_then_two_then_one();
+
+        assert!(!layout.drag_border_at(&[true, true], 0.5));
+        assert!(layout.drag_border_at(&[false], 5.0));
+        for (_, ratio) in split_snapshot(&layout) {
+            assert!((0.1..=0.9).contains(&ratio), "{ratio}");
+        }
     }
 }

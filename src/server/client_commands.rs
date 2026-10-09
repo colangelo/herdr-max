@@ -367,6 +367,13 @@ mod tests {
                 "workspace.close",
                 "508d4409a530158b98432cccffb62a7ca4f7d3cb308b6db2989739f8325fdb46",
             ),
+            // Fork (herdr-max): a mouse drag sends `proportional: true`. An
+            // older server ignores the field and sets the one ratio, as before
+            // (fork issue 175).
+            (
+                "layout.set_split_ratio",
+                "a606d4fb0b80f1b68b282f7c342493a6adcbedd3bb19087904d10977f27554cb",
+            ),
         ] {
             let actual_digest = actual.remove(method);
             assert_eq!(
@@ -441,7 +448,12 @@ mod tests {
             );
         }
         let mut expected = expected;
-        for method in ["pane.close", "tab.close", "workspace.close"] {
+        for method in [
+            "pane.close",
+            "tab.close",
+            "workspace.close",
+            "layout.set_split_ratio",
+        ] {
             expected.remove(method);
         }
 
