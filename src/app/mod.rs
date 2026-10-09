@@ -1135,6 +1135,90 @@ mod tests {
         app
     }
 
+    fn pane_agent_border_row(app: &App) -> String {
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let layout = crate::ui::compute_tab_surface_for(
+            &app.state,
+            &app.terminal_runtimes,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            }),
+            area,
+            false,
+            Default::default(),
+        );
+        let (buffer, _, _, _) = crate::server::render_stream::render_tab_surface_virtual(
+            &app.state,
+            &app.terminal_runtimes,
+            layout,
+            area,
+        );
+        (0..80).map(|x| buffer[(x, 0)].symbol()).collect()
+    }
+
+    fn pane_agent_border_app(show_labels: bool) -> App {
+        let mut config = Config::default();
+        config.ui.pane_borders = crate::config::PaneBordersConfig::Always;
+        config.ui.show_agent_labels_on_pane_borders = show_labels;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("border labels")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].terminal_id(pane).unwrap().clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        app
+    }
+
+    #[test]
+    fn pane_agent_border_labels_honor_configured_visibility() {
+        for show_labels in [false, true] {
+            let app = pane_agent_border_app(show_labels);
+            let row = pane_agent_border_row(&app);
+            assert_eq!(row.contains("claude"), show_labels, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn pane_agent_border_labels_reload_both_directions() {
+        let mut app = pane_agent_border_app(false);
+        let mut config = Config::default();
+        config.ui.pane_borders = crate::config::PaneBordersConfig::Always;
+        for show_labels in [true, false, true] {
+            config.ui.show_agent_labels_on_pane_borders = show_labels;
+            app.apply_live_config(&config, &[], &[], false);
+            let row = pane_agent_border_row(&app);
+            assert_eq!(row.contains("claude"), show_labels, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn disabling_agent_border_labels_keeps_assigned_pane_labels() {
+        let mut app = pane_agent_border_app(false);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].terminal_id(pane).unwrap().clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("reviewer".into());
+        let row = pane_agent_border_row(&app);
+        assert!(row.contains("reviewer"), "{row:?}");
+        assert!(!row.contains("claude"), "{row:?}");
+    }
+
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
