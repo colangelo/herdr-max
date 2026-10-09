@@ -98,6 +98,25 @@ fn label_text(
     }
 }
 
+fn connected_version<'a>(
+    state: &'a ClientShellState,
+    snapshot: &'a ClientShellSnapshot,
+) -> &'a str {
+    // Welcome is the compatibility-floor source. A current, coherent optional
+    // fact also covers a live handoff that preserves an older client's socket.
+    snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.server_version.as_deref())
+        .or_else(|| {
+            state
+                .endpoint_versions
+                .get(&state.active_endpoint_id)
+                .map(String::as_str)
+        })
+        .unwrap_or("unknown")
+}
+
 fn pane_name<'a>(snapshot: &'a ClientShellSnapshot, pane_id: &str) -> &'a str {
     if let Some(name) = snapshot
         .resource_facts
@@ -226,17 +245,7 @@ pub(super) fn paint(
             })
             .bg(if resize { p.mauve } else { p.red })
             .add_modifier(Modifier::BOLD);
-        let version = state
-            .endpoint_versions
-            .get(&state.active_endpoint_id)
-            .map(String::as_str)
-            .or_else(|| {
-                snapshot
-                    .resource_facts
-                    .as_ref()
-                    .and_then(|facts| facts.server_version.as_deref())
-            })
-            .unwrap_or("unknown");
+        let version = connected_version(state, snapshot);
         let spans = summary_spans(
             buffer.area,
             layout.pane_surface,
@@ -350,6 +359,19 @@ fn summary_spans<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connected_version_uses_welcome_and_current_handoff_fact() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_endpoint_server_version(&ClientEndpointId::Local, Some("welcome-build".into()));
+        let mut snapshot = super::super::tests::snapshot();
+        assert_eq!(connected_version(&state, &snapshot), "welcome-build");
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            server_version: Some("handoff-build".into()),
+            ..Default::default()
+        });
+        assert_eq!(connected_version(&state, &snapshot), "handoff-build");
+    }
+
     #[test]
     fn pane_labels_use_the_canonical_session_name_fact() {
         let mut snapshot = super::super::tests::snapshot();

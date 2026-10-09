@@ -2280,6 +2280,12 @@ mod tests {
             .unwrap()
             .set_manual_label("assigned".into());
         assert_eq!(state.pane_display_label(0, pane), "assigned");
+        state.terminals.remove(&terminal_id);
+        assert_eq!(
+            state.pane_display_label(0, pane),
+            "pane 1",
+            "unavailable terminal keeps the stable pane number"
+        );
     }
 
     #[test]

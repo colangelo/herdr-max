@@ -309,13 +309,13 @@ fn resource_facts(
         let Some((ws_idx, pane_id)) = app.parse_pane_id(&public.pane_id) else {
             continue;
         };
-        let Some(terminal) = app.state.pane_terminal(pane_id) else {
-            continue;
-        };
         pane_names.insert(
             public.pane_id.clone(),
             app.state.pane_display_label(ws_idx, pane_id),
         );
+        let Some(terminal) = app.state.pane_terminal(pane_id) else {
+            continue;
+        };
         if let Some(order) = terminal.pin_order {
             pane_pins.insert(public.pane_id.clone(), order);
         }
