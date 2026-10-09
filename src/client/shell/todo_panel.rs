@@ -548,6 +548,12 @@ pub(super) fn render_detail_box(b: &mut Buffer, area: Rect, text: Option<&str>, 
         inner.width.saturating_sub(2),
         inner.height,
     );
+    render_detail_text(b, text_area, text, p);
+}
+
+/// The detail's text in `text_area`, wrapped, or a note that the row shows
+/// all of it.
+pub(super) fn render_detail_text(b: &mut Buffer, text_area: Rect, text: Option<&str>, p: &Palette) {
     if text_area.width == 0 || text_area.height == 0 {
         return;
     }
