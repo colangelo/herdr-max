@@ -186,12 +186,12 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
-/// How `agent.send` delivers the text (fork issue 182).
+/// How `agent.message` delivers the text (fork issue 182).
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum AgentSendMode {
+pub enum AgentMessageMode {
     /// Herdr types the text into the agent's pane, as if the user were there.
     #[default]
     Typed,
@@ -199,12 +199,12 @@ pub enum AgentSendMode {
     Note,
 }
 
-/// What `agent.send` does when the agent is working.
+/// What `agent.message` does when the agent is working.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum AgentSendBusy {
+pub enum AgentMessageBusy {
     /// Deliver now; the agent takes it at its next pause.
     #[default]
     Queue,
@@ -214,15 +214,15 @@ pub enum AgentSendBusy {
 
 /// Send one line of text to an agent without switching to it (fork issue 182).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AgentSendParams {
+pub struct AgentMessageParams {
     pub target: String,
     /// One line, at most 4000 bytes. Empty only with `answer`.
     #[serde(default)]
     pub text: String,
     #[serde(default)]
-    pub mode: AgentSendMode,
+    pub mode: AgentMessageMode,
     #[serde(default)]
-    pub busy: AgentSendBusy,
+    pub busy: AgentMessageBusy,
     /// For an agent that is blocked on a prompt: the key of the option to
     /// press (for example `1`) instead of typing text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,7 +231,7 @@ pub struct AgentSendParams {
 
 /// What the note command reported for a `note` send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AgentSendNote {
+pub struct AgentMessageNote {
     /// `queued`, `held` or `injected`.
     pub state: String,
     /// The note command's own words, verbatim.

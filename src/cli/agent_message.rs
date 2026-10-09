@@ -1,17 +1,17 @@
-//! `herdr agent send`: send one line of text to an agent without switching to
-//! it (fork issue 182). The same `agent.send` method the command bar uses.
+//! `herdr agent message`: send one line of text to an agent without switching to
+//! it (fork issue 182). The same `agent.message` method the command bar uses.
 
-use crate::api::schema::{AgentSendBusy, AgentSendMode, AgentSendParams, Method, Request};
+use crate::api::schema::{AgentMessageBusy, AgentMessageMode, AgentMessageParams, Method, Request};
 
-const USAGE: &str = "usage: herdr agent send <target> <text> [--note] [--interrupt] | herdr agent send <target> --answer KEY";
+const USAGE: &str = "usage: herdr agent message <target> <text> [--note] [--interrupt] | herdr agent message <target> --answer KEY";
 
-/// Parse `agent send`. The options are recognised anywhere; `--` ends option
+/// Parse `agent message`. The options are recognised anywhere; `--` ends option
 /// parsing so text that starts with `--` can still be sent. The first other
 /// word is the target and the rest is the text, joined with single spaces.
-fn parse_agent_send_args(args: &[String]) -> Result<AgentSendParams, String> {
+fn parse_agent_message_args(args: &[String]) -> Result<AgentMessageParams, String> {
     let mut words: Vec<&str> = Vec::new();
-    let mut mode = AgentSendMode::Typed;
-    let mut busy = AgentSendBusy::Queue;
+    let mut mode = AgentMessageMode::Typed;
+    let mut busy = AgentMessageBusy::Queue;
     let mut answer = None;
     let mut index = 0;
     while index < args.len() {
@@ -25,8 +25,8 @@ fn parse_agent_send_args(args: &[String]) -> Result<AgentSendParams, String> {
                 words.extend(args[index + 1..].iter().map(String::as_str));
                 break;
             }
-            "--note" if attached.is_none() => mode = AgentSendMode::Note,
-            "--interrupt" if attached.is_none() => busy = AgentSendBusy::Interrupt,
+            "--note" if attached.is_none() => mode = AgentMessageMode::Note,
+            "--interrupt" if attached.is_none() => busy = AgentMessageBusy::Interrupt,
             "--answer" => {
                 let value = match attached {
                     Some(value) => value,
@@ -53,10 +53,10 @@ fn parse_agent_send_args(args: &[String]) -> Result<AgentSendParams, String> {
         (None, true) => return Err(USAGE.into()),
         _ => {}
     }
-    if answer.is_some() && mode == AgentSendMode::Note {
+    if answer.is_some() && mode == AgentMessageMode::Note {
         return Err("--answer presses a key in the pane; it cannot be a note".into());
     }
-    Ok(AgentSendParams {
+    Ok(AgentMessageParams {
         target: (*target).to_owned(),
         text,
         mode,
@@ -65,8 +65,8 @@ fn parse_agent_send_args(args: &[String]) -> Result<AgentSendParams, String> {
     })
 }
 
-pub(super) fn agent_send(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_agent_send_args(args) {
+pub(super) fn agent_message(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_agent_message_args(args) {
         Ok(params) => params,
         Err(message) => {
             eprintln!("{message}");
@@ -74,8 +74,8 @@ pub(super) fn agent_send(args: &[String]) -> std::io::Result<i32> {
         }
     };
     super::print_response(&super::send_request(&Request {
-        id: "cli:agent:send".into(),
-        method: Method::AgentSend(params),
+        id: "cli:agent:message".into(),
+        method: Method::AgentMessage(params),
     })?)
 }
 
@@ -89,11 +89,11 @@ mod tests {
 
     #[test]
     fn text_after_the_target_is_joined_and_typed_by_default() {
-        let params = parse_agent_send_args(&args(&["reviewer", "look", "at", "this"])).unwrap();
+        let params = parse_agent_message_args(&args(&["reviewer", "look", "at", "this"])).unwrap();
         assert_eq!(params.target, "reviewer");
         assert_eq!(params.text, "look at this");
-        assert_eq!(params.mode, AgentSendMode::Typed);
-        assert_eq!(params.busy, AgentSendBusy::Queue);
+        assert_eq!(params.mode, AgentMessageMode::Typed);
+        assert_eq!(params.busy, AgentMessageBusy::Queue);
         assert_eq!(params.answer, None);
     }
 
@@ -104,27 +104,28 @@ mod tests {
             args(&["reviewer", "hi", "--note", "--interrupt"]),
             args(&["reviewer", "--interrupt", "hi", "--note"]),
         ] {
-            let params = parse_agent_send_args(&form).unwrap();
+            let params = parse_agent_message_args(&form).unwrap();
             assert_eq!(params.text, "hi", "{form:?}");
-            assert_eq!(params.mode, AgentSendMode::Note, "{form:?}");
-            assert_eq!(params.busy, AgentSendBusy::Interrupt, "{form:?}");
+            assert_eq!(params.mode, AgentMessageMode::Note, "{form:?}");
+            assert_eq!(params.busy, AgentMessageBusy::Interrupt, "{form:?}");
         }
     }
 
     #[test]
     fn double_dash_keeps_option_words_as_text() {
         let params =
-            parse_agent_send_args(&args(&["reviewer", "--", "--note", "is", "a", "flag"])).unwrap();
+            parse_agent_message_args(&args(&["reviewer", "--", "--note", "is", "a", "flag"]))
+                .unwrap();
         assert_eq!(params.text, "--note is a flag");
-        assert_eq!(params.mode, AgentSendMode::Typed);
+        assert_eq!(params.mode, AgentMessageMode::Typed);
     }
 
     #[test]
     fn an_answer_is_a_key_for_a_blocked_agent() {
-        let params = parse_agent_send_args(&args(&["reviewer", "--answer", "1"])).unwrap();
+        let params = parse_agent_message_args(&args(&["reviewer", "--answer", "1"])).unwrap();
         assert_eq!(params.answer.as_deref(), Some("1"));
         assert_eq!(params.text, "");
-        let params = parse_agent_send_args(&args(&["reviewer", "--answer=2"])).unwrap();
+        let params = parse_agent_message_args(&args(&["reviewer", "--answer=2"])).unwrap();
         assert_eq!(params.answer.as_deref(), Some("2"));
     }
 
@@ -144,7 +145,7 @@ mod tests {
                 "cannot be a note",
             ),
         ] {
-            let error = parse_agent_send_args(&form).unwrap_err();
+            let error = parse_agent_message_args(&form).unwrap_err();
             assert!(error.contains(needle), "{form:?}: {error}");
         }
     }

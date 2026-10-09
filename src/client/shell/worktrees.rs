@@ -561,7 +561,7 @@ impl ClientShellState {
                 | PendingEndpointKind::TodoMutation { .. }
                 | PendingEndpointKind::TodoSave { .. }
                 | PendingEndpointKind::PaneMove
-                | PendingEndpointKind::AgentSend,
+                | PendingEndpointKind::AgentMessage,
                 Err(_),
             ) => true,
         }

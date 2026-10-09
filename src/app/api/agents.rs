@@ -3,9 +3,9 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendBusy, AgentSendKeysParams, AgentSendMode,
-    AgentSendNote, AgentSendParams, AgentStartParams, AgentStatus, AgentTarget, PaneReadResult,
-    ResponseResult,
+    AgentMessageBusy, AgentMessageMode, AgentMessageNote, AgentMessageParams, AgentPromptParams,
+    AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentStatus, AgentTarget,
+    PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -13,7 +13,7 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
-/// `agent.send` writes typed text in pieces of at most this many bytes, with
+/// `agent.message` writes typed text in pieces of at most this many bytes, with
 /// a short gap between them: a TUI that classifies input by the size of a
 /// burst (Claude Code collapses ~1000 bytes into `[Pasted text]`) then sees
 /// typing, not a paste. The same sizes as `herdr pane send-text --chunk 300`.
@@ -146,7 +146,7 @@ impl App {
     ) -> bool {
         let params = match request.method {
             crate::api::schema::Method::AgentPrompt(params) => params,
-            crate::api::schema::Method::AgentSend(params) => {
+            crate::api::schema::Method::AgentMessage(params) => {
                 self.handle_deferred_agent_send(request.id, params, respond_to);
                 return true;
             }
@@ -201,14 +201,14 @@ impl App {
         true
     }
 
-    /// `agent.send` (fork issue 182): type one line into an agent as the user
+    /// `agent.message` (fork issue 182): type one line into an agent as the user
     /// would, or hand it to the note command. Answers through `respond_to`
     /// once the text is out, so the app thread never waits on the Enter delay
     /// or on the note command.
     fn handle_deferred_agent_send(
         &mut self,
         id: String,
-        params: AgentSendParams,
+        params: AgentMessageParams,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
         let respond = |response: String| {
@@ -262,7 +262,7 @@ impl App {
                 format!("agent {} is not blocked on a prompt", params.target),
             ));
         }
-        if params.mode == AgentSendMode::Note {
+        if params.mode == AgentMessageMode::Note {
             return self.send_agent_note(id, agent, params, respond_to);
         }
 
@@ -290,9 +290,9 @@ impl App {
         if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
             return respond(agent_not_ready(id, &params.target));
         }
-        let sent = |pieces, enter_sent, interrupted| ResponseResult::AgentSent {
+        let sent = |pieces, enter_sent, interrupted| ResponseResult::AgentMessaged {
             agent: agent.clone(),
-            delivery: AgentSendMode::Typed,
+            delivery: AgentMessageMode::Typed,
             pieces,
             enter_sent,
             interrupted,
@@ -321,7 +321,8 @@ impl App {
         }
 
         let mut interrupted = false;
-        if params.busy == AgentSendBusy::Interrupt && agent.agent_status == AgentStatus::Working {
+        if params.busy == AgentMessageBusy::Interrupt && agent.agent_status == AgentStatus::Working
+        {
             let bytes = match key_bytes("esc") {
                 Ok(bytes) => bytes,
                 Err(key) => {
@@ -395,7 +396,7 @@ impl App {
         &self,
         id: String,
         agent: crate::api::schema::AgentInfo,
-        params: AgentSendParams,
+        params: AgentMessageParams,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
         let Some(name) = agent.name.clone() else {
@@ -406,7 +407,7 @@ impl App {
             ));
             return;
         };
-        let interrupt = params.busy == AgentSendBusy::Interrupt;
+        let interrupt = params.busy == AgentMessageBusy::Interrupt;
         let text = params.text;
         let thread_id = id.clone();
         let thread_respond_to = respond_to.clone();
@@ -417,9 +418,9 @@ impl App {
             let response = match run_note_command(&command, &name, &text, interrupt) {
                 Ok(note) => encode_success(
                     thread_id,
-                    ResponseResult::AgentSent {
+                    ResponseResult::AgentMessaged {
                         agent,
-                        delivery: AgentSendMode::Note,
+                        delivery: AgentMessageMode::Note,
                         pieces: 0,
                         enter_sent: false,
                         interrupted: interrupt,
@@ -749,7 +750,7 @@ pub(crate) fn run_note_command(
     name: &str,
     text: &str,
     interrupt: bool,
-) -> Result<AgentSendNote, (&'static str, String)> {
+) -> Result<AgentMessageNote, (&'static str, String)> {
     use std::process::{Command, Stdio};
 
     let mut words = command.split_whitespace();
@@ -817,7 +818,7 @@ pub(crate) fn run_note_command(
     } else {
         "queued"
     };
-    Ok(AgentSendNote {
+    Ok(AgentMessageNote {
         state: state.to_owned(),
         detail: stdout.chars().take(400).collect(),
     })
@@ -1525,12 +1526,12 @@ mod tests {
         pane_id
     }
 
-    fn send(app: &mut App, params: AgentSendParams) -> String {
+    fn send(app: &mut App, params: AgentMessageParams) -> String {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(app.handle_deferred_agent_api_request(
             crate::api::schema::Request {
                 id: "send".into(),
-                method: crate::api::schema::Method::AgentSend(params),
+                method: crate::api::schema::Method::AgentMessage(params),
             },
             respond_to,
         ));
@@ -1539,12 +1540,12 @@ mod tests {
             .expect("agent send responds")
     }
 
-    fn params(text: &str) -> AgentSendParams {
-        AgentSendParams {
+    fn params(text: &str) -> AgentMessageParams {
+        AgentMessageParams {
             target: "reviewer".into(),
             text: text.into(),
-            mode: AgentSendMode::Typed,
-            busy: AgentSendBusy::Queue,
+            mode: AgentMessageMode::Typed,
+            busy: AgentMessageBusy::Queue,
             answer: None,
         }
     }
@@ -1588,7 +1589,7 @@ mod tests {
         let started = std::time::Instant::now();
         let response = send(&mut app, params(&text));
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::AgentSent {
+        let ResponseResult::AgentMessaged {
             delivery,
             pieces,
             enter_sent,
@@ -1599,7 +1600,7 @@ mod tests {
         else {
             panic!("expected a sent response: {response}");
         };
-        assert_eq!(delivery, AgentSendMode::Typed);
+        assert_eq!(delivery, AgentMessageMode::Typed);
         assert_eq!((pieces, enter_sent, interrupted), (3, true, false));
         assert!(note.is_none());
         assert_eq!(rx.try_recv().unwrap().len(), 300);
@@ -1621,7 +1622,7 @@ mod tests {
 
         let queued = send(&mut app, params("later"));
         let queued: SuccessResponse = serde_json::from_str(&queued).unwrap();
-        let ResponseResult::AgentSent { interrupted, .. } = queued.result else {
+        let ResponseResult::AgentMessaged { interrupted, .. } = queued.result else {
             panic!("expected a sent response");
         };
         assert!(!interrupted);
@@ -1629,10 +1630,10 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
 
         let mut now = params("now");
-        now.busy = AgentSendBusy::Interrupt;
+        now.busy = AgentMessageBusy::Interrupt;
         let interrupted = send(&mut app, now);
         let interrupted: SuccessResponse = serde_json::from_str(&interrupted).unwrap();
-        let ResponseResult::AgentSent { interrupted, .. } = interrupted.result else {
+        let ResponseResult::AgentMessaged { interrupted, .. } = interrupted.result else {
             panic!("expected a sent response");
         };
         assert!(interrupted);
@@ -1652,7 +1653,7 @@ mod tests {
         app.state.insert_test_runtime(pane_id, runtime);
 
         let mut idle = params("hello");
-        idle.busy = AgentSendBusy::Interrupt;
+        idle.busy = AgentMessageBusy::Interrupt;
         send(&mut app, idle);
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"hello"));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
@@ -1677,7 +1678,7 @@ mod tests {
         let mut answer = params("");
         answer.answer = Some("1".into());
         let answered: SuccessResponse = serde_json::from_str(&send(&mut app, answer)).unwrap();
-        let ResponseResult::AgentSent {
+        let ResponseResult::AgentMessaged {
             pieces, enter_sent, ..
         } = answered.result
         else {

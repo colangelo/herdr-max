@@ -13,7 +13,8 @@ use super::todo_panel::render_panel_shell;
 use super::todo_text::{apply_text_key, Shape, TextField};
 use super::*;
 use crate::api::schema::{
-    AgentSendBusy, AgentSendMode, AgentSendParams, AgentStatus, Method, PaneTarget, ResponseResult,
+    AgentMessageBusy, AgentMessageMode, AgentMessageParams, AgentStatus, Method, PaneTarget,
+    ResponseResult,
 };
 use crate::input::{command_table, CommandAction};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -80,7 +81,7 @@ pub(super) struct SendTarget {
 #[derive(Debug)]
 pub(super) struct SendDraft {
     pub(super) target: SendTarget,
-    pub(super) mode: AgentSendMode,
+    pub(super) mode: AgentMessageMode,
     /// Typing as you needs a local endpoint and a session that is not blocked
     /// on a prompt: free text is never typed into a prompt.
     pub(super) typed_possible: bool,
@@ -141,6 +142,17 @@ pub(super) fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
         return Some(0);
     }
     let hay: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    // The query appearing whole beats any scattered match, most of all at the
+    // start of a word (`spl` is `split`, not the middle of `display`).
+    let whole = query.trim().to_lowercase();
+    let hay_text: String = hay.iter().collect();
+    if let Some(at) = hay_text.find(&whole) {
+        let word_start = hay_text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        return Some(1000 + if word_start { 200 } else { 0 });
+    }
     let mut score = 0i64;
     let mut next = 0;
     let mut last: Option<usize> = None;
@@ -159,10 +171,6 @@ pub(super) fn fuzzy_score(query: &str, text: &str) -> Option<i64> {
     }
     if next < needle.len() {
         return None;
-    }
-    let whole = query.trim().to_lowercase();
-    if hay.iter().collect::<String>().contains(&whole) {
-        score += 40;
     }
     Some(score)
 }
@@ -704,8 +712,8 @@ fn render_compose(b: &mut Buffer, list: Rect, draft: &SendDraft, config: &Client
     ]);
     lines.push(Vec::new());
     let (how, meaning) = match draft.mode {
-        AgentSendMode::Typed => ("you", "typed into the pane, as if you were at it"),
-        AgentSendMode::Note => (
+        AgentMessageMode::Typed => ("you", "typed into the pane, as if you were at it"),
+        AgentMessageMode::Note => (
             "a note",
             "a peer message it may act on; it approves nothing",
         ),
@@ -985,7 +993,7 @@ impl ClientShellState {
         }
         if matches!(palette.stage, PaletteStage::Commands) {
             let typed = palette.query.text().to_owned();
-            if typed.len() > SEND_WORD.len()
+            if typed.len() >= SEND_WORD.len()
                 && typed[..SEND_WORD.len()].eq_ignore_ascii_case(SEND_WORD)
             {
                 palette.enter_targets(typed[SEND_WORD.len()..].trim_start());
@@ -1148,8 +1156,8 @@ impl ClientShellState {
                     KeyCode::Tab if modifiers.is_empty() => {
                         if draft.typed_possible && draft.note_possible {
                             draft.mode = match draft.mode {
-                                AgentSendMode::Typed => AgentSendMode::Note,
-                                AgentSendMode::Note => AgentSendMode::Typed,
+                                AgentMessageMode::Typed => AgentMessageMode::Note,
+                                AgentMessageMode::Note => AgentMessageMode::Typed,
                             };
                         }
                     }
@@ -1197,7 +1205,7 @@ impl ClientShellState {
         }
     }
 
-    /// Send the message: through `agent.send`, the one method every client of
+    /// Send the message: through `agent.message`, the one method every client of
     /// a send uses. A blocked session with nothing to send to is focused
     /// instead; a working one waits for "queue or interrupt?" when the config
     /// says to ask.
@@ -1235,25 +1243,25 @@ impl ClientShellState {
         draft.asking = false;
         draft.sending = true;
         draft.notice = None;
-        let params = AgentSendParams {
+        let params = AgentMessageParams {
             target: draft.target.pane_id.clone(),
             text,
             mode: draft.mode,
             busy: if interrupt && working {
-                AgentSendBusy::Interrupt
+                AgentMessageBusy::Interrupt
             } else {
-                AgentSendBusy::Queue
+                AgentMessageBusy::Queue
             },
             answer: None,
         };
         self.push_endpoint_method_with_kind(
-            Method::AgentSend(params),
-            PendingEndpointKind::AgentSend,
+            Method::AgentMessage(params),
+            PendingEndpointKind::AgentMessage,
             outcome,
         );
     }
 
-    /// The answer to `agent.send`: a receipt in the bar, or the refusal under
+    /// The answer to `agent.message`: a receipt in the bar, or the refusal under
     /// the message so it can be fixed.
     pub(super) fn handle_agent_send_result(
         &mut self,
@@ -1268,7 +1276,7 @@ impl ClientShellState {
         };
         outcome.repaint = true;
         match result {
-            Ok(ResponseResult::AgentSent {
+            Ok(ResponseResult::AgentMessaged {
                 delivery,
                 pieces,
                 interrupted,
@@ -1278,7 +1286,7 @@ impl ClientShellState {
                 let who = draft.target.label.clone();
                 let mut lines = Vec::new();
                 match (delivery, note) {
-                    (AgentSendMode::Note, Some(note)) => {
+                    (AgentMessageMode::Note, Some(note)) => {
                         lines.push(format!("note to {who}: {}", note.state));
                         if !note.detail.is_empty() {
                             lines.push(note.detail.clone());
@@ -1381,8 +1389,8 @@ impl ClientPaletteOverlay {
         let note_possible = target.name.is_some();
         let wants_note = default_mode == crate::config::PaletteSendMode::Note;
         let mode = match (wants_note, typed_possible, note_possible) {
-            (true, _, true) | (false, false, true) => AgentSendMode::Note,
-            _ => AgentSendMode::Typed,
+            (true, _, true) | (false, false, true) => AgentMessageMode::Note,
+            _ => AgentMessageMode::Typed,
         };
         self.query.clear();
         self.stage = PaletteStage::Compose(SendDraft {
@@ -1494,13 +1502,13 @@ mod tests {
         use crate::config::PaletteSendMode;
         let mut palette = sample();
         palette.begin_compose(0, PaletteSendMode::Typed, true);
-        assert_eq!(draft(&palette).mode, AgentSendMode::Typed);
+        assert_eq!(draft(&palette).mode, AgentMessageMode::Typed);
         assert!(draft(&palette).typed_possible && draft(&palette).note_possible);
 
         palette.begin_compose(0, PaletteSendMode::Note, true);
         assert_eq!(
             draft(&palette).mode,
-            AgentSendMode::Note,
+            AgentMessageMode::Note,
             "the config switch"
         );
     }
@@ -1510,7 +1518,7 @@ mod tests {
         use crate::config::PaletteSendMode;
         let mut palette = sample();
         palette.begin_compose(0, PaletteSendMode::Typed, false);
-        assert_eq!(draft(&palette).mode, AgentSendMode::Note);
+        assert_eq!(draft(&palette).mode, AgentMessageMode::Note);
         assert!(!draft(&palette).typed_possible);
     }
 
@@ -1526,7 +1534,7 @@ mod tests {
         let mut named = sample();
         named.targets[2].name = Some("gate".into());
         named.begin_compose(2, PaletteSendMode::Typed, true);
-        assert_eq!(draft(&named).mode, AgentSendMode::Note);
+        assert_eq!(draft(&named).mode, AgentMessageMode::Note);
     }
 
     fn typed(palette: &mut ClientPaletteOverlay, text: &str) {

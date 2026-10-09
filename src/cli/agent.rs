@@ -17,7 +17,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "list" => agent_list(&args[1..]),
-        "send" => super::agent_send::agent_send(&args[1..]),
+        "message" => super::agent_message::agent_message(&args[1..]),
         "get" => agent_get(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
@@ -978,7 +978,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
-    eprintln!("  herdr agent send <target> <text> [--note] [--interrupt] | --answer KEY");
+    eprintln!("  herdr agent message <target> <text> [--note] [--interrupt] | --answer KEY");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent pin <target>");

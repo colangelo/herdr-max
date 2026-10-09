@@ -823,8 +823,8 @@ pub(super) enum PendingEndpointKind {
         follow: Option<String>,
     },
     PaneMove,
-    /// `agent.send` from the command bar.
-    AgentSend,
+    /// `agent.message` from the command bar.
+    AgentMessage,
     CopySearch {
         pane_id: String,
         origin: crate::api::schema::PaneTextPoint,

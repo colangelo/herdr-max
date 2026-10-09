@@ -655,7 +655,7 @@ impl ClientShellState {
                             "todo save failed"
                         } else if matches!(pending.kind, PendingEndpointKind::PaneMove) {
                             "pane move failed"
-                        } else if matches!(pending.kind, PendingEndpointKind::AgentSend) {
+                        } else if matches!(pending.kind, PendingEndpointKind::AgentMessage) {
                             "send failed"
                         } else {
                             "Action rejected"
@@ -670,7 +670,7 @@ impl ClientShellState {
                         pending.kind,
                         PendingEndpointKind::TodoSave { .. }
                             | PendingEndpointKind::PaneMove
-                            | PendingEndpointKind::AgentSend
+                            | PendingEndpointKind::AgentMessage
                     );
                 if feedback {
                     self.push_feedback_toast(title, body);
@@ -968,7 +968,7 @@ impl ClientShellState {
                 self.handle_pane_move_result(&result, &mut outcome);
                 return (true, outcome.actions);
             }
-            PendingEndpointKind::AgentSend => {
+            PendingEndpointKind::AgentMessage => {
                 let mut outcome = ClientShellInput::default();
                 self.handle_agent_send_result(&result, &mut outcome);
                 return (true, outcome.actions);

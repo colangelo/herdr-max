@@ -5,7 +5,7 @@
 use super::super::palette::{ClientPaletteOverlay, PaletteItem, PaletteLayout};
 use super::*;
 use crate::api::schema::{
-    AgentSendBusy, AgentSendMode, AgentSendNote, AgentStatus, Method, ResponseResult,
+    AgentMessageBusy, AgentMessageMode, AgentMessageNote, AgentStatus, Method, ResponseResult,
 };
 use crate::input::KeybindAction;
 use crate::protocol::ClientShellAgent;
@@ -296,7 +296,10 @@ fn moving_skips_headings_and_clicking_a_row_runs_it() {
             modifiers: crossterm::event::KeyModifiers::empty(),
         },
     )]);
-    assert!(state.overlay.is_none(), "a click on a command runs it");
+    assert!(
+        !matches!(state.overlay, Some(ClientShellOverlay::Palette(_))),
+        "a click on a command closes the bar and runs it"
+    );
 }
 
 #[test]
@@ -374,10 +377,10 @@ fn one(outcome: &ClientShellInput) -> (String, Method) {
     requests.remove(0)
 }
 
-fn one_send(outcome: &ClientShellInput) -> (String, crate::api::schema::AgentSendParams) {
+fn one_send(outcome: &ClientShellInput) -> (String, crate::api::schema::AgentMessageParams) {
     match one(outcome) {
-        (id, Method::AgentSend(params)) => (id, params),
-        other => panic!("expected an agent.send, got {other:?}"),
+        (id, Method::AgentMessage(params)) => (id, params),
+        other => panic!("expected an agent.message, got {other:?}"),
     }
 }
 
@@ -388,12 +391,12 @@ fn pick(state: &mut ClientShellState, name: &str) {
     state.compose(W, H).unwrap();
 }
 
-fn sent_result(mode: AgentSendMode) -> ResponseResult {
-    let note = (mode == AgentSendMode::Note).then(|| AgentSendNote {
+fn sent_result(mode: AgentMessageMode) -> ResponseResult {
+    let note = (mode == AgentMessageMode::Note).then(|| AgentMessageNote {
         state: "held".into(),
         detail: "held until morning: if urgent, tell your gestore".into(),
     });
-    ResponseResult::AgentSent {
+    ResponseResult::AgentMessaged {
         agent: serde_json::from_value(serde_json::json!({
             "terminal_id": "t1",
             "agent_status": "idle",
@@ -406,7 +409,7 @@ fn sent_result(mode: AgentSendMode) -> ResponseResult {
         .unwrap(),
         delivery: mode,
         pieces: 2,
-        enter_sent: mode == AgentSendMode::Typed,
+        enter_sent: mode == AgentMessageMode::Typed,
         interrupted: false,
         note,
     }
@@ -478,16 +481,16 @@ fn enter_sends_the_message_typed_as_you_and_the_receipt_says_what_it_means() {
     let (id, method) = one(&outcome);
     assert_eq!(
         method,
-        Method::AgentSend(crate::api::schema::AgentSendParams {
+        Method::AgentMessage(crate::api::schema::AgentMessageParams {
             target: "pane_1".into(),
             text: "take a look at the diff".into(),
-            mode: AgentSendMode::Typed,
-            busy: AgentSendBusy::Queue,
+            mode: AgentMessageMode::Typed,
+            busy: AgentMessageBusy::Queue,
             answer: None,
         })
     );
 
-    state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentSendMode::Typed)));
+    state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentMessageMode::Typed)));
     let joined = boxed(&mut state).join("\n");
     assert!(
         joined.contains("typed to reviewer in 2 pieces, enter pressed"),
@@ -509,9 +512,9 @@ fn tab_sends_it_as_a_note_and_a_held_note_is_shown_in_its_own_words() {
     state.handle_input_bytes(b"\t");
     let outcome = state.handle_input_bytes(b"\r");
     let (id, params) = one_send(&outcome);
-    assert_eq!(params.mode, AgentSendMode::Note);
+    assert_eq!(params.mode, AgentMessageMode::Note);
 
-    state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentSendMode::Note)));
+    state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentMessageMode::Note)));
     let joined = boxed(&mut state).join("\n");
     assert!(joined.contains("note to reviewer: held"), "{joined}");
     assert!(
@@ -542,7 +545,7 @@ fn a_working_session_queues_and_alt_enter_interrupts() {
     type_text(&mut state, "stop and rebase");
     let queued = state.handle_input_bytes(b"\r");
     let (_, params) = one_send(&queued);
-    assert_eq!(params.busy, AgentSendBusy::Queue);
+    assert_eq!(params.busy, AgentMessageBusy::Queue);
 
     // A fresh bar: alt+enter is escape then enter.
     let mut state = state_with_agents(Config::default());
@@ -550,7 +553,7 @@ fn a_working_session_queues_and_alt_enter_interrupts() {
     type_text(&mut state, "stop and rebase");
     let interrupt = state.handle_input_bytes(b"\x1b\r");
     let (_, params) = one_send(&interrupt);
-    assert_eq!(params.busy, AgentSendBusy::Interrupt);
+    assert_eq!(params.busy, AgentMessageBusy::Interrupt);
 }
 
 #[test]
@@ -585,7 +588,7 @@ fn a_blocked_session_is_offered_its_pane_not_free_text() {
     type_text(&mut state, "ping");
     let outcome = state.handle_input_bytes(b"\r");
     let (_, params) = one_send(&outcome);
-    assert_eq!(params.mode, AgentSendMode::Note);
+    assert_eq!(params.mode, AgentMessageMode::Note);
 }
 
 #[test]

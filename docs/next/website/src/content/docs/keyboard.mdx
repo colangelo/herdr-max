@@ -44,7 +44,7 @@ A command with no key shows `unset` and still runs from the bar. The bar reads t
 
 A working agent takes a typed line at its next pause. `alt+enter` interrupts it first (`esc`, then the line). With `palette.send.busy = "ask"` the bar asks "queue or interrupt?" before sending to a working agent. An agent that is blocked on a prompt is never typed into: only a note can go to it, and a blocked agent with no name gets an `open pane` button instead. After a send the bar shows what happened ("typed to reviewer in 2 pieces, enter pressed", or the note's state) and says what it does not mean: it arrived, not that it was read or done.
 
-Sending as you to a session on another machine is not built yet: from a remote server's view a message goes as a note. `palette.send.cross_machine_typed` is reserved for it and has no effect. The same send is available from scripts as `herdr agent send` and the `agent.send` API method.
+Sending as you to a session on another machine is not built yet: from a remote server's view a message goes as a note. `palette.send.cross_machine_typed` is reserved for it and has no effect. The same send is available from scripts as `herdr agent message` and the `agent.message` API method.
 
 ## The rest, by task
 

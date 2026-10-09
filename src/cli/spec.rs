@@ -448,9 +448,9 @@ fn agent_command() -> Command {
                 .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
         )
         .subcommand(
-            Command::new("send")
+            Command::new("message")
                 .about("Send one line of text to an agent, typed as you or as a note")
-                .override_usage("herdr agent send <TARGET> <TEXT> [OPTIONS]\n       herdr agent send <TARGET> --answer KEY")
+                .override_usage("herdr agent message <TARGET> <TEXT> [OPTIONS]\n       herdr agent message <TARGET> --answer KEY")
                 .arg(required("target", "TARGET"))
                 .arg(Arg::new("text").value_name("TEXT").num_args(0..).trailing_var_arg(true))
                 .arg(flag("note").help("Send a peer message through the note command instead of typing the text"))
