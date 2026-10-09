@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -365,16 +365,17 @@ Generated keys form complete taps when the application requests key-release
 events. Client-shell callers must advertise/check this method separately;
 unavailable, hidden, popup-blocked or stale targets cannot receive its input.
 
-`pane.clear` purges the target pane's saved scrollback with tmux
-`clear-history` semantics. The visible screen contents and the running process
-are untouched, and the call is a safe no-op when the scrollback is already
-empty:
+`pane.clear` clears the target pane's screen inside Herdr's terminal; the
+running process is untouched. `pane.clear_scrollback` (CLI `herdr pane clear`)
+purges the pane's saved scrollback with tmux `clear-history` semantics instead.
+The visible screen contents and the running process are untouched, and the call
+is a safe no-op when the scrollback is already empty:
 
 ```json
-{"id":"req_clear","method":"pane.clear","params":{"pane_id":"w1:p1"}}
+{"id":"req_clear","method":"pane.clear_scrollback","params":{"pane_id":"w1:p1"}}
 ```
 
-The response is `type: "ok"`. Unknown pane ids fail with `pane_not_found`.
+Both respond `type: "ok"`. Unknown pane ids fail with `pane_not_found`.
 
 A pane's `agent_session` carries `restore_argv` when a restore would start an agent there: the exact command, resume command plus the launch flags Herdr kept (Herdr adds `--remote` for Codex panes on its app server). It is absent when the pane would come back as a plain shell, for example when the session on record belongs to an agent that no longer runs there.
 
