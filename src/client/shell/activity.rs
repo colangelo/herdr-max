@@ -2,7 +2,20 @@ use super::*;
 use crate::api::schema::AgentStatus;
 
 impl ClientShellState {
+    /// Steps the shared working spinner. The client loop calls this on every
+    /// wake, so an armed tick that is not yet due returns before scanning the
+    /// visible rows; a row that disappears disarms the tick at its deadline.
     pub(crate) fn tick_activity(&mut self, now: std::time::Instant) -> bool {
+        if self.config.status_spinner != crate::config::StatusSpinnerConfig::On {
+            self.activity_deadline = None;
+            return false;
+        }
+        if self
+            .activity_deadline
+            .is_some_and(|deadline| now < deadline)
+        {
+            return false;
+        }
         let local_working = self.hits.agents.iter().any(|(_, id)| {
             self.snapshot.as_deref().is_some_and(|snapshot| {
                 snapshot
@@ -22,17 +35,12 @@ impl ClientShellState {
                     })
                 })
         });
-        let working = self.config.status_spinner == crate::config::StatusSpinnerConfig::On
-            && (local_working || remote_working);
-        if !working {
+        if !(local_working || remote_working) {
             self.activity_deadline = None;
             return false;
         }
-        let Some(deadline) = self.activity_deadline else {
+        if self.activity_deadline.is_none() {
             self.activity_deadline = Some(now + self.config.status_spinner_interval);
-            return false;
-        };
-        if now < deadline {
             return false;
         }
         self.config.spinner_frame = self.config.spinner_frame.wrapping_add(1);
@@ -54,9 +62,8 @@ mod tests {
         assert!(!state.tick_activity(now + std::time::Duration::from_secs(1)));
         assert_eq!(state.config.spinner_frame, 0);
     }
-    #[test]
-    fn one_visible_working_row_arms_one_shared_tick_and_hiding_it_disarms() {
-        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    fn state_with_visible_working_row(config: &Config) -> ClientShellState {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(config));
         let mut snapshot = super::super::tests::snapshot();
         let agent:crate::protocol::ClientShellAgent=serde_json::from_value(serde_json::json!({
             "pane_id":"pane_1","workspace_id":"ws_1","tab_id":"tab_1","name":null,"display_agent":null,"agent":null,"title":null,
@@ -68,6 +75,11 @@ mod tests {
             .hits
             .agents
             .push((Rect::new(0, 0, 10, 1), "pane_1".into()));
+        state
+    }
+    #[test]
+    fn one_visible_working_row_arms_one_shared_tick_and_hiding_it_disarms() {
+        let mut state = state_with_visible_working_row(&Config::default());
         let now = std::time::Instant::now();
         assert!(!state.tick_activity(now));
         assert!(state.tick_activity(now + state.config.status_spinner_interval));
@@ -75,5 +87,54 @@ mod tests {
         state.hits.agents.clear();
         assert!(!state.tick_activity(now + std::time::Duration::from_secs(1)));
         assert!(state.activity_deadline.is_none());
+    }
+    #[test]
+    fn an_armed_tick_waits_for_its_deadline_and_turning_the_spinner_off_disarms_it() {
+        let mut state = state_with_visible_working_row(&Config::default());
+        let interval = state.config.status_spinner_interval;
+        let now = std::time::Instant::now();
+        assert!(!state.tick_activity(now));
+        // Early wakes keep the armed deadline, even once the row is gone; the
+        // row check runs when the tick is due.
+        state.hits.agents.clear();
+        assert!(!state.tick_activity(now + interval / 2));
+        assert_eq!(state.activity_deadline, Some(now + interval));
+        assert!(!state.tick_activity(now + interval));
+        assert!(state.activity_deadline.is_none());
+        assert_eq!(state.config.spinner_frame, 0);
+
+        let mut state = state_with_visible_working_row(&Config::default());
+        assert!(!state.tick_activity(now));
+        state.config.status_spinner = crate::config::StatusSpinnerConfig::Off;
+        assert!(!state.tick_activity(now + interval / 2));
+        assert!(state.activity_deadline.is_none());
+        assert_eq!(
+            state.timer_delay(now),
+            std::time::Duration::from_millis(100)
+        );
+    }
+    #[test]
+    fn spinner_frame_wraps_and_the_interval_is_clamped_from_config() {
+        let mut state = state_with_visible_working_row(&Config::default());
+        state.config.spinner_frame = u8::MAX;
+        let now = std::time::Instant::now();
+        assert!(!state.tick_activity(now));
+        assert!(state.tick_activity(now + state.config.status_spinner_interval));
+        assert_eq!(state.config.spinner_frame, 0);
+
+        let interval = |ms| {
+            let mut config = Config::default();
+            config.ui.status_spinner_ms = ms;
+            ClientShellConfig::from_config(&config).status_spinner_interval
+        };
+        assert_eq!(
+            interval(1),
+            std::time::Duration::from_millis(crate::config::MIN_STATUS_SPINNER_MS)
+        );
+        assert_eq!(
+            interval(10_000),
+            std::time::Duration::from_millis(crate::config::MAX_STATUS_SPINNER_MS)
+        );
+        assert_eq!(interval(333), std::time::Duration::from_millis(333));
     }
 }

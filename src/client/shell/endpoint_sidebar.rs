@@ -36,6 +36,7 @@ pub(super) fn render_collapsed(
                 snapshot,
                 collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_groups),
+                Some(&config.sort_motion),
             );
             if reveal {
                 if let Some(target) = state
@@ -131,6 +132,7 @@ pub(super) fn render_collapsed(
         let entries = super::sidebar::workspace_entries(
             snapshot,
             collapsed_groups_for_endpoint(state, &endpoint.endpoint_id).unwrap_or(&empty_groups),
+            Some(&config.sort_motion),
         );
         for entry in &entries {
             let workspace = &snapshot.workspaces[entry.index];
@@ -300,12 +302,16 @@ pub(super) fn render_expanded(
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
+                super::sidebar::workspace_entries(
+                    snapshot,
+                    collapsed_groups,
+                    Some(&config.sort_motion),
+                )
+                .into_iter()
+                .map(|entry| Row::Workspace {
+                    endpoint: endpoint_index,
+                    entry,
+                }),
             );
         }
     }

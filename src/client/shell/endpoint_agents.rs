@@ -184,6 +184,7 @@ fn agent_rows(
         endpoints,
         active_endpoint_id,
         config.agent_panel_sort,
+        Some(&config.sort_motion),
     )
     .into_iter()
     .enumerate()

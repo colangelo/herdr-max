@@ -22,9 +22,13 @@ pub(super) struct AgentRow {
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
+/// The agent panel in drawn order. `motion` applies the bubble-motion
+/// projection to a priority sort; pass `None` only for the sorted target
+/// itself.
 pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
+    motion: Option<&super::sort_motion::SortMotion>,
 ) -> Vec<String> {
     let mut ids = if snapshot.agent_view_label.is_some() {
         snapshot
@@ -59,7 +63,12 @@ pub(super) fn ordered_agent_pane_ids(
             (pin.is_none(), pin.unwrap_or(u64::MAX))
         });
     }
-    ids
+    match motion {
+        Some(motion) if sort == crate::config::AgentPanelSortConfig::Priority => {
+            motion.project_agents(&snapshot.boot_id, ids)
+        }
+        _ => ids,
+    }
 }
 
 pub(super) fn render_agent_panel(
@@ -305,7 +314,7 @@ pub(super) fn agent_rows(
     machine: Option<&str>,
 ) -> Vec<AgentRow> {
     let mut pin_rank = 0;
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    ordered_agent_pane_ids(snapshot, config.agent_panel_sort, Some(&config.sort_motion))
         .into_iter()
         .enumerate()
         .filter_map(|(index, pane_id)| {

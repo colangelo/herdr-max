@@ -53,7 +53,25 @@ pub(super) struct AggregateAgentTarget {
     pub(super) pane_id: String,
 }
 
+/// The federated agent list in drawn order. `motion` applies the
+/// bubble-motion projection to a priority sort; pass `None` only for the
+/// sorted target itself.
 pub(super) fn aggregate_agent_rows<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    sort: crate::config::AgentPanelSortConfig,
+    motion: Option<&super::sort_motion::SortMotion>,
+) -> Vec<AggregateAgentRow<'a>> {
+    let rows = sorted_aggregate_agent_rows(endpoints, active_endpoint_id, sort);
+    match motion {
+        Some(motion) if sort == crate::config::AgentPanelSortConfig::Priority => {
+            motion.project_aggregate(rows)
+        }
+        _ => rows,
+    }
+}
+
+fn sorted_aggregate_agent_rows<'a>(
     endpoints: &'a [ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     sort: crate::config::AgentPanelSortConfig,
@@ -134,7 +152,7 @@ pub(super) fn aggregate_agent_rows<'a>(
 
     let mut rows = cached_endpoint_snapshots(endpoints)
         .flat_map(|endpoint| {
-            super::agent_sidebar::ordered_agent_pane_ids(endpoint.snapshot, sort)
+            super::agent_sidebar::ordered_agent_pane_ids(endpoint.snapshot, sort, None)
                 .into_iter()
                 .filter_map(move |pane_id| {
                     let agent = endpoint
@@ -284,8 +302,9 @@ pub(super) fn online_agent_targets(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     sort: crate::config::AgentPanelSortConfig,
+    motion: Option<&super::sort_motion::SortMotion>,
 ) -> Vec<AggregateAgentTarget> {
-    aggregate_agent_rows(endpoints, active_endpoint_id, sort)
+    aggregate_agent_rows(endpoints, active_endpoint_id, sort, motion)
         .into_iter()
         .filter(|row| !row.endpoint.stale())
         .map(|row| AggregateAgentTarget {

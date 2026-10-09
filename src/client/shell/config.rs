@@ -176,6 +176,7 @@ impl ClientShellConfig {
                 ),
             ),
             spinner_frame: 0,
+            sort_motion: super::sort_motion::SortMotion::from_config(config),
             status_indicators: config.ui.status_indicators,
             sound_enabled: config.ui.sound.enabled,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
@@ -452,6 +453,7 @@ impl ClientShellConfig {
                         crate::config::MIN_STATUS_SPINNER_MS,
                         crate::config::MAX_STATUS_SPINNER_MS,
                     ));
+                self.sort_motion.apply_live_config(config);
                 self.status_indicators = ui.status_indicators;
                 self.sound_enabled = ui.sound.enabled;
                 self.show_agent_labels_on_pane_borders = ui.show_agent_labels_on_pane_borders;

@@ -55,6 +55,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) status_spinner: crate::config::StatusSpinnerConfig,
     pub(super) status_spinner_interval: std::time::Duration,
     pub(super) spinner_frame: u8,
+    /// Bubble motion of the priority-sorted sidebar lists, advanced only by
+    /// `tick_sort_motion`.
+    pub(super) sort_motion: super::sort_motion::SortMotion,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
     pub(super) show_agent_labels_on_pane_borders: bool,
@@ -1374,12 +1377,17 @@ impl ClientShellState {
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
         if self.mobile_layout_active() {
-            render::workspace_entries(snapshot, &empty_collapsed_groups)
+            render::workspace_entries(
+                snapshot,
+                &empty_collapsed_groups,
+                Some(&self.config.sort_motion),
+            )
         } else {
             render::workspace_entries(
                 snapshot,
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
+                Some(&self.config.sort_motion),
             )
         }
     }
@@ -2083,6 +2091,7 @@ impl ClientShellState {
             .into_iter()
             .chain(self.selection_repaint_deadline)
             .chain(self.activity_deadline)
+            .chain(self.config.sort_motion.deadline)
             .chain(self.pane_labels_until)
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))

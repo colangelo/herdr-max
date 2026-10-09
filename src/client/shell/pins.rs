@@ -299,7 +299,7 @@ mod tests {
             workspace_sort: Some("priority".into()),
             ..Default::default()
         });
-        let entries = render::workspace_entries(&snapshot, &HashSet::new());
+        let entries = render::workspace_entries(&snapshot, &HashSet::new(), None);
         assert_eq!(snapshot.workspaces[entries[0].index].workspace_id, "second");
         assert_eq!(entries[0].pin_rank, Some(0));
         assert_eq!(entries[0].visible_index, 0);
@@ -349,7 +349,7 @@ mod tests {
             workspace_pins: Some([("child".into(), 0)].into_iter().collect()),
             ..Default::default()
         });
-        let entries = render::workspace_entries(&snapshot, &HashSet::new());
+        let entries = render::workspace_entries(&snapshot, &HashSet::new(), None);
         assert_eq!(
             entries
                 .iter()
@@ -357,7 +357,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["parent", "child", "ws_1"]
         );
-        let entries = render::workspace_entries(&snapshot, &HashSet::from(["repo".into()]));
+        let entries = render::workspace_entries(&snapshot, &HashSet::from(["repo".into()]), None);
         assert_eq!(snapshot.workspaces[entries[0].index].workspace_id, "parent");
     }
 }

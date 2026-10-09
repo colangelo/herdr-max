@@ -531,6 +531,7 @@ fn agent_navigation_keeps_scroll_when_target_is_visible() {
         &state.endpoints,
         &state.active_endpoint_id,
         state.config.agent_panel_sort,
+        Some(&state.config.sort_motion),
     );
     let index = targets
         .iter()
@@ -1741,6 +1742,7 @@ fn selected_position_sort_uses_public_tab_and_pane_numbers() {
         &state.endpoints,
         &state.active_endpoint_id,
         crate::config::AgentPanelSortConfig::Priority,
+        None,
     )
     .into_iter()
     .map(|row| row.agent.name.as_deref().expect("agent name"))

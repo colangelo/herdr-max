@@ -2329,6 +2329,7 @@ async fn run_client_loop(
                             | shell.tick_workspace_highlight(now)
                             | shell.tick_endpoint_error(now)
                             | shell.tick_activity(now)
+                            | shell.tick_sort_motion(now)
                             | shell.tick_pane_labels(now);
                         let frame = outcome
                             .repaint
