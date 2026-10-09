@@ -190,7 +190,7 @@ fn composed_bar(mode: ClientShellMode, explicit_labels: bool, sync: bool) -> (Fr
 #[test]
 #[ignore = "capture for review, not a check"]
 fn capture_mode_bars() {
-    let (frame, p) = composed_bar(ClientShellMode::Navigate, true, false);
+    let (frame, p) = composed_bar(ClientShellMode::Terminal, true, false);
     capture("PANES bar (display panes)", &frame, 11..12, &p);
     let (frame, p) = composed_bar(ClientShellMode::Resize, false, false);
     capture("RESIZE bar", &frame, 11..12, &p);
