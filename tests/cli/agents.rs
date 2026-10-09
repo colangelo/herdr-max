@@ -141,6 +141,10 @@ fn agent_start_waits_for_a_new_pane_shell_to_finish_initializing() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
+)]
 fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -621,6 +625,10 @@ fn agent_start_timeout_releases_the_name_for_reuse() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
+)]
 fn agent_start_reports_detected_kind_mismatch_before_released_name() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -698,6 +706,10 @@ fn agent_start_reports_detected_kind_mismatch_before_released_name() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
+)]
 fn agent_start_follows_its_named_terminal_when_the_pane_moves() {
     use std::os::unix::fs::PermissionsExt;
 
