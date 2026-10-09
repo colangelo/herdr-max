@@ -374,6 +374,22 @@ fn parse_leading_id(args: &[String]) -> Result<u64, TodoArgError> {
         .map_err(|_| TodoArgError::Message(format!("invalid todo id: {raw}")))
 }
 
+/// Whether `value` is shaped like a public pane id (`w1:p3`, `p_3`, `p_1_3`):
+/// one word, with no spaces, so ordinary todo text never matches.
+fn looks_like_pane_id(value: &str) -> bool {
+    if let Some(rest) = value.strip_prefix("p_") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '_');
+    }
+    value.rsplit_once(":p").is_some_and(|(workspace, pane)| {
+        !workspace.is_empty()
+            && workspace
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && !pane.is_empty()
+            && pane.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
 fn parse_todo_add_args(
     args: &[String],
     env_pane_id: Option<&str>,
@@ -384,6 +400,16 @@ fn parse_todo_add_args(
     // The text is positional, so a leading flag means the text was forgotten.
     if is_help_arg(text) || text.starts_with('-') {
         return Err(TodoArgError::Usage);
+    }
+    // `todo add <pane> "x"` is the form people reach for first; the pane is a
+    // flag here, so say so instead of filing the pane id as the todo's text.
+    if looks_like_pane_id(text) {
+        if let Some(real_text) = args.get(1).filter(|next| !next.starts_with('-')) {
+            return Err(TodoArgError::Message(format!(
+                "{text} looks like a pane id, but todo add takes the text first: \
+                 herdr todo add \"{real_text}\" --pane {text}"
+            )));
+        }
     }
 
     let mut target = PaneTarget::new(env_pane_id);
@@ -704,6 +730,31 @@ mod tests {
             TodoArgError::Usage,
             "a flag must not be swallowed as the todo text"
         );
+    }
+
+    #[test]
+    fn add_args_name_the_right_form_when_a_pane_id_comes_first() {
+        for pane in ["w1:p3", "p_3", "p_1_3"] {
+            let error = parse_todo_add_args(&args(&[pane, "fix it"]), Some("w1:p1")).unwrap_err();
+
+            let TodoArgError::Message(message) = error else {
+                panic!("{pane}: expected a message, got {error:?}");
+            };
+            assert!(
+                message.contains(&format!("herdr todo add \"fix it\" --pane {pane}")),
+                "{pane}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_args_keep_a_lone_pane_like_word_as_text() {
+        let parsed = parse_todo_add_args(&args(&["w1:p3"]), Some("w1:p1")).unwrap();
+        assert_eq!(parsed.text, "w1:p3");
+
+        let parsed =
+            parse_todo_add_args(&args(&["w1:p3", "--priority", "high"]), Some("w1:p1")).unwrap();
+        assert_eq!(parsed.text, "w1:p3");
     }
 
     #[test]

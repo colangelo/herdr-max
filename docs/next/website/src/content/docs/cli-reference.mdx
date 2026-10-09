@@ -157,6 +157,8 @@ herdr todo clear [--done] [--pane ID|--current] [--json]
 
 Every pane carries its own todo list. Without `--pane` or `--current`, each verb acts on the calling pane's `HERDR_PANE_ID`, so an agent about to exit can record its next steps with `herdr todo add "hand back to review"` without knowing its own pane id. Run outside a Herdr pane without a target and the command fails instead of guessing; `todo list` also accepts `--all` to list every pane in the session.
 
+The todo text comes first and the pane is a flag: `herdr todo add "x" --pane w1:p2`. A pane id given first, as in `todo add w1:p2 "x"`, is refused with that form.
+
 `--priority` is `high`, `normal`, or `low` and defaults to `normal`. `--link <target>` points a todo at another pane by pane id (`w1:p2`); the link captures a label for the target when it is made — that pane's label, its agent name, or the id you passed — so it still reads sensibly once the target is gone. `edit --unlink` drops the link. A pane holds at most 50 todos of at most 500 characters each; writes past either limit are rejected with `todo_limit_reached` or `todo_text_too_long` rather than truncated.
 
 `todo list` prints one todo per line in display order — outstanding before done, then highest priority first, then creation order — marking outstanding todos with `*`, followed by the id, priority, and text, with ` → label` appended for a linked todo and ` (gone)` when its target pane no longer exists. A trailing line counts the outstanding todos when any remain. `--all` adds a pane column. Pass `--json` for the raw `todo.list` response, including each todo's `link_pane_id`, `link_alive`, `created_at_unix`, and `updated_at_unix`.
