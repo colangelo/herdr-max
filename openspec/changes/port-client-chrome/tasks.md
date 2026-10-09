@@ -8,7 +8,7 @@
 - [ ] 1.6 pins-order: Restore per-endpoint pins, workspace priority, markers and discoverable key/menu actions; test shared IDs/view filter/order; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.7 follow: Follow focused entries after reorder with manual-scroll disengagement; test local/aggregate visibility; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.8 overflow: Restore pure hidden-edge plan/summary/click and fog/fade; port tests and live reload; update applicable staged docs and verify bin check/feature tests.
-- [ ] 1.9 spinner: Restore client-only shared spinner and background pulse with fork defaults; test scheduling/static fallback and profile redraw requests; update applicable staged docs and verify bin check/feature tests.
+- [x] 1.9 spinner: Restore client-only shared spinner and background pulse with fork defaults; test scheduling/static fallback and profile redraw requests; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.10 pane-style: Restore endpoint-configured borders/titles/tints/inactive fade; port pure fade/render tests and scaling evidence; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.11 feedback: Anchor clipboard/action feedback to source pane; port three fallback/anchoring tests and async identity; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.12 toast: Restore size/per-kind duration/center persistence; test original replacement semantics and enum compatibility; update applicable staged docs and verify bin check/feature tests.
@@ -17,7 +17,7 @@
 - [ ] 1.15 tab-indicators: Restore notification/todo glyphs/count/position/accent; test bar budgets and floating geometry; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.16 sync-colors: Render target-tab sync members/outsiders/chip; test grace and label precedence with input seat; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.17 hints-sound: Preserve fork hint-driven sound/toast/title behavior; test exactly-once client effects with ordinary semantic notifications; update applicable staged docs and verify bin check/feature tests.
-- [ ] 1.18 motion: Port optional bubble motion/easing in isolated fork-only commit; test pure ordering/tick and measure cost; update applicable staged docs and verify bin check/feature tests.
+- [x] 1.18 motion: Port optional bubble motion/easing in isolated fork-only commit; test pure ordering/tick and measure cost; update applicable staged docs and verify bin check/feature tests.
 - [ ] 1.19 head-host: Restore detached-head row/host identity using optional facts; test branch semantics and remote server label/version; update applicable staged docs and verify bin check/feature tests.
 
 ## 2. Integration
