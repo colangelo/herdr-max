@@ -1,0 +1,3 @@
+# Throwaway CI probe (issue 171): run every test instead of stopping at the first failure.
+[profile.default]
+fail-fast = false
