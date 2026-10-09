@@ -7925,9 +7925,26 @@ mod tests {
         for var in STALE_SSH_CONNECTION_ENV_VARS {
             assert!(cmd.get_env(var).is_none(), "{var} should not reach panes");
         }
+        // Forwarding goes through herdr's stable agent link when the session
+        // has one (it depends on this machine's live session, not the test),
+        // and otherwise keeps the inherited socket. Either way it stays set.
+        let inherited = std::ffi::OsString::from("/tmp/agent.sock");
+        #[cfg(unix)]
+        let expected = {
+            let stable_agent = crate::platform::ssh_agent::socket_path();
+            if std::fs::symlink_metadata(&stable_agent)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                stable_agent.into_os_string()
+            } else {
+                inherited
+            }
+        };
+        #[cfg(not(unix))]
+        let expected = inherited;
         assert_eq!(
             cmd.get_env("SSH_AUTH_SOCK"),
-            Some(std::ffi::OsStr::new("/tmp/agent.sock")),
+            Some(expected.as_os_str()),
             "agent forwarding stays usable in panes"
         );
     }
