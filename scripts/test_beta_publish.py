@@ -86,6 +86,7 @@ FAKE_GH = textwrap.dedent(
 ).lstrip()
 
 
+@unittest.skipUnless(os.name == "posix", "beta publish runs a bash script")
 class BetaPublishTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp())

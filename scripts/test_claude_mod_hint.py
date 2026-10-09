@@ -54,6 +54,7 @@ def run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["sh", str(SCRIPT), *args], capture_output=True, text=True, timeout=10)
 
 
+@unittest.skipUnless(os.name == "posix", "the claude-mod hint is a POSIX shell script on a unix socket")
 class HerdrHintScript(unittest.TestCase):
     def test_a_hint_goes_to_the_socket_as_a_report_hint_request(self):
         herdr = FakeHerdr()
