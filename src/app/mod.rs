@@ -145,6 +145,9 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    /// Restored agents being watched for a resume command that died at boot.
+    pub(crate) resume_retries:
+        HashMap<crate::terminal::TerminalId, agent_resume_retry::ResumeRetry>,
     startup_per_agent_delay: Duration,
     next_agent_resume_at: Option<Instant>,
     /// How Codex panes are launched and named (`[agents.codex]`).
@@ -689,6 +692,7 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            resume_retries: HashMap::new(),
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),
             ),

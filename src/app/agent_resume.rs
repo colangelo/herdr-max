@@ -23,6 +23,11 @@ impl App {
     }
 
     pub(crate) fn sync_pending_agent_resume_deadline(&mut self, now: Instant) {
+        self.sync_pending_agent_resume_deadline_inner(now);
+        self.fold_resume_retry_deadline();
+    }
+
+    fn sync_pending_agent_resume_deadline_inner(&mut self, now: Instant) {
         if !self.has_pending_agent_resumes() {
             self.pending_agent_resume_deadline = None;
             self.next_agent_resume_at = None;
@@ -50,9 +55,12 @@ impl App {
         now: Instant,
         allow_empty_theme: bool,
     ) -> bool {
+        // A restored agent that died at boot is looked at here too (issue 177).
+        let retried = self.run_resume_retries(now);
         // Geometry/theme events can also enter here; they must not bypass spacing.
         if self.next_agent_resume_at.is_some_and(|next| now < next) {
-            return false;
+            self.fold_resume_retry_deadline();
+            return retried;
         }
         let pending = self.pending_agent_resume_candidates();
         let mut changed = false;
@@ -93,7 +101,8 @@ impl App {
         if !self.has_pending_agent_resumes() {
             self.next_agent_resume_at = None;
         }
-        changed
+        self.fold_resume_retry_deadline();
+        changed || retried
     }
 
     fn pending_agent_resume_candidates(&self) -> Vec<PendingAgentResumeCandidate> {
@@ -308,6 +317,7 @@ impl App {
             }
         };
 
+        let retry_command = resume_command.clone();
         let mut input = resume_command;
         input.push('\r');
         // Restore relaunches the agent; that is not activity in the pane.
@@ -324,6 +334,15 @@ impl App {
         }
 
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        self.watch_resume(
+            terminal_id.clone(),
+            super::agent_resume_retry::ResumeRetry::new(
+                pane_id,
+                retry_command,
+                plan.agent.clone(),
+                Instant::now(),
+            ),
+        );
         let mut agent_name = None;
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.pending_agent_resume_plan = None;
