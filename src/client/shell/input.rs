@@ -749,6 +749,17 @@ impl ClientShellState {
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
                 {
+                    // A held sync switch must not toggle the group back off.
+                    if key.kind == KeyEventKind::Repeat
+                        && matches!(
+                            binding,
+                            crate::input::KeybindMatch::Action(
+                                crate::input::KeybindAction::ToggleSyncPanes
+                            )
+                        )
+                    {
+                        return None;
+                    }
                     self.record_binding(binding, outcome);
                     return None;
                 }

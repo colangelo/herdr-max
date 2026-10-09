@@ -226,6 +226,7 @@ pub(crate) fn keybind_help_groups(
                     "scroll line down",
                 ),
                 entry(binding_label(&keybinds.zoom), "zoom pane"),
+                entry(binding_label(&keybinds.toggle_sync_panes), "sync panes"),
                 entry(binding_label(&keybinds.resize_mode), "resize mode"),
                 entry(
                     binding_label(&keybinds.resize_pane_left),
