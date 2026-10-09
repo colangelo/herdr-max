@@ -212,7 +212,8 @@ impl ClientShellState {
         }));
     }
 
-    pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
+    /// A shared list chord: a row, half the menu, or an end; clamped.
+    pub(super) fn chord_context_menu_selection(&mut self, chord: super::move_picker::Chord) {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
@@ -220,8 +221,7 @@ impl ClientShellState {
         if item_count == 0 {
             return;
         }
-        menu.highlighted = (menu.highlighted as isize + delta)
-            .clamp(0, item_count.saturating_sub(1) as isize) as usize;
+        menu.highlighted = chord.target(menu.highlighted, item_count, item_count);
     }
 
     pub(super) fn activate_context_menu_item(

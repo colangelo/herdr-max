@@ -755,9 +755,9 @@ fn render_row(
     selected: bool,
     last_branch: bool,
     status_width: usize,
-    indicators: crate::config::StatusIndicatorStyle,
-    p: &Palette,
+    config: &ClientShellConfig,
 ) {
+    let p = &config.palette;
     let bar = Style::default()
         .fg(contrast(p))
         .bg(p.accent)
@@ -771,7 +771,7 @@ fn render_row(
     };
     b.set_style(row, pick(Style::default()));
     let dim = Style::default().fg(p.overlay0);
-    let icon = |status| super::status_icon(status, indicators).to_owned();
+    let icon = |status| config.state_icon(status).to_owned();
     let mut spans = Vec::new();
     spans.push((
         if matches!(item, MoveItem::Here(_)) {
@@ -802,7 +802,7 @@ fn render_row(
         } => {
             spans.push((
                 icon(*status),
-                pick(Style::default().fg(super::status_color(*status, p))),
+                pick(Style::default().fg(config.state_color(*status))),
             ));
             spans.push((" ".to_owned(), pick(Style::default())));
             spans.push((
@@ -821,7 +821,7 @@ fn render_row(
             MoveTarget::Tab { .. } => {
                 spans.push((
                     icon(entry.status),
-                    pick(Style::default().fg(super::status_color(entry.status, p))),
+                    pick(Style::default().fg(config.state_color(entry.status))),
                 ));
                 spans.push((" ".to_owned(), pick(Style::default())));
                 spans.push(("tab ".to_owned(), pick(dim)));
@@ -1022,9 +1022,9 @@ fn render_scrollbar(b: &mut Buffer, list: Rect, start: usize, len: usize, p: &Pa
 pub(super) fn render_move_picker(
     b: &mut Buffer,
     picker: &ClientMovePickerOverlay,
-    indicators: crate::config::StatusIndicatorStyle,
-    p: &Palette,
+    config: &ClientShellConfig,
 ) -> Option<(MovePickerLayout, Option<crate::protocol::CursorState>)> {
+    let p = &config.palette;
     for y in b.area.y..b.area.bottom() {
         for x in b.area.x..b.area.right() {
             let cell = &mut b[(x, y)];
@@ -1076,8 +1076,7 @@ pub(super) fn render_move_picker(
             offset == picker.selected,
             last_branch,
             draw_status,
-            indicators,
-            p,
+            config,
         );
     }
     render_scrollbar(b, list, layout.start, picker.items.len(), p);
@@ -1138,6 +1137,24 @@ pub(super) enum Chord {
     Last,
 }
 
+impl Chord {
+    /// Where this chord takes `selected` in a list of `len` rows shown
+    /// `visible` at a time: one row, half a page, or an end. Clamped, never
+    /// wrapping.
+    pub(super) fn target(self, selected: usize, visible: usize, len: usize) -> usize {
+        let half = (visible / 2).max(1);
+        let last = len.saturating_sub(1);
+        match self {
+            Self::Prev => selected.saturating_sub(1),
+            Self::Next => selected.saturating_add(1).min(last),
+            Self::HalfPageUp => selected.saturating_sub(half),
+            Self::HalfPageDown => selected.saturating_add(half).min(last),
+            Self::First => 0,
+            Self::Last => last,
+        }
+    }
+}
+
 /// While the search has focus plain letters are text; otherwise `j`/`k` and
 /// `ctrl+u`/`ctrl+d` move too.
 pub(super) fn list_chord(
@@ -1180,19 +1197,14 @@ impl ClientShellState {
         }
     }
 
-    /// The fork's pane-move feedback: a notice titled with what happened.
+    /// The fork's pane-move feedback: a toast titled with what happened.
     fn pane_move_feedback(
         &mut self,
         title: &str,
         body: impl Into<String>,
         outcome: &mut ClientShellInput,
     ) {
-        outcome.repaint |= self.push_endpoint_notice(
-            ClientEndpointNoticeKind::Rejected,
-            format!("pane.move:{title}"),
-            title,
-            body,
-        );
+        outcome.repaint |= self.push_feedback_toast(title, body);
     }
 
     pub(super) fn open_move_picker(&mut self, outcome: &mut ClientShellInput) {

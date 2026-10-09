@@ -1100,8 +1100,10 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
             }),
             "remote reconnect {cycle} must restore the visible screen without switching machines"
         );
+        // 20 s, not upstream's 8: alone it takes ~1 s, but a loaded machine
+        // running the whole suite misses 8 s now and then.
         assert!(
-            wait_until(Duration::from_secs(8), Duration::from_millis(100), || {
+            wait_until(Duration::from_secs(20), Duration::from_millis(100), || {
                 if screen_text().contains(&format!("REMOTE_ALIVE_INPUT_{cycle}")) {
                     return true;
                 }

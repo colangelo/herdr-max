@@ -1604,9 +1604,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.apply_settings_choice(outcome);
-                } else if super::contains(self.hits.overlay_cancel, point)
-                    || !super::contains(self.hits.settings_popup, point)
-                {
+                } else {
+                    // As the fork: a click on the close button, outside the
+                    // popup or on its blank interior cancels.
                     let installing = matches!(
                         self.overlay,
                         Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
@@ -1783,6 +1783,9 @@ impl ClientShellState {
                     rename.input.clear();
                     outcome.repaint = true;
                 }
+            } else if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
+                // Any other click cancels, the way Esc does.
+                self.cancel_confirm_close(outcome);
             } else {
                 self.overlay = None;
                 outcome.repaint = true;

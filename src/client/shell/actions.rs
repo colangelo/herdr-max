@@ -650,7 +650,18 @@ impl ClientShellState {
                         error.message.clone(),
                     ),
                 };
-                self.push_endpoint_notice(kind, notice_code, title, body);
+                // A refused pane move or todo save is the fork's toast, not
+                // an endpoint notice.
+                let feedback = kind == ClientEndpointNoticeKind::Rejected
+                    && matches!(
+                        pending.kind,
+                        PendingEndpointKind::TodoSave { .. } | PendingEndpointKind::PaneMove
+                    );
+                if feedback {
+                    self.push_feedback_toast(title, body);
+                } else {
+                    self.push_endpoint_notice(kind, notice_code, title, body);
+                }
             }
         }
         match pending.kind {

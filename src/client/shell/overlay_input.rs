@@ -642,27 +642,19 @@ impl ClientShellState {
         }
 
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
-            match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    outcome.repaint = true;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.move_global_menu_selection(-1);
-                    outcome.repaint = true;
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.move_global_menu_selection(1);
-                    outcome.repaint = true;
-                }
-                KeyCode::Enter => {
-                    let highlighted = match self.overlay.as_ref() {
-                        Some(ClientShellOverlay::GlobalMenu(menu)) => menu.highlighted,
-                        _ => return,
-                    };
-                    self.activate_global_menu_item(highlighted, outcome);
-                }
-                _ => {}
+            let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+            if code == KeyCode::Esc {
+                self.overlay = None;
+                outcome.repaint = true;
+            } else if code == KeyCode::Enter {
+                let highlighted = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::GlobalMenu(menu)) => menu.highlighted,
+                    _ => return,
+                };
+                self.activate_global_menu_item(highlighted, outcome);
+            } else if let Some(chord) = move_picker::list_chord(code, modifiers, false) {
+                self.chord_global_menu_selection(chord);
+                outcome.repaint = true;
             }
             return;
         }
@@ -672,27 +664,19 @@ impl ClientShellState {
         }
 
         if matches!(self.overlay, Some(ClientShellOverlay::ContextMenu(_))) {
-            match key.code {
-                KeyCode::Esc => {
-                    self.overlay = None;
-                    outcome.repaint = true;
-                }
-                KeyCode::Up => {
-                    self.move_context_menu_selection(-1);
-                    outcome.repaint = true;
-                }
-                KeyCode::Down => {
-                    self.move_context_menu_selection(1);
-                    outcome.repaint = true;
-                }
-                KeyCode::Enter => {
-                    let highlighted = match self.overlay.as_ref() {
-                        Some(ClientShellOverlay::ContextMenu(menu)) => menu.highlighted,
-                        _ => return,
-                    };
-                    self.activate_context_menu_item(highlighted, outcome);
-                }
-                _ => {}
+            let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+            if code == KeyCode::Esc {
+                self.overlay = None;
+                outcome.repaint = true;
+            } else if code == KeyCode::Enter {
+                let highlighted = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::ContextMenu(menu)) => menu.highlighted,
+                    _ => return,
+                };
+                self.activate_context_menu_item(highlighted, outcome);
+            } else if let Some(chord) = move_picker::list_chord(code, modifiers, false) {
+                self.chord_context_menu_selection(chord);
+                outcome.repaint = true;
             }
             return;
         }
@@ -904,13 +888,13 @@ impl ClientShellState {
                     | KeyCode::Down
                     | KeyCode::PageUp
                     | KeyCode::PageDown
-                    | KeyCode::Char('n' | 'p')
+                    | KeyCode::Char('n' | 'p' | 'j')
                         if !matches!(code, KeyCode::Char(_))
                             || modifiers == KeyModifiers::CONTROL =>
                     {
                         let delta = match code {
                             KeyCode::Up | KeyCode::Char('p') => -1,
-                            KeyCode::Down | KeyCode::Char('n') => 1,
+                            KeyCode::Down | KeyCode::Char('n' | 'j') => 1,
                             KeyCode::PageUp => -8,
                             KeyCode::PageDown => 8,
                             _ => unreachable!(),
@@ -928,36 +912,27 @@ impl ClientShellState {
                 return;
             }
 
+            // Unfocused, the shared list chords scroll the page: arrows, j/k,
+            // ctrl+n/p/j/k, ctrl+u/d for 8 rows, Home and End.
+            let chord = move_picker::list_chord(code, modifiers, false);
             match code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = None,
-                KeyCode::Home => {
+                _ if chord.is_some() || matches!(code, KeyCode::PageUp | KeyCode::PageDown) => {
+                    let max = self.hits.help_max_scroll;
                     if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        help.scroll = 0;
-                    }
-                }
-                KeyCode::End => {
-                    if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        help.scroll = self.hits.help_max_scroll;
-                    }
-                }
-                KeyCode::Up
-                | KeyCode::Char('k')
-                | KeyCode::Down
-                | KeyCode::Char('j')
-                | KeyCode::PageUp
-                | KeyCode::PageDown => {
-                    let delta = match code {
-                        KeyCode::Up | KeyCode::Char('k') => -1,
-                        KeyCode::Down | KeyCode::Char('j') => 1,
-                        KeyCode::PageUp => -8,
-                        KeyCode::PageDown => 8,
-                        _ => unreachable!(),
-                    };
-                    if let Some(ClientShellOverlay::Help(help)) = self.overlay.as_mut() {
-                        help.scroll = help
-                            .scroll
-                            .saturating_add_signed(delta)
-                            .min(self.hits.help_max_scroll);
+                        help.scroll = match (chord, code) {
+                            (Some(move_picker::Chord::Prev), _) => help.scroll.saturating_sub(1),
+                            (Some(move_picker::Chord::Next), _) => help.scroll.saturating_add(1),
+                            (Some(move_picker::Chord::HalfPageUp), _) | (None, KeyCode::PageUp) => {
+                                help.scroll.saturating_sub(8)
+                            }
+                            (Some(move_picker::Chord::HalfPageDown), _)
+                            | (None, KeyCode::PageDown) => help.scroll.saturating_add(8),
+                            (Some(move_picker::Chord::First), _) => 0,
+                            (Some(move_picker::Chord::Last), _) => max,
+                            (None, _) => help.scroll,
+                        }
+                        .min(max);
                     }
                 }
                 _ if text_character == Some('/') => {
@@ -976,22 +951,8 @@ impl ClientShellState {
         if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
             if key.code == KeyCode::Enter {
                 self.accept_close_confirmation(outcome);
-            } else if key.code == KeyCode::Esc
-                && matches!(
-                    &self.overlay,
-                    Some(ClientShellOverlay::ConfirmClose(confirm)) if confirm.force.is_some()
-                )
-            {
-                // A refused close or respawn: cancelling leaves the pane alone
-                // and returns to where the user was.
-                self.overlay = None;
-                outcome.repaint = true;
             } else if key.code == KeyCode::Esc {
-                self.overlay = None;
-                self.mode = ClientShellMode::Navigate;
-                self.navigate_workspace_id = self.focused_navigation_target();
-                self.reveal_navigation_workspace = true;
-                outcome.repaint = true;
+                self.cancel_confirm_close(outcome);
             }
             return;
         }
@@ -1029,6 +990,24 @@ impl ClientShellState {
         if rename.input.handle_key(key).is_some() {
             outcome.repaint = true;
         }
+    }
+
+    /// Esc, or any click that is not the confirm button. A refused close or
+    /// respawn (a forced confirmation) leaves the pane alone and returns to
+    /// where the user was; a plain confirmation also returns to navigating,
+    /// as the fork does.
+    pub(super) fn cancel_confirm_close(&mut self, outcome: &mut ClientShellInput) {
+        let forced = matches!(
+            &self.overlay,
+            Some(ClientShellOverlay::ConfirmClose(confirm)) if confirm.force.is_some()
+        );
+        self.overlay = None;
+        if !forced {
+            self.mode = ClientShellMode::Navigate;
+            self.navigate_workspace_id = self.focused_navigation_target();
+            self.reveal_navigation_workspace = true;
+        }
+        outcome.repaint = true;
     }
 
     pub(super) fn save_rename_overlay(&mut self, outcome: &mut ClientShellInput) {

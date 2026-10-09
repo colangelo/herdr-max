@@ -88,6 +88,55 @@ class AgentDetectionManifestCheckTests(unittest.TestCase):
             bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
             check.validate_catalog(website, bundled_manifests, engine_version=1)
 
+    def test_a_fork_owned_bundled_manifest_is_not_compared_with_the_published_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "bundled"
+            website = root / "website"
+            bundled.mkdir()
+            website.mkdir()
+            fork_owned = manifest("codex", "2026.06.10.2").replace(
+                'updated_at = "2026-06-10T00:00:00Z"\n',
+                'updated_at = "2026-06-10T00:00:00Z"\nfork = true\n',
+            )
+            (bundled / "codex.toml").write_text(fork_owned)
+            (website / "codex.toml").write_text(manifest("codex", "2026.06.10.1"))
+            (website / "index.toml").write_text(catalog())
+
+            bundled_manifests = check.load_manifest_dir(bundled, engine_version=1)
+            check.validate_catalog(website, bundled_manifests, engine_version=1)
+
+    def test_rejects_a_non_boolean_fork_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex.toml"
+            path.write_text(
+                manifest("codex", "2026.06.10.1").replace(
+                    'updated_at = "2026-06-10T00:00:00Z"\n',
+                    'updated_at = "2026-06-10T00:00:00Z"\nfork = "yes"\n',
+                )
+            )
+            with self.assertRaisesRegex(check.CheckError, "fork must be a boolean"):
+                check.validate_manifest(path, engine_version=1)
+
+    def test_blocked_reason_must_name_a_known_reason_on_a_blocked_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "codex.toml"
+            blocked = manifest("codex", "2026.06.10.1").replace(
+                'state = "idle"', 'state = "blocked"\nblocked_reason = "question"'
+            )
+            path.write_text(blocked)
+            check.validate_manifest(path, engine_version=1)
+            path.write_text(blocked.replace('"question"', '"later"'))
+            with self.assertRaisesRegex(check.CheckError, "invalid blocked_reason"):
+                check.validate_manifest(path, engine_version=1)
+            path.write_text(
+                manifest("codex", "2026.06.10.1").replace(
+                    'state = "idle"', 'state = "idle"\nblocked_reason = "form"'
+                )
+            )
+            with self.assertRaisesRegex(check.CheckError, "requires state blocked"):
+                check.validate_manifest(path, engine_version=1)
+
     def test_rejects_published_version_lower_than_bundled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
