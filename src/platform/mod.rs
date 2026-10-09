@@ -708,6 +708,30 @@ fn child_exit_classification_only_checkpoints_interruptions() {
 mod tests {
     use super::*;
 
+    /// A server the client started stays the client's child (it only setsid()s), and after a live
+    /// handoff the old server exits while the client lives on, so an unreaped child is a zombie until
+    /// the client exits. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/179
+    #[test]
+    fn a_launched_server_daemon_is_reaped_when_it_exits() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        let pid = launch_server_daemon_command(&mut command).expect("launch the stand-in daemon");
+
+        // kill(pid, 0) succeeds for a zombie and fails with ESRCH once it is reaped.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reaped = loop {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+            if !alive {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(reaped, "the exited daemon {pid} was left as a zombie");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn live_pane_process_group_rejects_processes_outside_the_pane_session() {
