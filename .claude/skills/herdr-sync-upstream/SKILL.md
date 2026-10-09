@@ -1,361 +1,375 @@
 ---
 name: herdr-sync-upstream
-description: Sync the herdr fork with upstream herdrdev/herdr — weekly merge of upstream/master on a sync/<date> branch in its own worktree, lost-feature audit, fast-forward adopt, inventory update, disable new upstream bot workflows. Use when the user wants to pull/merge/integrate/sync upstream changes into the fork.
+description: Weekly sync of the herdr fork (Herdr Max) with upstream herdrdev/herdr. A merge of upstream/master on a sync branch, tags sync-merge/N, FORK-INVENTORY.md updates, checks only through the lead's runner under the shared lock, CI on a draft PR, then fast-forward master, a beta build and a seamless install. Use when the user or the weekly trigger says to sync, merge or pull in upstream changes.
 ---
 
-# Syncing the herdr fork with upstream
+# Weekly upstream sync of the herdr fork
 
-Fork model (since the v0.9.3 sync, #171): `master` is **merge-based**. It holds the
-fork's own history, one merge commit per upstream sync, and fix commits. It is not
-a linear patch set on top of upstream. Do not rebase `master` and do not
-force-push it. A sync is `git merge upstream/master` on a scratch branch, and
-adopting it is a fast-forward of `master`.
+Decided by ac on 2026-10-08 ("yes, weekly sync"):
+https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/173
 
-Cadence: weekly (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/173).
-A small weekly merge is cheap; a skipped month is how v0.9.3 became a TUI port.
+## How the fork is laid out
 
-Topic order lives in `FORK-INVENTORY.md`, not in the history. Read it first:
-it says what the fork carries, what is a port, what upstream now covers
-(superseded) and what is a deliberate divergence. New authored commits carry
-trailers (`Fork-Topic`, `Fork-Change`, `Upstream`, see the inventory).
+- `master` is **merge-based**. It holds the fork's own history, one merge commit per
+  upstream sync, and fix commits. Never rebase it, never force-push it, never replay the
+  fork's commits one by one. The v0.9.3 sync (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/171)
+  proved that a commit-by-commit replay splices code; a whole-tree merge does not.
+- Cutover point: tag `cutover/0.9.3-ac` (master `ba033b4a`). Before it: tag `revert-point/pre-0.9.3`.
+- Remotes: `origin` = github.com/colangelo/herdr-max (CI and releases run there),
+  `internal` = Gitea AC-forks/herdr-max (issue tracker, integration remote, what you
+  push to first), `upstream` = github.com/herdrdev/herdr (read only).
+- Integration points are tags `sync-merge/N` (the counter is global, so other trains take numbers too: 31 went to
+  the post-cutover batch. Never pick a number from memory; the next one is `git tag -l 'sync-merge/*' | sort -V | tail -1` plus one). Tag every merge
+  result, every green check and the commit you ask others to test.
+- `FORK-INVENTORY.md` (repo root) is the map of what the fork carries. Rows have a status:
+  **carried** (fork behaviour, present), **port** (re-implemented on the client shell),
+  **divergent** (a deliberate difference from upstream), **superseded** (upstream does it
+  now; fork code dropped). Read it before merging; update it after.
+- New authored commits carry trailers `Fork-Topic`, `Fork-Change`, `Upstream` (see the
+  inventory). Commit style: lowercase conventional commits, no emojis, no co-author or
+  session trailer lines, and a body line `refs <full Gitea issue URL>` (a bare `#N` means
+  GitHub here).
 
-Remotes: `origin` = github.com/colangelo/herdr-max, `internal` = Gitea
-(AC-forks/herdr-max), `upstream` = github.com/herdrdev/herdr (`gh`/API calls use
-`herdrdev/herdr` too). The fork's CI and `release-ac` pass
-`--repo colangelo/herdr-max` explicitly, so upstream's default repo in
-`scripts/changelog.py` is harmless.
+Where fork code lives: code that only draws or handles input belongs in
+`src/client/shell/`. Server facts reach the shell through optional snapshot fields or
+advertised methods, never private client sockets. Upstream's AGENTS.md "Stable client
+endpoint contract" decides what may change on the wire.
 
-Sync issue: open (or reuse) a `[fork] sync upstream <version/date>` issue on the
-Gitea tracker before starting (`herdr-fork-tracking` skill). Everything found
-below is recorded there.
+## Roles and rules
 
-## 1. Assess
+- **Lead** = the session that owns the sync issue. For the weekly job the coordinator
+  session `herdr` assigns it (or does it). The lead merges, fixes, runs checks and
+  reports. Asks for ac go to the `herdr` coordinator, never to ac directly.
+- **Heavy work goes through the lead's runner, under the shared lock.** The machine is
+  shared by many sessions. No bare `cargo`, `just check`, `just test` or builds in your own
+  shell. The runner is `port-notes/tools/port-runner.sh` on branch
+  `research/post-v0.9.3-port-notes` (copy under `/tmp/herdr-sync/`). It takes
+  `NEEDS-RUN: <command>` lines from `.local/port/PROGRESS.md` of a worktree, runs only an
+  allowlist (`just check|test|lint|test-one <name>`, `cargo nextest run|test|check|clippy`),
+  and writes `.local/port/runs/NNN.out` plus a line in `.local/port/runs/RESULTS.md`.
+  What it runs, which you can also run by hand from the worktree:
+
+  ```bash
+  lockf -k /tmp/m4m-heavy.lock nice -n 15 env CARGO_BUILD_JOBS=6 CARGO_INCREMENTAL=0 \
+    NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig timeout 2400 just check
+  ```
+
+  The lock is `/tmp/m4m-heavy.lock`; one heavy job at a time on the Mac. Cap jobs at 6
+  (4 when the load is high). The runner only scans worktrees named `port-*`, `fix-*` and
+  `sync-v0.9.3` under `~/dev/worktrees/herdr/`; for a new name, add it to its `for wt in`
+  line or use the manual command above. Check `df -h /System/Volumes/Data` first; it stops
+  at 97 %.
+- **Docs-only syncs and the measurement run no cargo at all.**
+- `herdr-beta`, never bare `herdr`. Worktrees through `wt`. `trash`, not `rm`. Never push
+  to `master` before the coordinator says go. Gate every push of code on a passing
+  `just check` exit code, chained: `... just check && git push ...`.
+
+## 0. Measure (zero tokens, git only)
+
+`scripts/sync_measure.sh` fetches `upstream` and `internal`, lists
+`internal/master..upstream/master` with date, author, files and the files in
+fork-heavy areas, shows the signals that decide the plan (upstream edits to `AGENTS.md`,
+`src/protocol/wire.rs`, `Cargo.toml`, `justfile`; renamed or deleted paths), and runs
+`git merge-tree --write-tree` to see whether the merge is textually clean. No checkout, no
+merge, no build.
 
 ```bash
-git fetch upstream
-BASE=$(git merge-base master upstream/master)                         # upstream tip of the last sync
-git log master..upstream/master --oneline | wc -l                    # upstream commits since last sync
-git log "$BASE"..upstream/master --oneline | head -80              # same range, readable
-git diff "$BASE" upstream/master -- AGENTS.md                      # read it all
-git log master..upstream/master --oneline -- .github/workflows justfile scripts/ build.rs .gitignore
-git diff --stat "$BASE" upstream/master -- src/ | tail -40         # where upstream churned
+scripts/sync_measure.sh                 # report on stdout
+scripts/sync_measure.sh --notify        # what the weekly job runs: file + bell to `herdr`
 ```
 
-(`BASE` is the upstream commit the last sync merged; no message search needed.)
+The weekly trigger runs it (see "The weekly trigger"). Zero commits: nothing to do.
 
-Read these on purpose:
+Read these by hand when the report flags them:
 
-- **Upstream `AGENTS.md` diff**, especially "Stable client endpoint contract".
-  It says which socket methods and snapshot fields are frozen. A change there
-  decides how the fork's client-facing shape changes are allowed.
-- **Architecture moves.** Look at renamed or deleted paths:
-  `git diff -M --name-status "$BASE" upstream/master | grep -E '^(R|D)' | head -60`.
-  The v0.9.3 lesson: upstream `207be3c7` moved the whole TUI into
-  `src/client/shell/`. A move like that turns every fork hunk in the old files
-  into a port, not a conflict. When you see one, stop and tell the coordinator
-  before merging: it needs a plan and likely seats, not a quick resolve.
-- **Protocol number.** `src/protocol/wire.rs::PROTOCOL_VERSION` upstream vs fork.
+- **Upstream `AGENTS.md` diff.** `git diff $(git merge-base internal/master upstream/master) upstream/master -- AGENTS.md`
+- **Architecture moves.** `git diff -M --name-status "$BASE" upstream/master | grep -E '^(R|D)'`.
+  The v0.9.3 lesson: upstream `207be3c7` moved the whole TUI into `src/client/shell/`,
+  which turned every fork hunk in the old files into a port, not a conflict. If you see a
+  move like that, stop and tell `herdr` before merging: it needs a plan and likely
+  seats, not a quick resolve.
+- **Protocol number.** The fork stays on upstream's `src/protocol/wire.rs::PROTOCOL_VERSION`
+  (inventory row `wire-protocol`). Bump only with upstream.
 - **Integration asset versions** (`*_INTEGRATION_VERSION`) on both sides.
 
-Where fork code lives now: code that only draws or handles input belongs in
-`src/client/shell/`. Server facts reach the shell through optional snapshot
-fields or advertised methods, never through private client sockets. A new fork
-feature that needs server data adds an optional field (default keeps old
-clients working) or a new advertised method.
+Typical week: a handful of fixes and perf commits, no moves. Merge in one go.
+A big week (renames, `AGENTS.md` contract change, protocol, 50+ commits) is merged in
+steps: merge an upstream commit in the middle (`git merge <sha>`), check, tag, continue.
+
+## 1. Open the sync issue
+
+One Gitea issue per sync, **before** touching anything (skill `herdr-fork-tracking`):
+
+- Title: `[fork] weekly upstream sync <YYYY-MM-DD>: <n> commits`
+- Body: the measurement table (subject, date, files; group fixes / features / refactors /
+  CI-docs), the flagged files with conflict risk, and the plan (one go or steps, expected
+  conflicts, size of the check). No labels.
+- Everything found later (lost-feature audit, test counts, handoff proof, beta version,
+  install result) is a comment on it, with full Gitea URLs.
+- Close it only after the install below, with a comment on how it was checked.
+
+```bash
+TOK=$(printf 'protocol=https\nhost=gitea.cat-bluegill.ts.net\n\n' | git credential fill 2>/dev/null | sed -n 's/^password=//p')
+B="https://gitea.cat-bluegill.ts.net/api/v1"
+curl -s -H "Authorization: token $TOK" -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg t "$title" --arg b "$body" '{title:$t,body:$b}')" \
+  "$B/repos/AC-forks/herdr-max/issues"        # slug must be AC-forks/herdr-max (the old slug 301s and drops the body)
+```
+
+Never print the token. Build JSON with `jq -n --arg`.
 
 ## 2. Merge on a sync branch, in its own worktree
 
-Never merge in the shared checkout. Use `wt`:
+The branch `sync/merge` of #171 is an ancestor of `master` now and another worktree
+may hold it; a weekly sync uses a dated branch `sync/<YYYY-MM-DD>` and keeps the
+`sync-merge/N` tag counter.
 
 ```bash
-wt switch --create sync/$(date +%F) --base master
-git -c merge.conflictStyle=diff3 merge upstream/master
+git fetch upstream && git fetch internal
+wt switch --create sync/$(date +%F) --base internal/master      # worktree under ~/dev/worktrees/herdr/
+git tag -a revert-point/pre-$(date +%F) internal/master -m "fork master before the $(date +%F) sync"
+git push internal revert-point/pre-$(date +%F)
+git -c merge.conflictStyle=diff3 -c rerere.enabled=false merge upstream/master
 ```
 
-Tag the revert point first. It is the old `master`:
+(To merge in steps, name a commit instead of `upstream/master`.)
 
-```bash
-git tag -a revert-point/pre-<upstream-version> master -m "fork master before the <version> sync"
-git push origin revert-point/pre-<upstream-version>
-git push internal revert-point/pre-<upstream-version>
-```
+`diff3` shows the common ancestor, which you need to tell "upstream rewrote it" from "fork
+added next to it". Keep `rerere` off: bad recordings poison later merges. Resolve, commit,
+then `git tag -a sync-merge/N -m "<what this is>"` and push the tag to `internal`.
 
-diff3 shows the common ancestor, which you need to tell "upstream rewrote it"
-from "fork added next to it". Keep `rerere` off for the first sync after an
-architecture move: bad recordings poison later merges (`-c rerere.enabled=false`).
+A `#![allow(dead_code, unused_imports)]` at the top of `src/main.rs` is acceptable only
+temporarily while a port lands. Remove it before the push.
 
-A `#![allow(dead_code, unused_imports)]` at the top of `src/main.rs` is
-acceptable **temporarily** while ports land, so the base compiles and passes
-clippy. It must be removed before the push, wiring or deleting each item
-clippy then reports.
+## 3. Rules from the v0.9.3 sync
 
-## 3. Lessons from v0.9.3 (each with the fix)
+**A green build proves nothing about a merge.** A merge can drop fork code next to a region
+where you took upstream's side, and git's "clean" merges can splice code (the tree
+`git merge-tree` calls clean in the measurement is a first guess, not a verdict). Do both
+before calling the merge done:
 
-**A whole-tree merge beats a commit-by-commit replay for producing the tree.**
-The replay's auto-resolver spliced code. Merge once, fix the result, and do not
-re-derive the fork's commits one by one. Use the old commits as *spec* for
-ports, not as patches.
+1. Run the full suite through the runner (section 5).
+2. **Lost-feature audit.** For each file in `git diff --name-only "$BASE" upstream/master`,
+   list the fork commits that touched it (`git log --oneline "$BASE"..internal/master -- <file>`)
+   and check the behaviour still exists: grep for the function, read the call site, run the
+   test. Where the fork changed lines within a few lines of an upstream hunk, read both
+   versions side by side. The v0.9.3 audit found four losses that compiled and passed:
+   client reconnect after live handoff, re-exec onto a newer server build, the
+   hint-driven blocked ring and toasts, the 200 ms sync-frame cap. One line each on the
+   sync issue: commit, what was lost, where it was restored (or why it was dropped).
 
-**Fork cherry-picks of upstream commits come back as duplicates.** Symptoms:
-`E0428`, `E0592`, `E0124`, `E0201`, `E0062` (duplicate definitions, impls,
-fields, methods), plus duplicate tests, match arms and JSON entries that
-compile fine. Fix: keep upstream's copy unless the fork's is a real extension
-(then extend upstream's, once). Never both. Search the changed files for
-repeated `fn test_name`, repeated match patterns and repeated JSON keys.
-
-**Taking upstream's side of a region can silently drop fork code next to it,
-and git's own "clean" merges can splice code.** A green build proves nothing.
-Do both of these before calling the merge done:
-
-1. Run the full suite (`cargo nextest run --locked --no-fail-fast`, see §5).
-2. Do a **lost-feature audit.** For each fork commit that touched a file
-   upstream rewrote (`git log --oneline "$BASE"..master -- <file>` for each
-   file in `git diff --name-only "$BASE" upstream/master`), check that the
-   behaviour still exists: grep for the function, read the call site, run the
-   test. Do not trust "no conflict". The v0.9.3 audit found four losses that
-   compiled and passed: the client reconnect after live handoff (#94), the
-   re-exec onto a newer server build (#165), the hint-driven blocked ring and
-   toasts (`a9c099df`), and the 200 ms sync-frame cap (`839473d8`, issue 126).
-   Write the findings on the sync issue with full Gitea URLs, one line each:
-   commit, what was lost, where it was restored (or why it was dropped).
+**Fork cherry-picks of upstream commits come back as duplicates** (`E0428`, `E0592`,
+`E0124`, `E0201`, `E0062`; duplicate tests, match arms, JSON keys that compile fine). Keep
+upstream's copy unless the fork's is a real extension; then extend upstream's, once.
 
 **Contract fixtures.** Never re-bless generation-1 fixtures
-(`tests/fixtures/endpoint-method-shapes-v1.json`). Fork shape changes (for
-example the close methods' optional `force`) are frozen explicitly in
-`advertised_client_shell_method_shapes_stay_at_the_v1_contract`. New fork
-methods are frozen beside upstream's additive ones. A failing contract test is
-a signal to change the fork side, not the fixture.
-
-**The protocol number collides every sync.** Both sides bump from the same base.
-Expect to bump the fork one past upstream's. Sweep for the number, not the
-commit: numeric pins (`assert_eq!(value["result"]["protocol"], N)`) and string
-pins (`contains("  protocol: N")`, Linux-only CLI suite). Keep
-`tests/cli/sessions.rs` equal to `src/protocol/wire.rs::PROTOCOL_VERSION`.
+(`tests/fixtures/endpoint-method-shapes-v1.json`). Fork shape changes (the close methods'
+optional `force`) are frozen explicitly in
+`advertised_client_shell_method_shapes_stay_at_the_v1_contract`. A failing contract test
+means change the fork side, not the fixture.
 
 **Regenerate the API schema** after any socket/method/shape change:
+`HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`
+(through the runner).
 
-```bash
-HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current
-```
+**Integration assets.** When both sides bumped an integration version with different
+content, bump once more so installs refresh and update the assertions in
+`src/integration/tests.rs`. Check the merged asset has both sides' content.
 
-**Integration assets.** When both sides bumped an integration version with
-different content (claude hook v10 in v0.9.3), bump once more so installs
-refresh, and update the version assertions in `src/integration/tests.rs`.
-Check the merged asset contains both sides' content, not just one.
+**Handoff manifest compatibility** (inventory `handoff-compat`): the fork keeps its
+manifest layout (`agent_state` string plus `hook_agent_state`) so older `-ac` servers hand
+off into the new build. Keep it when upstream touches those fields.
 
-**Infra** (`justfile`, `.github/workflows/`, `scripts/`, `build.rs`): do a
-3-way `git merge-file` per file onto upstream's new layout
-(`git merge-file -p ours base theirs`; base = the file at `$BASE`,
-theirs = upstream's new file). Re-apply the fork deltas, do not fight the diff:
-the `ZIG` export, the `release-ac`/beta flow, the macOS `windows-lint` skip,
-and the fork manifest at `distribution/latest.json` plus the
-`website/latest.json` compat copy for old 0.8.x-ac binaries. Checklist in §5.
+**Infra files** (`justfile`, `.github/workflows/`, `scripts/`, `build.rs`). The fork deltas
+are merged now, so a normal merge applies. When one conflicts, keep these: the `ZIG`
+export, the `release-ac`/beta flow, the macOS `windows-lint` skip, the
+`update-homebrew` job, `HERDR_BUILD_CHANNEL: ac`, the fork's own `update-latest-json`
+(with `--repo colangelo/herdr-max`; upstream's one needing `RELEASE_DEPLOY_KEY` stays
+removed), and `distribution/latest.json` plus the `website/latest.json` copy for 0.8.x-ac
+binaries.
 
-**Handoff manifest compatibility.** The fork keeps its handoff manifest layout
-(`agent_state` string plus `hook_agent_state`) so older `-ac` servers hand off
-into the new build (`handoff-compat` in the inventory). Keep it when upstream
-touches those fields.
-
-**Disk on m4m.** Several worktrees times (debug + test + clippy) fill the disk
-fast. Serialize `just check` runs, one worktree at a time, and keep the target
-dirs (a cold rebuild costs more than the space). Check `df -h /` before starting.
-
-**Seats in sandboxes.** Codex seats in `workspace-write` sandboxes cannot write
-`.git` or bind Unix sockets. Use the committer and the NEEDS-RUN runner:
-
-- committer: the seat writes `.local/port/ready/NNN.files` (paths) and
-  `NNN.msg` (commit message); the committer commits them.
-- runner: the seat writes a NEEDS-RUN request for an allowlisted test command;
-  results land in `.local/port/runs/RESULTS.md`.
-- scripts: `port-notes/tools/port-committer.sh` and `port-runner.sh` on branch
-  `research/post-v0.9.3-port-notes`.
-- **Never approve a seat's request to run outside the sandbox.** Route it to
-  the coordinator.
-
-**Changelog duplicates.** Both sides edit `## Unreleased` in
-`docs/next/CHANGELOG.md`. Merge per `###` heading (upstream entries first),
-one block per heading, in `Added` / `Changed` / `Fixed` order. A naive merger
-folds Unreleased entries into a released section, or leaves two `### Fixed`
-blocks. `scripts/changelog.py` copies the Unreleased body verbatim into the next
-release, so duplicates ship. `just check` does not catch it. Check:
+**Changelog duplicates.** Both sides edit `## Unreleased` in `docs/next/CHANGELOG.md`.
+Merge per `###` heading, upstream entries first. `scripts/changelog.py` copies Unreleased
+verbatim into the next release, so duplicates ship, and `just check` does not catch them:
 
 ```bash
 grep '^## ' docs/next/CHANGELOG.md | sort | uniq -d     # must be empty
 awk '/^## /{s=$0; split("",h); split("",e); next} /^### /{if (h[$0]++) print "dup heading in " s ": " $0; next} /^- /{if (e[$0]++) print "dup entry in " s ": " substr($0,1,50)}' docs/next/CHANGELOG.md
 ```
 
-**Other repeat conflicts.** `.gitignore`: keep both (upstream appends where the
-fork `.env` block sits). `justfile` `test`/`check`: both sides add
-`scripts.test_*` modules to the same `unittest` line, take the union. Manifests:
-fork `claude.toml` versions can run ahead of upstream's; check
-`distribution/agent-detection`, `release-docs-check`, and that the remote
-catalog URL cannot override the fork's bundled manifests. Vendored
-`libghostty-vt`: for each entry in `vendor/libghostty-vt.patches.md`, re-apply or
-drop, and let `just check` verify.
+**Other repeat conflicts.** `.gitignore`: keep both. `justfile` `test`/`check`: both sides
+add `scripts.test_*` modules to one line; take the union. Agent-detection manifests: the
+fork's `claude.toml` versions can run ahead of upstream's; check `distribution/agent-detection`
+and that the remote catalog cannot override the fork's bundled manifests. Vendored
+`libghostty-vt`: for each entry in `vendor/libghostty-vt.patches.md`, re-apply or drop.
 
-## 4. Live-handoff proof before cutover
+## 4. Live-handoff proof (only when the merge touches handoff, server or protocol)
 
-A merge that passes tests can still break live handoff. Prove it on a throwaway
-session, never on a working one (memory recipe: "herdr throwaway proof recipe"):
+A merge that passes tests can still break live handoff. Prove it on a throwaway session,
+never on a working one (memory recipe "herdr throwaway proof recipe"):
 
-1. Start a throwaway server on the *old* beta (sized tmux, `unset HERDR_ENV`,
-   compiled stand-in `claude`, `SHELL=/opt/homebrew/bin/zsh`).
-2. Create workspaces, tabs, panes, an agent pane, todos, pins, labels.
-3. `herdr-beta server live-handoff --import-exe <new build>` (use the
-   release-path build: a debug build answers on the `herdr-dev` socket and an old
-   client hangs "reconnecting", which is an artifact, not a bug).
-4. Compare before and after: workspaces/tabs/panes, pane pids and start times,
-   sizes (with a client attached), agent state/session id/restore argv, pins,
-   todos, labels. A new client must render and take input; an attached old
-   client must reconnect (#94).
-5. Agent screens stay blank until the agent repaints. The post-handoff nudge
-   (SIGWINCH) causes the repaint; a stand-in that never repaints stays blank,
-   that is the same as before the sync.
+1. Start a throwaway server on the old beta (sized tmux, `unset HERDR_ENV`, compiled
+   stand-in `claude`, `SHELL=/opt/homebrew/bin/zsh`). Make workspaces, tabs, panes, an
+   agent pane, todos, pins, labels.
+2. `herdr-beta server live-handoff --import-exe <new release-path build>` (a debug build
+   answers on the `herdr-dev` socket and an old client hangs "reconnecting", an artifact).
+3. Compare before and after: workspaces/tabs/panes, pane pids and start times, sizes,
+   agent state/session id/restore argv, pins, todos, labels. A new client must render and
+   take input; an attached old client must reconnect.
+4. Agent screens stay blank until the agent repaints; the post-handoff SIGWINCH nudge
+   causes the repaint.
 
-Record the result and evidence paths on the sync issue.
+A build for this proof is heavy: ask for it through the runner and the lock.
 
-## 5. Verify before adopting
+## 5. Check, CI on a draft PR
 
-Fork surface survived:
+Local check, through the runner (section "Roles and rules"):
+
+- `just check` (its test stage runs `cargo nextest run --locked --no-fail-fast`; plain
+  nextest cancels on the first failure and hides the rest).
+- Changelog checks from section 3. `just release-docs-check` before any release.
+- **macOS `just check` does not compile the CLI integration suite**
+  (`tests/cli.rs` is `cfg(all(unix, not(target_os = "macos")))`), so a changed shared helper
+  compiles locally and fails Linux CI with `E0061`. Compile it before pushing, then restore:
+
+  ```bash
+  cp tests/cli.rs /tmp/cli.rs.orig
+  sed -i.bak 's/^#!\[cfg(all(unix, not(target_os = "macos")))\]$/#![cfg(unix)]/' tests/cli.rs && rm -f tests/cli.rs.bak
+  cargo check --locked --all-targets       # through the runner; compile only, do not run
+  cp /tmp/cli.rs.orig tests/cli.rs; git diff --name-only tests/cli.rs    # must be empty
+  ```
+
+  Never `cargo check --target *-linux-gnu`: it clobbers the vendored libghostty-vt archive.
+- **Before blaming the merge for a failing test, get an upstream baseline** (a worktree at
+  `upstream/master`, one test, through the runner). Known upstream failures change from
+  sync to sync: re-verify, do not trust an old list. The fork cannot open upstream issues
+  (external-contributor guardrail); record failures on the sync issue. Last known:
+  https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/186 (an upstream profile
+  test that fails on both builds).
+
+Then push the branch and let CI judge on the full matrix (Linux, macOS, Windows):
 
 ```bash
-git diff upstream/master HEAD --stat
-git diff upstream/master HEAD --diff-filter=D --name-only      # no upstream file deleted without a reason
+git push internal sync/<date>
+git push origin sync/<date>        # CI runs on GitHub
+command gh pr create --repo colangelo/herdr-max --draft --base master --head sync/<date> \
+  --title "weekly upstream sync <date>" --body "refs https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/<n>"
+command gh pr checks --repo colangelo/herdr-max --watch
 ```
 
-Load-bearing infra hunks:
+If `gh` or the push to `origin` says the token is invalid, ask mac-m4 to log in again
+(`gh auth login` on m4m); the Gitea steps keep working meanwhile. Do not look for another
+path or another token. The draft PR is for CI only; nobody reviews
+or merges it on GitHub.
 
-- `release.yml`: `update-homebrew` job (publishes `Formula/herdr.rb` to
-  colangelo/homebrew-tap); build env `HERDR_BUILD_CHANNEL: ac` plus the
-  `Set fork build id from tag` step; tag-verify compares
-  `TAG_BASE="${TAG_VERSION%%-ac*}"` against `Cargo.toml`; upstream's
-  `update-latest-json` job (needs `secrets.RELEASE_DEPLOY_KEY`) stays removed,
-  and the fork's own `update-latest-json` (uses `--repo colangelo/herdr-max`
-  with `--tag`/`--force`) stays; it writes `distribution/latest.json` and the
-  `website/latest.json` compat copy.
-- `ci.yml`: the conventional-commits force-push guard
-  (`git cat-file -e "$BEFORE_SHA"` fallback).
-- `justfile`: `release-ac` recipe, `ZIG` export, macOS `windows-lint` skip.
+Windows lint is skipped on macOS by design; the Windows CI job is where upstream's
+Windows-only files (`windows_recent_fallback.rs` and similar) get compiled.
+
+## 6. Adopt
+
+Only when the check and the PR's CI are green **and `herdr` says go**:
 
 ```bash
-uv run --with pyyaml python -c "import yaml; [yaml.safe_load(open(f)) for f in ['.github/workflows/release.yml','.github/workflows/ci.yml']]"
-just --list >/dev/null
-python3 scripts/conventional_commits.py --range "master..HEAD"   # new commits only
-```
-
-`master..HEAD` includes upstream's commits. A rejected upstream subject is not
-yours to reword.
-
-Full suite:
-
-- `just check` (serialized, see disk note). Its test stage runs
-  `cargo nextest run --locked --no-fail-fast`. Plain nextest cancels on the first
-  failure and hides the rest, so a one-off looks like a broad breakage.
-- **Remove the `#![allow(dead_code, unused_imports)]`** from `src/main.rs`
-  first, and make clippy pass without it.
-- Changelog checks from §3.
-- `just release-docs-check` separately before any release (`just check` omits it).
-
-**macOS `just check` does not compile the CLI integration suite.**
-`tests/cli.rs` starts with `#![cfg(all(unix, not(target_os = "macos")))]`, so a
-changed shared helper compiles clean locally and fails Linux CI with `E0061`.
-Compile it before pushing:
-
-```bash
-cp tests/cli.rs /tmp/cli.rs.orig
-sed -i.bak 's/^#!\[cfg(all(unix, not(target_os = "macos")))\]$/#![cfg(unix)]/' tests/cli.rs
-rm -f tests/cli.rs.bak
-cargo check --locked --all-targets
-cp /tmp/cli.rs.orig tests/cli.rs                 # ALWAYS restore
-git diff --name-only tests/cli.rs                # must be empty
-```
-
-Compile only, do not run. Never cross-compile with `cargo check --target
-*-linux-gnu`: it clobbers the vendored libghostty-vt archive.
-
-**Before blaming the merge for a failing test, get an upstream baseline:**
-
-```bash
-wt switch --create upstream-baseline --base upstream/master
-cargo nextest run --locked <test_name>           # in that worktree
-wt remove upstream-baseline
-```
-
-Known upstream-baseline failures on macOS, re-verify each sync, do not assume
-they are still upstream's (all reproduced on clean upstream, zero fork patches,
-deterministic under `-j 1`; last verified 2026-08-26 at `d79fd746`):
-
-- `api_ping::events_subscribe_streams_output_and_agent_status_events`
-- `cross_area::cross_area_two_clients_shared_view_and_single_detach_stability`
-- `live_handoff::live_server_holds_one_pty_master_fd_per_pane`
-- `multi_client::multi_client_broadcasts_frame_updates_to_all_clients`
-- `live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session` (2026-07-25)
-
-The fork's external-contributor guardrail forbids opening an upstream issue for
-them. Compare against the baseline count, not against zero.
-
-## 6. Adopt and push
-
-Only when `just check` passes **and the coordinator says go**.
-
-```bash
-# on master in the shared checkout (or via wt merge): fast-forward only
-git merge --ff-only sync/<yyyy-mm-dd>
-git push origin master
+cd <the shared checkout or the master worktree>
+git fetch internal
+git merge --ff-only sync/<date>      # no force, no lease
 git push internal master
+git push origin master
 ```
 
-No force, no lease. If `--ff-only` refuses, `master` moved: merge `master` into
-the sync branch, rerun `just check`, try again.
-
-If the internal push times out: Tailscale may be stopped (`tailscale status`;
-`tailscale up`), or see the m4m MagicDNS caveat in global CLAUDE.md.
+If `--ff-only` refuses, `master` moved: merge `master` into the sync branch, recheck, retry.
+If the push to `internal` times out: `tailscale status`, then the m4m MagicDNS note in
+global CLAUDE.md.
 
 Then:
 
-1. **Update `FORK-INVENTORY.md`.** Move every topic upstream now covers to
-   **Superseded** and name the upstream commit (`upstream 7f89b11a (fork
-   73a00623)`). Add new divergences. Note the new merge commit's parents.
-2. **Comment on the sync issue** with full Gitea URLs (never bare `#N`, which
-   means GitHub here): merge SHA, upstream range, the lost-feature audit list,
-   handoff-proof result, test counts versus baseline, revert tag. Close the
-   issue only after the dogfood below.
-3. Leave the `revert-point/pre-<version>` tag in place until the next sync lands.
+1. **Update `FORK-INVENTORY.md`**: move every topic upstream now covers to **superseded**
+   and name the upstream commit; add new divergences; note the new merge commit. A
+   pure-fix week often changes nothing; say so on the issue.
+2. **Comment on the sync issue**: merge SHA, upstream range, lost-feature audit list,
+   handoff proof result if run, test counts vs baseline, tags (`sync-merge/N`,
+   `revert-point/pre-<date>`).
+3. Leave the previous `revert-point/*` tag in place until the next sync lands, then keep
+   or trash it by `herdr`'s call.
 
-## 7. Post-sync checks
+## 7. Beta and seamless install
 
-- **New upstream bot workflows.** Upstream's maintainer automation needs their
-  secrets (`KANGAL_GITHUB_TOKEN`, `RELEASE_DEPLOY_KEY`) and fails on the fork.
-  Compare `gh workflow list --repo colangelo/herdr-max --all` against the
-  disabled set (Approve Contributor, Approve Merged Contributor, Issue Gate,
+The lead hands the master SHA to `herdr` (the coordinator pane), which builds the beta.
+Mechanics: skills `herdr-release` (Beta channel, live handoff) and `herdr-dogfood`.
+
+1. Beta build from pushed master (`just beta`), wait for the run, note
+   `herdr-beta --version` (`X.Y.Z-ac-beta.<run>-<codename>`).
+2. **Seamless install = live handoff**, panes and sessions kept
+   (`herdr-beta server live-handoff`, or `just brew-upgrade herdr-beta`), **mac-m4
+   first**. Report the before/after diff (workspaces, panes, pids, agents).
+3. Then **mbm5**, through manager-aruba (herdr only asks; it does not touch that Mac).
+4. Close the sync issue with the beta version, the two install results and the diff.
+
+## 8. Post-sync checks
+
+- **New upstream bot workflows.** Upstream's maintainer automation needs their secrets and
+  fails on the fork. Compare `command gh workflow list --repo colangelo/herdr-max --all`
+  against the disabled set (Approve Contributor, Approve Merged Contributor, Issue Gate,
   Close pending-release issues, PR Gate, Preview, **Website**) and
-  `gh workflow disable <name>` any new ones. Keep: CI, Nix, Release,
-  Build artifacts (manual).
-- **CI on the pushed master** goes green:
-  `gh run list --repo colangelo/herdr-max --branch master --limit 3`.
-- **Update manifest.** Run `just latest-json-check`. New fork binaries read
-  `distribution/latest.json`; 0.8.x-ac binaries read the `website/latest.json`
-  copy. Until the first `release-ac` after the sync runs, `distribution/latest.json`
-  holds upstream's data, so cut the cutover release soon or an update offers
-  upstream assets. Every target needs a 64-char `sha256`. `latest-json-check`
-  also validates the copy published at raw.githubusercontent, so it stays red
-  until the push lands and the raw cache turns over. Drop `website/latest.json`
-  once no machine runs 0.8.x-ac.
-- **Drift check.** Skim upstream changes to `justfile` release recipes,
-  `scripts/changelog.py` and `release.yml`. If the release flow moved, update
-  `.claude/skills/herdr-release/SKILL.md` and the `release-ac` recipe.
-- **Versioned release docs stay upstream-only.** `docs-versions.mjs check`
-  asserts the docs manifest matches `website/latest.json`, which the fork keeps
-  fork-scoped, so it always fails here. `release-docs-check` omits that line and
-  the `Website` workflow is disabled. If a sync reintroduces either, drop it
-  again. Rationale: `.claude/skills/herdr-release/SKILL.md`.
-- **Dogfood with `herdr-beta`.** Cut a beta (`herdr-dogfood` / `herdr-release`
-  skills) and live-handoff the named Macs onto it, panes and sessions kept
-  (`herdr-beta server live-handoff`). Report the before/after diff. Only then
-  close the sync issue.
-- Keep the fork's PROJECTS entry honest:
-  `~/_sync/dev/CONTEXT/PROJECTS/herdr.md`.
+  `command gh workflow disable <name>` any new one. Keep CI, Nix, Release, Build artifacts
+  (manual).
+- **CI on the pushed master** is green: `command gh run list --repo colangelo/herdr-max --branch master --limit 3`.
+- **Update manifest**: `just latest-json-check` (through the runner). New fork binaries read
+  `distribution/latest.json`; 0.8.x-ac binaries read the `website/latest.json` copy. Until
+  the first `release-ac` after a sync, `distribution/latest.json` may hold upstream's data.
+  Every target needs a 64-char `sha256`. Drop `website/latest.json` once no machine runs 0.8.x-ac.
+- **Drift check.** If upstream moved `justfile` release recipes, `scripts/changelog.py` or
+  `release.yml`, update `.claude/skills/herdr-release/SKILL.md` and the `release-ac` recipe.
+- **Versioned release docs stay upstream-only**: `docs-versions.mjs check` asserts the docs
+  manifest matches `website/latest.json`, which the fork keeps fork-scoped, so it always
+  fails here. `release-docs-check` omits that line and the Website workflow is disabled.
+- Keep the fork's PROJECTS entry honest: `~/_sync/dev/CONTEXT/PROJECTS/herdr.md`.
 
-Related: `FORK-INVENTORY.md`, `.claude/skills/herdr-release/SKILL.md` (the -ac
-release after a sync), `.claude/skills/herdr-dogfood/SKILL.md`,
-`~/_sync/dev/CONTEXT/SKILLS/fork-maintenance/SKILL.md` (the general pattern).
+## The weekly trigger
+
+What runs: **a zero-token measurement script, not a session wake.** Nothing needs a model
+until there is something to merge. `scripts/sync_measure.sh --notify` fetches, measures,
+writes `~/.local/state/herdr-sync/<date>.md`, and when upstream has new commits rings the
+`herdr` coordinator with `agent-bell send --to herdr --wake` (the fallback is `--queue`, so
+the report is not lost; the peer-message rule is in CONTEXT `PATTERNS/agent-bell.md`). With
+zero commits it stays silent. The coordinator then opens the sync issue, assigns a lead (or
+leads it) and runs sections 1 to 8.
+
+Why not the `scheduled-checks` skill: that is a session-only `CronCreate` job (dies with
+the session, expires after 7 days). #173 asks for a durable trigger. A LaunchAgent is.
+
+Where: **m4m**, which owns the Mac's scheduled jobs (like `dev.agent-idle-maintain`).
+When: **Tuesday 08:43** local time. Not Sunday 10:00 (budget reset), not :00 or :30; a
+Tuesday leaves the week's budget fresh after the Sunday reset and Wednesday to Friday to
+dogfood. A Mac asleep at 08:43 runs the job on wake.
+
+What mac-m4 installs (nobody has installed it yet): `~/Library/LaunchAgents/dev.herdr.sync-measure.plist`
+
+```xml
+<dict>
+  <key>Label</key><string>dev.herdr.sync-measure</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/gtimeout</string><string>10m</string>
+    <string>/bin/zsh</string><string>-lc</string>
+    <string>cd ~ &amp;&amp; HERDR_REPO=$HOME/_sync/dev/herdr exec $HOME/_sync/dev/herdr/scripts/sync_measure.sh --notify</string>
+  </array>
+  <key>StartCalendarInterval</key><dict>
+    <key>Weekday</key><integer>2</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>43</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/ac/Library/Logs/herdr-sync-measure.log</string>
+  <key>StandardErrorPath</key><string>/Users/ac/Library/Logs/herdr-sync-measure.err</string>
+</dict>
+```
+
+(`zsh -lc` puts `agent-bell` and Homebrew on PATH.) Before relying on it: the script path
+must exist on the shared checkout, i.e. this file has to be on `master` there; test once with
+`launchctl kickstart -k gui/$UID/dev.herdr.sync-measure` and confirm `herdr` gets the bell.
+`herdr` also keeps one standing line on its weekly list: "Tuesday sync report arrived?
+if not, run `scripts/sync_measure.sh` by hand".
+
+Related: `FORK-INVENTORY.md`, `.claude/skills/herdr-release/SKILL.md`,
+`.claude/skills/herdr-dogfood/SKILL.md`, `.claude/skills/herdr-fork-tracking` (the global
+skill), `~/_sync/dev/CONTEXT/SKILLS/fork-maintenance/SKILL.md` (the general pattern),
+`~/_sync/dev/CONTEXT/SKILLS/scheduled-checks/SKILL.md`.
