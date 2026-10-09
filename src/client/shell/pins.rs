@@ -192,6 +192,7 @@ impl ClientShellState {
                     boot_id: boot_id.clone(),
                     method_name,
                     confirmation_workspace_id: None,
+                    force_target: None,
                     kind: PendingEndpointKind::Generic,
                 },
             );

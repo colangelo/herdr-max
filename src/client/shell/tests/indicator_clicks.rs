@@ -115,7 +115,8 @@ fn clicking_the_notification_indicator_toggles_the_center() {
         [Method::NotificationList(_)]
     ));
 
-    click(&mut state, indicator(&state));
+    let at = indicator(&state);
+    click(&mut state, at);
     assert!(state.overlay.is_none(), "a second click closes it");
 }
 
@@ -137,7 +138,8 @@ fn the_indicators_do_nothing_outside_terminal_navigate_and_resize() {
     let mut state = state();
     state.mode = ClientShellMode::Copy;
 
-    click(&mut state, indicator(&state));
+    let at = indicator(&state);
+    click(&mut state, at);
     assert!(!matches!(
         state.overlay,
         Some(ClientShellOverlay::NotificationCenter(_))
