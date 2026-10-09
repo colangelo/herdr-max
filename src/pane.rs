@@ -6952,6 +6952,35 @@ mod tests {
     }
 
     #[test]
+    fn a_settling_managed_start_rechecks_an_identified_agent_fast_and_then_stops() {
+        // An identified agent whose process swapped itself in place (a script that execs the real
+        // thing keeps its pid and group) is only re-probed every PROCESS_RECHECK_IDENTIFIED, which
+        // is longer than an agent start settles. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/183
+        let now = std::time::Instant::now();
+        let settling = Some(now + std::time::Duration::from_secs(3));
+        let identified = ProcessProbeInput {
+            current_agent: Some(Agent::Pi),
+            elapsed_since_process_check: std::time::Duration::from_millis(600),
+            ..process_probe_input()
+        };
+        let probe = |until, input: ProcessProbeInput| {
+            should_probe_foreground_job(ProcessProbeInput {
+                acquisition_age: probe_acquisition_age(now, until, input.acquisition_age),
+                ..input
+            })
+        };
+        assert!(!probe(None, identified), "without a managed start the 5 s cadence stands");
+        assert!(probe(settling, identified), "while settling, 600 ms since the last probe is due");
+        let fresh = ProcessProbeInput {
+            elapsed_since_process_check: std::time::Duration::from_millis(100),
+            ..identified
+        };
+        assert!(!probe(settling, fresh), "but not more often than the fast recheck");
+        let over = Some(now - std::time::Duration::from_millis(1));
+        assert!(!probe(over, identified), "the window is over, back to the normal cadence");
+    }
+
+    #[test]
     fn windows_foreground_observation_schedule_preserves_lifecycle_checks() {
         let quiet = ProcessProbeInput {
             current_agent: Some(Agent::Codex),
