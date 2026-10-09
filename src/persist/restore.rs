@@ -143,6 +143,36 @@ fn restore_pane_todos(
     }
 }
 
+/// What a pane keeps whatever happens to its process: its todos (links are
+/// remapped once every tab is restored), when it last got input, and its pin.
+/// Every restore path calls this, including a pane whose directory or shell is
+/// unavailable, so the next snapshot does not save them away.
+fn restore_durable_pane_metadata(
+    terminal: &mut TerminalState,
+    pane: Option<&super::snapshot::PaneSnapshot>,
+    todo_links: &mut TodoLinkRestore,
+) {
+    let Some(pane) = pane else {
+        return;
+    };
+    restore_pane_todos(terminal, &pane.todos, pane.next_todo_id, todo_links);
+    terminal.restored_last_input_at_ms = pane.last_input_at_ms;
+    terminal.pin_order = pane.pin_order;
+}
+
+/// The flags the pane's agent was launched with, as saved.
+fn saved_agent_launch(
+    pane: &super::snapshot::PaneSnapshot,
+) -> Option<crate::agent_resume::AgentLaunchFlags> {
+    pane.agent_launch
+        .as_ref()
+        .map(|launch| crate::agent_resume::AgentLaunchFlags {
+            agent: launch.agent.clone(),
+            flags: launch.flags.clone(),
+            started_at_ms: launch.started_at_ms,
+        })
+}
+
 struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
@@ -609,6 +639,7 @@ fn unavailable_restored_terminal(
     pane: Option<&super::snapshot::PaneSnapshot>,
     cwd: PathBuf,
     reason: String,
+    todo_links: &mut TodoLinkRestore,
 ) -> TerminalState {
     warn!(cwd = %cwd.display(), reason = %reason, "preserving unavailable restored pane");
     let mut terminal = TerminalState::new(TerminalId::alloc(), cwd);
@@ -622,6 +653,9 @@ fn unavailable_restored_terminal(
         if let Some(resume) = saved_reported_resume(pane) {
             terminal.restore_reported_resume(reported_resume_from_snapshot(resume));
         }
+        if let Some(record) = saved_agent_launch(pane) {
+            terminal.restore_agent_launch(record);
+        }
         match (
             pane.agent_name.as_ref(),
             pane.managed_agent_kind
@@ -633,6 +667,7 @@ fn unavailable_restored_terminal(
             _ => {}
         }
     }
+    restore_durable_pane_metadata(&mut terminal, pane, todo_links);
     terminal
 }
 
@@ -692,6 +727,7 @@ fn restore_tab(
                 cwd,
                 "Saved directory is unavailable. Restore the directory and restart this session."
                     .into(),
+                todo_links,
             );
             panes.insert(*id, PaneState::new(terminal.id.clone()));
             terminals.push(terminal);
@@ -706,11 +742,6 @@ fn restore_tab(
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
-        let saved_todos: &[PaneTodoSnapshot] =
-            saved_pane.map(|p| p.todos.as_slice()).unwrap_or_default();
-        let saved_next_todo_id = saved_pane.map(|p| p.next_todo_id).unwrap_or(1);
-        let saved_last_input_at_ms = saved_pane.and_then(|p| p.last_input_at_ms);
-        let saved_pin_order = saved_pane.and_then(|p| p.pin_order);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
         let startup = {
@@ -733,13 +764,8 @@ fn restore_tab(
         let restored_agent_session =
             restored_terminal_agent_session(saved_agent_session, startup.duplicate_agent_session);
         let restored_agent_launch = saved_pane
-            .and_then(|p| p.agent_launch.as_ref())
-            .filter(|_| !startup.duplicate_agent_session)
-            .map(|launch| crate::agent_resume::AgentLaunchFlags {
-                agent: launch.agent.clone(),
-                flags: launch.flags.clone(),
-                started_at_ms: launch.started_at_ms,
-            });
+            .and_then(saved_agent_launch)
+            .filter(|_| !startup.duplicate_agent_session);
         let initial_restore_agent = startup
             .restore_plan
             .as_ref()
@@ -822,9 +848,7 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            restore_pane_todos(&mut terminal, saved_todos, saved_next_todo_id, todo_links);
-            terminal.restored_last_input_at_ms = saved_last_input_at_ms;
-            terminal.pin_order = saved_pin_order;
+            restore_durable_pane_metadata(&mut terminal, saved_pane, todo_links);
             panes.insert(*id, PaneState::new(terminal_id));
             terminals.push(terminal);
             continue;
@@ -932,9 +956,7 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                restore_pane_todos(&mut terminal, saved_todos, saved_next_todo_id, todo_links);
-                terminal.restored_last_input_at_ms = saved_last_input_at_ms;
-                terminal.pin_order = saved_pin_order;
+                restore_durable_pane_metadata(&mut terminal, saved_pane, todo_links);
                 #[cfg(unix)]
                 if let Some(agent_state) = handoff_agent_state {
                     terminal.restore_handoff_agent_state(agent_state);
@@ -969,6 +991,7 @@ fn restore_tab(
                     let terminal = unavailable_restored_terminal(
                         saved_pane, cwd,
                         format!("Could not start the saved shell: {e}. Fix the shell configuration and restart this session."),
+                        todo_links,
                     );
                     panes.insert(*id, PaneState::new(terminal.id.clone()));
                     terminals.push(terminal);
@@ -2298,6 +2321,122 @@ mod tests {
             state.terminals = terminals;
             state.active = Some(0);
             state.assert_invariants_for_test();
+        }
+    }
+
+    /// Fork issue 189: a pane restored without its directory, or without a
+    /// shell, still owns its todos (with links both ways), its agent's launch
+    /// flags, its pin and its last input, so the next snapshot saves them
+    /// again instead of empty fields.
+    #[tokio::test]
+    async fn unavailable_restored_panes_keep_their_durable_metadata() {
+        for missing_shell in [false, true] {
+            let mut snapshot: SessionSnapshot = serde_json::from_str(include_str!(
+                "../../tests/fixtures/session/current-herdr-session.json"
+            ))
+            .unwrap();
+            let cwd = std::env::current_dir().unwrap();
+            let missing = cwd.join("__herdr_missing_restore_directory__");
+            assert!(!missing.exists());
+            for workspace in &mut snapshot.workspaces {
+                workspace.identity_cwd = cwd.clone();
+                for tab in &mut workspace.tabs {
+                    for pane in tab.panes.values_mut() {
+                        pane.cwd = cwd.clone();
+                    }
+                }
+            }
+            let todo = |id: u64, text: &str, link_pane: u32, link_label: &str| {
+                super::super::snapshot::PaneTodoSnapshot {
+                    id,
+                    text: text.into(),
+                    done: false,
+                    priority: crate::terminal::todo::TodoPriority::High,
+                    link_pane: Some(link_pane),
+                    link_label: Some(link_label.into()),
+                    created_at_unix: 100,
+                    updated_at_unix: 140 + id,
+                }
+            };
+            // Pane 1 has lost its directory. Pane 3, in the other workspace,
+            // either starts or, with `missing_shell`, fails to start its shell.
+            // Each has a todo linking to the other.
+            let lost = snapshot.workspaces[0].tabs[0].panes.get_mut(&1).unwrap();
+            lost.cwd = missing.clone();
+            lost.todos = vec![todo(4, "ship it", 3, "infra")];
+            lost.next_todo_id = 5;
+            lost.pin_order = Some(2);
+            lost.last_input_at_ms = Some(1_700_000_000_000);
+            lost.agent_launch = Some(super::super::snapshot::PaneAgentLaunchSnapshot {
+                agent: "claude".into(),
+                flags: vec!["--model".into(), "opus".into()],
+                started_at_ms: Some(1_700_000_000_001),
+            });
+            let other = snapshot.workspaces[1].tabs[0].panes.get_mut(&3).unwrap();
+            other.todos = vec![todo(7, "review", 1, "lost")];
+            other.next_todo_id = 9;
+            other.pin_order = Some(1);
+            other.last_input_at_ms = Some(1_700_000_000_002);
+
+            let (events, _rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                0,
+                if missing_shell {
+                    "__herdr_missing_restore_shell__"
+                } else {
+                    test_restore_shell()
+                },
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let lost_id = workspaces[0].tabs[0].root_pane;
+            let other_id = workspaces[1].tabs[0].root_pane;
+            let lost_terminal = workspaces[0].tabs[0].terminal_id(lost_id).unwrap();
+            let other_terminal = workspaces[1].tabs[0].terminal_id(other_id).unwrap();
+            assert!(terminals[lost_terminal].restore_error.is_some());
+            assert_eq!(
+                terminals[other_terminal].restore_error.is_some(),
+                missing_shell,
+                "pane 3 takes the shell-failure branch only without a shell"
+            );
+            assert_eq!(runtimes.get(other_terminal).is_some(), !missing_shell);
+
+            let captured =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
+            let lost = &captured.workspaces[0].tabs[0].panes[&lost_id.raw()];
+            assert_eq!(lost.todos.len(), 1, "missing_shell={missing_shell}");
+            assert_eq!(lost.todos[0].text, "ship it");
+            assert_eq!(
+                lost.todos[0].link_pane,
+                Some(other_id.raw()),
+                "a link out of an unavailable pane is remapped"
+            );
+            assert_eq!(lost.todos[0].link_label.as_deref(), Some("infra"));
+            assert_eq!(lost.next_todo_id, 5);
+            assert_eq!(lost.pin_order, Some(2));
+            assert_eq!(lost.last_input_at_ms, Some(1_700_000_000_000));
+            let launch = lost.agent_launch.as_ref().expect("launch flags kept");
+            assert_eq!(launch.agent, "claude");
+            assert_eq!(launch.flags, ["--model", "opus"]);
+
+            let other = &captured.workspaces[1].tabs[0].panes[&other_id.raw()];
+            assert_eq!(other.todos.len(), 1, "missing_shell={missing_shell}");
+            assert_eq!(
+                other.todos[0].link_pane,
+                Some(lost_id.raw()),
+                "a link into an unavailable pane still resolves"
+            );
+            assert_eq!(other.next_todo_id, 9);
+            assert_eq!(other.pin_order, Some(1));
+            assert_eq!(other.last_input_at_ms, Some(1_700_000_000_002));
         }
     }
 
