@@ -4,8 +4,9 @@
 //! server is up. A local app client restores the terminal, waits for the new
 //! server's socket, and attaches again at the terminal's current size; a
 //! detach, a normal server stop and a direct terminal attach still exit.
-//! A federated client does not come through here: its Local endpoint
-//! supervisor reconnects while the shell keeps running.
+//! A federated client's Local endpoint supervisor reconnects while the shell
+//! keeps running. Only when the server that took over refuses it (a rollback
+//! to an older build) does it come through here to re-exec onto that build.
 
 use super::*;
 use std::sync::Mutex;
@@ -30,6 +31,30 @@ pub(super) fn is_live_handoff_shutdown(err: &ClientError) -> bool {
         ClientError::ServerShutdown { reason: Some(reason) }
             if reason == crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON
     )
+}
+
+/// Whether a federated client leaves its session for the reconnect loop, which
+/// re-execs onto the server's build: Local handed off, and the server that took
+/// over then refused this client as incompatible (a rollback to an older
+/// build). Until a handoff, a Local that needs attention is a configuration
+/// problem the endpoint supervisor reports, not a build to follow.
+pub(super) fn federated_local_follows_handoff(
+    endpoint_is_local: bool,
+    status: super::endpoint::ClientEndpointStatus,
+    local_handed_off: bool,
+) -> bool {
+    endpoint_is_local
+        && local_handed_off
+        && status == super::endpoint::ClientEndpointStatus::Attention
+}
+
+/// The error that hands a federated session to the reconnect loop as if Local
+/// had shut down for a live handoff, so it takes the same reconnect and re-exec
+/// path as a local client.
+pub(super) fn federated_handoff_exit() -> ClientError {
+    ClientError::ServerShutdown {
+        reason: Some(crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON.to_owned()),
+    }
 }
 
 /// Whether a session that ended with `err` follows the server to its successor
@@ -369,5 +394,30 @@ mod tests {
 
         quit.store(true, Ordering::Release);
         assert!(!wait_for_socket(&path, Duration::from_secs(30), &quit));
+    }
+
+    #[test]
+    fn a_federated_client_follows_the_server_build_only_when_local_refuses_it_after_a_handoff() {
+        use super::super::endpoint::ClientEndpointStatus::{
+            Attention, Connecting, Disabled, Online, Reconnecting,
+        };
+        // Local handed off and the server that took over refused this client:
+        // follow its build, as a local client does.
+        assert!(federated_local_follows_handoff(true, Attention, true));
+        // Still coming back, or back: the supervisor keeps reconnecting.
+        for status in [Connecting, Reconnecting, Online, Disabled] {
+            assert!(
+                !federated_local_follows_handoff(true, status, true),
+                "{status:?}"
+            );
+        }
+        // No handoff: a Local that needs attention is shown, not followed.
+        assert!(!federated_local_follows_handoff(true, Attention, false));
+        // A saved machine needing attention never restarts the client.
+        assert!(!federated_local_follows_handoff(false, Attention, true));
+
+        // The exit takes the local client's reconnect and re-exec path.
+        assert!(follows_handoff(&federated_handoff_exit(), true));
+        assert!(is_live_handoff_shutdown(&federated_handoff_exit()));
     }
 }

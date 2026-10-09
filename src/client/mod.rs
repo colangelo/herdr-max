@@ -650,6 +650,8 @@ async fn run_client_loop(
     };
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
+    // Local shut down for a live handoff and has not come back online since.
+    let mut local_handed_off = false;
     if federated {
         supervisors.add_local(
             client_socket_path(),
@@ -1316,6 +1318,14 @@ async fn run_client_loop(
                     if !supervisors.record_status(&endpoint_id, generation, status, now) {
                         continue;
                     }
+                    if handoff::federated_local_follows_handoff(
+                        endpoint_id.is_local(),
+                        status,
+                        local_handed_off,
+                    ) {
+                        warn!(error = %message, "Local refused this client after a live handoff; following the server's build");
+                        return Err(handoff::federated_handoff_exit());
+                    }
                     if status == endpoint::ClientEndpointStatus::Attention {
                         warn!(endpoint = %endpoint_id.storage_key(), generation, error = %message, "endpoint needs attention");
                     }
@@ -1348,6 +1358,9 @@ async fn run_client_loop(
                         now,
                     ) {
                         continue;
+                    }
+                    if endpoint_id.is_local() {
+                        local_handed_off = false;
                     }
                     let surface_decoder = negotiated_surface_decoder(&negotiation);
                     let agent_view_projection_supported = negotiation.supports_capability(
@@ -1772,6 +1785,12 @@ async fn run_client_loop(
                     ServerMessage::ServerShutdown { reason } => {
                         if !federated && endpoint_id.is_local() {
                             return Err(ClientError::ServerShutdown { reason });
+                        }
+                        if endpoint_id.is_local()
+                            && reason.as_deref()
+                                == Some(crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON)
+                        {
+                            local_handed_off = true;
                         }
                         write_stream.fail(
                             &endpoint_id,
