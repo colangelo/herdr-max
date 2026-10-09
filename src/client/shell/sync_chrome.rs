@@ -36,8 +36,9 @@ pub(super) fn paint(
         rect.y,
         text,
         usize::from(rect.width),
+        // SYNC keeps its own yellow; its text is the dark chip text of every mode chip.
         Style::default()
-            .fg(palette.panel_bg)
+            .fg(panel_contrast_fg(palette))
             .bg(crate::app::state::SYNC_YELLOW)
             .add_modifier(Modifier::BOLD),
     );
