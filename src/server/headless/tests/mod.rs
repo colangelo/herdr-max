@@ -6,6 +6,7 @@ mod hint_notifications;
 mod native_graphics;
 #[path = "pane_move.rs"]
 mod pane_move_tests;
+mod remembered_client_size;
 #[path = "pane_graphics.rs"]
 mod retained_graphics_tests;
 #[path = "surface_delta.rs"]
@@ -64,14 +65,17 @@ fn test_headless_server() -> HeadlessServer {
 fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
     let config = crate::config::Config::default();
     let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = crate::app::App::new(
+    let app = crate::app::App::new(
         &config,
         crate::app::AppPolicy::TEST,
         None,
         api_rx,
         event_hub,
     );
+    test_headless_server_from_app(app)
+}
 
+fn test_headless_server_from_app(mut app: crate::app::App) -> HeadlessServer {
     app.state.default_shell = crate::app::exiting_test_command().into();
     let dir = std::env::temp_dir().join(format!(
         "hh-{}-{}",
