@@ -874,12 +874,8 @@ impl ClientShellState {
                 self.hits.todo_board_layout = rendered.map(|(layout, _)| layout);
                 cursor
             } else if let ClientShellOverlay::MovePicker(picker) = overlay {
-                let rendered = super::move_picker::render_move_picker(
-                    &mut composed,
-                    picker,
-                    self.config.status_indicators,
-                    &self.config.palette,
-                );
+                let rendered =
+                    super::move_picker::render_move_picker(&mut composed, picker, &self.config);
                 let cursor = rendered.as_ref().and_then(|(_, cursor)| cursor.clone());
                 if let Some((layout, _)) = rendered.as_ref() {
                     occlusion.cover(layout.outer);
