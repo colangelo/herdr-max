@@ -17,7 +17,9 @@ pub(super) fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
+    // The server canonicalizes cwds; on macOS /tmp is a symlink to /private/tmp.
+    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    tmp.join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {

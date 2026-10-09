@@ -292,10 +292,7 @@ fn plugin_update_refreshes_selected_then_all_github_plugins() {
     }
 
     let server = spawn_named_server(&config_home, &runtime_dir, "updates");
-    wait_for_socket(
-        &named_session_socket(&config_home, "updates"),
-        Duration::from_secs(5),
-    );
+    wait_for_socket(&named_session_socket(&config_home, "updates"));
     run_named_cli_json(
         &config_home,
         &runtime_dir,
@@ -518,10 +515,7 @@ fn plugin_update_does_not_resurrect_a_plugin_unlinked_during_build() {
     assert!(installed.status.success());
 
     let server = spawn_named_server(&config_home, &runtime_dir, "race");
-    wait_for_socket(
-        &named_session_socket(&config_home, "race"),
-        Duration::from_secs(5),
-    );
+    wait_for_socket(&named_session_socket(&config_home, "race"));
     let listed = run_named_cli_json(
         &config_home,
         &runtime_dir,
@@ -683,10 +677,7 @@ mv "$HERDR_PLUGIN_ROOT/result-$kind.tmp" "$HERDR_PLUGIN_ROOT/result-$kind"
     let alpha = spawn_named_server(&config_home, &runtime_dir, "alpha");
     let beta = spawn_named_server(&config_home, &runtime_dir, "beta");
     for name in ["alpha", "beta"] {
-        wait_for_socket(
-            &named_session_socket(&config_home, name),
-            Duration::from_secs(5),
-        );
+        wait_for_socket(&named_session_socket(&config_home, name));
     }
     let socket = named_session_socket(&config_home, "alpha");
     run_cli_json(
