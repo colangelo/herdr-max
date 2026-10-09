@@ -5702,7 +5702,7 @@ mod tests {
         let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
 
         assert_eq!(
-            new.terminal.recent_unwrapped_text(10),
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
             "tick 24\ntick 25\ntick 26"
         );
     }
@@ -5717,7 +5717,10 @@ mod tests {
         replayed.extend_from_slice(b"ls\r\n");
         let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
 
-        assert_eq!(new.terminal.recent_unwrapped_text(10), "one\n$ ls");
+        assert_eq!(
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
+            "one\n$ ls"
+        );
     }
 
     #[cfg(unix)]
@@ -5730,7 +5733,10 @@ mod tests {
         replayed.extend_from_slice(b"next");
         let new = PaneRuntime::test_with_scrollback_bytes(40, 6, 4096, &replayed);
 
-        assert_eq!(new.terminal.recent_unwrapped_text(10), "top\n\n\nnext");
+        assert_eq!(
+            new.terminal.recent_unwrapped_text_snapshot(10).text,
+            "top\n\n\nnext"
+        );
     }
 
     #[cfg(unix)]
