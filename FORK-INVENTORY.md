@@ -54,6 +54,7 @@ deliberate difference from upstream's contract or names).
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels, notification/todo indicators (click opens their panels) | `port/chrome`, merged `3e4827ff`, clicks `7e363fa4`/`3ccbf1e3` (`sync-merge/11`) |
 | overlays | port | todo panel/editor/board, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays`, merged through `sync-merge/11` |
 | sync-frame-hold | port | upstream holds mid-sync surfaces; the fork adds the 200 ms cap so a stuck app cannot freeze a pane | fork 839473d8 (issue 126) |
+| sync-hold-cursor-test | divergent | upstream's Windows-only test `cursor_settle_ignores_intermediate_synchronized_frame_positions` (src/pane/terminal.rs) expects no render delay inside a `?2026h` block; the fork's sync-frame-hold schedules `SYNC_HOLD_MAX` on the frame that opens one, so the test expects that on the opening frame. Keep it when syncing; drop the edit if the 200 ms cap goes upstream or the fork drops it | `ad933b48` (issue 188) |
 | prefix-list | superseded | `keys.prefix` as a list | upstream 7f89b11a (fork 73a00623) |
 | detached-split-size | superseded | split sizes while detached | upstream new_pane_size (fork b943d332) |
 | agent-restart-group | superseded | a restarted agent in another process group is a replacement | upstream AgentJobTracker::replaced_in_front (fork 9d6ba1f8, issue 112) |
