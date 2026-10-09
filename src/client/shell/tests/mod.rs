@@ -264,6 +264,7 @@ mod endpoint_requests;
 mod endpoints;
 mod force_confirm;
 mod graphics;
+mod indicator_clicks;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;

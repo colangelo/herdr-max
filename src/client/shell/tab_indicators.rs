@@ -127,6 +127,56 @@ pub(super) fn paint_floating(
     Some(rect)
 }
 
+impl ClientShellState {
+    /// The indicators toggle their panels as the fork's did: the notification
+    /// indicator opens and closes the notification center, a pane's todo mark
+    /// that pane's todo panel. They answer before an open panel routes the
+    /// click, so a second click on the same control closes it; a cell the todo
+    /// panel covers belongs to the panel, not to a mark beneath it.
+    pub(super) fn toggle_indicator_panel_at(
+        &mut self,
+        point: (u16, u16),
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let chrome_mode = matches!(
+            self.mode,
+            ClientShellMode::Terminal | ClientShellMode::Navigate | ClientShellMode::Resize
+        );
+        if chrome_mode
+            && matches!(
+                self.overlay,
+                None | Some(ClientShellOverlay::NotificationCenter(_))
+            )
+            && super::contains(self.hits.notification_indicator, point)
+        {
+            self.toggle_notification_center(outcome);
+            return true;
+        }
+        let panel_covers = self
+            .hits
+            .todo_panel
+            .as_ref()
+            .is_some_and(|panel| super::contains(panel.outer, point));
+        if !chrome_mode
+            || panel_covers
+            || !matches!(self.overlay, None | Some(ClientShellOverlay::TodoPanel(_)))
+        {
+            return false;
+        }
+        let Some(pane_id) = self
+            .hits
+            .pane_todos
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .map(|(_, pane_id)| pane_id.clone())
+        else {
+            return false;
+        };
+        self.toggle_todo_panel(&pane_id, outcome);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +187,7 @@ mod tests {
             notifications: Some(crate::protocol::ClientNotificationSummary {
                 total: 2,
                 unread: 2,
+                ..Default::default()
             }),
             pane_todos: Some(Default::default()),
             ..Default::default()
@@ -179,6 +230,7 @@ mod tests {
             notifications: Some(crate::protocol::ClientNotificationSummary {
                 total: 200,
                 unread: 150,
+                ..Default::default()
             }),
             pane_todos: Some(
                 [(
@@ -187,6 +239,7 @@ mod tests {
                         total: 5,
                         open: 5,
                         highest_priority: Some("high".into()),
+                        ..Default::default()
                     },
                 )]
                 .into(),

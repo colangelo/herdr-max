@@ -710,6 +710,11 @@ impl ClientShellState {
             }
             return;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.toggle_indicator_panel_at(point, outcome)
+        {
+            return;
+        }
         match self.overlay {
             Some(ClientShellOverlay::NotificationCenter(_)) => {
                 return self.route_notification_center_mouse(mouse, outcome);
