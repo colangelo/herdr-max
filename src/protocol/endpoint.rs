@@ -32,6 +32,33 @@ pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 
+/// Optional clipboard provenance; the published Clipboard payload remains unchanged.
+pub const CLIPBOARD_ORIGIN_KIND: &str = "endpoint.clipboard-origin.v1";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointClipboardOrigin {
+    pub boot_id: String,
+    pub pane_id: String,
+    pub data_digest: String,
+}
+pub fn clipboard_data_digest(data: &str) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(data.as_bytes()))
+}
+pub fn clipboard_origin_message(
+    boot_id: &str,
+    pane_id: String,
+    data: &str,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: CLIPBOARD_ORIGIN_KIND.into(),
+        data: serde_json::to_string(&EndpointClipboardOrigin {
+            boot_id: boot_id.into(),
+            pane_id,
+            data_digest: clipboard_data_digest(data),
+        })?,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
     pub boot_id: String,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::shell::state_presentation::StatePresentation;
 
 mod settings_overlay;
 mod worktree_overlays;
@@ -41,6 +42,7 @@ pub(crate) fn render_client_overlay(
     active_endpoint_id: &ClientEndpointId,
     k: &LiveKeybindConfig,
     p: &Palette,
+    config: &ClientShellConfig,
 ) -> Option<OverlayRender> {
     if !matches!(
         o,
@@ -65,7 +67,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
         ClientShellOverlay::Navigator(v) => {
-            render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
+            render_navigator_overlay(b, v, endpoints, active_endpoint_id, p, config)
         }
         ClientShellOverlay::Settings(v) => {
             settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
@@ -733,6 +735,7 @@ pub(super) fn navigator_row_label(
     rows: &[ClientNavigatorRow],
     ix: usize,
     purpose: ClientNavigatorPurpose,
+    presentation: &StatePresentation,
 ) -> (String, Option<(u16, String)>) {
     let r = &rows[ix];
     let is_pane = matches!(r.target, ClientNavigatorTarget::Pane { .. });
@@ -749,7 +752,10 @@ pub(super) fn navigator_row_label(
     let padding = usize::from(r.depth.saturating_sub(u8::from(is_pane))) * 2 + 1;
     let indent = format!("{:padding$}{connector}", "");
     let current = if r.current { "◆ " } else { "" };
-    let status = r.status.map(status_dot).unwrap_or_default();
+    let status = r
+        .status
+        .map(|status| presentation.icon(status, crate::config::StatusIndicatorStyle::Dots))
+        .unwrap_or_default();
     let status_separator = if status.is_empty() { "" } else { " " };
     let lead = format!("{indent}{current}{status}{status_separator}");
     match &r.target {
@@ -783,9 +789,10 @@ pub(in crate::client::shell) fn navigator_status_measure(text: &str) -> u16 {
 pub(in crate::client::shell) fn navigator_columns(
     rows: &[ClientNavigatorRow],
     purpose: ClientNavigatorPurpose,
+    presentation: &StatePresentation,
 ) -> (u16, u16) {
     let labels = (0..rows.len())
-        .map(|ix| display_width(&navigator_row_label(rows, ix, purpose).0) + 1)
+        .map(|ix| display_width(&navigator_row_label(rows, ix, purpose, presentation).0) + 1)
         .max()
         .unwrap_or(0);
     let measure = rows
@@ -808,6 +815,7 @@ fn render_navigator_overlay(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     p: &Palette,
+    config: &ClientShellConfig,
 ) -> Option<OverlayRender> {
     let a = b.area;
     let linking = n.purpose == ClientNavigatorPurpose::TodoLink;
@@ -858,7 +866,13 @@ fn render_navigator_overlay(
     let text_room = i.right().saturating_sub(text_x);
     let used = if let Some(filter) = n.filter.filter(|_| !n.search_focused) {
         let status = navigator_filter_status(filter);
-        let chip = format!("{} {}", status_dot(status), status_text(status));
+        let chip = format!(
+            "{} {}",
+            config
+                .state_presentation
+                .icon(status, crate::config::StatusIndicatorStyle::Dots),
+            status_text(status)
+        );
         put_text(
             b,
             text_x,
@@ -866,7 +880,7 @@ fn render_navigator_overlay(
             text_room,
             &chip,
             Style::default()
-                .fg(status_color(status, p))
+                .fg(config.state_color(status))
                 .bg(p.panel_bg)
                 .add_modifier(Modifier::BOLD),
         );
@@ -1007,7 +1021,7 @@ fn render_navigator_overlay(
         let connector_x = rect.x + padding;
         let indent = format!("{:width$}{connector}", "", width = usize::from(padding));
         let current = if r.current { "◆ " } else { "" };
-        let (label, id_at) = navigator_row_label(&rows, ix, n.purpose);
+        let (label, id_at) = navigator_row_label(&rows, ix, n.purpose, &config.state_presentation);
         let st = if r.status.is_none() {
             st.add_modifier(Modifier::BOLD)
         } else {
@@ -1066,14 +1080,22 @@ fn render_navigator_overlay(
             let status_style = if r.stale || ix == selected {
                 st
             } else {
-                Style::default().fg(status_color(status, p)).bg(p.panel_bg)
+                Style::default()
+                    .fg(config.state_color(status))
+                    .bg(p.panel_bg)
             };
             put_text(
                 b,
                 rect.x.saturating_add(display_width(&prefix)),
                 rect.y,
-                display_width(status_dot(status)),
-                status_dot(status),
+                display_width(
+                    config
+                        .state_presentation
+                        .icon(status, crate::config::StatusIndicatorStyle::Dots),
+                ),
+                config
+                    .state_presentation
+                    .icon(status, crate::config::StatusIndicatorStyle::Dots),
                 status_style,
             );
             if columns > 0 {

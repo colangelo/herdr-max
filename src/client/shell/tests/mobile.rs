@@ -42,7 +42,7 @@ fn navigate_update_status_uses_released_desktop_and_mobile_placement() {
             pane_id: None,
             position: Some(crate::config::ToastHerdrPosition::BottomRight),
         },
-        deadline: std::time::Instant::now(),
+        deadline: Some(std::time::Instant::now()),
     });
     let top = state.compose(106, 30).expect("top-tab update shell");
     assert!(row_text(&top, 29).contains("update ready"));

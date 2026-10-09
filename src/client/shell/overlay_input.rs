@@ -215,7 +215,7 @@ impl ClientShellState {
         let rows =
             render::client_navigator_rows(&self.endpoints, &self.active_endpoint_id, &navigator);
         (navigator.content_width, navigator.status_width) =
-            render::navigator_columns(&rows, purpose);
+            render::navigator_columns(&rows, purpose, &self.config.state_presentation);
         navigator.selected = match purpose {
             ClientNavigatorPurpose::Goto => rows
                 .iter()

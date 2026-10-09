@@ -16,6 +16,7 @@ pub(crate) fn render_tab_bar(
 ) {
     let palette = &config.palette;
     buffer.set_style(area, Style::default().bg(palette.panel_bg));
+    let area = super::tab_indicators::paint_bar(buffer, area, snapshot, config, hits);
     let tabs = snapshot
         .tabs
         .iter()

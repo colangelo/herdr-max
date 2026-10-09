@@ -50,19 +50,23 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    collapsed_groups: &HashSet<String>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
+    let bar =
+        u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left);
     let selection_background = workspace_selection_background(palette);
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
-    for (index, workspace) in snapshot
-        .workspaces
+    let entries = workspace_entries(snapshot, collapsed_groups);
+    for (index, entry) in entries
         .iter()
         .take(workspace_area.height as usize)
         .enumerate()
     {
+        let workspace = &snapshot.workspaces[entry.index];
         let rect = Rect::new(
             workspace_area.x,
             workspace_area.y + index as u16,
@@ -86,21 +90,24 @@ pub(crate) fn render_collapsed_sidebar(
         };
         put_text(
             buffer,
-            rect.x,
+            rect.x.saturating_add(bar),
             rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            number_style,
+            rect.width.saturating_sub(bar).min(2),
+            &format!("{:<2}", crate::config::jump_symbol(index).unwrap_or(' ')),
+            number_style.fg(config
+                .workspace_number_color
+                .unwrap_or(number_style.fg.unwrap_or(palette.overlay0))),
         );
         let status = workspace.agent_status;
         put_text(
             buffer,
-            rect.x.saturating_add(2),
+            rect.x.saturating_add(bar + 2),
             rect.y,
-            rect.width.saturating_sub(2),
-            status_icon(status, config.status_indicators),
-            Style::default().fg(status_color(status, palette)),
+            rect.width.saturating_sub(bar + 2),
+            config.state_icon(status),
+            Style::default().fg(config.state_color(status)),
         );
+        super::sidebar_chrome::draw_active_border(buffer, rect, workspace.focused, config, 0);
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -150,24 +157,36 @@ pub(crate) fn render_collapsed_sidebar(
         }
         put_text(
             buffer,
-            rect.x,
+            rect.x.saturating_add(bar),
             rect.y,
-            rect.width.min(2),
-            &format!("{:<2}", index + 1),
-            Style::default().fg(if agent.focused {
+            rect.width.saturating_sub(bar).min(2),
+            &format!("{:<2}", crate::config::jump_symbol(index).unwrap_or(' ')),
+            Style::default().fg(config.agent_number_color.unwrap_or(if agent.focused {
                 palette.text
             } else {
                 palette.overlay0
-            }),
+            })),
         );
         put_text(
             buffer,
-            rect.x.saturating_add(2),
+            rect.x.saturating_add(bar + 2),
             rect.y,
-            rect.width.saturating_sub(2),
-            status_icon(agent.agent_status, config.status_indicators),
-            Style::default().fg(status_color(agent.agent_status, palette)),
+            rect.width.saturating_sub(bar + 2),
+            config.state_presentation.agent_icon(
+                agent.agent_status,
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|f| f.background_activity.as_ref())
+                    .and_then(|f| f.get(&agent.pane_id))
+                    .copied()
+                    .unwrap_or(false),
+                agent.state_change_seq,
+                config,
+            ),
+            Style::default().fg(config.state_color(agent.agent_status)),
         );
+        super::sidebar_chrome::draw_active_border(buffer, rect, agent.focused, config, 0);
         hits.agents.push((rect, pane_id));
     }
     hits.sidebar_toggle = if area.is_empty() || workspace_area.width == 0 {
@@ -220,11 +239,15 @@ pub(crate) fn render_sidebar(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        " spaces",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " SPACES"
+        } else {
+            " spaces"
+        },
+        super::sidebar_chrome::header_style(config),
     );
+
+    render_host_label(buffer, workspace_area, snapshot, config);
 
     let entries = workspace_entries(snapshot, state.collapsed_groups);
     let body = Rect::new(
@@ -244,6 +267,7 @@ pub(crate) fn render_sidebar(
                 .get(entry.index)
                 .map(|workspace| {
                     workspace_rows(
+                        snapshot,
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
                         entry.indented,
@@ -265,29 +289,32 @@ pub(crate) fn render_sidebar(
                 .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
         })
         .collect::<Vec<_>>();
-    let mut metrics = super::scroll::list_scroll_metrics(
+    let (mut metrics, mut reserve, mut count) = super::sidebar_overflow::list_metrics(
         &row_heights,
         &gaps,
         body.height,
         *state.workspace_scroll,
+        config.sidebar_overflow.edge_rows(),
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
         if let Some(target) = entries
             .iter()
             .position(|entry| snapshot.workspaces[entry.index].focused)
         {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+            *state.workspace_scroll = super::sidebar_overflow::reveal_start(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
                 target,
+                config.sidebar_overflow.edge_rows(),
             );
-            metrics = super::scroll::list_scroll_metrics(
+            (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
+                config.sidebar_overflow.edge_rows(),
             );
         }
     }
@@ -298,15 +325,36 @@ pub(crate) fn render_sidebar(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+    let items = entries
+        .iter()
+        .map(|entry| {
+            super::sidebar_overflow::item(
+                displayed_workspace_status(
+                    snapshot,
+                    &snapshot.workspaces[entry.index],
+                    state.collapsed_groups,
+                ),
+                entry.pin_rank,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (entry_position, entry) in entries
+        .iter()
+        .enumerate()
+        .skip(*state.workspace_scroll)
+        .take(count)
+    {
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
+        let rows = workspace_rows(snapshot, workspace, status, entry.indented, &config.spaces);
+        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16)
+            .min(body.height.saturating_sub(reserve.top + reserve.bottom));
+        if y.saturating_add(row_height) > bottom {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
@@ -314,6 +362,11 @@ pub(crate) fn render_sidebar(
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+        visible.push(super::sidebar_overflow::VisibleItem {
+            index: entry_position,
+            rect,
+            exempt: workspace.focused || selected || dragged,
+        });
         if selected {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
         } else if dragged {
@@ -325,7 +378,7 @@ pub(crate) fn render_sidebar(
             buffer,
             rect,
             status,
-            config.status_indicators,
+            config,
             entry,
             rows,
             workspace.focused,
@@ -340,8 +393,17 @@ pub(crate) fn render_sidebar(
             snapshot,
             entry.index,
             state.collapsed_groups,
-            palette,
+            config,
         );
+        if let Some(marker) = super::pins::workspace_marker(rect, entry, config) {
+            hits.pin_markers.push((
+                marker,
+                state.active_endpoint_id.clone(),
+                crate::api::schema::Method::WorkspaceUnpin(crate::api::schema::WorkspaceTarget {
+                    workspace_id: workspace.workspace_id.clone(),
+                }),
+            ));
+        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -355,6 +417,15 @@ pub(crate) fn render_sidebar(
         y = y.saturating_add(row_height + gap);
     }
 
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *state.workspace_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, false, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;
@@ -491,6 +562,9 @@ pub(crate) fn workspace_entries(
             .filter(|worktree| grouped.contains(worktree.key.as_str()))
         else {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
+                visible_index: 0,
+                group_collapsed: None,
                 index,
                 indented: false,
                 last_child: false,
@@ -510,6 +584,9 @@ pub(crate) fn workspace_entries(
                 .is_some_and(|worktree| !worktree.is_linked_worktree)
         }) {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
+                visible_index: 0,
+                group_collapsed: None,
                 index: parent,
                 indented: false,
                 last_child: false,
@@ -525,6 +602,9 @@ pub(crate) fn workspace_entries(
                         .is_some_and(|worktree| worktree.is_linked_worktree)
             }) {
                 entries.push(WorkspaceEntry {
+                    pin_rank: None,
+                    visible_index: 0,
+                    group_collapsed: None,
                     index: active,
                     indented: true,
                     last_child: true,
@@ -544,11 +624,25 @@ pub(crate) fn workspace_entries(
             .collect::<Vec<_>>();
         for (child_index, child) in children.iter().enumerate() {
             entries.push(WorkspaceEntry {
+                pin_rank: None,
+                visible_index: 0,
+                group_collapsed: None,
                 index: *child,
                 indented: true,
                 last_child: child_index + 1 == children.len(),
             });
         }
+    }
+    super::pins::order_workspaces(snapshot, &grouped, &mut entries);
+    for (visible_index, entry) in entries.iter_mut().enumerate() {
+        entry.visible_index = visible_index;
+        entry.group_collapsed = snapshot.workspaces[entry.index]
+            .worktree
+            .as_ref()
+            .filter(|worktree| {
+                !worktree.is_linked_worktree && grouped.contains(worktree.key.as_str())
+            })
+            .map(|worktree| collapsed_groups.contains(&worktree.key));
     }
     entries
 }
@@ -606,11 +700,13 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
     snapshot: &ClientShellSnapshot,
     workspace_index: usize,
     collapsed_groups: &HashSet<String>,
-    palette: &Palette,
+    config: &ClientShellConfig,
 ) -> Option<(Rect, String)> {
     let key = parent_group_key(snapshot, workspace_index)?;
     let toggle = Rect::new(
-        workspace_rect.right().saturating_sub(1),
+        workspace_rect.x.saturating_add(u16::from(
+            config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left,
+        )),
         workspace_rect.y,
         1,
         1,
@@ -625,9 +721,18 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
         } else {
             "▾"
         },
-        Style::default().fg(palette.accent),
+        Style::default().fg(config.palette.accent),
     );
-    Some((toggle, key))
+    // Preserve the fork's full-card trailing chevron hit cell.
+    Some((
+        Rect::new(
+            workspace_rect.right().saturating_sub(1),
+            workspace_rect.y,
+            1,
+            1,
+        ),
+        key,
+    ))
 }
 
 pub(in crate::client::shell) fn displayed_workspace_status(
@@ -656,21 +761,61 @@ pub(in crate::client::shell) fn displayed_workspace_status(
             })
         })
         .map(|candidate| candidate.agent_status)
-        .max_by_key(|status| status_priority(*status))
+        .max_by_key(|status| display_status_priority(*status))
         .unwrap_or(workspace.agent_status)
 }
 
+pub(super) fn render_host_label(
+    buffer: &mut Buffer,
+    area: Rect,
+    snapshot: &ClientShellSnapshot,
+    config: &ClientShellConfig,
+) {
+    if !config.show_host || area.is_empty() {
+        return;
+    }
+    let Some(host) = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.host_label.as_deref())
+    else {
+        return;
+    };
+    let label = if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+        host.to_uppercase()
+    } else {
+        host.to_lowercase()
+    };
+    let width = super::render::display_width(&label);
+    if width == 0 || area.width < 7 + 2 + width + 1 {
+        return;
+    }
+    put_text(
+        buffer,
+        area.right() - width - 1,
+        area.y,
+        width,
+        &label,
+        super::sidebar_chrome::header_style(config),
+    );
+}
+
 pub(in crate::client::shell) fn workspace_rows(
+    snapshot: &ClientShellSnapshot,
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indented: bool,
     config: &SpacesSidebarConfig,
 ) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    let head = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.workspace_heads.as_ref())
+        .and_then(|heads| heads.get(&workspace.workspace_id))
+        .map(|head| head.label.as_str())
+        .or(workspace.branch.as_deref());
     let label = if indented && !workspace.custom_label {
-        workspace
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
+        head.and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
             .unwrap_or(&workspace.label)
     } else {
         &workspace.label
@@ -680,7 +825,7 @@ pub(in crate::client::shell) fn workspace_rows(
         config,
         crate::ui::SpaceTokenContext {
             workspace: label,
-            branch: workspace.branch.as_deref(),
+            branch: head,
             state_text: status_text(status),
             ahead_behind: workspace.git_ahead_behind,
             tokens: &token_values,
@@ -693,7 +838,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
     status: crate::api::schema::AgentStatus,
-    indicators: crate::config::StatusIndicatorStyle,
+    config: &ClientShellConfig,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
     focused: bool,
@@ -702,73 +847,23 @@ pub(in crate::client::shell) fn render_workspace_rows(
     dragged: bool,
     palette: &Palette,
 ) {
-    for (row_index, row) in rows.iter().enumerate() {
-        let y = area.y + row_index as u16;
-        if y >= area.bottom() {
-            break;
-        }
-        let mut x = area.x;
-        if entry.indented {
-            let prefix = if row_index == 0 {
-                if entry.last_child {
-                    "   └─ "
-                } else {
-                    "   ├─ "
-                }
-            } else if entry.last_child {
-                "        "
-            } else {
-                "   │    "
-            };
-            x = put_segment(
-                buffer,
-                x,
-                y,
-                area.right(),
-                prefix,
-                Style::default().fg(palette.overlay0),
-            );
-        } else if row_index == 0 {
-            x = x.saturating_add(1);
-        } else {
-            x = x.saturating_add(3);
-        }
-        let highlighted = focused || dragged;
-        let workspace_style = Style::default()
-            .fg(if highlighted {
-                palette.text
-            } else {
-                palette.subtext0
-            })
-            .add_modifier(if highlighted {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
-        let secondary_style = Style::default().fg(if focused {
-            palette.mauve
-        } else {
-            palette.overlay0
-        });
-        let spans = crate::ui::resolved_token_spans(
-            row,
-            (
-                status_icon(status, indicators),
-                Style::default().fg(status_color(status, palette)),
-            ),
-            Style::default().fg(status_color(status, palette)),
-            workspace_style,
-            secondary_style,
-            Style::default().fg(palette.overlay1),
-            palette,
-            area.right().saturating_sub(2).saturating_sub(x) as usize,
-        );
-        Paragraph::new(Line::from(spans)).render(
-            Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
-            buffer,
-        );
-    }
-
+    use crate::config::{SidebarActiveBorderConfig, SidebarStyleConfig};
+    let editorial = config.sidebar_style == SidebarStyleConfig::Editorial;
+    let jump = config
+        .show_workspace_numbers
+        .then(|| crate::config::jump_symbol(entry.visible_index))
+        .flatten();
+    let label = super::sidebar_chrome::number_label(jump, &config.workspace_number_prefix);
+    let number_color = config.workspace_number_color.unwrap_or(palette.overlay0);
+    let bar = u16::from(config.sidebar_active_border == SidebarActiveBorderConfig::Left);
+    let lead = if entry.indented {
+        3
+    } else if entry.group_collapsed.is_some() {
+        2
+    } else {
+        1
+    };
+    let secondary_lead: u16 = if entry.indented { 5 } else { 3 };
     let background = if selected {
         Some(workspace_selection_background(palette))
     } else if dragged {
@@ -778,11 +873,160 @@ pub(in crate::client::shell) fn render_workspace_rows(
     } else {
         None
     };
-    if let Some(background) = background {
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                buffer[(x, y)].set_bg(background);
+    if let Some(bg) = background {
+        buffer.set_style(area, Style::default().bg(bg));
+    }
+    for (row_index, row) in rows.iter().take(usize::from(area.height)).enumerate() {
+        let y = area.y + row_index as u16;
+        let indent = bar + if row_index == 0 { lead } else { secondary_lead };
+        if !editorial && row_index == 1 {
+            if let Some(jump) = jump {
+                buffer.set_stringn(
+                    area.x + bar + lead,
+                    y,
+                    jump.to_string(),
+                    1,
+                    Style::default().fg(number_color),
+                );
             }
+        }
+        let name = Style::default()
+            .fg(if focused || selected || dragged {
+                palette.text
+            } else {
+                palette.subtext0
+            })
+            .add_modifier(Modifier::BOLD);
+        let secondary = Style::default().fg(if focused || selected {
+            palette.mauve
+        } else {
+            palette.overlay0
+        });
+        let secondary = if editorial && !(focused || selected) {
+            secondary.add_modifier(Modifier::DIM)
+        } else {
+            secondary
+        };
+        let reserve = if editorial && row_index == 0 {
+            super::sidebar_chrome::number_reserve(&label, config.sidebar_active_border)
+        } else {
+            0
+        };
+        let width = area.width.saturating_sub(indent + reserve);
+        let spans = crate::ui::resolved_token_spans(
+            row,
+            (
+                config.state_icon(status),
+                Style::default().fg(config.state_color(status)),
+            ),
+            Style::default()
+                .fg(config.state_color(status))
+                .add_modifier(Modifier::DIM),
+            name,
+            secondary,
+            secondary,
+            palette,
+            usize::from(width),
+        );
+        if width > 0 {
+            Paragraph::new(Line::from(spans)).render(
+                Rect::new(area.x.saturating_add(indent), y, width, 1),
+                buffer,
+            );
+        }
+    }
+    if let Some(rank) = entry.pin_rank {
+        if area.width > bar + lead - 1 {
+            buffer.set_stringn(
+                area.x + bar + lead - 1,
+                area.y,
+                "↑",
+                1,
+                Style::default().fg(super::pins::marker_color(rank)),
+            );
+        }
+    }
+    if editorial {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            area,
+            area.y,
+            &label,
+            number_color,
+            config.sidebar_active_border,
+        );
+    }
+    // Span writes preserve the prefilled band; the active bar wins its own column.
+    super::sidebar_chrome::draw_active_border(buffer, area, focused, config, config.spaces.row_gap);
+}
+
+#[cfg(test)]
+mod head_host_tests {
+    use super::*;
+    #[test]
+    fn detached_head_keeps_second_row_without_reinterpreting_branch() {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.workspaces[0].branch = None;
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            workspace_heads: Some(
+                [(
+                    "ws_1".into(),
+                    crate::protocol::ClientWorkspaceHead {
+                        label: "rebase @a620c06".into(),
+                        short_oid: "a620c06".into(),
+                        operation: Some("rebase".into()),
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        let config = ClientShellConfig::from_config(&Config::default());
+        let rows = workspace_rows(
+            &snapshot,
+            &snapshot.workspaces[0],
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            &config.spaces,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().flatten().any(|token| matches!(&token.kind, crate::ui::ResolvedTokenKind::Branch(text) if text == "rebase @a620c06")));
+        assert!(snapshot.workspaces[0].branch.is_none());
+        snapshot.resource_facts = None;
+        let rows = workspace_rows(
+            &snapshot,
+            &snapshot.workspaces[0],
+            crate::api::schema::AgentStatus::Idle,
+            false,
+            &config.spaces,
+        );
+        assert_eq!(rows.len(), 1, "older endpoints retain the no-branch layout");
+    }
+    #[test]
+    fn connected_host_casing_follows_header_and_narrow_or_disabled_hides_it() {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            host_label: Some("RemoteHost".into()),
+            ..Default::default()
+        });
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        for (style, expected) in [
+            (crate::config::SidebarStyleConfig::Editorial, "REMOTEHOST"),
+            (crate::config::SidebarStyleConfig::Default, "remotehost"),
+        ] {
+            config.sidebar_style = style;
+            let area = Rect::new(0, 0, 30, 1);
+            let mut buffer = Buffer::empty(area);
+            render_host_label(&mut buffer, area, &snapshot, &config);
+            let row: String = (0..30).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(row.ends_with(&format!("{expected} ")));
+        }
+        for (enabled, width) in [(false, 30), (true, 15)] {
+            config.show_host = enabled;
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            render_host_label(&mut buffer, area, &snapshot, &config);
+            assert!(buffer.content.iter().all(|cell| cell.symbol() == " "));
         }
     }
 }

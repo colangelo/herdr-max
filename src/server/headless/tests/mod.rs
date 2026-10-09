@@ -2,6 +2,7 @@ use super::*;
 
 mod application_scroll;
 mod event_fairness;
+mod hint_notifications;
 mod native_graphics;
 #[path = "pane_move.rs"]
 mod pane_move_tests;

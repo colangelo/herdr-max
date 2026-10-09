@@ -384,6 +384,8 @@ Separators appear only between visible entries. Set `tab_bar_right_separator = "
 
 `dim_inactive_panes = true` adds the terminal's faint attribute to unfocused panes, the same faint that Prefix and Navigate mode use, so how strong it is belongs to the host terminal (Ghostty's `faint-opacity`, for one). To get a lighter dim that stays different from Prefix mode, set `inactive_pane_dim = 20` under `[ui]`: how far the text colour of an unfocused pane moves toward the colour behind it, in percent, 0 to 90 (0 is off, an out-of-range value is clamped and reported). It recolours the cells, so the amount is the same in every terminal. The colour behind the text is the cell's own background when an app painted one, else `pane_inactive_bg` when set, else the terminal's background. Default text uses the terminal's foreground, and named or indexed colours use the terminal's palette. Prefix and Navigate mode keep their faint on top, so the two states stay apart. `herdr server reload-config` applies it live, and a layout with a single pane is never dimmed.
 
+Pane border, title, background and inactive-dim options are read by the endpoint server. They apply to that server's pane surfaces for every attached client, including SSH clients. Prefix and Navigate add their stronger faint locally over the server's inactive fade.
+
 ### Outer terminal window title
 
 Herdr emulates the terminals in its panes, so an `OSC 0`/`OSC 2` title written inside a pane stops at Herdr. Herdr writes its own title to the terminal it runs in, which is what window managers and terminal tab bars read:

@@ -158,6 +158,22 @@ impl ClientShellState {
             self.reveal_navigation_workspace = true;
             self.reveal_mobile_workspace = true;
         }
+        if self
+            .last_composed_size
+            .is_some_and(|previous| previous != (cols, rows))
+        {
+            self.arm_pane_labels(false, std::time::Instant::now());
+        }
+        if matches!(
+            self.chrome_drag,
+            Some(
+                ClientChromeDrag::PaneSplit { .. }
+                    | ClientChromeDrag::SidebarWidth
+                    | ClientChromeDrag::SidebarSection
+            )
+        ) {
+            self.arm_pane_labels(false, std::time::Instant::now());
+        }
         self.last_composed_size = Some((cols, rows));
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
@@ -172,6 +188,9 @@ impl ClientShellState {
             });
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             return Some(self.compose_unavailable(cols, rows).into());
+        }
+        if self.config.follow_workspace && self.mode != ClientShellMode::Navigate {
+            self.reveal_focused_workspace = true;
         }
         let snapshot = self.snapshot.as_deref()?;
         // Do not compose a retained surface while waiting for its matching snapshot or
@@ -274,6 +293,36 @@ impl ClientShellState {
                 pixel_height: pane.pixel_height,
             })
             .collect();
+        if self.config.mouse_capture {
+            if let Some(todos) = snapshot
+                .resource_facts
+                .as_ref()
+                .and_then(|facts| facts.pane_todos.as_ref())
+            {
+                for pane in &surface.panes {
+                    if let Some(summary) = todos.get(&pane.pane_id) {
+                        let rect = Rect::new(
+                            layout.pane_surface.x.saturating_add(pane.rect.x),
+                            layout.pane_surface.y.saturating_add(pane.rect.y),
+                            pane.rect.width,
+                            pane.rect.height,
+                        );
+                        if let Some(indicator) = crate::ui::pane_todo_indicator_for_rect(
+                            rect,
+                            pane.inner_rect.y > pane.rect.y,
+                            crate::ui::TodoDisplaySummary::from_fact(summary),
+                            self.config.show_pane_todos,
+                            &self.config.palette,
+                            self.config.todo_color,
+                        ) {
+                            self.hits
+                                .pane_todos
+                                .push((indicator.rect, pane.pane_id.clone()));
+                        }
+                    }
+                }
+            }
+        }
         let topology_signature = pane_surface_topology_signature(surface);
         self.hits.pane_splits = surface
             .splits
@@ -333,19 +382,103 @@ impl ClientShellState {
             )
         };
         if mode_bar == Some(layout.tab_bar) {
+            self.hits.notification_indicator = Rect::default();
+            self.hits.todo_board = Rect::default();
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
-        let mode_bar_cells = mode_bar.map(|bar| {
+        let mut mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        if self.mode != ClientShellMode::Terminal && self.hits.panes.len() > 1 {
+            for pane in
+                self.hits.panes.iter().filter(|pane| {
+                    snapshot.focused_pane_id.as_deref() != Some(pane.pane_id.as_str())
+                })
+            {
+                let inner =
+                    pane.inner_rect
+                        .intersection(Rect::new(0, 0, frame.width, frame.height));
+                for y in inner.y..inner.bottom() {
+                    for x in inner.x..inner.right() {
+                        frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)]
+                            .modifier |= Modifier::DIM.bits();
+                    }
+                }
+            }
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        if layout.mobile_header.is_empty()
+            && self.config.notification_center_position
+                == crate::config::NotificationCenterPositionConfig::BottomRight
+            && snapshot
+                .resource_facts
+                .as_ref()
+                .and_then(|facts| facts.notifications.as_ref())
+                .is_some()
+        {
+            let mut composed = frame.to_ratatui_buffer()?;
+            if let Some(rect) = super::tab_indicators::paint_floating(
+                &mut composed,
+                snapshot,
+                &self.config,
+                &mut self.hits,
+            ) {
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
+        if self.mode == ClientShellMode::Terminal
+            && !self.pane_labels_visible()
+            && snapshot.focused_tab_id.as_ref().is_some_and(|tab_id| {
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|facts| facts.tab_sync.as_ref())
+                    .is_some_and(|tabs| tabs.contains_key(tab_id))
+            })
+        {
+            let mut composed = frame.to_ratatui_buffer()?;
+            if let Some(rect) = super::sync_chrome::paint(
+                &mut composed,
+                mode_bar_area,
+                snapshot,
+                &self.config.palette,
+            ) {
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+        }
+        if self.pane_labels_visible() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            for rect in super::display_panes::paint(&mut composed, layout, self, snapshot) {
+                if !rect
+                    .intersection(self.hits.notification_indicator)
+                    .is_empty()
+                {
+                    self.hits.notification_indicator = Rect::default();
+                }
+                if !rect.intersection(self.hits.todo_board).is_empty() {
+                    self.hits.todo_board = Rect::default();
+                }
+                occlusion.cover(rect);
+            }
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, None);
+            if self.mode == ClientShellMode::Resize {
+                // Subsequent selection/popup composition restores this bar:
+                // retain the complete fork resize summary, not the base hints.
+                mode_bar_cells = mode_bar.map(|bar| {
+                    let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
+                    frame.cells[start..start + usize::from(bar.width)].to_vec()
+                });
+            }
+        }
         let has_selection = self
             .selection
             .as_ref()
@@ -511,13 +644,24 @@ impl ClientShellState {
                 };
             } else if let Some(notification) = self.visible_notification.as_ref() {
                 self.hits.notification_toast = if layout.mobile_header.is_empty() {
-                    notifications::render_visible_notification(
+                    notifications::render_visible_notification_for_source(
                         &mut composed,
                         Rect::new(0, 0, cols, rows),
+                        layout.pane_surface,
+                        (notification.endpoint_id == self.active_endpoint_id)
+                            .then(|| {
+                                notification.event.pane_id.as_deref().and_then(|id| {
+                                    self.hits
+                                        .panes
+                                        .iter()
+                                        .find(|pane| pane.pane_id == id)
+                                        .map(|pane| pane.inner_rect)
+                                })
+                            })
+                            .flatten(),
                         notification,
-                        self.config.toast_position,
+                        &self.config,
                         u16::from(has_config_diagnostic) + lifecycle_offset,
-                        &self.config.palette,
                     )
                 } else {
                     notifications::render_mobile_notification_banner(
@@ -548,14 +692,29 @@ impl ClientShellState {
                 self.config.clipboard_toast_position,
                 self.hits.notification_toast,
             );
-            occlusion.cover(crate::ui::render_copy_feedback_buffer(
-                &mut composed,
-                feedback_area,
-                feedback,
-                offset,
-                self.config.clipboard_toast_position,
-                &self.config.palette,
-            ));
+            let drawn = if self.config.clipboard_toast_position
+                == crate::config::ToastClipboardPosition::Pane
+            {
+                crate::ui::render_copy_feedback_buffer_for_source(
+                    &mut composed,
+                    feedback_area,
+                    self.copy_feedback_pane(),
+                    feedback,
+                    offset,
+                    self.config.clipboard_toast_position,
+                    &self.config.palette,
+                )
+            } else {
+                crate::ui::render_copy_feedback_buffer(
+                    &mut composed,
+                    feedback_area,
+                    feedback,
+                    offset,
+                    self.config.clipboard_toast_position,
+                    &self.config.palette,
+                )
+            };
+            occlusion.cover(drawn);
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.popup = None;
@@ -734,6 +893,7 @@ impl ClientShellState {
                     &self.active_endpoint_id,
                     &self.config.keybinds,
                     &self.config.palette,
+                    &self.config,
                 )?;
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;

@@ -313,6 +313,7 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                state.collapsed_groups,
                 &mut hits,
             );
         } else {
@@ -339,6 +340,7 @@ pub(super) fn render_shell(
         );
     }
     if !config.mouse_capture {
+        hits.overflow_edges.clear();
         hits.sidebar_divider = Rect::default();
         hits.sidebar_section_divider = Rect::default();
         hits.workspace_scrollbar = Rect::default();

@@ -23,13 +23,22 @@ pub(super) fn render_collapsed(
             rect.width,
             &format!(
                 "{initial}{}",
-                status_icon(row.agent.status, config.status_indicators)
+                config.state_presentation.agent_icon(
+                    row.agent.status,
+                    row.agent.background_work,
+                    row.agent.state_change_seq,
+                    config
+                )
             ),
             Style::default()
                 .fg(if row.stale {
                     config.palette.overlay0
                 } else {
-                    status_color(row.agent.status, &config.palette)
+                    config.state_presentation.agent_color(
+                        row.agent.status,
+                        row.agent.background_work,
+                        &config.palette,
+                    )
                 })
                 .add_modifier(if row.stale {
                     Modifier::DIM
@@ -71,8 +80,21 @@ pub(super) fn render_expanded(
         agent_scroll,
         hits,
         |row| row.agent.rows.len(),
+        |row| super::sidebar_overflow::item(row.agent.status, row.agent.pin_rank),
+        |row| row.agent.focused,
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            if !row.stale && row.agent.pin_rank.is_some() {
+                if let Some(marker) = super::pins::marker_rect(rect, 1, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        row.endpoint_id.clone(),
+                        crate::api::schema::Method::AgentUnpin(crate::api::schema::AgentTarget {
+                            target: row.agent.pane_id.clone(),
+                        }),
+                    ));
+                }
+            }
             if row.stale {
                 buffer.set_style(
                     rect,
@@ -112,12 +134,13 @@ impl ClientShellState {
         if let Some(last) = gaps.last_mut() {
             *last = 0;
         }
-        self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
+        self.agent_scroll = super::sidebar_overflow::reveal_start(
             &heights,
             &gaps,
             body_height,
             self.agent_scroll,
             target,
+            self.config.sidebar_overflow.edge_rows(),
         );
     }
 }
@@ -156,15 +179,25 @@ fn agent_rows(
         .flatten()
         .collect::<HashMap<_, _>>();
 
+    let mut pin_ranks = HashMap::<ClientEndpointId, usize>::new();
     super::aggregate_navigation::aggregate_agent_rows(
         endpoints,
         active_endpoint_id,
         config.agent_panel_sort,
     )
     .into_iter()
-    .filter_map(|row| {
+    .enumerate()
+    .filter_map(|(index, row)| {
         let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
         let mut agent = rendered_rows.remove(&key)?;
+        agent.jump_index = index;
+        if super::pins::pane_pin(row.endpoint.snapshot, &agent.pane_id).is_some() {
+            let rank = pin_ranks
+                .entry(row.endpoint.endpoint_id.clone())
+                .or_default();
+            agent.pin_rank = Some(*rank);
+            *rank += 1;
+        }
         agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
         Some(EndpointAgentRow {
             endpoint_id: row.endpoint.endpoint_id.clone(),

@@ -504,6 +504,18 @@ pub(super) fn render_panes(
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
+            let multi_pane = ws
+                .tabs
+                .get(target.tab_index)
+                .is_some_and(|tab| tab.layout.pane_count() > 1);
+            apply_pane_appearance(
+                frame.buffer_mut(),
+                info,
+                multi_pane,
+                &app.pane_appearance,
+                &app.palette,
+                &app.host_terminal_theme,
+            );
         } else if let Some(reason) = ws
             .tabs
             .get(target.tab_index)
@@ -518,7 +530,56 @@ pub(super) fn render_panes(
         }
     }
 
-    render_pane_borders(app, ws, pane_infos, split_borders, frame);
+    render_pane_borders(app, ws, target.tab_index, pane_infos, split_borders, frame);
+}
+
+fn apply_pane_appearance(
+    buffer: &mut ratatui::buffer::Buffer,
+    info: &PaneInfo,
+    multi_pane: bool,
+    appearance: &crate::app::state::PaneAppearance,
+    palette: &Palette,
+    host: &crate::terminal_theme::TerminalTheme,
+) {
+    let tint = if info.is_focused {
+        appearance.active_bg
+    } else {
+        appearance.inactive_bg
+    };
+    let dim = !info.is_focused && multi_pane && appearance.dim_inactive;
+    let mut fade = if !info.is_focused && multi_pane {
+        super::inactive_dim::InactiveDim::new(
+            appearance.inactive_dim,
+            tint,
+            palette.panel_bg,
+            palette.text,
+            host,
+        )
+    } else {
+        None
+    };
+    if !dim && tint.is_none() && fade.is_none() {
+        return;
+    }
+    let inner = info.inner_rect.intersection(buffer.area);
+    for y in inner.y..inner.bottom() {
+        for x in inner.x..inner.right() {
+            let cell = &mut buffer[(x, y)];
+            if dim {
+                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            }
+            if let Some(bg) = tint {
+                if cell.bg == Color::Reset {
+                    cell.set_bg(bg);
+                }
+            }
+            if let Some(fade) = fade.as_mut() {
+                if let Some(fg) = fade.faded_fg(cell.fg, cell.bg, cell.modifier) {
+                    cell.set_fg(fg);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn popup_pane_rects(app: &AppState, area: Rect) -> Option<(Rect, Rect)> {
@@ -563,6 +624,7 @@ struct LineCell {
 fn render_pane_borders(
     app: &AppState,
     ws: &crate::workspace::Workspace,
+    tab_index: usize,
     pane_infos: &[PaneInfo],
     split_borders: &[crate::layout::SplitBorder],
     frame: &mut Frame,
@@ -571,6 +633,7 @@ fn render_pane_borders(
         return;
     }
 
+    let sync_tab = ws.tabs.get(tab_index).filter(|tab| tab.is_syncing());
     let mut cells = std::collections::HashMap::<(u16, u16), LineCell>::new();
     for info in pane_infos {
         add_pane_border_cells(&mut cells, info);
@@ -590,16 +653,27 @@ fn render_pane_borders(
         let focused = pane_infos
             .iter()
             .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
-        let symbol = line_cell_symbol(line);
+        let glyph_style = if focused {
+            app.pane_appearance.border_style
+        } else {
+            crate::config::PaneBorderActiveStyleConfig::Light
+        };
+        let symbol = line_cell_symbol(line, glyph_style);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
+        let color = match sync_tab {
+            Some(tab)
+                if pane_infos.iter().any(|info| {
+                    tab.pane_synced(info.id) && line_touches_pane(x, y, info, app.pane_gaps)
+                }) =>
+            {
+                crate::app::state::SYNC_YELLOW
+            }
+            Some(_) => app.palette.sync_outsider(),
+            None => app.pane_appearance.border_color(focused, &app.palette),
         };
         cell.set_style(Style::default().fg(color));
     }
@@ -735,71 +809,94 @@ fn render_pane_border_titles(
     pane_infos: &[PaneInfo],
     frame: &mut Frame,
 ) {
-    let buf = frame.buffer_mut();
-    let area = buf.area;
+    let buffer = frame.buffer_mut();
+    let area = buffer.area;
     for info in pane_infos {
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
-        else {
-            continue;
-        };
         let y = info.rect.y;
-        if y < area.y || y >= area.y.saturating_add(area.height) {
+        if y < area.y || y >= area.bottom() {
             continue;
         }
-        let start_x = info.rect.x.saturating_add(1);
-        let end_x = info
-            .rect
-            .x
-            .saturating_add(info.rect.width)
-            .saturating_sub(1)
-            .min(area.x.saturating_add(area.width));
-        if start_x >= end_x {
-            continue;
+        let terminal = ws
+            .pane_state(info.id)
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
+        let indicator = terminal.and_then(|terminal| {
+            crate::ui::pane_todo_indicator_for_rect(
+                info.rect,
+                true,
+                crate::ui::TodoDisplaySummary::from_terminal(terminal),
+                app.pane_appearance.show_todos,
+                &app.palette,
+                app.pane_appearance.todo_color,
+            )
+        });
+        let reserved = indicator
+            .as_ref()
+            .map_or(0, |indicator| indicator.rect.width);
+        if let Some(title) = terminal
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|label| {
+                pane_border_title(
+                    &label,
+                    info.rect.width.saturating_sub(reserved),
+                    info.is_focused,
+                )
+            })
+        {
+            let start = info.rect.x.saturating_add(1);
+            let end = info
+                .rect
+                .right()
+                .saturating_sub(1 + reserved)
+                .min(area.right());
+            if start < end {
+                let style = Style::default().fg(app
+                    .pane_appearance
+                    .title_color(info.is_focused, &app.palette));
+                let style = if info.is_focused {
+                    style.add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                };
+                buffer.set_stringn(start, y, title, usize::from(end - start), style);
+            }
         }
-        let color = if info.is_focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
-        let mut style = Style::default().fg(color);
-        if info.is_focused {
-            style = style.add_modifier(Modifier::BOLD);
+        if let Some(indicator) = indicator {
+            crate::ui::paint_pane_todo_indicator(buffer, &indicator);
         }
-        buf.set_stringn(
-            start_x,
-            y,
-            title,
-            end_x.saturating_sub(start_x) as usize,
-            style,
-        );
     }
 }
 
-fn line_cell_symbol(line: LineCell) -> &'static str {
-    match (line.up, line.down, line.left, line.right) {
-        (true, true, true, true) => "┼",
-        (true, true, true, false) => "┤",
-        (true, true, false, true) => "├",
-        (true, false, true, true) => "┴",
-        (false, true, true, true) => "┬",
-        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => {
-            "│"
-        }
-        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => {
-            "─"
-        }
-        (false, true, false, true) => "┌",
-        (false, true, true, false) => "┐",
-        (true, false, false, true) => "└",
-        (true, false, true, false) => "┘",
-        _ => "",
+fn line_cell_symbol(
+    line: LineCell,
+    style: crate::config::PaneBorderActiveStyleConfig,
+) -> &'static str {
+    // cross, tee-left, tee-right, tee-up, tee-down, vertical, horizontal,
+    // corner-tl, corner-tr, corner-bl, corner-br
+    const LIGHT: [&str; 11] = ["┼", "┤", "├", "┴", "┬", "│", "─", "┌", "┐", "└", "┘"];
+    const HEAVY: [&str; 11] = ["╋", "┫", "┣", "┻", "┳", "┃", "━", "┏", "┓", "┗", "┛"];
+    const DOUBLE: [&str; 11] = ["╬", "╣", "╠", "╩", "╦", "║", "═", "╔", "╗", "╚", "╝"];
+
+    let index = match (line.up, line.down, line.left, line.right) {
+        (true, true, true, true) => 0,
+        (true, true, true, false) => 1,
+        (true, true, false, true) => 2,
+        (true, false, true, true) => 3,
+        (false, true, true, true) => 4,
+        (true, true, false, false) | (true, false, false, false) | (false, true, false, false) => 5,
+        (false, false, true, true) | (false, false, true, false) | (false, false, false, true) => 6,
+        (false, true, false, true) => 7,
+        (false, true, true, false) => 8,
+        (true, false, false, true) => 9,
+        (true, false, true, false) => 10,
+        _ => return "",
+    };
+    match style {
+        crate::config::PaneBorderActiveStyleConfig::Light => LIGHT[index],
+        crate::config::PaneBorderActiveStyleConfig::Heavy => HEAVY[index],
+        crate::config::PaneBorderActiveStyleConfig::Double => DOUBLE[index],
     }
 }
 
@@ -953,7 +1050,63 @@ mod tests {
         split_borders: &[crate::layout::SplitBorder],
         frame: &mut Frame,
     ) {
-        render_pane_borders(app, ws, &app.view.pane_infos, split_borders, frame);
+        render_pane_borders(
+            app,
+            ws,
+            ws.active_tab_index(),
+            &app.view.pane_infos,
+            split_borders,
+            frame,
+        );
+    }
+
+    #[test]
+    fn sync_borders_follow_rendered_tab_and_gray_its_outsiders() {
+        let app = AppState::test_new();
+        let mut ws = Workspace::test_new("sync");
+        let target = ws.test_add_tab(None);
+        let id = ws.tabs[target].root_pane;
+        ws.tabs[target].set_sync(true);
+        let info = PaneInfo {
+            id,
+            rect: Rect::new(0, 0, 12, 4),
+            inner_rect: Rect::new(1, 1, 10, 2),
+            scrollbar_rect: None,
+            borders: Borders::ALL,
+            is_focused: true,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(12, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            crate::app::state::SYNC_YELLOW
+        );
+        ws.tabs[target].toggle_pane_sync(id, std::time::Instant::now());
+        assert!(ws.tabs[target].sync_ending());
+        terminal
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            app.palette.sync_outsider()
+        );
+        ws.tabs[target].set_sync(false);
+        terminal
+            .draw(|frame| {
+                render_pane_borders(&app, &ws, target, std::slice::from_ref(&info), &[], frame)
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 1)].fg,
+            app.pane_appearance.border_color(true, &app.palette)
+        );
     }
 
     #[test]
@@ -1019,6 +1172,7 @@ mod tests {
     #[test]
     fn pane_border_renderer_places_adjacent_cjk_by_display_width() {
         let mut app = AppState::test_new();
+        app.pane_appearance.show_todos = false; // Isolate title fitting; todo reservation has its own tests.
         app.view.terminal_area = Rect::new(0, 0, 12, 3);
         let ws = Workspace::test_new("test");
         let pane_id = ws.tabs[0].root_pane;
@@ -1646,6 +1800,113 @@ mod tests {
             assert_eq!(
                 automatic_selection_bg(&palette, Default::default()),
                 fallback
+            );
+        }
+    }
+    #[test]
+    fn inactive_pane_dim_fades_unfocused_cells_and_preserves_app_backgrounds() {
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        buffer.set_style(area, Style::default().fg(Color::Rgb(200, 200, 200)));
+        buffer[(0, 0)].set_bg(Color::Rgb(100, 100, 100));
+        let mut info = PaneInfo {
+            id: PaneId::from_raw(1),
+            rect: area,
+            inner_rect: area,
+            scrollbar_rect: None,
+            borders: Borders::NONE,
+            is_focused: false,
+        };
+        let appearance = crate::app::state::PaneAppearance {
+            inactive_bg: Some(Color::Rgb(0, 0, 0)),
+            inactive_dim: 20,
+            ..Default::default()
+        };
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            true,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(100, 100, 100));
+        assert_eq!(buffer[(0, 0)].fg, Color::Rgb(180, 180, 180));
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(160, 160, 160));
+        buffer.set_style(area, Style::default().fg(Color::Rgb(200, 200, 200)));
+        info.is_focused = true;
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            true,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(200, 200, 200));
+        info.is_focused = false;
+        apply_pane_appearance(
+            &mut buffer,
+            &info,
+            false,
+            &appearance,
+            &Palette::catppuccin(),
+            &Default::default(),
+        );
+        assert_eq!(buffer[(1, 0)].fg, Color::Rgb(200, 200, 200));
+    }
+    #[test]
+    fn line_cell_symbol_maps_every_shape_per_style() {
+        use crate::config::PaneBorderActiveStyleConfig;
+        let cell = |up, down, left, right| LineCell {
+            up,
+            down,
+            left,
+            right,
+        };
+        let shapes: [(LineCell, [&str; 3]); 11] = [
+            (cell(true, true, true, true), ["┼", "╋", "╬"]),
+            (cell(true, true, true, false), ["┤", "┫", "╣"]),
+            (cell(true, true, false, true), ["├", "┣", "╠"]),
+            (cell(true, false, true, true), ["┴", "┻", "╩"]),
+            (cell(false, true, true, true), ["┬", "┳", "╦"]),
+            (cell(true, true, false, false), ["│", "┃", "║"]),
+            (cell(false, false, true, true), ["─", "━", "═"]),
+            (cell(false, true, false, true), ["┌", "┏", "╔"]),
+            (cell(false, true, true, false), ["┐", "┓", "╗"]),
+            (cell(true, false, false, true), ["└", "┗", "╚"]),
+            (cell(true, false, true, false), ["┘", "┛", "╝"]),
+        ];
+        for (line, [light, heavy, double]) in shapes {
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Light),
+                light
+            );
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Heavy),
+                heavy
+            );
+            assert_eq!(
+                line_cell_symbol(line, PaneBorderActiveStyleConfig::Double),
+                double
+            );
+        }
+        // dangling stubs render as plain lines; empty cells render nothing
+        assert_eq!(
+            line_cell_symbol(
+                cell(true, false, false, false),
+                PaneBorderActiveStyleConfig::Heavy
+            ),
+            "┃"
+        );
+        for style in [
+            PaneBorderActiveStyleConfig::Light,
+            PaneBorderActiveStyleConfig::Heavy,
+            PaneBorderActiveStyleConfig::Double,
+        ] {
+            assert_eq!(
+                line_cell_symbol(cell(false, false, false, false), style),
+                ""
             );
         }
     }

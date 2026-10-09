@@ -342,6 +342,7 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
         state.set_endpoint_snapshot(&endpoint_id, projection);
     }
     state.compose(100, 28).unwrap();
+    state.config.follow_agent = false; // Emulate manual scrolling, which disengages focus follow.
     state.agent_scroll = 6;
     state.compose(100, 28).unwrap();
     assert_eq!(state.agent_scroll, 6);
@@ -921,7 +922,16 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
         .expect("local worktree group marker");
     assert_eq!(key, "repo");
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
-    assert_eq!(buffer[(local_toggle.x, local_toggle.y)].symbol(), "▸");
+    assert_eq!(
+        local_toggle.x,
+        local_parent.rect.right() - 1,
+        "fork trailing hit cell"
+    );
+    assert!(
+        (local_parent.rect.x..local_parent.rect.right())
+            .any(|x| buffer[(x, local_parent.rect.y)].symbol() == "▸"),
+        "leading group glyph is painted independently of legacy hit target"
+    );
     assert!((local_parent.rect.x..local_parent.rect.right())
         .any(|x| buffer[(x, local_parent.rect.y)].fg == state.config.palette.red));
 
@@ -1083,6 +1093,7 @@ fn expanded_machine_sidebar_reveals_newly_focused_workspace() {
         .iter()
         .any(|hit| { hit.endpoint_id == ClientEndpointId::Local && hit.workspace_id == "ws_13" }));
 
+    state.config.follow_workspace = false; // The real scroll handler disengages follow.
     state.workspace_scroll = 0;
     state.compose(106, 20).expect("manual scroll");
     assert_eq!(state.workspace_scroll, 0);
@@ -1182,6 +1193,7 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
         remote_workspaces[1].rect.bottom() + 1
     );
 
+    state.config.follow_workspace = false;
     state.workspace_scroll = usize::MAX;
     state.compose(100, 18).expect("scrolled endpoint frame");
     let metrics = state
@@ -1197,10 +1209,16 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
         .iter()
         .filter(|hit| hit.endpoint_id == remote_id)
         .collect::<Vec<_>>();
-    assert_eq!(visible_remote.len(), 3);
-    let gap_y = visible_remote[1].rect.bottom();
-    assert_eq!(visible_remote[2].rect.y, gap_y + 1);
-    assert!(visible_remote[2].rect.bottom() <= state.hits.workspace_body.bottom());
+    assert_eq!(
+        visible_remote.len(),
+        2,
+        "the reserved overflow summary leaves two complete rows"
+    );
+    assert_eq!(visible_remote[0].workspace_id, "ws_2");
+    assert_eq!(visible_remote[1].workspace_id, "ws_3");
+    let gap_y = visible_remote[0].rect.bottom();
+    assert_eq!(visible_remote[1].rect.y, gap_y + 1);
+    assert!(visible_remote[1].rect.bottom() <= state.hits.workspace_body.bottom());
     assert!(state
         .hits
         .workspaces
@@ -1295,7 +1313,7 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("○ Local · local agent"), "frame: {text}");
+    assert!(text.contains("✓ Local · local agent"), "frame: {text}");
     assert!(text.contains("× Build · remote agent"), "frame: {text}");
     assert!(text.contains("grouped"), "frame: {text}");
     let toggle = state.hits.agent_sort_toggle;

@@ -523,3 +523,50 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_workspace_cl
             if params.workspace_id == "ws_1" && !params.close_group
     ));
 }
+
+#[test]
+fn focused_workspace_follows_reorder_until_manual_scroll_disengages() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut projected = snapshot();
+    let original = projected.workspaces[0].clone();
+    projected.workspaces = (0..24)
+        .map(|index| {
+            let mut ws = original.clone();
+            ws.workspace_id = format!("ws_{}", index + 1);
+            ws.focused = index == 0;
+            ws
+        })
+        .collect();
+    state.set_snapshot(Box::new(projected.clone()));
+    state.set_pane_surface(surface());
+    state.compose(100, 20).unwrap();
+    projected.revision = 2;
+    let focused = projected.workspaces.remove(0);
+    projected.workspaces.push(focused);
+    state.set_snapshot(Box::new(projected.clone()));
+    let mut next_surface = surface();
+    next_surface.projection_revision = 2;
+    state.set_pane_surface(next_surface);
+    state.compose(100, 20).unwrap();
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.workspace_id == "ws_1"));
+    state.config.follow_workspace = false;
+    state.workspace_scroll = 0;
+    state.compose(100, 20).unwrap();
+    assert_eq!(state.workspace_scroll, 0);
+    assert!(!state
+        .hits
+        .workspaces
+        .iter()
+        .any(|hit| hit.workspace_id == "ws_1"));
+    projected.revision = 3;
+    projected.focused_workspace_id = Some("ws_2".into());
+    for ws in &mut projected.workspaces {
+        ws.focused = ws.workspace_id == "ws_2";
+    }
+    state.set_snapshot(Box::new(projected));
+    assert!(state.config.follow_workspace);
+}

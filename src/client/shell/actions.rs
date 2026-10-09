@@ -24,6 +24,7 @@ impl ClientShellState {
                     && matches!(
                         action,
                         crate::input::KeybindAction::RenameWorkspace
+                            | crate::input::KeybindAction::TogglePinWorkspace
                             | crate::input::KeybindAction::CloseWorkspace
                     )
                 {
@@ -42,6 +43,37 @@ impl ClientShellState {
                 ) {
                     self.begin_worktree_action(action, outcome);
                     return;
+                }
+                if action == crate::input::KeybindAction::TogglePinWorkspace {
+                    if let Some(id) = self.workspace_action_id() {
+                        self.toggle_workspace_pin(id, outcome);
+                    }
+                    return;
+                }
+                if action == crate::input::KeybindAction::TogglePinAgent {
+                    if let Some(id) = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|s| s.focused_pane_id.clone())
+                    {
+                        self.toggle_agent_pin(id, outcome);
+                    }
+                    return;
+                }
+                if action == crate::input::KeybindAction::DisplayPanes {
+                    self.arm_pane_labels(true, std::time::Instant::now());
+                    self.mode = ClientShellMode::Terminal;
+                    outcome.repaint = true;
+                    return;
+                }
+                if matches!(
+                    action,
+                    crate::input::KeybindAction::ResizePaneLeft
+                        | crate::input::KeybindAction::ResizePaneRight
+                        | crate::input::KeybindAction::ResizePaneUp
+                        | crate::input::KeybindAction::ResizePaneDown
+                ) {
+                    self.arm_pane_labels(false, std::time::Instant::now());
                 }
                 if action == crate::input::KeybindAction::OpenNavigator {
                     self.open_navigator_overlay();
@@ -337,7 +369,9 @@ impl ClientShellState {
                     content_revision,
                 },
             ),
-            PendingEndpointKind::SelectionCopy,
+            PendingEndpointKind::SelectionCopy {
+                endpoint_id: self.active_endpoint_id.clone(),
+            },
             outcome,
         );
     }
@@ -687,12 +721,16 @@ impl ClientShellState {
                 let repaint = self.complete_pane_scroll(pane_id, serial, result, &mut outcome);
                 return (repaint, outcome.actions);
             }
-            PendingEndpointKind::SelectionCopy => {
+            PendingEndpointKind::SelectionCopy { endpoint_id } => {
                 return match result {
-                    Ok(crate::api::schema::ResponseResult::PaneSelection { text, .. })
+                    Ok(crate::api::schema::ResponseResult::PaneSelection { pane_id, text })
                         if !text.is_empty() =>
                     {
-                        let repaint = self.show_copy_feedback(std::time::Instant::now());
+                        let repaint = self.show_copy_feedback_for(
+                            Some(pane_id),
+                            Some(endpoint_id),
+                            std::time::Instant::now(),
+                        );
                         (
                             repaint,
                             vec![ClientShellAction::ClipboardWrite(text.into_bytes())],

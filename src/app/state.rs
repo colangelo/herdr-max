@@ -941,6 +941,75 @@ pub(crate) struct PaneFocusTarget {
     pub pane_id: PaneId,
 }
 
+/// Endpoint-configured pane appearance; resolved at startup/reload, pure during rendering.
+#[derive(Clone, Copy)]
+pub(crate) struct PaneAppearance {
+    pub(crate) show_todos: bool,
+    pub(crate) todo_color: Option<Color>,
+    pub(crate) border_active: Option<Color>,
+    pub(crate) border_inactive: Option<Color>,
+    pub(crate) border_style: crate::config::PaneBorderActiveStyleConfig,
+    pub(crate) title_active: Option<Color>,
+    pub(crate) title_inactive: Option<Color>,
+    pub(crate) active_bg: Option<Color>,
+    pub(crate) inactive_bg: Option<Color>,
+    pub(crate) dim_inactive: bool,
+    pub(crate) inactive_dim: u32,
+}
+
+impl Default for PaneAppearance {
+    fn default() -> Self {
+        Self {
+            show_todos: true,
+            todo_color: None,
+            border_active: None,
+            border_inactive: None,
+            border_style: crate::config::PaneBorderActiveStyleConfig::Light,
+            title_active: None,
+            title_inactive: None,
+            active_bg: None,
+            inactive_bg: None,
+            dim_inactive: false,
+            inactive_dim: 0,
+        }
+    }
+}
+
+impl PaneAppearance {
+    pub(crate) fn from_config(config: &crate::config::Config) -> Self {
+        let ui = &config.ui;
+        let parse = |value: &Option<String>| value.as_deref().map(crate::config::parse_color);
+        Self {
+            show_todos: ui.show_pane_todo_indicator,
+            todo_color: parse(&ui.pane_todo_color),
+            border_active: parse(&ui.pane_border_active_color),
+            border_inactive: parse(&ui.pane_border_inactive_color),
+            border_style: ui.pane_border_active_style,
+            title_active: parse(&ui.pane_title_active_color),
+            title_inactive: parse(&ui.pane_title_inactive_color),
+            active_bg: parse(&ui.pane_active_bg),
+            inactive_bg: parse(&ui.pane_inactive_bg),
+            dim_inactive: ui.dim_inactive_panes,
+            inactive_dim: config.inactive_pane_dim(),
+        }
+    }
+    pub(crate) fn border_color(&self, focused: bool, palette: &Palette) -> Color {
+        if focused {
+            self.border_active.unwrap_or(palette.accent)
+        } else {
+            self.border_inactive.unwrap_or(palette.overlay0)
+        }
+    }
+    pub(crate) fn title_color(&self, focused: bool, palette: &Palette) -> Color {
+        (if focused {
+            self.title_active
+        } else {
+            self.title_inactive
+        })
+        .unwrap_or_else(|| self.border_color(focused, palette))
+    }
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -950,6 +1019,7 @@ pub enum TabBarStatusSegment {
 }
 
 pub struct AppState {
+    pub(crate) pane_appearance: PaneAppearance,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
@@ -1260,6 +1330,7 @@ impl AppState {
             workspace_sort: WorkspaceSort::Manual,
             next_agent_state_change_seq: 0,
             confirm_close: true,
+            pane_appearance: PaneAppearance::default(),
             pane_borders: crate::config::PaneBordersConfig::Auto,
             pane_outer_borders: true,
             pane_scrollbars: true,

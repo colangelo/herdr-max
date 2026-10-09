@@ -123,10 +123,12 @@ pub(super) fn aggregate_agent_rows<'a>(
                         &view.sort,
                     )
                 });
+                order_pins(&mut rows);
                 return rows;
             }
         }
         sort_aggregate_rows(&mut rows, sort);
+        order_pins(&mut rows);
         return rows;
     }
 
@@ -153,7 +155,25 @@ pub(super) fn aggregate_agent_rows<'a>(
         })
         .collect::<Vec<_>>();
     sort_aggregate_rows(&mut rows, sort);
+    order_pins(&mut rows);
     rows
+}
+
+fn order_pins(rows: &mut [AggregateAgentRow<'_>]) {
+    if !rows
+        .iter()
+        .any(|row| super::pins::pane_pin(row.endpoint.snapshot, &row.agent.pane_id).is_some())
+    {
+        return;
+    }
+    rows.sort_by_key(|row| {
+        let pin = super::pins::pane_pin(row.endpoint.snapshot, &row.agent.pane_id);
+        (
+            row.endpoint.endpoint_index,
+            pin.is_none(),
+            pin.unwrap_or(u64::MAX),
+        )
+    });
 }
 
 fn sort_aggregate_rows(

@@ -22,6 +22,7 @@ pub(super) fn render_collapsed(
     let palette = &config.palette;
     super::render::render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
+    let empty_groups = HashSet::new();
     let mut total_rows = 0usize;
     let mut selected_row = None;
     let reveal = std::mem::take(state.reveal_navigation_workspace);
@@ -31,19 +32,25 @@ pub(super) fn render_collapsed(
             continue;
         }
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
+            let entries = super::sidebar::workspace_entries(
+                snapshot,
+                collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                    .unwrap_or(&empty_groups),
+            );
             if reveal {
                 if let Some(target) = state
                     .selected_workspace_id
                     .filter(|target| target.endpoint_id == endpoint.endpoint_id)
                 {
-                    selected_row = snapshot
-                        .workspaces
+                    selected_row = entries
                         .iter()
-                        .position(|workspace| workspace.workspace_id == target.workspace_id)
+                        .position(|entry| {
+                            snapshot.workspaces[entry.index].workspace_id == target.workspace_id
+                        })
                         .map(|index| total_rows + index);
                 }
             }
-            total_rows += snapshot.workspaces.len();
+            total_rows += entries.len();
         }
     }
     let height = usize::from(workspace_area.height);
@@ -121,7 +128,12 @@ pub(super) fn render_collapsed(
         let Some(snapshot) = endpoint.snapshot.as_deref() else {
             continue;
         };
-        for workspace in &snapshot.workspaces {
+        let entries = super::sidebar::workspace_entries(
+            snapshot,
+            collapsed_groups_for_endpoint(state, &endpoint.endpoint_id).unwrap_or(&empty_groups),
+        );
+        for entry in &entries {
+            let workspace = &snapshot.workspaces[entry.index];
             if skip > 0 {
                 skip -= 1;
                 continue;
@@ -151,7 +163,10 @@ pub(super) fn render_collapsed(
                 );
             }
             let stale = endpoint.status != ClientEndpointStatus::Online;
-            let number = format!(" {}", workspace.number);
+            let number = format!(
+                " {}",
+                crate::config::jump_symbol(entry.visible_index).unwrap_or(' ')
+            );
             let number_width = super::render::display_width(&number).min(rect.width);
             let dim = if stale {
                 Modifier::DIM
@@ -177,12 +192,12 @@ pub(super) fn render_collapsed(
                 rect.x.saturating_add(number_width),
                 rect.y,
                 rect.width.saturating_sub(number_width),
-                status_icon(workspace.agent_status, config.status_indicators),
+                config.state_icon(workspace.agent_status),
                 Style::default()
                     .fg(if stale {
                         palette.overlay0
                     } else {
-                        status_color(workspace.agent_status, palette)
+                        config.state_color(workspace.agent_status)
                     })
                     .add_modifier(dim),
             );
@@ -258,10 +273,12 @@ pub(super) fn render_expanded(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        " machines",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " MACHINES"
+        } else {
+            " machines"
+        },
+        super::sidebar_chrome::header_style(config),
     );
 
     let empty_collapsed_groups = HashSet::new();
@@ -316,6 +333,7 @@ pub(super) fn render_expanded(
                         let workspace = snapshot.workspaces.get(entry.index)?;
                         Some(
                             super::sidebar::workspace_rows(
+                                snapshot,
                                 workspace,
                                 super::sidebar::displayed_workspace_status(
                                     snapshot,
@@ -375,20 +393,22 @@ pub(super) fn render_expanded(
             Row::Endpoint(_) => false,
         });
         if let Some(selected_row) = selected_row {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+            *state.workspace_scroll = super::sidebar_overflow::reveal_start(
                 &row_heights,
                 &gaps,
                 body.height,
                 *state.workspace_scroll,
                 selected_row,
+                config.sidebar_overflow.edge_rows(),
             );
         }
     }
-    let metrics = super::scroll::list_scroll_metrics(
+    let (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
         &row_heights,
         &gaps,
         body.height,
         *state.workspace_scroll,
+        config.sidebar_overflow.edge_rows(),
     );
     hits.workspace_max_scroll = metrics.max_offset_from_bottom;
     hits.workspace_scroll_metrics = Some(metrics);
@@ -397,15 +417,47 @@ pub(super) fn render_expanded(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (row_index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
+    let items = rows
+        .iter()
+        .map(|row| match row {
+            Row::Endpoint(_) => {
+                super::sidebar_overflow::item(crate::api::schema::AgentStatus::Unknown, None)
+            }
+            Row::Workspace { endpoint, entry } => state.endpoints[*endpoint]
+                .snapshot
+                .as_deref()
+                .map(|snapshot| {
+                    super::sidebar_overflow::item(
+                        snapshot.workspaces[entry.index].agent_status,
+                        entry.pin_rank,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    super::sidebar_overflow::item(crate::api::schema::AgentStatus::Unknown, None)
+                }),
+        })
+        .collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (row_index, row) in rows
+        .iter()
+        .enumerate()
+        .skip(*state.workspace_scroll)
+        .take(count)
+    {
         match row {
             Row::Endpoint(index) => {
-                if y >= body.bottom() {
+                if y >= bottom {
                     break;
                 }
                 let endpoint = &state.endpoints[*index];
                 let rect = Rect::new(body.x, y, content_width, 1);
+                visible.push(super::sidebar_overflow::VisibleItem {
+                    index: row_index,
+                    rect,
+                    exempt: &state.endpoints[*index].endpoint_id == state.active_endpoint_id,
+                });
                 let collapsed = state.collapsed_endpoints.contains(&endpoint.endpoint_id);
                 let marker = if collapsed { "▸" } else { "▾" };
                 let status_badge = render_endpoint_row(
@@ -448,13 +500,15 @@ pub(super) fn render_expanded(
                     collapsed_groups,
                 );
                 let tokens = super::sidebar::workspace_rows(
+                    snapshot,
                     workspace,
                     status,
                     entry.indented,
                     &config.spaces,
                 );
-                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-                if y.saturating_add(height) > body.bottom() {
+                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16)
+                    .min(body.height.saturating_sub(reserve.top + reserve.bottom));
+                if y.saturating_add(height) > bottom {
                     break;
                 }
                 let rect = Rect::new(body.x, y, content_width, height);
@@ -468,11 +522,16 @@ pub(super) fn render_expanded(
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
                 });
+                visible.push(super::sidebar_overflow::VisibleItem {
+                    index: row_index,
+                    rect,
+                    exempt: selected || (endpoint_active && workspace.focused),
+                });
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
                     status,
-                    config.status_indicators,
+                    config,
                     entry,
                     tokens,
                     endpoint_active && workspace.focused,
@@ -491,12 +550,23 @@ pub(super) fn render_expanded(
                 }
                 let group_toggle = super::sidebar::render_parent_group_toggle(
                     buffer,
-                    rect,
+                    nested,
                     snapshot,
                     entry.index,
                     collapsed_groups,
-                    palette,
+                    config,
                 );
+                if let Some(marker) = super::pins::workspace_marker(nested, entry, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        endpoint.endpoint_id.clone(),
+                        crate::api::schema::Method::WorkspaceUnpin(
+                            crate::api::schema::WorkspaceTarget {
+                                workspace_id: workspace.workspace_id.clone(),
+                            },
+                        ),
+                    ));
+                }
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),
@@ -510,6 +580,15 @@ pub(super) fn render_expanded(
             }
         }
     }
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *state.workspace_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, false, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.workspace_scrollbar = track;

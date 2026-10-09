@@ -4,6 +4,7 @@
 //! sync-snapshot/2026-10-08).
 
 use super::super::render::{navigator_columns, navigator_status_measure};
+use super::super::state_presentation::StatePresentation;
 use super::super::todo_edit::TodoEditLink;
 use super::*;
 use crate::api::schema::{AgentStatus, Method};
@@ -114,6 +115,11 @@ fn row(label: &str, status: Option<AgentStatus>, status_text: &str) -> ClientNav
 
 // -- measuring --------------------------------------------------------------------
 
+fn columns(rows: &[ClientNavigatorRow]) -> (u16, u16) {
+    let presentation = StatePresentation::from_config(&crate::config::Config::default());
+    navigator_columns(rows, ClientNavigatorPurpose::Goto, &presentation)
+}
+
 #[test]
 fn navigator_status_width_counts_the_longest_state_word() {
     assert_eq!(navigator_status_measure("claude · idle"), 9 + 7);
@@ -122,22 +128,19 @@ fn navigator_status_width_counts_the_longest_state_word() {
         row("a", Some(AgentStatus::Idle), "claude · idle"),
         row("b", Some(AgentStatus::Unknown), "shell"),
     ];
-    assert_eq!(
-        navigator_columns(&rows, ClientNavigatorPurpose::Goto).1,
-        16 + 2
-    );
+    assert_eq!(columns(&rows).1, 16 + 2);
 }
 
 #[test]
 fn navigator_status_width_is_capped_at_40() {
     let rows = [row("a", Some(AgentStatus::Idle), &"x".repeat(80))];
-    assert_eq!(navigator_columns(&rows, ClientNavigatorPurpose::Goto).1, 40);
+    assert_eq!(columns(&rows).1, 40);
 }
 
 #[test]
 fn rows_without_a_status_leave_no_status_column() {
     let rows = [row("a", None, "")];
-    assert_eq!(navigator_columns(&rows, ClientNavigatorPurpose::Goto).1, 0);
+    assert_eq!(columns(&rows).1, 0);
 }
 
 #[test]

@@ -570,6 +570,7 @@ impl App {
             workspace_sort,
             next_agent_state_change_seq: 0,
             confirm_close: config.ui.confirm_close,
+            pane_appearance: crate::app::state::PaneAppearance::from_config(config),
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,
             pane_scrollbars: config.ui.pane_scrollbars,
@@ -947,6 +948,7 @@ impl App {
 
                 self.loaded_host_cursor = config.ui.host_cursor;
                 self.state.confirm_close = config.ui.confirm_close;
+                self.state.pane_appearance = crate::app::state::PaneAppearance::from_config(config);
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_outer_borders = config.ui.pane_outer_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
@@ -3786,5 +3788,24 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+    #[test]
+    fn reload_config_applies_endpoint_pane_appearance_and_clamps_inactive_dim() {
+        let mut app = test_app();
+        let mut config = crate::config::Config::default();
+        config.ui.inactive_pane_dim = 20;
+        config.ui.pane_border_active_color = Some("#123456".into());
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.pane_appearance.inactive_dim, 20);
+        assert_eq!(
+            app.state.pane_appearance.border_active,
+            Some(ratatui::style::Color::Rgb(0x12, 0x34, 0x56))
+        );
+        config.ui.inactive_pane_dim = 500;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.pane_appearance.inactive_dim, 90);
+        config.ui.inactive_pane_dim = 0;
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(app.state.pane_appearance.inactive_dim, 0);
     }
 }

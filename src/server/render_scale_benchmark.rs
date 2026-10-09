@@ -650,3 +650,23 @@ async fn dirty_scroll_collection_profile() {
         rows / 2_000
     );
 }
+
+/// Fixed geometry, real pane surfaces: isolate the cost of the configured fade.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual configured pane appearance scaling profile"]
+async fn pane_appearance_scale_profile() {
+    for dim in [0, 20] {
+        let mut config = Config::default();
+        config.ui.inactive_pane_dim = dim;
+        let rows = CARDINALITIES.map(|count| {
+            (
+                count,
+                profile_pipeline(RenderPipeline::with_config(active_panes(count), &config)),
+            )
+        });
+        println!("inactive_pane_dim={dim}, fixed geometry {COLS}x{ROWS}");
+        print_stage("server pane surface", &rows, |stats| stats.server);
+        print_stage("client shell composition", &rows, |stats| stats.client);
+        print_stage("combined pipeline", &rows, |stats| stats.total);
+    }
+}
