@@ -622,7 +622,11 @@ mod tests {
                 }
             }
             assert!(!app.has_pending_agent_resumes());
-            assert!(app.pending_agent_resume_deadline.is_none());
+            // Launched agents are now watched, so only the retry check remains.
+            assert_eq!(
+                app.pending_agent_resume_deadline,
+                app.next_resume_retry_at()
+            );
             assert!(app.next_agent_resume_at.is_none());
             assert_eq!(
                 app.state
@@ -691,7 +695,11 @@ mod tests {
                 }
             }
             assert!(!app.has_pending_agent_resumes());
-            assert!(app.pending_agent_resume_deadline.is_none());
+            // Launched agents are now watched, so only the retry check remains.
+            assert_eq!(
+                app.pending_agent_resume_deadline,
+                app.next_resume_retry_at()
+            );
             assert!(app.next_agent_resume_at.is_none());
             assert_eq!(app.terminal_runtimes.len(), 4);
             for (_, runtime) in app.terminal_runtimes.drain() {
@@ -924,9 +932,10 @@ mod tests {
             app.start_pending_agent_resumes(now + std::time::Duration::from_millis(100), false,)
         );
         assert!(app.terminal_runtimes.get(&hidden_terminal).is_some());
-        assert!(
-            app.pending_agent_resume_deadline.is_none(),
-            "launched pending resumes should clear the wakeup deadline"
+        assert_eq!(
+            app.pending_agent_resume_deadline,
+            app.next_resume_retry_at(),
+            "launched pending resumes leave only the retry check as the wakeup deadline"
         );
 
         for (_, runtime) in app.terminal_runtimes.drain() {
