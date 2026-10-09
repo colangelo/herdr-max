@@ -46,6 +46,21 @@ pub(crate) fn copy_feedback_rect(
     Rect::new(x, y, width, height)
 }
 
+pub(crate) fn copy_feedback_rect_in_pane(pane: Rect, feedback: &CopyFeedback) -> Option<Rect> {
+    let width = u16::try_from(super::text::display_width(&feedback.message))
+        .ok()?
+        .checked_add(4)?;
+    let height = 3;
+    (width > 0 && width <= pane.width && height <= pane.height).then(|| {
+        Rect::new(
+            pane.x + (pane.width - width) / 2,
+            pane.y + (pane.height - height) / 2,
+            width,
+            height,
+        )
+    })
+}
+
 pub(crate) fn render_copy_feedback_buffer(
     buffer: &mut Buffer,
     area: Rect,
@@ -54,7 +69,32 @@ pub(crate) fn render_copy_feedback_buffer(
     position: ToastClipboardPosition,
     palette: &Palette,
 ) -> Rect {
-    let feedback_area = copy_feedback_rect(area, feedback, offset_rows, position);
+    render_copy_feedback_buffer_for_source(
+        buffer,
+        area,
+        None,
+        feedback,
+        offset_rows,
+        position,
+        palette,
+    )
+}
+
+pub(crate) fn render_copy_feedback_buffer_for_source(
+    buffer: &mut Buffer,
+    area: Rect,
+    source: Option<Rect>,
+    feedback: &CopyFeedback,
+    offset_rows: u16,
+    position: ToastClipboardPosition,
+    palette: &Palette,
+) -> Rect {
+    let feedback_area = if position == ToastClipboardPosition::Pane {
+        source.and_then(|pane| copy_feedback_rect_in_pane(pane, feedback))
+    } else {
+        None
+    }
+    .unwrap_or_else(|| copy_feedback_rect(area, feedback, offset_rows, position));
     if feedback_area.is_empty() {
         return feedback_area;
     }
@@ -144,6 +184,44 @@ mod tests {
         assert_eq!(
             bottom.x,
             area.x + area.width.saturating_sub(bottom.width) / 2
+        );
+    }
+    #[test]
+    fn feedback_centers_in_a_pane_that_holds_it() {
+        let pane = Rect::new(40, 5, 60, 20);
+        let feedback = CopyFeedback {
+            message: "copied to clipboard".into(),
+            source_pane: None,
+        };
+        let copy = copy_feedback_rect_in_pane(pane, &feedback).expect("fits");
+        assert_eq!((copy.width, copy.height), (23, 3));
+        assert_eq!((copy.x, copy.y), (40 + (60 - 23) / 2, 5 + (20 - 3) / 2));
+    }
+    #[test]
+    fn feedback_does_not_center_in_a_pane_too_small_for_it() {
+        let feedback = CopyFeedback {
+            message: "copied to clipboard".into(),
+            source_pane: None,
+        };
+        assert_eq!(
+            copy_feedback_rect_in_pane(Rect::new(0, 0, 22, 10), &feedback),
+            None
+        );
+        assert_eq!(
+            copy_feedback_rect_in_pane(Rect::new(0, 0, 40, 2), &feedback),
+            None
+        );
+    }
+    #[test]
+    fn pane_position_falls_back_to_bottom_center() {
+        let area = Rect::new(0, 0, 80, 24);
+        let feedback = CopyFeedback {
+            message: "copied to clipboard".into(),
+            source_pane: None,
+        };
+        assert_eq!(
+            copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::Pane),
+            copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::BottomCenter)
         );
     }
 }

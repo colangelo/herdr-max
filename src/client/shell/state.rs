@@ -13,6 +13,33 @@ pub(crate) enum ClientShellKeybindingSource {
 }
 
 pub(crate) struct ClientShellConfig {
+    pub(super) show_host: bool,
+    pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
+    pub(super) display_panes_duration: std::time::Duration,
+    pub(super) show_pane_todos: bool,
+    /// `ui.pane_todo_color`: one colour for every open todo's mark instead of
+    /// the priority colours.
+    pub(super) todo_color: Option<ratatui::style::Color>,
+    pub(super) follow_workspace: bool,
+    pub(super) follow_agent: bool,
+    pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
+    pub(super) sidebar_overflow: crate::config::SidebarOverflowConfig,
+    pub(super) sidebar_fog: [u32; crate::config::SIDEBAR_FOG_ROWS],
+    pub(super) sidebar_fog_tint: u32,
+    pub(super) sidebar_fade: [u32; crate::config::SIDEBAR_FOG_ROWS],
+    pub(super) sidebar_fog_style: crate::config::SidebarFogStyle,
+
+    pub(super) sidebar_style: crate::config::SidebarStyleConfig,
+    pub(super) sidebar_active_border: crate::config::SidebarActiveBorderConfig,
+    pub(super) sidebar_border_style: crate::config::PaneBorderActiveStyleConfig,
+    pub(super) sidebar_border_color: Option<ratatui::style::Color>,
+    pub(super) show_workspace_numbers: bool,
+    pub(super) show_agent_numbers: bool,
+    pub(super) workspace_number_color: Option<ratatui::style::Color>,
+    pub(super) agent_number_color: Option<ratatui::style::Color>,
+    pub(super) workspace_number_prefix: String,
+    pub(super) agent_number_prefix: String,
+
     pub(super) sidebar_width: u16,
     pub(super) sidebar_min_width: u16,
     pub(super) sidebar_max_width: u16,
@@ -24,10 +51,15 @@ pub(crate) struct ClientShellConfig {
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
+    pub(super) state_presentation: super::state_presentation::StatePresentation,
+    pub(super) status_spinner: crate::config::StatusSpinnerConfig,
+    pub(super) status_spinner_interval: std::time::Duration,
+    pub(super) spinner_frame: u8,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
     pub(super) toast_delay_seconds: u64,
+    pub(super) herdr_toast: crate::config::HerdrToastConfig,
     pub(super) toast_position: crate::config::ToastHerdrPosition,
     pub(super) copy_on_select: bool,
     pub(super) clipboard_toast_enabled: bool,
@@ -41,10 +73,6 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) confirm_close: bool,
-    /// `ui.pane_todo_color`: one colour for every open todo's mark instead of
-    /// the priority colours.
-    pub(super) pane_todo_color: Option<ratatui::style::Color>,
-    pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
@@ -87,6 +115,13 @@ pub(super) enum ClientMobileTarget {
 
 #[derive(Default)]
 pub(super) struct ShellHitMap {
+    pub(super) pin_markers: Vec<(Rect, ClientEndpointId, crate::api::schema::Method)>,
+    /// The floating notification indicator, when chrome draws one; the
+    /// bottom-right notification center opens above it.
+    pub(super) notification_indicator: Rect,
+    pub(super) todo_board: Rect,
+    pub(super) pane_todos: Vec<(Rect, String)>,
+    pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
     pub(super) workspace_body: Rect,
@@ -120,12 +155,10 @@ pub(super) struct ShellHitMap {
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) notification_center: Option<super::notification_center::NotificationCenterLayout>,
-    /// The floating notification indicator, when chrome draws one; the
-    /// bottom-right notification center opens above it.
-    pub(super) notification_indicator: Rect,
     pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
     pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
     pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,
+    pub(super) todo_board_layout: Option<super::todo_board::TodoBoardLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -310,6 +343,7 @@ pub(super) enum ClientShellOverlayKind {
     NotificationCenter,
     TodoPanel,
     TodoEdit,
+    TodoBoard,
     MovePicker,
 }
 
@@ -365,6 +399,17 @@ pub(super) enum ClientNavigatorTarget {
         endpoint_id: ClientEndpointId,
         pane_id: String,
     },
+    /// The link picker's "no link" row.
+    ClearLink,
+}
+
+/// What the navigator is open for: going to a pane, or choosing the pane a
+/// todo links to (fork bc502abd).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ClientNavigatorPurpose {
+    #[default]
+    Goto,
+    TodoLink,
 }
 
 #[derive(Clone, Debug)]
@@ -375,18 +420,26 @@ pub(super) struct ClientNavigatorRow {
     pub(super) detail: String,
     pub(super) agent: Option<String>,
     pub(super) status: Option<crate::api::schema::AgentStatus>,
+    /// A pane row's status column: "{agent} · {state}" or "shell".
+    pub(super) status_text: String,
     pub(super) stale: bool,
     pub(super) current: bool,
     pub(super) target: ClientNavigatorTarget,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(super) struct ClientNavigatorOverlay {
     pub(super) query: TextEditor,
     pub(super) search_focused: bool,
     pub(super) selected: Option<ClientNavigatorTarget>,
     pub(super) scroll: usize,
     pub(super) filter: Option<ClientNavigatorFilter>,
+    pub(super) purpose: ClientNavigatorPurpose,
+    /// The todo editor the link picker was opened from, restored on close.
+    pub(super) suspended_todo_edit: Option<Box<super::todo_edit::ClientTodoEditOverlay>>,
+    /// Measured once at open over every row, so a query never resizes the box.
+    pub(super) content_width: u16,
+    pub(super) status_width: u16,
 }
 
 #[derive(Debug)]
@@ -530,6 +583,7 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
+    TogglePin,
     Rename,
     Close,
     NewWorktree,
@@ -551,6 +605,7 @@ pub(super) enum ClientContextMenuAction {
 pub(super) enum ClientContextMenuTarget {
     Workspace {
         workspace_id: String,
+        pinned: Option<bool>,
         is_git: bool,
         is_linked_worktree: bool,
         has_worktree_children: bool,
@@ -560,6 +615,11 @@ pub(super) enum ClientContextMenuTarget {
     Tab {
         tab_id: String,
         workspace_id: String,
+    },
+    Agent {
+        pane_id: String,
+        workspace_id: String,
+        pinned: Option<bool>,
     },
     Pane {
         pane_id: String,
@@ -645,6 +705,7 @@ pub(super) enum ClientShellOverlay {
     NotificationCenter(super::notification_center::ClientNotificationCenterOverlay),
     TodoPanel(super::todo_panel::ClientTodoPanelOverlay),
     TodoEdit(super::todo_edit::ClientTodoEditOverlay),
+    TodoBoard(super::todo_board::ClientTodoBoardOverlay),
     MovePicker(super::move_picker::ClientMovePickerOverlay),
 }
 
@@ -667,6 +728,7 @@ impl ClientShellOverlay {
             Self::NotificationCenter(_) => ClientShellOverlayKind::NotificationCenter,
             Self::TodoPanel(_) => ClientShellOverlayKind::TodoPanel,
             Self::TodoEdit(_) => ClientShellOverlayKind::TodoEdit,
+            Self::TodoBoard(_) => ClientShellOverlayKind::TodoBoard,
             Self::MovePicker(_) => ClientShellOverlayKind::MovePicker,
         }
     }
@@ -701,7 +763,9 @@ pub(super) enum PendingEndpointKind {
     WorktreeRemove {
         forced: bool,
     },
-    SelectionCopy,
+    SelectionCopy {
+        endpoint_id: ClientEndpointId,
+    },
     PaneScroll {
         pane_id: String,
         serial: u64,
@@ -732,6 +796,11 @@ pub(super) enum PendingEndpointKind {
         pane_id: String,
         revision: Option<u64>,
         panes: u64,
+    },
+    /// `todo.list` with no pane: every pane's todos, for the board. `key` is
+    /// the snapshot's todo state the request was made against.
+    TodoBoardList {
+        key: u64,
     },
     TodoMutation {
         pane_id: String,
@@ -824,7 +893,7 @@ pub(super) struct ClientPendingNotification {
 pub(super) struct ClientVisibleNotification {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) event: SemanticNotification,
-    pub(super) deadline: std::time::Instant,
+    pub(super) deadline: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -943,6 +1012,9 @@ pub(crate) struct ClientShellState {
     pub(super) next_application_scroll_generation: u64,
     pub(super) retired_scroll_keys: HashSet<crate::input::InputLeaseKey<u8>>,
     pub(super) pending_application_scroll_cancellations: Vec<(ClientEndpointId, String)>,
+    pub(super) endpoint_versions: HashMap<ClientEndpointId, String>,
+    pub(super) pane_labels_until: Option<std::time::Instant>,
+    pub(super) pane_labels_explicit: bool,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -980,6 +1052,7 @@ pub(crate) struct ClientShellState {
     pub(super) last_tab_bar_width: Option<u16>,
     pub(super) last_composed_size: Option<(u16, u16)>,
     pub(super) last_composed_at: Option<std::time::Instant>,
+    pub(super) activity_deadline: Option<std::time::Instant>,
     pub(super) selection_repaint_deadline: Option<std::time::Instant>,
     pub(super) hits: ShellHitMap,
     pub(super) endpoints: Vec<ClientShellEndpoint>,
@@ -1020,7 +1093,14 @@ pub(crate) struct ClientShellState {
     pub(super) pane_scroll_in_flight: HashMap<String, u64>,
     pub(super) pane_scroll_queued: HashMap<String, usize>,
     pub(super) pane_scroll_targets: HashMap<String, usize>,
-    pub(super) copy_feedback: Option<crate::app::state::CopyFeedback>,
+    pub(super) copy_feedback: Option<super::feedback::ClientCopyFeedback>,
+    pub(super) clipboard_origins: HashMap<
+        ClientEndpointId,
+        (
+            Option<u64>,
+            crate::protocol::endpoint::EndpointClipboardOrigin,
+        ),
+    >,
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     pub(super) input_leases: ClientInputLeases,
@@ -1075,6 +1155,9 @@ pub(super) fn release_notes_state(
 
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceEntry {
+    pub(super) pin_rank: Option<usize>,
+    pub(super) visible_index: usize,
+    pub(super) group_collapsed: Option<bool>,
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,
@@ -1161,6 +1244,10 @@ impl ClientShellState {
             last_tab_bar_width: None,
             last_composed_size: None,
             last_composed_at: None,
+            endpoint_versions: HashMap::new(),
+            pane_labels_until: None,
+            pane_labels_explicit: false,
+            activity_deadline: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],
@@ -1196,6 +1283,7 @@ impl ClientShellState {
             pane_scroll_queued: HashMap::new(),
             pane_scroll_targets: HashMap::new(),
             copy_feedback: None,
+            clipboard_origins: HashMap::new(),
             copy_feedback_deadline: None,
             host_mouse_pixels: None,
             input_leases: ClientInputLeases::default(),
@@ -1347,6 +1435,8 @@ impl ClientShellState {
         self.tab_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
+        self.config.follow_agent = true;
+        self.config.follow_workspace = true;
         self.tab_scroll = 0;
         self.mobile_switcher_scroll = 0;
         self.reveal_focused_workspace = true;
@@ -1391,6 +1481,7 @@ impl ClientShellState {
         }
         self.reset_copy_pipeline();
         self.copy_feedback = None;
+        self.clipboard_origins.clear();
         self.copy_feedback_deadline = None;
         self.host_mouse_pixels = None;
         self.dismissed_product_announcement = None;
@@ -1529,6 +1620,15 @@ impl ClientShellState {
             != snapshot.focused_workspace_id.as_deref()
         {
             self.reveal_focused_workspace = true;
+            self.config.follow_workspace = true;
+        }
+        if self
+            .snapshot
+            .as_deref()
+            .and_then(|current| current.focused_pane_id.as_deref())
+            != snapshot.focused_pane_id.as_deref()
+        {
+            self.config.follow_agent = true;
         }
         if tab_layout_changed
             || self
@@ -1922,15 +2022,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
-        if !self.config.clipboard_toast_enabled {
-            return false;
-        }
-        self.copy_feedback = Some(crate::app::state::CopyFeedback {
-            message: "copied to clipboard".to_owned(),
-            source_pane: None,
-        });
-        self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
-        true
+        self.show_copy_feedback_for(None, None, now)
     }
 
     pub(crate) fn tick_copy_feedback(&mut self, now: std::time::Instant) -> bool {
@@ -1986,6 +2078,8 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.activity_deadline)
+            .chain(self.pane_labels_until)
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

@@ -19,6 +19,35 @@ pub(crate) fn truncate_end(text: &str, max_width: usize) -> String {
     format!("{prefix}…")
 }
 
+pub(crate) fn truncate_start(text: &str, max_width: usize) -> String {
+    if display_width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+
+    let suffix = take_suffix_width(text, max_width.saturating_sub(1));
+    format!("…{suffix}")
+}
+
+fn take_suffix_width(text: &str, max_width: usize) -> String {
+    let mut output = Vec::new();
+    let mut width = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        output.push(ch);
+        width += ch_width;
+    }
+    output.into_iter().rev().collect()
+}
+
 fn take_prefix_width(text: &str, max_width: usize) -> String {
     let mut output = String::new();
     let mut width = 0usize;
@@ -49,20 +78,6 @@ pub(crate) fn middle_elide(text: &str, max_width: usize) -> String {
     format!("{prefix}…{suffix}")
 }
 
-fn take_suffix_width(text: &str, max_width: usize) -> String {
-    let mut output = Vec::new();
-    let mut width = 0usize;
-    for ch in text.chars().rev() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        output.push(ch);
-        width += ch_width;
-    }
-    output.into_iter().rev().collect()
-}
-
 // Restored fork items (v0.9.3 sync): re-home next to their kin later.
 pub(crate) fn relative_time_label(now_unix: u64, then_unix: u64) -> String {
     let seconds = now_unix.saturating_sub(then_unix);
@@ -89,5 +104,13 @@ mod tests {
 
         assert_eq!(text, "提交 herdr 的反…");
         assert!(display_width(&text) <= 16);
+    }
+    #[test]
+    fn truncate_start_keeps_the_display_width_aware_suffix() {
+        assert_eq!(truncate_start("asks L:20 A:0", 4), "…A:0");
+        assert_eq!(truncate_start("界界末尾", 5), "…末尾");
+        assert_eq!(truncate_start("界", 0), "");
+        assert_eq!(truncate_start("界", 1), "…");
+        assert_eq!(truncate_start("界", 2), "界");
     }
 }

@@ -113,6 +113,49 @@ impl ClientShellConfig {
     pub(crate) fn from_config(config: &Config) -> Self {
         let theme_runtime = crate::app::client_theme_runtime_from_config(config);
         Self {
+            show_host: config.ui.show_host,
+            notification_center_position: config.ui.notification_center_position,
+            show_pane_todos: config.ui.show_pane_todo_indicator,
+            todo_color: config
+                .ui
+                .pane_todo_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            display_panes_duration: std::time::Duration::from_millis(
+                crate::config::clamp_display_panes_ms(config.ui.display_panes_ms),
+            ),
+            follow_workspace: true,
+            follow_agent: true,
+            host_background: None,
+            sidebar_overflow: config.ui.sidebar_overflow,
+            sidebar_fog: config.sidebar_fog().0,
+            sidebar_fog_tint: config.sidebar_fog().1,
+            sidebar_fade: config.sidebar_fade(),
+            sidebar_fog_style: config.sidebar_fog_style(),
+
+            sidebar_style: config.ui.sidebar_style,
+            sidebar_active_border: config.ui.sidebar_active_border,
+            sidebar_border_style: config.ui.pane_border_active_style,
+            sidebar_border_color: config
+                .ui
+                .pane_border_active_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            show_workspace_numbers: config.ui.show_workspace_numbers,
+            show_agent_numbers: config.ui.show_agent_numbers,
+            workspace_number_color: config
+                .ui
+                .workspace_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            agent_number_color: config
+                .ui
+                .agent_number_color
+                .as_deref()
+                .map(crate::config::parse_color),
+            workspace_number_prefix: config.ui.workspace_number_prefix.clone(),
+            agent_number_prefix: config.ui.agent_number_prefix.clone(),
+
             sidebar_width: config.ui.sidebar_width,
             sidebar_min_width: config.ui.sidebar_min_width,
             sidebar_max_width: config.ui.sidebar_max_width,
@@ -124,10 +167,20 @@ impl ClientShellConfig {
             spaces: config.ui.sidebar.spaces.clone(),
             agents: config.ui.sidebar.agents.clone(),
             agent_panel_sort: config.ui.agent_panel_sort,
+            state_presentation: super::state_presentation::StatePresentation::from_config(config),
+            status_spinner: config.ui.status_spinner,
+            status_spinner_interval: std::time::Duration::from_millis(
+                config.ui.status_spinner_ms.clamp(
+                    crate::config::MIN_STATUS_SPINNER_MS,
+                    crate::config::MAX_STATUS_SPINNER_MS,
+                ),
+            ),
+            spinner_frame: 0,
             status_indicators: config.ui.status_indicators,
             sound_enabled: config.ui.sound.enabled,
             toast_delivery: config.ui.toast.delivery,
             toast_delay_seconds: config.ui.toast.delay_seconds,
+            herdr_toast: config.ui.toast.herdr,
             toast_position: config.ui.toast.herdr.position,
             copy_on_select: config.ui.copy_on_select,
             clipboard_toast_enabled: config.ui.toast.clipboard.enabled,
@@ -147,12 +200,6 @@ impl ClientShellConfig {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             confirm_close: config.ui.confirm_close,
-            pane_todo_color: config
-                .ui
-                .pane_todo_color
-                .as_deref()
-                .map(crate::config::parse_color),
-            notification_center_position: config.ui.notification_center_position,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
@@ -346,6 +393,45 @@ impl ClientShellConfig {
                 diagnostics.push(format!("{diagnostic}; keeping previous [ui] settings"));
             } else {
                 let ui = &config.ui;
+                self.display_panes_duration = std::time::Duration::from_millis(
+                    crate::config::clamp_display_panes_ms(ui.display_panes_ms),
+                );
+                self.show_host = ui.show_host;
+                self.notification_center_position = ui.notification_center_position;
+                self.show_pane_todos = ui.show_pane_todo_indicator;
+                self.todo_color = ui
+                    .pane_todo_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.sidebar_overflow = config.ui.sidebar_overflow;
+                self.sidebar_fog = config.sidebar_fog().0;
+                self.sidebar_fog_tint = config.sidebar_fog().1;
+                self.sidebar_fade = config.sidebar_fade();
+                self.sidebar_fog_style = config.sidebar_fog_style();
+
+                self.sidebar_style = config.ui.sidebar_style;
+                self.sidebar_active_border = config.ui.sidebar_active_border;
+                self.sidebar_border_style = config.ui.pane_border_active_style;
+                self.sidebar_border_color = config
+                    .ui
+                    .pane_border_active_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.show_workspace_numbers = config.ui.show_workspace_numbers;
+                self.show_agent_numbers = config.ui.show_agent_numbers;
+                self.workspace_number_color = config
+                    .ui
+                    .workspace_number_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.agent_number_color = config
+                    .ui
+                    .agent_number_color
+                    .as_deref()
+                    .map(crate::config::parse_color);
+                self.workspace_number_prefix = config.ui.workspace_number_prefix.clone();
+                self.agent_number_prefix = config.ui.agent_number_prefix.clone();
+
                 diagnostics.extend(ui.sound.diagnostics());
                 self.sidebar_width = ui.sidebar_width;
                 self.sidebar_min_width = ui.sidebar_min_width;
@@ -357,10 +443,19 @@ impl ClientShellConfig {
                 self.spaces = ui.sidebar.spaces.clone();
                 self.agents = ui.sidebar.agents.clone();
                 self.agent_panel_sort = ui.agent_panel_sort;
+                self.state_presentation =
+                    super::state_presentation::StatePresentation::from_config(config);
+                self.status_spinner = ui.status_spinner;
+                self.status_spinner_interval =
+                    std::time::Duration::from_millis(ui.status_spinner_ms.clamp(
+                        crate::config::MIN_STATUS_SPINNER_MS,
+                        crate::config::MAX_STATUS_SPINNER_MS,
+                    ));
                 self.status_indicators = ui.status_indicators;
                 self.sound_enabled = ui.sound.enabled;
                 self.toast_delivery = ui.toast.delivery;
                 self.toast_delay_seconds = ui.toast.delay_seconds;
+                self.herdr_toast = ui.toast.herdr;
                 self.toast_position = ui.toast.herdr.position;
                 self.copy_on_select = ui.copy_on_select;
                 self.clipboard_toast_enabled = ui.toast.clipboard.enabled;
@@ -408,7 +503,13 @@ impl ClientShellConfig {
 
         let sidebar_width = if sidebar_collapsed {
             match self.sidebar_collapsed_mode {
-                SidebarCollapsedModeConfig::Compact => 4,
+                SidebarCollapsedModeConfig::Compact => {
+                    4 + u16::from(matches!(
+                        self.sidebar_active_border,
+                        crate::config::SidebarActiveBorderConfig::Left
+                            | crate::config::SidebarActiveBorderConfig::Right
+                    ))
+                }
                 SidebarCollapsedModeConfig::Hidden => 0,
             }
         } else {

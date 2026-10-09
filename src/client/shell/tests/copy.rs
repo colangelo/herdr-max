@@ -1310,7 +1310,9 @@ fn navigator_searches_ancestor_context_and_keeps_split_agents_individually_actio
     };
     navigator.query.clear();
     let frame = state.compose(160, 48).expect("navigator");
-    assert_eq!(state.hits.navigator_popup.width, 116);
+    // Fork (herdr-max): the navigator is as wide as its rows, from 73 to 120
+    // columns, instead of filling the window.
+    assert_eq!(state.hits.navigator_popup.width, 73);
     let pane_rows = state
         .hits
         .navigator_rows
@@ -1831,7 +1833,8 @@ fn navigator_owns_search_mouse_selection_and_stable_target_focus() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(navigator_text.contains("client-shell"));
-    assert!(navigator_text.contains("terminal"));
+    // Fork (herdr-max): a pane with no agent says "shell" in the status column.
+    assert!(navigator_text.contains("shell"));
     assert!(!navigator_text.contains("pane 1"));
 
     let search = state.hits.navigator_search;
@@ -2408,4 +2411,40 @@ fn copy_mode_repeat_during_projection_gap_stays_active() {
             Some(19)
         );
     }
+}
+
+#[test]
+fn copied_feedback_centers_in_its_source_pane_with_public_identity() {
+    let mut config = Config::default();
+    config.ui.toast.clipboard.position = crate::config::ToastClipboardPosition::Pane;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    let mut source = surface();
+    let layout = state.layout(110, 40);
+    let area = Rect::new(0, 0, layout.pane_surface.width, layout.pane_surface.height);
+    source.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::empty(area), None, &[]);
+    source.panes[0].rect.width = area.width;
+    source.panes[0].rect.height = area.height;
+    source.panes[0].inner_rect = source.panes[0].rect;
+    state.set_pane_surface(source);
+    state.compose(110, 40).unwrap();
+    let pane = state.hits.panes[0].inner_rect;
+    state.show_copy_feedback_for(
+        Some("pane_1".into()),
+        Some(ClientEndpointId::Local),
+        std::time::Instant::now(),
+    );
+    let frame = state.compose(110, 40).unwrap();
+    let x = pane.x + (pane.width - 23) / 2;
+    let y = pane.y + (pane.height - 3) / 2;
+    let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+    assert_eq!(cell.symbol, "┌");
+    assert_eq!(
+        cell.fg,
+        crate::protocol::color_to_u32(state.config.palette.green)
+    );
+    state.copy_feedback.as_mut().unwrap().endpoint_id = None;
+    let frame = state.compose(110, 40).unwrap();
+    let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+    assert_ne!(cell.symbol, "┌", "unknown origin uses corner fallback");
 }

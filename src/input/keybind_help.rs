@@ -123,6 +123,14 @@ pub(crate) fn keybind_help_groups(
                 ),
                 entry(binding_label(&keybinds.goto), "session navigator"),
                 entry(binding_label(&keybinds.new_workspace), "new workspace"),
+                entry(
+                    binding_label(&keybinds.toggle_pin_workspace),
+                    "pin / unpin space",
+                ),
+                entry(
+                    binding_label(&keybinds.toggle_pin_agent),
+                    "pin / unpin agent",
+                ),
                 entry(binding_label(&keybinds.new_worktree), "new worktree"),
                 entry(binding_label(&keybinds.open_worktree), "open worktree"),
                 entry(
@@ -159,6 +167,10 @@ pub(crate) fn keybind_help_groups(
         (
             "panes",
             vec![
+                entry(
+                    binding_label(&keybinds.display_panes),
+                    "display pane labels",
+                ),
                 entry(binding_label(&keybinds.split_vertical), "split vertical"),
                 entry(
                     binding_label(&keybinds.split_horizontal),
@@ -190,6 +202,10 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.next_layout), "cycle layout"),
                 entry(binding_label(&keybinds.open_pane_todos), "pane todos"),
                 entry(binding_label(&keybinds.add_pane_todo), "add pane todo"),
+                entry(
+                    binding_label(&keybinds.open_todo_board),
+                    "session todo board",
+                ),
                 entry(binding_label(&keybinds.copy_mode), "copy mode"),
                 entry(binding_label(&keybinds.copy_mode_page_up), "scroll page up"),
                 entry(
@@ -275,6 +291,19 @@ pub(crate) fn keybind_help_groups(
             entry("ctrl+u / ctrl+d", "half page up / down"),
             entry("home / end", "first / last destination"),
             entry("esc", "leave search / clear search / close"),
+        ],
+    ));
+    groups.push((
+        "todo board",
+        vec![
+            entry("enter / click twice", "open owner pane"),
+            entry("e", "edit todo"),
+            entry("spc", "toggle done"),
+            entry("g", "follow link"),
+            entry("d", "remove todo"),
+            entry("c", "clear done"),
+            entry("/", "search todos"),
+            entry("esc / q", "close board"),
         ],
     ));
     groups.push((
@@ -402,5 +431,18 @@ mod tests {
             .expect("respawn pane should appear in the help panel");
 
         assert_eq!(entry.0, "prefix+ctrl+x");
+    }
+
+    #[test]
+    fn pin_actions_are_discoverable_even_when_unbound() {
+        let groups = keybind_help_groups(&Keybinds::default(), &[]);
+        for name in ["pin / unpin space", "pin / unpin agent"] {
+            let (keys, _) = groups
+                .iter()
+                .flat_map(|(_, entries)| entries)
+                .find(|(_, label)| label.as_ref() == name)
+                .expect("pin help entry");
+            assert_eq!(keys, "unset");
+        }
     }
 }

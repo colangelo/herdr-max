@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod actions;
+mod activity;
 mod agent_sidebar;
 mod aggregate_navigation;
 mod application_scroll;
+mod display_panes;
 mod layout_controls;
 mod machine_diagnostics;
+mod sync_chrome;
+mod tab_indicators;
 mod workspace_navigation;
 use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};
 mod composition;
@@ -20,6 +24,7 @@ mod endpoint_sidebar;
 mod endpoints;
 mod force_confirm;
 pub(super) use endpoints::*;
+mod feedback;
 mod global_menu;
 mod graphics;
 mod input;
@@ -32,13 +37,18 @@ mod notification_center;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
+mod pins;
 mod preferences;
 mod render;
 mod scroll;
 mod settings;
+mod sidebar_chrome;
+mod sidebar_overflow;
 mod state;
+mod state_presentation;
 mod surface_patch;
 mod text_editor;
+mod todo_board;
 mod todo_edit;
 mod todo_panel;
 mod todo_text;
@@ -198,14 +208,10 @@ fn status_icon(
         (StatusIndicatorStyle::Dots, AgentStatus::Unknown) => "·",
         (StatusIndicatorStyle::Symbols, AgentStatus::Blocked) => "×",
         (StatusIndicatorStyle::Symbols, AgentStatus::Working) => "◐",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "✓",
-        (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "○",
+        (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "□",
+        (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "✓",
         (StatusIndicatorStyle::Symbols, AgentStatus::Unknown) => "·",
     }
-}
-
-fn status_dot(status: crate::api::schema::AgentStatus) -> &'static str {
-    status_icon(status, crate::config::StatusIndicatorStyle::Dots)
 }
 
 fn status_priority(status: crate::api::schema::AgentStatus) -> u8 {
@@ -214,6 +220,18 @@ fn status_priority(status: crate::api::schema::AgentStatus) -> u8 {
         AgentStatus::Blocked => 4,
         AgentStatus::Done => 3,
         AgentStatus::Working => 2,
+        AgentStatus::Idle => 1,
+        AgentStatus::Unknown => 0,
+    }
+}
+
+// Display answers what is running; attention sorting still puts unseen Done first.
+fn display_status_priority(status: crate::api::schema::AgentStatus) -> u8 {
+    use crate::api::schema::AgentStatus;
+    match status {
+        AgentStatus::Blocked => 4,
+        AgentStatus::Working => 3,
+        AgentStatus::Done => 2,
         AgentStatus::Idle => 1,
         AgentStatus::Unknown => 0,
     }

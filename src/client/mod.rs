@@ -494,6 +494,12 @@ async fn run_client_loop(
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
+        shell.set_endpoint_server_version(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.server_version.clone()),
+        );
         shell.set_endpoint_methods_for(
             &endpoint::ClientEndpointId::Local,
             initial
@@ -616,7 +622,8 @@ async fn run_client_loop(
         let negotiation = endpoint::EndpointNegotiation::new(
             handshake.endpoint_methods.unwrap_or_default(),
             handshake.endpoint_capabilities.unwrap_or_default(),
-        );
+        )
+        .with_server_version(handshake.server_version);
         let surface_decoder = negotiated_surface_decoder(&negotiation);
         let transport = start_endpoint_transport(
             stream,
@@ -1341,6 +1348,10 @@ async fn run_client_loop(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
                     let frame = state.shell.as_mut().and_then(|shell| {
+                        shell.set_endpoint_server_version(
+                            &endpoint_id,
+                            negotiation.server_version().map(str::to_owned),
+                        );
                         shell.set_endpoint_methods_for(&endpoint_id, Some(negotiation.methods()));
                         shell.set_endpoint_agent_view_projection_supported(
                             &endpoint_id,
@@ -1963,7 +1974,7 @@ async fn run_client_loop(
                             let (width, height) = state.reported_size;
                             let frame = state.shell.as_mut().and_then(|shell| {
                                 shell
-                                    .show_copy_feedback(std::time::Instant::now())
+                                    .show_forwarded_copy_feedback(&data, std::time::Instant::now())
                                     .then(|| shell.compose(width, height))
                                     .flatten()
                             });
@@ -2066,6 +2077,16 @@ async fn run_client_loop(
                             continue;
                         }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
+                            Ok(endpoint::EndpointControlMessage::ClipboardOrigin(origin)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.cache_clipboard_origin(
+                                        &endpoint_id,
+                                        Some(generation),
+                                        origin,
+                                    );
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::AgentViewProjection(
                                 projection,
@@ -2289,6 +2310,7 @@ async fn run_client_loop(
                         shell.tick_notification_center(&mut outcome);
                         shell.tick_todo_editor(&mut outcome);
                         shell.tick_move_picker(&mut outcome);
+                        shell.tick_todo_board(&mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;
@@ -2305,7 +2327,9 @@ async fn run_client_loop(
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)
-                            | shell.tick_endpoint_error(now);
+                            | shell.tick_endpoint_error(now)
+                            | shell.tick_activity(now)
+                            | shell.tick_pane_labels(now);
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

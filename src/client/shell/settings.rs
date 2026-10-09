@@ -13,11 +13,11 @@ fn theme_index(name: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn indicator_index(style: crate::config::StatusIndicatorStyle) -> usize {
+pub(super) fn indicator_index(style: crate::config::StatusIndicatorStyle) -> usize {
     usize::from(style == crate::config::StatusIndicatorStyle::Symbols)
 }
 
-fn toast_index(delivery: crate::config::ToastDelivery) -> usize {
+pub(super) fn toast_index(delivery: crate::config::ToastDelivery) -> usize {
     match delivery {
         crate::config::ToastDelivery::Off => 0,
         crate::config::ToastDelivery::Herdr => 1,
@@ -119,6 +119,28 @@ impl ClientShellState {
         if settings.section == ClientSettingsSection::Theme {
             self.preview_selected_theme();
         }
+    }
+
+    /// Moves the selection by a list chord. Half a page is half of the rows
+    /// the list shows: the theme list's, or the whole list for the short ones.
+    fn chord_settings_selection(&mut self, chord: super::move_picker::Chord) {
+        let count = self.settings_choice_count();
+        let visible = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
+                section: ClientSettingsSection::Theme,
+                ..
+            })) => usize::from(self.hits.settings_popup.height.saturating_sub(9)).max(1),
+            _ => count,
+        };
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_ref() else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        let target = chord.target(settings.selected, visible, count);
+        let delta = target as isize - settings.selected as isize;
+        self.move_settings_selection(delta);
     }
 
     pub(super) fn select_settings_choice(&mut self, index: usize) {
@@ -381,13 +403,10 @@ impl ClientShellState {
             self.move_settings_section(-1, outcome);
             return true;
         }
-        if matches!(code, KeyCode::Up | KeyCode::Char('k')) && modifiers.is_empty() {
-            self.move_settings_selection(-1);
-            outcome.repaint = true;
-            return true;
-        }
-        if matches!(code, KeyCode::Down | KeyCode::Char('j')) && modifiers.is_empty() {
-            self.move_settings_selection(1);
+        // The fork's shared list chords: arrows, j/k, ctrl+n/p/j/k, ctrl+u/d
+        // for half a page, Home and End.
+        if let Some(chord) = super::move_picker::list_chord(code, modifiers, false) {
+            self.chord_settings_selection(chord);
             outcome.repaint = true;
             return true;
         }

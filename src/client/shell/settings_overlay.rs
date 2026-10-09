@@ -1,63 +1,102 @@
 use super::*;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 
-fn choice_style(selected: bool, palette: &Palette) -> Style {
-    if selected {
-        Style::default()
-            .fg(contrast(palette))
-            .bg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.text).bg(palette.panel_bg)
+const SETTINGS_WIDTH: u16 = 76;
+const SETTINGS_BASE_HEIGHT: u16 = 22;
+/// Most rows the integrations footer may take.
+const INTEGRATIONS_FOOTER_MAX_ROWS: u16 = 6;
+/// Rows the integrations section spends outside its list and footer.
+const INTEGRATIONS_CHROME_ROWS: u16 = 14;
+
+/// The lines under the integrations list: the install messages, else the
+/// hint for the list's state.
+fn integrations_footer_lines(
+    settings: &ClientSettingsOverlay,
+    palette: &Palette,
+) -> Vec<Line<'static>> {
+    let style = Style::default().fg(palette.overlay1).bg(palette.panel_bg);
+    let mut lines: Vec<Line<'static>> = settings
+        .integration_messages
+        .iter()
+        .map(|message| Line::from(Span::styled(format!(" {message}"), style)))
+        .collect();
+    if settings.installing_integrations {
+        lines.push(Line::from(Span::styled(" installing…", style)));
     }
+    if !lines.is_empty() || settings.loading_integrations {
+        return lines;
+    }
+    let found_any = settings.integrations.iter().any(|integration| {
+        integration.available
+            || integration.state != crate::api::schema::IntegrationState::NotInstalled
+    });
+    let hint = if settings
+        .integrations
+        .iter()
+        .any(super::super::settings::integration_needs_install)
+    {
+        " press install to add available or outdated integrations"
+    } else if found_any {
+        " all detected integrations are installed"
+    } else {
+        " no supported agent CLIs found on PATH"
+    };
+    vec![Line::from(Span::styled(hint, style))]
 }
 
-fn draw_choice(
-    buffer: &mut Buffer,
-    rect: Rect,
-    label: &str,
-    selected: bool,
-    current: bool,
+fn integrations_footer_height(
+    settings: &ClientSettingsOverlay,
+    width: u16,
     palette: &Palette,
-) {
-    let style = choice_style(selected, palette);
-    buffer.set_style(rect, style);
-    let marker = if selected { "▸" } else { " " };
-    let current = if current { " ✓" } else { "" };
-    put_text(
-        buffer,
-        rect.x,
-        rect.y,
-        rect.width,
-        &format!(" {marker} {label}{current}"),
-        style,
-    );
+) -> u16 {
+    let lines = integrations_footer_lines(settings, palette);
+    if lines.is_empty() {
+        return 0;
+    }
+    (Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1)) as u16)
+        .min(INTEGRATIONS_FOOTER_MAX_ROWS)
+}
+
+/// The popup grows with the integrations list and its footer.
+fn settings_popup_height(settings: &ClientSettingsOverlay, palette: &Palette) -> u16 {
+    if settings.section != ClientSettingsSection::Integrations {
+        return SETTINGS_BASE_HEIGHT;
+    }
+    let list_rows = settings.integrations.len().max(1) as u16;
+    let footer_rows = integrations_footer_height(settings, SETTINGS_WIDTH - 2, palette);
+    (INTEGRATIONS_CHROME_ROWS + list_rows + footer_rows).max(SETTINGS_BASE_HEIGHT)
 }
 
 pub(super) fn render_settings_overlay(
     buffer: &mut Buffer,
     settings: &ClientSettingsOverlay,
     integration_updates_available: bool,
+    config: &ClientShellConfig,
     palette: &Palette,
 ) -> Option<OverlayRender> {
-    let integration_height = 14u16
-        .saturating_add(settings.integrations.len().max(1) as u16)
-        .saturating_add(settings.integration_messages.len().min(6) as u16);
-    let height = if settings.section == ClientSettingsSection::Integrations {
-        integration_height.max(22)
-    } else {
-        22
-    };
-    let popup = popup(buffer.area, 76, height)?;
+    let popup = popup(
+        buffer.area,
+        SETTINGS_WIDTH,
+        settings_popup_height(settings, palette),
+    )?;
     let inner = panel(buffer, popup, palette.accent, palette.panel_bg)?;
-    if inner.width < 20 || inner.height < 8 {
-        return None;
+    if inner.width < 10 || inner.height < 4 {
+        return Some(OverlayRender {
+            area: popup,
+            ..OverlayRender::default()
+        });
     }
+    // Title, tabs and rule; a gap; the content; a gap; the hint and buttons.
+    let stack = crate::ui::modal_stack_areas(inner, 3, 2, 0, 1);
 
     put_text(
         buffer,
-        inner.x,
-        inner.y,
-        inner.width,
+        stack.header.x,
+        stack.header.y,
+        stack.header.width,
         " settings",
         Style::default()
             .fg(palette.text)
@@ -70,126 +109,127 @@ pub(super) fn render_settings_overlay(
             .integrations
             .iter()
             .any(|integration| integration.state == crate::api::schema::IntegrationState::Outdated);
+    // The fork's Tabs: a space either side of each label and one between
+    // tabs; only the label, with its badge, takes the highlight. The hit rect
+    // keeps the padding.
+    let tabs_y = stack.header.y + 1;
     let mut tab_x = inner.x;
     let mut tab_hits = Vec::new();
     for section in ClientSettingsSection::ALL {
         let badge = *section == ClientSettingsSection::Integrations && integration_badge;
-        let label = if badge {
-            format!(" ● {} ", section.label())
-        } else {
-            format!(" {} ", section.label())
-        };
-        let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
-        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
+        let label = section.label();
+        let title_width = display_width(label) + if badge { 2 } else { 0 };
+        let rect_width = (title_width + 2).min(inner.right().saturating_sub(tab_x));
+        if rect_width == 0 {
+            break;
+        }
+        let rect = Rect::new(tab_x, tabs_y, rect_width, 1);
         let active = *section == settings.section;
-        let style = if active {
-            Style::default()
-                .fg(contrast(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
-        };
-        buffer.set_style(rect, style);
-        put_text(buffer, rect.x, rect.y, rect.width, &label, style);
-        if badge && !active {
+        let base = Style::default().fg(palette.overlay1).bg(palette.panel_bg);
+        buffer.set_style(rect, base);
+        let title_rect = Rect::new(
+            tab_x + 1,
+            tabs_y,
+            title_width.min(rect.right().saturating_sub(tab_x + 1)),
+            1,
+        );
+        if badge {
             put_text(
                 buffer,
-                rect.x.saturating_add(1),
-                rect.y,
-                rect.width.saturating_sub(1).min(2),
+                title_rect.x,
+                tabs_y,
+                title_rect.width,
                 "● ",
                 Style::default()
                     .fg(palette.accent)
                     .bg(palette.panel_bg)
                     .add_modifier(Modifier::BOLD),
             );
+            put_text(
+                buffer,
+                title_rect.x + 2,
+                tabs_y,
+                title_rect.width.saturating_sub(2),
+                label,
+                base,
+            );
+        } else {
+            put_text(buffer, title_rect.x, tabs_y, title_rect.width, label, base);
+        }
+        if active {
+            buffer.set_style(
+                title_rect,
+                Style::default()
+                    .fg(contrast(palette))
+                    .bg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
         }
         tab_hits.push((rect, *section));
-        tab_x = tab_x.saturating_add(width.saturating_add(1));
+        tab_x = rect.right().saturating_add(1);
         if tab_x >= inner.right() {
             break;
         }
     }
     put_text(
         buffer,
-        inner.x,
-        inner.y + 2,
-        inner.width,
+        stack.header.x,
+        stack.header.y + 2,
+        stack.header.width,
         &"─".repeat(inner.width as usize),
         Style::default().fg(palette.surface0).bg(palette.panel_bg),
     );
 
-    let content = Rect::new(
-        inner.x,
-        inner.y + 4,
-        inner.width,
-        inner.height.saturating_sub(7),
-    );
+    let content = stack.content;
     let mut choice_hits = Vec::new();
     match settings.section {
         ClientSettingsSection::Theme => {
-            let visible = usize::from(content.height);
-            let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
-            for (visible_index, (index, name)) in crate::config::THEME_NAMES
-                .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible)
-                .enumerate()
-            {
-                let rect = Rect::new(
-                    content.x,
-                    content.y + visible_index as u16,
-                    content.width,
-                    1,
-                );
-                draw_choice(
-                    buffer,
-                    rect,
-                    name,
-                    index == settings.selected,
-                    super::super::settings::normalized_theme_name(name)
-                        == super::super::settings::normalized_theme_name(
-                            &settings.original_theme_name,
-                        ),
-                    palette,
-                );
-                choice_hits.push((rect, index));
-            }
+            render_theme_list(buffer, content, settings, palette, &mut choice_hits);
         }
         ClientSettingsSection::Indicators => {
-            render_choice_section(
+            render_choice_list(
                 buffer,
                 content,
-                "agent status indicators",
-                "choose color dots or distinct symbols for each state",
-                &["color dots  ● ● ● ○ ·", "distinct symbols  × ◐ ✓ ○ ·"],
-                settings.selected,
+                ChoiceList {
+                    title: "agent status indicators",
+                    description: "choose color dots or distinct symbols for each state",
+                    options: &["color dots  ● ● ● ○ ·", "distinct symbols  × ◐ □ ✓ ·"],
+                    current: super::super::settings::indicator_index(config.status_indicators),
+                    selected: settings.selected,
+                    row_height: 1,
+                },
                 palette,
                 &mut choice_hits,
             );
         }
         ClientSettingsSection::Sound => {
-            render_choice_section(
+            render_choice_list(
                 buffer,
                 content,
-                "sound alerts",
-                "play sounds when agents change state in background",
-                &["on", "off"],
-                settings.selected,
+                ChoiceList {
+                    title: "sound alerts",
+                    description: "play sounds when agents change state in background",
+                    options: &["on", "off"],
+                    current: usize::from(!config.sound_enabled),
+                    selected: settings.selected,
+                    row_height: 1,
+                },
                 palette,
                 &mut choice_hits,
             );
         }
         ClientSettingsSection::Toast => {
-            render_choice_section(
+            render_choice_list(
                 buffer,
                 content,
-                "notification popups",
-                "choose where background popup notifications should appear",
-                &["off", "inside herdr", "via terminal", "via system"],
-                settings.selected,
+                ChoiceList {
+                    title: "notification popups",
+                    description: "choose where background popup notifications should appear",
+                    options: &["off", "inside herdr", "via terminal", "via system"],
+                    current: super::super::settings::toast_index(config.toast_delivery),
+                    selected: settings.selected,
+                    row_height: 2,
+                },
                 palette,
                 &mut choice_hits,
             );
@@ -204,44 +244,45 @@ pub(super) fn render_settings_overlay(
         .iter()
         .any(super::super::settings::integration_needs_install);
     let show_primary = settings.section != ClientSettingsSection::Integrations || installable;
-    let labels = if show_primary { vec![10, 12] } else { vec![12] };
-    let buttons = row(inner, &labels, 2, inner.height.saturating_sub(1));
-    let (primary, close) = if show_primary {
-        let primary = buttons[0];
-        button(
-            buffer,
-            primary,
+    let mut buttons = Vec::new();
+    if show_primary {
+        buttons.push(ModalButton::primary(
+            "↵",
             if settings.section == ClientSettingsSection::Integrations {
-                " ↵ install "
+                "install"
             } else {
-                " ↵ apply "
+                "apply"
             },
-            Style::default()
-                .fg(contrast(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        (primary, buttons[1])
+            palette.accent,
+        ));
+    }
+    buttons.push(ModalButton::secondary("esc", "close"));
+    let rects = render_button_row(
+        buffer,
+        inner,
+        &buttons,
+        BUTTON_GAP,
+        inner.height.saturating_sub(1),
+        palette,
+    );
+    let (primary, close) = if show_primary {
+        (rects[0], rects[1])
     } else {
-        (Rect::default(), buttons[0])
+        (Rect::default(), rects[0])
     };
-    button(
-        buffer,
-        close,
-        " esc close ",
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.surface0)
-            .add_modifier(Modifier::BOLD),
-    );
-    put_text(
-        buffer,
-        inner.x,
-        inner.bottom().saturating_sub(2),
-        inner.width,
-        " ↑↓ select  tab section",
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
+    if let Some(footer) = stack.footer {
+        let hint = Style::default().bg(palette.panel_bg);
+        Widget::render(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ↑↓", hint.fg(palette.overlay0)),
+                Span::styled(" select  ", hint.fg(palette.overlay1)),
+                Span::styled("tab", hint.fg(palette.overlay0)),
+                Span::styled(" section", hint.fg(palette.overlay1)),
+            ])),
+            Rect::new(footer.x, footer.y, footer.width, 1),
+            buffer,
+        );
+    }
 
     Some(OverlayRender {
         area: popup,
@@ -254,44 +295,125 @@ pub(super) fn render_settings_overlay(
     })
 }
 
-fn render_choice_section(
+/// Every theme, the selection marked `▸` and highlighted across the row, the
+/// saved one marked `✓` in green. The list scrolls so the selection is its
+/// last visible row once it passes the bottom.
+fn render_theme_list(
     buffer: &mut Buffer,
     area: Rect,
-    title: &str,
-    description: &str,
-    choices: &[&str],
-    selected: usize,
+    settings: &ClientSettingsOverlay,
     palette: &Palette,
     hits: &mut Vec<(Rect, usize)>,
 ) {
-    put_text(
+    let visible = usize::from(area.height);
+    let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
+    let saved = super::super::settings::normalized_theme_name(&settings.original_theme_name);
+    for (visible_index, (index, name)) in crate::config::THEME_NAMES
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .enumerate()
+    {
+        let rect = Rect::new(area.x, area.y + visible_index as u16, area.width, 1);
+        let selected = index == settings.selected;
+        let current = super::super::settings::normalized_theme_name(name) == saved;
+        let name_style = Style::default().fg(palette.subtext0).bg(palette.panel_bg);
+        if selected {
+            // The highlight overrides the ✓'s green too.
+            let style = Style::default()
+                .fg(palette.text)
+                .bg(palette.surface0)
+                .add_modifier(Modifier::BOLD);
+            buffer.set_style(rect, style);
+            let marker = if current { " ✓" } else { "" };
+            put_text(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.width,
+                &format!(" ▸ {name}{marker}"),
+                style,
+            );
+        } else {
+            let x = put_segment(
+                buffer,
+                rect.x,
+                rect.y,
+                rect.right(),
+                &format!("   {name}"),
+                name_style,
+            );
+            if current {
+                put_segment(
+                    buffer,
+                    x,
+                    rect.y,
+                    rect.right(),
+                    " ✓",
+                    Style::default().fg(palette.green).bg(palette.panel_bg),
+                );
+            }
+        }
+        hits.push((rect, index));
+    }
+}
+
+struct ChoiceList<'a> {
+    title: &'a str,
+    description: &'a str,
+    options: &'a [&'a str],
+    /// The saved option, marked `✓`.
+    current: usize,
+    selected: usize,
+    /// 1, or 2 for a spaced-out list; the label sits on the first row and the
+    /// highlight covers both.
+    row_height: u16,
+}
+
+/// The fork's choice list: the description over two rows, a blank row, then
+/// one row per option as ` {title}: {option}`, `✓` on the saved one.
+fn render_choice_list(
+    buffer: &mut Buffer,
+    area: Rect,
+    list: ChoiceList<'_>,
+    palette: &Palette,
+    hits: &mut Vec<(Rect, usize)>,
+) {
+    Widget::render(
+        Paragraph::new(format!(" {}", list.description))
+            .style(Style::default().fg(palette.overlay1).bg(palette.panel_bg))
+            .wrap(Wrap { trim: false }),
+        Rect::new(area.x, area.y, area.width, area.height.min(2)),
         buffer,
-        area.x,
-        area.y,
-        area.width,
-        title,
-        Style::default()
-            .fg(palette.text)
-            .bg(palette.panel_bg)
-            .add_modifier(Modifier::BOLD),
     );
-    put_text(
-        buffer,
-        area.x,
-        area.y + 1,
-        area.width,
-        description,
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
-    let row_gap = u16::from(choices.len() > 2);
-    for (index, choice) in choices.iter().enumerate() {
-        let y = area.y + 3 + index as u16 * (1 + row_gap);
+    let mut y = area.y.saturating_add(3);
+    for (index, option) in list.options.iter().enumerate() {
         if y >= area.bottom() {
             break;
         }
-        let rect = Rect::new(area.x, y, area.width, 1);
-        draw_choice(buffer, rect, choice, index == selected, false, palette);
+        let height = list.row_height.min(area.bottom() - y);
+        let rect = Rect::new(area.x, y, area.width, height);
+        let style = if index == list.selected {
+            Style::default()
+                .fg(palette.text)
+                .bg(palette.surface0)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.subtext0).bg(palette.panel_bg)
+        };
+        buffer.set_style(rect, style);
+        let marker = if index == list.current { " ✓" } else { "" };
+        put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            rect.width,
+            &format!(" {}: {option}{marker}", list.title),
+            style,
+        );
         hits.push((rect, index));
+        y = y.saturating_add(list.row_height);
     }
 }
 
@@ -301,6 +423,7 @@ fn render_integrations(
     settings: &ClientSettingsOverlay,
     palette: &Palette,
 ) {
+    let footer_height = integrations_footer_height(settings, area.width, palette);
     put_text(
         buffer,
         area.x,
@@ -312,39 +435,40 @@ fn render_integrations(
             .bg(palette.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    put_text(
-        buffer,
-        area.x,
-        area.y + 1,
-        area.width,
-        "enable session restore and, where supported, direct status updates",
-        Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-    );
-    if settings.loading_integrations {
-        put_text(
-            buffer,
+    Widget::render(
+        Paragraph::new("enable session restore and, where supported, direct status updates")
+            .style(Style::default().fg(palette.overlay1).bg(palette.panel_bg))
+            .wrap(Wrap { trim: false }),
+        Rect::new(
             area.x,
-            area.y + 3,
+            area.y + 1,
             area.width,
-            " loading integrations…",
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
-        return;
-    }
+            area.height.saturating_sub(1).min(2),
+        ),
+        buffer,
+    );
+    // Title 1, description 2, blank 1; then the list; a blank and the footer.
+    let list_y = area.y.saturating_add(4);
+    let footer_y = area.bottom().saturating_sub(footer_height);
+    let list_bottom = footer_y.saturating_sub(1).max(list_y).min(area.bottom());
+    let muted = Style::default().fg(palette.overlay1).bg(palette.panel_bg);
     if settings.integrations.is_empty() {
         put_text(
             buffer,
             area.x,
-            area.y + 3,
+            list_y,
             area.width,
-            " no integration targets available",
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
+            if settings.loading_integrations {
+                " loading integrations…"
+            } else {
+                " no integration targets available"
+            },
+            muted,
         );
-        return;
     }
     for (index, integration) in settings.integrations.iter().enumerate() {
-        let y = area.y + 3 + index as u16;
-        if y >= area.bottom() {
+        let y = list_y + index as u16;
+        if y >= list_bottom {
             break;
         }
         let (marker, color, status) = match integration.state {
@@ -359,57 +483,29 @@ fn render_integrations(
                 ("–", palette.overlay0, "not found")
             }
         };
-        put_text(
+        let x = put_segment(
             buffer,
             area.x,
             y,
-            3,
-            &format!(" {marker}"),
+            area.right(),
+            &format!(" {marker} "),
             Style::default().fg(color).bg(palette.panel_bg),
         );
-        put_text(
+        let x = put_segment(
             buffer,
-            area.x + 3,
+            x,
             y,
-            11.min(area.width.saturating_sub(3)),
+            area.right(),
             &format!("{:<9}", integration.label),
             Style::default().fg(palette.subtext0).bg(palette.panel_bg),
         );
-        put_text(
-            buffer,
-            area.x + 14,
-            y,
-            area.width.saturating_sub(14),
-            status,
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
+        put_segment(buffer, x, y, area.right(), status, muted);
     }
-    let message_y = area
-        .y
-        .saturating_add(4)
-        .saturating_add(settings.integrations.len() as u16);
-    for (offset, message) in settings.integration_messages.iter().take(6).enumerate() {
-        let y = message_y.saturating_add(offset as u16);
-        if y >= area.bottom() {
-            break;
-        }
-        put_text(
+    if footer_height > 0 {
+        Widget::render(
+            Paragraph::new(integrations_footer_lines(settings, palette)).wrap(Wrap { trim: false }),
+            Rect::new(area.x, footer_y, area.width, footer_height),
             buffer,
-            area.x,
-            y,
-            area.width,
-            &format!(" {message}"),
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
-        );
-    }
-    if settings.installing_integrations && message_y < area.bottom() {
-        put_text(
-            buffer,
-            area.x,
-            message_y,
-            area.width,
-            " installing…",
-            Style::default().fg(palette.overlay1).bg(palette.panel_bg),
         );
     }
 }

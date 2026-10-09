@@ -123,10 +123,12 @@ pub(super) fn aggregate_agent_rows<'a>(
                         &view.sort,
                     )
                 });
+                order_pins(&mut rows);
                 return rows;
             }
         }
         sort_aggregate_rows(&mut rows, sort);
+        order_pins(&mut rows);
         return rows;
     }
 
@@ -153,7 +155,25 @@ pub(super) fn aggregate_agent_rows<'a>(
         })
         .collect::<Vec<_>>();
     sort_aggregate_rows(&mut rows, sort);
+    order_pins(&mut rows);
     rows
+}
+
+fn order_pins(rows: &mut [AggregateAgentRow<'_>]) {
+    if !rows
+        .iter()
+        .any(|row| super::pins::pane_pin(row.endpoint.snapshot, &row.agent.pane_id).is_some())
+    {
+        return;
+    }
+    rows.sort_by_key(|row| {
+        let pin = super::pins::pane_pin(row.endpoint.snapshot, &row.agent.pane_id);
+        (
+            row.endpoint.endpoint_index,
+            pin.is_none(),
+            pin.unwrap_or(u64::MAX),
+        )
+    });
 }
 
 fn sort_aggregate_rows(
@@ -297,12 +317,36 @@ pub(super) fn navigator_rows(
         words.iter().all(|word| value.contains(word))
     };
     let filtering = navigator.filter.is_some() || !query.is_empty();
-    let federated = endpoints.len() > 1;
+    // The link picker offers only the active server's panes: a todo links
+    // within the server it lives on.
+    let linking = navigator.purpose == ClientNavigatorPurpose::TodoLink;
+    let own_pane = navigator
+        .suspended_todo_edit
+        .as_ref()
+        .map(|edit| edit.pane_id.as_str());
+    let federated = endpoints.len() > 1 && !linking;
     let depth_offset = u8::from(federated);
     let mut rows = Vec::new();
+    if linking {
+        rows.push(ClientNavigatorRow {
+            depth: 0,
+            label: "no link".to_owned(),
+            meta: String::new(),
+            detail: "leave this todo with no link".to_owned(),
+            agent: None,
+            status: Some(crate::api::schema::AgentStatus::Unknown),
+            status_text: "clear".to_owned(),
+            stale: false,
+            current: false,
+            target: ClientNavigatorTarget::ClearLink,
+        });
+    }
 
     for endpoint in endpoints {
         let stale = endpoint.status != ClientEndpointStatus::Online;
+        if linking && (stale || endpoint.endpoint_id != *active_endpoint_id) {
+            continue;
+        }
         let endpoint_query_matches = !query.is_empty() && text(&endpoint.label);
         let mut endpoint_rows = Vec::new();
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
@@ -345,6 +389,9 @@ pub(super) fn navigator_rows(
                         .map(Vec::as_slice)
                         .unwrap_or_default();
                     for (index, pane) in tab_panes.iter().enumerate() {
+                        if own_pane == Some(pane.pane_id.as_str()) {
+                            continue;
+                        }
                         let agent = agents.get(pane.pane_id.as_str()).copied();
                         let status = agent
                             .map_or(crate::api::schema::AgentStatus::Unknown, |agent| {
@@ -409,6 +456,12 @@ pub(super) fn navigator_rows(
                                 ),
                                 agent: agent_kind.map(str::to_owned),
                                 status: Some(status),
+                                status_text: match agent_kind {
+                                    Some(agent) => {
+                                        format!("{agent} · {}", super::status_text(status))
+                                    }
+                                    None => "shell".to_owned(),
+                                },
                                 stale,
                                 current: endpoint.endpoint_id == *active_endpoint_id
                                     && snapshot.focused_pane_id.as_deref() == Some(&pane.pane_id),
@@ -431,6 +484,7 @@ pub(super) fn navigator_rows(
                         detail: workspace.new_workspace_cwd.clone(),
                         agent: None,
                         status: None,
+                        status_text: String::new(),
                         stale,
                         current: false,
                         target: ClientNavigatorTarget::Workspace {
@@ -451,6 +505,7 @@ pub(super) fn navigator_rows(
                     detail: String::new(),
                     agent: None,
                     status: None,
+                    status_text: String::new(),
                     stale,
                     current: false,
                     target: ClientNavigatorTarget::Machine {
@@ -482,4 +537,29 @@ pub(super) fn selected_navigator_target(
     navigator: &ClientNavigatorOverlay,
 ) -> Option<ClientNavigatorTarget> {
     navigator_selected_index(rows, navigator).map(|index| rows[index].target.clone())
+}
+
+/// Every pane the navigator offers with no query or chip: the count its
+/// search row shows, which stays put while the list narrows.
+pub(super) fn navigator_pane_count(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    navigator: &ClientNavigatorOverlay,
+) -> usize {
+    let linking = navigator.purpose == ClientNavigatorPurpose::TodoLink;
+    let own_pane = navigator
+        .suspended_todo_edit
+        .as_ref()
+        .map(|edit| edit.pane_id.as_str());
+    endpoints
+        .iter()
+        .filter(|endpoint| {
+            !linking
+                || (endpoint.status == ClientEndpointStatus::Online
+                    && endpoint.endpoint_id == *active_endpoint_id)
+        })
+        .filter_map(|endpoint| endpoint.snapshot.as_deref())
+        .flat_map(|snapshot| snapshot.panes.iter())
+        .filter(|pane| own_pane != Some(pane.pane_id.as_str()))
+        .count()
 }

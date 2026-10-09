@@ -17,7 +17,9 @@ pub(super) fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/hcli-{}-{nanos}", std::process::id()))
+    // The server canonicalizes cwds; on macOS /tmp is a symlink to /private/tmp.
+    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    tmp.join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
@@ -176,6 +178,7 @@ pub(super) fn spawn_named_server(
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.env_remove("HERDR_STARTUP_CWD");
+    clear_caller_ids(&mut command);
     command
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
@@ -229,6 +232,7 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.env_remove("HERDR_STARTUP_CWD");
+    clear_caller_ids(&mut command);
     command
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
@@ -325,9 +329,19 @@ pub(super) fn spawn_herdr_with_config(
     }
 }
 
+/// A herdr CLI run from inside a herdr pane inherits that pane's identity
+/// (`HERDR_PANE_ID` and friends) and would address it instead of the test
+/// server. Every spawned CLI or server drops them.
+fn clear_caller_ids(command: &mut Command) {
+    for key in ["HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"] {
+        command.env_remove(key);
+    }
+}
+
 pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.env_remove("HERDR_STARTUP_CWD");
+    clear_caller_ids(&mut command);
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
     command.output().unwrap()
@@ -340,6 +354,7 @@ pub(super) fn run_cli_in_dir(
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
     command.env_remove("HERDR_STARTUP_CWD");
+    clear_caller_ids(&mut command);
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
@@ -612,5 +627,24 @@ pub(super) fn accept_fake_cli_operation(listener: &UnixListener) -> (UnixStream,
             "different-build-same-protocol",
             CURRENT_PROTOCOL,
         );
+    }
+}
+
+#[cfg(test)]
+mod harness_env_tests {
+    use super::*;
+
+    #[test]
+    fn caller_pane_identity_is_not_inherited_by_spawned_herdr() {
+        let mut command = Command::new("true");
+        clear_caller_ids(&mut command);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for key in ["HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID"] {
+            assert!(removed.iter().any(|name| name == key), "{key}");
+        }
     }
 }

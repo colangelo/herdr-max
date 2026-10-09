@@ -164,7 +164,7 @@ fn notifications_and_clipboard_feedback_only_cover_their_drawn_corners() {
                     pane_id: None,
                     position: Some(position),
                 },
-                deadline: std::time::Instant::now(),
+                deadline: Some(std::time::Instant::now()),
             });
             state.compose(cols, rows).unwrap();
             let rect = state.hits.notification_toast;
@@ -184,10 +184,13 @@ fn notifications_and_clipboard_feedback_only_cover_their_drawn_corners() {
             state.config.clipboard_toast_position = position;
             state.set_snapshot(Box::new(snapshot()));
             state.set_pane_surface(surface());
-            state.copy_feedback = Some(crate::app::state::CopyFeedback {
-                message: "copied".into(),
-                source_pane: None,
-            });
+            state.copy_feedback = Some(
+                crate::app::state::CopyFeedback {
+                    message: "copied".into(),
+                    source_pane: None,
+                }
+                .into(),
+            );
             let layout = state.layout(cols, rows);
             let area = if layout.mobile_header.is_empty() {
                 layout.pane_surface
@@ -276,6 +279,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             selected: None,
             scroll: 0,
             filter: None,
+            ..Default::default()
         }),
         ClientShellOverlay::WorktreeCreate(ClientWorktreeCreateOverlay {
             source_workspace_id: "ws_1".into(),
@@ -349,6 +353,8 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 &state.active_endpoint_id,
                 &state.config.keybinds,
                 &state.config.palette,
+                &state.config,
+                layout.pane_surface,
             ),
         }
         .unwrap();

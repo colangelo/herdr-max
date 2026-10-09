@@ -191,6 +191,18 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_server_version(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        version: Option<String>,
+    ) {
+        if let Some(version) = version {
+            self.endpoint_versions.insert(endpoint_id.clone(), version);
+        } else {
+            self.endpoint_versions.remove(endpoint_id);
+        }
+    }
+
     pub(crate) fn set_endpoint_methods_for(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -235,6 +247,7 @@ impl ClientShellState {
         let generation = endpoint.snapshot_generation;
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
+        let follow_agent = self.config.follow_agent;
         if switching_endpoint {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
@@ -244,6 +257,7 @@ impl ClientShellState {
         if switching_endpoint {
             // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
+            self.config.follow_agent = follow_agent;
         }
         if let Some((_, pane_id)) = pending_agent_reveal {
             self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);

@@ -131,7 +131,8 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("main"));
-    assert!(text.contains("└─"));
+    assert!(text.contains("▾"));
+    assert!(!text.contains("└─"), "fork group rows use compact chevrons");
     assert!(text.contains("feature"));
 
     let mut replacement = (**state.snapshot.as_ref().expect("snapshot")).clone();
@@ -147,8 +148,12 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
     state.set_pane_surface(replacement_surface);
     let collapsed = state.compose(106, 20).expect("collapsed worktree group");
     let parent = state.hits.workspaces[0].rect;
-    let status_cell = usize::from(parent.y) * usize::from(collapsed.width)
-        + usize::from(parent.x.saturating_add(1));
+    let (status_x, status_y) = cell_symbol_position(
+        &collapsed,
+        parent,
+        state.config.state_icon(AgentStatus::Blocked),
+    );
+    let status_cell = usize::from(status_y) * usize::from(collapsed.width) + usize::from(status_x);
     assert_eq!(
         collapsed.cells[status_cell].fg,
         crate::protocol::color_to_u32(state.config.palette.red)
@@ -756,7 +761,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
             .agents
             .first()
             .map(|(_, pane_id)| pane_id.as_str()),
-        Some("pane_2")
+        Some("pane_1")
     );
     let body = state.hits.agent_body;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
@@ -830,7 +835,7 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
 }
 
 #[test]
-fn workspace_state_text_does_not_stack_terminal_faint() {
+fn workspace_state_text_matches_the_fork_faint_style() {
     use crate::config::SpaceSidebarToken;
 
     let mut config = Config::default();
@@ -847,8 +852,8 @@ fn workspace_state_text_does_not_stack_terminal_faint() {
     let (x, y) = cell_symbol_position(&frame, rect, "idle");
     let cell = buffer.cell((x, y)).expect("workspace state text cell");
     assert!(
-        !cell.modifier.contains(Modifier::DIM),
-        "workspace state text at ({x},{y}) should not stack terminal faint: {cell:?}"
+        cell.modifier.contains(Modifier::DIM),
+        "fork workspace state text at ({x},{y}) retains its faint style: {cell:?}"
     );
 }
 

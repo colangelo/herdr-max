@@ -511,9 +511,15 @@ fn a_save_the_store_rejects_keeps_the_editor_open_with_the_typed_text() {
     );
 
     assert_eq!(edit(&state).text.text(), "too many");
-    let notice = state.visible_endpoint_notice.as_ref().expect("notice");
-    assert_eq!(notice.title, "todo save failed");
-    assert!(notice.body.contains("maximum"));
+    // The fork's toast, anchored to the focused pane; no endpoint notice.
+    assert!(state.visible_endpoint_notice.is_none());
+    let toast = &state.visible_notification.as_ref().expect("toast").event;
+    assert_eq!(toast.title, "todo save failed");
+    assert!(toast
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("maximum")));
+    assert_eq!(toast.pane_id.as_deref(), Some("pane_1"));
     // And it can be saved again.
     assert!(matches!(
         only(&state.handle_input_bytes(b"\x13")).1,
@@ -744,5 +750,30 @@ fn keybind_help_lists_the_todo_actions_and_chords() {
     assert_eq!(
         find("todo edit modal", "toggle done").as_deref(),
         Some("ctrl+t")
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_what_is_under_the_pointer_and_the_editor_stays() {
+    let wheel = |state: &mut ClientShellState| {
+        state.handle_raw_events(vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        })])
+    };
+    let mut bare = state();
+    let without = wheel(&mut bare);
+
+    let mut state = state();
+    bind(&mut state, KeybindAction::AddPaneTodo);
+    state.compose(W, H).unwrap();
+    let with = wheel(&mut state);
+    edit(&state);
+    assert_eq!(
+        format!("{:?}", with.actions),
+        format!("{:?}", without.actions),
+        "the wheel does what it does with no editor open"
     );
 }

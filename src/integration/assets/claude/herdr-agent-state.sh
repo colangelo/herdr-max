@@ -54,6 +54,11 @@ if hook_input_file:
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
+# Upstream c5051933: only Claude's own, exactly-spelled events count. Cursor sends
+# `sessionStart` and the like. The fork installs three events (CANONICAL_HOOKS in
+# claude_settings.rs), so all three pass, not only SessionStart.
+if hook_event_name not in ("SessionStart", "UserPromptSubmit", "Stop"):
+    raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
 if is_subagent:
     raise SystemExit(0)

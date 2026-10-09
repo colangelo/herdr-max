@@ -9,6 +9,7 @@ mod tabs;
 
 pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
+pub(super) use overlays::{navigator_columns, navigator_status_measure};
 pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
 pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
@@ -321,6 +322,7 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                state.collapsed_groups,
                 &mut hits,
             );
         } else {
@@ -347,6 +349,7 @@ pub(super) fn render_shell(
         );
     }
     if !config.mouse_capture {
+        hits.overflow_edges.clear();
         hits.sidebar_divider = Rect::default();
         hits.sidebar_section_divider = Rect::default();
         hits.workspace_scrollbar = Rect::default();

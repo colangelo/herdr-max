@@ -4,7 +4,7 @@ use super::*;
 use ratatui::{
     style::Color,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget},
 };
 
 pub(super) fn render_mobile_notice_banner(
@@ -114,16 +114,36 @@ pub(super) fn render_notification_card(
     dot_color: Color,
     palette: &Palette,
 ) -> Rect {
+    render_notification_card_with_size(
+        buffer,
+        area,
+        title,
+        body,
+        position,
+        top_offset,
+        dot_color,
+        palette,
+        crate::config::ToastHerdrSize::Auto,
+    )
+}
+
+fn render_notification_card_with_size(
+    buffer: &mut Buffer,
+    area: Rect,
+    title: &str,
+    body: &str,
+    position: crate::config::ToastHerdrPosition,
+    top_offset: u16,
+    dot_color: Color,
+    palette: &Palette,
+    size: crate::config::ToastHerdrSize,
+) -> Rect {
     if area.is_empty() {
         return Rect::default();
     }
-    let content_width = unicode_width::UnicodeWidthStr::width(title)
-        .max(unicode_width::UnicodeWidthStr::width(body))
-        .saturating_add(6);
-    let width = u16::try_from(content_width)
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let height: u16 = if body.is_empty() { 3 } else { 4 }.min(area.height);
+    let (natural_width, natural_height) = notification_size(title, body, size, area.width);
+    let width = natural_width.min(area.width);
+    let height = natural_height.min(area.height);
     let x = match position {
         crate::config::ToastHerdrPosition::TopLeft
         | crate::config::ToastHerdrPosition::BottomLeft => area.x,
@@ -152,6 +172,12 @@ pub(super) fn render_notification_card(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.overlay0))
         .style(Style::default().bg(palette.panel_bg));
+    let (pad_cols, pad_rows) = if size == crate::config::ToastHerdrSize::Auto {
+        (0, 0)
+    } else {
+        (2, 1)
+    };
+    let block = block.padding(Padding::new(pad_cols, pad_cols, pad_rows, pad_rows));
     let inner = block.inner(rect);
     block.render(rect, buffer);
     Paragraph::new(Line::from(vec![
@@ -183,6 +209,87 @@ pub(super) fn render_notification_card(
     rect
 }
 
+fn notification_size(
+    title: &str,
+    body: &str,
+    size: crate::config::ToastHerdrSize,
+    anchor: u16,
+) -> (u16, u16) {
+    let (cols, rows) = if size == crate::config::ToastHerdrSize::Auto {
+        (0, 0)
+    } else {
+        (2, 1)
+    };
+    let content = unicode_width::UnicodeWidthStr::width(title)
+        .max(unicode_width::UnicodeWidthStr::width(body))
+        .saturating_add(6 + 2 * cols);
+    let minimum = match size {
+        crate::config::ToastHerdrSize::Auto => 0,
+        crate::config::ToastHerdrSize::Medium => u32::from(anchor) * 2 / 5,
+        crate::config::ToastHerdrSize::Large => u32::from(anchor) * 3 / 5,
+    } as u16;
+    (
+        u16::try_from(content).unwrap_or(u16::MAX).max(minimum),
+        if body.is_empty() {
+            3 + 2 * rows as u16
+        } else {
+            4 + 2 * rows as u16
+        },
+    )
+}
+
+pub(super) fn render_visible_notification_for_source(
+    buffer: &mut Buffer,
+    frame: Rect,
+    pane_area: Rect,
+    source: Option<Rect>,
+    notification: &ClientVisibleNotification,
+    config: &ClientShellConfig,
+    offset: u16,
+) -> Rect {
+    let event = &notification.event;
+    let position = event.position.unwrap_or(config.toast_position);
+    let source = if event.kind == SemanticNotificationKind::Custom
+        && config.herdr_toast.pane_feedback == crate::config::ToastPaneFeedback::Pane
+    {
+        source.filter(|pane| {
+            let (width, height) = notification_size(
+                &event.title,
+                event.body.as_deref().unwrap_or_default(),
+                config.herdr_toast.size,
+                pane.width,
+            );
+            width <= pane.width && height <= pane.height
+        })
+    } else {
+        None
+    };
+    let (anchor, position) = if let Some(source) = source {
+        (source, crate::config::ToastHerdrPosition::Center)
+    } else if position == crate::config::ToastHerdrPosition::Center && !pane_area.is_empty() {
+        (pane_area, position)
+    } else {
+        (frame, position)
+    };
+    let dot = match event.kind {
+        SemanticNotificationKind::NeedsAttention => config.palette.red,
+        SemanticNotificationKind::Finished => config.palette.blue,
+        _ => config.palette.accent,
+    };
+    render_notification_card_with_size(
+        buffer,
+        anchor,
+        &event.title,
+        event.body.as_deref().unwrap_or_default(),
+        position,
+        offset,
+        dot,
+        &config.palette,
+        config.herdr_toast.size,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn render_visible_notification(
     buffer: &mut Buffer,
     area: Rect,
@@ -229,7 +336,7 @@ mod tests {
                 pane_id: None,
                 position: None,
             },
-            deadline: std::time::Instant::now(),
+            deadline: Some(std::time::Instant::now()),
         }
     }
 
@@ -276,7 +383,7 @@ mod tests {
                 pane_id: Some("pane".into()),
                 position: None,
             },
-            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
         });
         let mut outcome = ClientShellInput::default();
 
@@ -481,5 +588,72 @@ mod tests {
                 assert!(rect.bottom() <= area.bottom());
             }
         }
+    }
+    #[test]
+    fn centered_toast_uses_pane_area_and_size_presets() {
+        let mut config = Config::default();
+        config.ui.toast.herdr.position = crate::config::ToastHerdrPosition::Center;
+        let frame = Rect::new(0, 0, 100, 30);
+        let panes = Rect::new(30, 1, 70, 29);
+        let mut buffer = Buffer::empty(frame);
+        let note = notification();
+        let config = ClientShellConfig::from_config(&config);
+        let auto = render_visible_notification_for_source(
+            &mut buffer,
+            frame,
+            panes,
+            None,
+            &note,
+            &config,
+            1,
+        );
+        assert_eq!(auto.x, panes.x + (panes.width - auto.width) / 2);
+        assert_eq!(auto.y, panes.y + (panes.height - auto.height) / 2);
+        let mut wider = Config::default();
+        wider.ui.toast.herdr.position = crate::config::ToastHerdrPosition::Center;
+        wider.ui.toast.herdr.size = crate::config::ToastHerdrSize::Large;
+        let config = ClientShellConfig::from_config(&wider);
+        let large = render_visible_notification_for_source(
+            &mut buffer,
+            frame,
+            panes,
+            None,
+            &note,
+            &config,
+            1,
+        );
+        assert!(large.width >= panes.width * 3 / 5);
+        assert!(large.height > auto.height);
+    }
+    #[test]
+    fn pane_action_toast_centers_only_when_the_whole_box_fits() {
+        let mut config = Config::default();
+        config.ui.toast.herdr.pane_feedback = crate::config::ToastPaneFeedback::Pane;
+        let config = ClientShellConfig::from_config(&config);
+        let note = notification();
+        let frame = Rect::new(0, 0, 100, 30);
+        let pane = Rect::new(35, 4, 60, 20);
+        let mut buffer = Buffer::empty(frame);
+        let rect = render_visible_notification_for_source(
+            &mut buffer,
+            frame,
+            frame,
+            Some(pane),
+            &note,
+            &config,
+            0,
+        );
+        assert_eq!(rect.x, pane.x + (pane.width - rect.width) / 2);
+        assert_eq!(rect.y, pane.y + (pane.height - rect.height) / 2);
+        let small = render_visible_notification_for_source(
+            &mut buffer,
+            frame,
+            frame,
+            Some(Rect::new(0, 0, 2, 2)),
+            &note,
+            &config,
+            0,
+        );
+        assert_eq!(small.x, frame.right() - small.width);
     }
 }

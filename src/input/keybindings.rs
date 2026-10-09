@@ -23,6 +23,8 @@ pub(crate) enum KeybindAction {
     OpenWorktree,
     RemoveWorktree,
     RenameWorkspace,
+    TogglePinWorkspace,
+    TogglePinAgent,
     CloseWorkspace,
     SwitchWorkspace(usize),
     SwitchTab(usize),
@@ -58,6 +60,7 @@ pub(crate) enum KeybindAction {
     RespawnPane,
     OpenPaneTodos,
     AddPaneTodo,
+    OpenTodoBoard,
     EditScrollback,
     ClearPane,
     ClearScrollback,
@@ -80,6 +83,7 @@ pub(crate) enum KeybindAction {
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
+    DisplayPanes,
     Help,
     Settings,
     ReloadConfig,
@@ -114,6 +118,7 @@ pub(crate) fn resolve_non_indexed_action(
 ) -> Option<KeybindAction> {
     for (bindings, action) in [
         (&keybinds.help, KeybindAction::Help),
+        (&keybinds.display_panes, KeybindAction::DisplayPanes),
         (&keybinds.settings, KeybindAction::Settings),
         (&keybinds.workspace_picker, KeybindAction::WorkspacePicker),
         (&keybinds.new_workspace, KeybindAction::NewWorkspace),
@@ -121,6 +126,11 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.open_worktree, KeybindAction::OpenWorktree),
         (&keybinds.remove_worktree, KeybindAction::RemoveWorktree),
         (&keybinds.rename_workspace, KeybindAction::RenameWorkspace),
+        (
+            &keybinds.toggle_pin_workspace,
+            KeybindAction::TogglePinWorkspace,
+        ),
+        (&keybinds.toggle_pin_agent, KeybindAction::TogglePinAgent),
         (&keybinds.close_workspace, KeybindAction::CloseWorkspace),
         (
             &keybinds.previous_workspace,
@@ -185,6 +195,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.respawn_pane, KeybindAction::RespawnPane),
         (&keybinds.open_pane_todos, KeybindAction::OpenPaneTodos),
         (&keybinds.add_pane_todo, KeybindAction::AddPaneTodo),
+        (&keybinds.open_todo_board, KeybindAction::OpenTodoBoard),
         (&keybinds.zoom, KeybindAction::Zoom),
         (&keybinds.resize_mode, KeybindAction::EnterResizeMode),
         (&keybinds.resize_pane_left, KeybindAction::ResizePaneLeft),

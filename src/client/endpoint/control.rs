@@ -8,6 +8,7 @@ pub(crate) struct DecodedAgentViewProjection {
 
 pub(crate) enum EndpointControlMessage {
     HealthPong,
+    ClipboardOrigin(crate::protocol::endpoint::EndpointClipboardOrigin),
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
@@ -18,6 +19,11 @@ pub(crate) fn decode_endpoint_control(
     kind: &str,
     data: &str,
 ) -> Result<EndpointControlMessage, String> {
+    if kind == crate::protocol::endpoint::CLIPBOARD_ORIGIN_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::ClipboardOrigin)
+            .unwrap_or(EndpointControlMessage::Ignored));
+    }
     if kind == crate::protocol::endpoint::HEALTH_PONG_KIND {
         return Ok(EndpointControlMessage::HealthPong);
     }
@@ -180,5 +186,21 @@ mod tests {
             ClientEndpointId::Ssh(ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap());
         assert!(protocol_failure_is_fatal(&ClientEndpointId::Local));
         assert!(!protocol_failure_is_fatal(&remote));
+    }
+    #[test]
+    fn optional_clipboard_origin_decodes_without_changing_core_clipboard() {
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::clipboard_origin_message("boot", "pane".into(), "YQ==")
+                .unwrap()
+        else {
+            panic!("named control");
+        };
+        assert!(
+            matches!(decode_endpoint_control(&kind,&data).unwrap(),EndpointControlMessage::ClipboardOrigin(origin) if origin.pane_id=="pane" && origin.boot_id=="boot")
+        );
+        assert!(matches!(
+            decode_endpoint_control(&kind, "bad JSON").unwrap(),
+            EndpointControlMessage::Ignored
+        ));
     }
 }

@@ -16,7 +16,10 @@ DEFAULT_BUNDLED_DIR = PROJECT_ROOT / "src" / "detect" / "manifests"
 DEFAULT_PUBLISHED_DIR = PROJECT_ROOT / "distribution" / "agent-detection"
 ENGINE_SOURCE = PROJECT_ROOT / "src" / "detect" / "manifest_update.rs"
 
-MANIFEST_KEYS = {"id", "version", "min_engine_version", "updated_at", "aliases", "rules"}
+# `fork` (fork only): set on a bundled manifest that carries this fork's own
+# rules. The binary never lets a downloaded manifest replace it, so it is never
+# published and the catalog comparison skips it.
+MANIFEST_KEYS = {"id", "version", "min_engine_version", "updated_at", "aliases", "rules", "fork"}
 RULE_KEYS = {
     "id",
     "state",
@@ -26,6 +29,7 @@ RULE_KEYS = {
     "visible_blocker",
     "visible_working",
     "skip_state_update",
+    "blocked_reason",
     "all",
     "any",
     "not",
@@ -35,6 +39,8 @@ RULE_KEYS = {
 }
 GATE_KEYS = {"all", "any", "not", "contains", "regex", "line_regex"}
 STATES = {"idle", "working", "blocked", "unknown"}
+# Fork: why a blocked rule blocks (src/detect/mod.rs BlockedReason).
+BLOCKED_REASONS = {"question", "permission", "form", "other"}
 REGION_RE = re.compile(
     r"^(whole_recent|whole_recent_without_current_prompt_marker|after_last_prompt_marker|"
     r"before_current_prompt_marker|current_prompt_block_marker|after_current_prompt_block_marker|"
@@ -124,6 +130,8 @@ def validate_manifest(path: Path, engine_version: int) -> dict:
     unknown = sorted(set(manifest) - MANIFEST_KEYS)
     if unknown:
         raise CheckError(f"{path}: unknown manifest field(s): {', '.join(unknown)}")
+    if "fork" in manifest and not isinstance(manifest["fork"], bool):
+        raise CheckError(f"{path}: fork must be a boolean")
 
     agent_id = manifest.get("id")
     if not isinstance(agent_id, str) or not agent_id.strip():
@@ -183,6 +191,11 @@ def validate_rule(path: Path, index: int, rule: object, complexity: dict[str, in
         and int(count_match.group(1)) > MAX_TOP_REGION_LINE_COUNT
     ):
         raise CheckError(f"{path}: rule {rule_id} has invalid region {region!r}")
+    if "blocked_reason" in rule:
+        if rule["blocked_reason"] not in BLOCKED_REASONS:
+            raise CheckError(f"{path}: rule {rule_id} has invalid blocked_reason {rule['blocked_reason']!r}")
+        if state != "blocked":
+            raise CheckError(f"{path}: rule {rule_id} blocked_reason requires state blocked")
     if rule.get("skip_state_update"):
         if state != "unknown":
             raise CheckError(f"{path}: rule {rule_id} skip_state_update requires state unknown")
@@ -324,6 +337,10 @@ def validate_catalog(
         seen[agent_id] = rel_path
 
         bundled_path, bundled_manifest = bundled[agent_id]
+        if bundled_manifest.get("fork") is True:
+            # The published copy is upstream's, for upstream binaries; this
+            # build keeps its bundled fork manifest whatever is published.
+            continue
         cmp = compare_versions(manifest["version"], bundled_manifest["version"], manifest_path)
         staged_manifest = STAGED_PUBLISHED_MANIFESTS.get(agent_id)
         published_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()

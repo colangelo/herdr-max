@@ -4,8 +4,8 @@
 //!
 //! The save is the server's: the modal sends `todo.add` or `todo.update` and
 //! closes only when the answer is a success, so a refused save keeps every
-//! typed character on screen. The panel it was opened from is carried inside
-//! it and put back when it closes.
+//! typed character on screen. The panel or board it was opened from is carried
+//! inside it and put back when it closes.
 
 use super::render::{display_width, put_text};
 use super::todo_panel::{render_panel_shell, todo_priority_color, ClientTodoPanelOverlay};
@@ -49,6 +49,16 @@ pub(super) struct StoredTodoLink {
     pub(super) label: String,
 }
 
+/// The surface the editor was opened from: parked inside the editor and put
+/// back when it closes. A board edited from a row comes back whole, selection
+/// and search kept; a save rebuilds either from the server's list.
+#[derive(Debug)]
+pub(super) enum SuspendedTodoSurface {
+    Panel(ClientTodoPanelOverlay),
+    /// Boxed: the board is large, and the editor rides inside the overlay slot.
+    Board(Box<super::todo_board::ClientTodoBoardOverlay>),
+}
+
 #[derive(Debug)]
 pub(super) struct ClientTodoEditOverlay {
     pub(super) pane_id: String,
@@ -59,8 +69,8 @@ pub(super) struct ClientTodoEditOverlay {
     pub(super) done: bool,
     pub(super) link: TodoEditLink,
     pub(super) stored_link: Option<StoredTodoLink>,
-    /// The panel this modal was opened from, put back when it closes.
-    pub(super) suspended: Option<ClientTodoPanelOverlay>,
+    /// The panel or board this modal was opened from, put back when it closes.
+    pub(super) suspended: Option<SuspendedTodoSurface>,
     /// A save is in flight; another save waits for its answer.
     pub(super) saving: bool,
 }
@@ -366,7 +376,7 @@ impl ClientShellState {
         &mut self,
         pane_id: String,
         todo: Option<TodoInfo>,
-        suspended: Option<ClientTodoPanelOverlay>,
+        suspended: Option<SuspendedTodoSurface>,
     ) {
         let Some(boot_id) = self
             .snapshot
@@ -407,8 +417,10 @@ impl ClientShellState {
         let Some(ClientShellOverlay::TodoEdit(edit)) = self.overlay.take() else {
             return;
         };
-        if let Some(panel) = edit.suspended {
-            self.resume_todo_panel(panel, outcome);
+        match edit.suspended {
+            Some(SuspendedTodoSurface::Panel(panel)) => self.resume_todo_panel(panel, outcome),
+            Some(SuspendedTodoSurface::Board(board)) => self.resume_todo_board(*board, outcome),
+            None => {}
         }
     }
 
@@ -485,7 +497,7 @@ impl ClientShellState {
         }
     }
 
-    /// A save landed. Success closes the editor and returns to the panel, or
+    /// A save landed. Success closes the editor and returns to the panel or board, or
     /// travels to the link for a save-and-follow; a refusal keeps the editor
     /// and its text open (the notice says why).
     pub(super) fn handle_todo_save_result(
@@ -565,8 +577,10 @@ impl ClientShellState {
                 }
                 return;
             }
-            // The link picker (ctrl+l) arrives with the navigator port.
-            KeyCode::Char('l' | 'L') if ctrl => return,
+            KeyCode::Char('l' | 'L') if ctrl => {
+                self.open_todo_link_picker();
+                return;
+            }
             _ => {}
         }
         let Some(edit) = self.todo_edit_mut() else {
@@ -635,7 +649,7 @@ impl ClientShellState {
                 edit.priority = next_priority(edit.priority);
             }
         } else if super::contains(rows.link, point) {
-            // The link picker arrives with the navigator port.
+            self.open_todo_link_picker();
         } else if super::contains(rows.done, point) {
             if let Some(edit) = self.todo_edit_mut() {
                 if edit.todo_id.is_some() {
@@ -647,5 +661,53 @@ impl ClientShellState {
         } else {
             self.close_todo_editor(outcome);
         }
+    }
+
+    /// ctrl+l or a click on the link row: the navigator opens as the link
+    /// picker with this editor parked inside it (fork bc502abd).
+    fn open_todo_link_picker(&mut self) {
+        match self.overlay.take() {
+            Some(ClientShellOverlay::TodoEdit(edit)) => {
+                self.open_navigator_for(ClientNavigatorPurpose::TodoLink, Some(Box::new(edit)));
+            }
+            other => self.overlay = other,
+        }
+    }
+
+    /// The link picker's Enter: a pane row stages that pane, the "no link"
+    /// row stages clearing it, and either returns to the editor. Space and
+    /// machine rows link nothing and leave the picker open.
+    pub(super) fn accept_todo_link(&mut self, target: ClientNavigatorTarget) {
+        let link = match target {
+            ClientNavigatorTarget::ClearLink => TodoEditLink::Clear,
+            ClientNavigatorTarget::Pane { pane_id, .. } => {
+                let label = match self.overlay.as_ref() {
+                    Some(ClientShellOverlay::Navigator(navigator)) => {
+                        render::client_navigator_rows(
+                            &self.endpoints,
+                            &self.active_endpoint_id,
+                            navigator,
+                        )
+                        .into_iter()
+                        .find(|row| {
+                            matches!(&row.target, ClientNavigatorTarget::Pane { pane_id: id, .. } if *id == pane_id)
+                        })
+                        .map(|row| row.label)
+                        .unwrap_or_default()
+                    }
+                    _ => String::new(),
+                };
+                TodoEditLink::Set { pane_id, label }
+            }
+            ClientNavigatorTarget::Machine { .. } | ClientNavigatorTarget::Workspace { .. } => {
+                return
+            }
+        };
+        if let Some(ClientShellOverlay::Navigator(navigator)) = self.overlay.as_mut() {
+            if let Some(edit) = navigator.suspended_todo_edit.as_mut() {
+                edit.link = link;
+            }
+        }
+        self.dismiss_navigator();
     }
 }

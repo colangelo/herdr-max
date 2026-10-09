@@ -29,6 +29,9 @@ const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_STARTUP_CWD");
     command.env_remove("HERDR_SESSION");
+    command.env_remove("HERDR_PANE_ID");
+    command.env_remove("HERDR_WORKSPACE_ID");
+    command.env_remove("HERDR_TAB_ID");
 }
 
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {

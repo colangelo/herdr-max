@@ -11,6 +11,11 @@ use ratatui::{
 use super::*;
 
 pub(super) struct AgentRow {
+    pub(super) todos: crate::ui::TodoDisplaySummary,
+    pub(super) state_change_seq: u64,
+    pub(super) background_work: bool,
+    pub(super) jump_index: usize,
+    pub(super) pin_rank: Option<usize>,
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
@@ -21,32 +26,40 @@ pub(super) fn ordered_agent_pane_ids(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
 ) -> Vec<String> {
-    if snapshot.agent_view_label.is_some() {
-        return snapshot
+    let mut ids = if snapshot.agent_view_label.is_some() {
+        snapshot
             .agent_order
             .iter()
-            .filter(|pane_id| {
-                snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.pane_id == pane_id.as_str())
-            })
+            .filter(|id| snapshot.agents.iter().any(|agent| &agent.pane_id == *id))
             .cloned()
-            .collect();
-    }
-    let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
-    if sort == crate::config::AgentPanelSortConfig::Priority {
-        agents.sort_by_key(|agent| {
-            (
-                std::cmp::Reverse(status_priority(agent.agent_status)),
-                std::cmp::Reverse(agent.state_change_seq),
-            )
+            .collect::<Vec<_>>()
+    } else {
+        let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
+        if sort == crate::config::AgentPanelSortConfig::Priority {
+            agents.sort_by_key(|agent| {
+                (
+                    std::cmp::Reverse(status_priority(agent.agent_status)),
+                    std::cmp::Reverse(agent.state_change_seq),
+                )
+            });
+        }
+        agents
+            .into_iter()
+            .map(|agent| agent.pane_id.clone())
+            .collect()
+    };
+    if snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|f| f.pane_pins.as_ref())
+        .is_some_and(|pins| !pins.is_empty())
+    {
+        ids.sort_by_key(|id| {
+            let pin = super::pins::pane_pin(snapshot, id);
+            (pin.is_none(), pin.unwrap_or(u64::MAX))
         });
     }
-    agents
-        .into_iter()
-        .map(|agent| agent.pane_id.clone())
-        .collect()
+    ids
 }
 
 pub(super) fn render_agent_panel(
@@ -80,7 +93,20 @@ pub(super) fn render_agent_panel(
         agent_scroll,
         hits,
         |row| row.rows.len(),
+        |row| super::sidebar_overflow::item(row.status, row.pin_rank),
+        |row| row.focused,
         |buffer, rect, row, hits| {
+            if row.pin_rank.is_some() {
+                if let Some(marker) = super::pins::marker_rect(rect, 1, config) {
+                    hits.pin_markers.push((
+                        marker,
+                        ClientEndpointId::Local,
+                        crate::api::schema::Method::AgentUnpin(crate::api::schema::AgentTarget {
+                            target: row.pane_id.clone(),
+                        }),
+                    ));
+                }
+            }
             hits.agents.push((rect, row.pane_id.clone()));
             render_agent_row(buffer, rect, row, config);
         },
@@ -113,10 +139,12 @@ pub(super) fn render_agent_panel_header(
         area.x,
         area.y + 1,
         area.width,
-        " agents",
-        Style::default()
-            .fg(config.palette.overlay0)
-            .add_modifier(Modifier::BOLD),
+        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
+            " AGENTS"
+        } else {
+            " agents"
+        },
+        super::sidebar_chrome::header_style(config),
     );
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
         crate::config::AgentPanelSortConfig::Spaces => "grouped",
@@ -160,6 +188,8 @@ pub(super) fn render_agent_list<T>(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
     row_lines: impl Fn(&T) -> usize,
+    edge_item: impl Fn(&T) -> super::sidebar_overflow::EdgeItem,
+    exempt: impl Fn(&T) -> bool,
     mut render_row: impl FnMut(&mut Buffer, Rect, &T, &mut ShellHitMap),
 ) {
     let body = Rect::new(
@@ -201,8 +231,25 @@ pub(super) fn render_agent_list<T>(
             }
         })
         .collect::<Vec<_>>();
-    let metrics =
-        super::scroll::list_scroll_metrics(&row_heights, &gaps, body.height, *agent_scroll);
+    if config.follow_agent {
+        if let Some(target) = rows.iter().position(&exempt) {
+            *agent_scroll = super::sidebar_overflow::reveal_start(
+                &row_heights,
+                &gaps,
+                body.height,
+                *agent_scroll,
+                target,
+                config.sidebar_overflow.edge_rows(),
+            );
+        }
+    }
+    let (metrics, reserve, count) = super::sidebar_overflow::list_metrics(
+        &row_heights,
+        &gaps,
+        body.height,
+        *agent_scroll,
+        config.sidebar_overflow.edge_rows(),
+    );
     hits.agent_max_scroll = metrics.max_offset_from_bottom;
     hits.agent_scroll_metrics = Some(metrics);
     *agent_scroll = metrics
@@ -210,13 +257,22 @@ pub(super) fn render_agent_list<T>(
         .saturating_sub(metrics.offset_from_bottom);
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
-        let height = row_heights[index].min(body.height);
-        if y.saturating_add(height) > body.bottom() {
+    let items = rows.iter().map(edge_item).collect::<Vec<_>>();
+    let mut visible = Vec::new();
+    let mut y = body.y + reserve.top;
+    let bottom = body.bottom().saturating_sub(reserve.bottom);
+    for (index, row) in rows.iter().enumerate().skip(*agent_scroll).take(count) {
+        let height =
+            row_heights[index].min(body.height.saturating_sub(reserve.top + reserve.bottom));
+        if y.saturating_add(height) > bottom {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, height);
+        visible.push(super::sidebar_overflow::VisibleItem {
+            index,
+            rect,
+            exempt: exempt(row),
+        });
         render_row(buffer, rect, row, hits);
         y = y
             .saturating_add(height)
@@ -227,6 +283,15 @@ pub(super) fn render_agent_list<T>(
             });
     }
 
+    let plan = super::sidebar_overflow::plan(
+        config.sidebar_overflow.fog(),
+        &items,
+        *agent_scroll,
+        &visible,
+        Rect::new(body.x, body.y, content_width, body.height),
+        reserve,
+    );
+    super::sidebar_overflow::paint(buffer, &plan, config, hits, true, count);
     if show_scrollbar {
         let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
         hits.agent_scrollbar = track;
@@ -239,9 +304,19 @@ pub(super) fn agent_rows(
     config: &ClientShellConfig,
     machine: Option<&str>,
 ) -> Vec<AgentRow> {
+    let mut pin_rank = 0;
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .enumerate()
+        .filter_map(|(index, pane_id)| {
+            let mut row = agent_row(snapshot, &pane_id, config, machine)?;
+            row.jump_index = index;
+            if super::pins::pane_pin(snapshot, &row.pane_id).is_some() {
+                row.pin_rank = Some(pin_rank);
+                pin_rank += 1;
+            }
+            Some(row)
+        })
         .collect()
 }
 
@@ -311,6 +386,23 @@ pub(super) fn agent_row(
         state_text,
     );
     Some(AgentRow {
+        todos: snapshot
+            .resource_facts
+            .as_ref()
+            .and_then(|f| f.pane_todos.as_ref())
+            .and_then(|facts| facts.get(&agent.pane_id))
+            .map(crate::ui::TodoDisplaySummary::from_fact)
+            .unwrap_or_default(),
+        state_change_seq: agent.state_change_seq,
+        background_work: snapshot
+            .resource_facts
+            .as_ref()
+            .and_then(|f| f.background_activity.as_ref())
+            .and_then(|f| f.get(&agent.pane_id))
+            .copied()
+            .unwrap_or(false),
+        jump_index: 0,
+        pin_rank: None,
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
@@ -339,11 +431,45 @@ pub(super) fn render_agent_row(
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD)
     };
-    let status_style = Style::default().fg(status_color(row.status, palette));
+    let status_style = Style::default().fg(config.state_presentation.agent_color(
+        row.status,
+        row.background_work,
+        palette,
+    ));
+    let editorial = config.sidebar_style == crate::config::SidebarStyleConfig::Editorial;
+    let jump = config
+        .show_agent_numbers
+        .then(|| crate::config::jump_symbol(row.jump_index))
+        .flatten();
+    let label = super::sidebar_chrome::number_label(jump, &config.agent_number_prefix);
+    let todo_label = match row.todos.open {
+        0 => String::new(),
+        n if n > 99 => "τ 99+".to_owned(),
+        n => format!("τ {n}"),
+    };
+    let todo_color = crate::ui::todo_priority_color(row.todos.priority, palette, config.todo_color);
+    let jump_row = usize::from(!todo_label.is_empty());
+    let number_color = config.agent_number_color.unwrap_or(palette.overlay0);
+    let bar =
+        u16::from(config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Left);
     let secondary = Style::default().fg(palette.overlay0);
+    let secondary = if editorial && !row.focused {
+        secondary.add_modifier(Modifier::DIM)
+    } else {
+        secondary
+    };
     let icon = (
-        status_icon(row.status, config.status_indicators),
-        Style::default().fg(status_color(row.status, palette)),
+        config.state_presentation.agent_icon(
+            row.status,
+            row.background_work,
+            row.state_change_seq,
+            config,
+        ),
+        Style::default().fg(config.state_presentation.agent_color(
+            row.status,
+            row.background_work,
+            palette,
+        )),
     );
     let rows = if row.rows.is_empty() {
         vec![vec![crate::ui::ResolvedToken {
@@ -354,8 +480,15 @@ pub(super) fn render_agent_row(
         row.rows.clone()
     };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
-        let indent = if index == 0 { 1 } else { 3 };
-        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
+        let indent = bar + if index == 0 { 1 } else { 3 };
+        let reserve = if index == 0 && !todo_label.is_empty() {
+            super::sidebar_chrome::number_reserve(&todo_label, config.sidebar_active_border)
+        } else if editorial && index == jump_row {
+            super::sidebar_chrome::number_reserve(&label, config.sidebar_active_border)
+        } else {
+            0
+        };
+        let mut spans = vec![ratatui::text::Span::raw(" ".repeat(usize::from(indent)))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
             icon,
@@ -364,13 +497,70 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width.saturating_sub(indent + reserve) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
+    if let Some(rank) = row.pin_rank {
+        if rect.width > bar {
+            buffer.set_stringn(
+                rect.x + bar,
+                rect.y,
+                "↑",
+                1,
+                Style::default().fg(super::pins::marker_color(rank)),
+            );
+        }
+    }
+    if !todo_label.is_empty() {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            rect,
+            rect.y,
+            &todo_label,
+            todo_color,
+            config.sidebar_active_border,
+        );
+        let width = display_width(&todo_label).min(usize::from(u16::MAX)) as u16;
+        if rect.width >= width.saturating_add(4) {
+            let end = rect.right().saturating_sub(u16::from(
+                config.sidebar_active_border == crate::config::SidebarActiveBorderConfig::Right,
+            ));
+            for x in end - width..end {
+                buffer[(x, rect.y)].set_style(Style::default().add_modifier(Modifier::BOLD));
+            }
+        }
+    }
+    if editorial {
+        super::sidebar_chrome::draw_number(
+            buffer,
+            rect,
+            rect.y.saturating_add(jump_row as u16),
+            &label,
+            number_color,
+            config.sidebar_active_border,
+        );
+    } else if let Some(jump) = jump {
+        if rect.height > 1 {
+            buffer.set_stringn(
+                rect.x + bar + 1,
+                rect.y + 1,
+                jump.to_string(),
+                1,
+                Style::default().fg(number_color),
+            );
+        }
+    }
+    super::sidebar_chrome::draw_active_border(
+        buffer,
+        rect,
+        row.focused,
+        config,
+        config.agents.row_gap,
+    );
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

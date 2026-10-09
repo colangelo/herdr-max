@@ -681,6 +681,15 @@ impl ClientShellState {
     /// Hit-test order determines which overlapping control receives the event;
     /// the sidebar toggle takes precedence over the agent scrollbar beneath it.
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            let explicit = self.pane_labels_explicit;
+            self.close_pane_labels();
+            if explicit {
+                outcome.repaint = true;
+                return;
+            }
+        }
+
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
         if self.mode == ClientShellMode::Navigate
@@ -701,6 +710,11 @@ impl ClientShellState {
             }
             return;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.toggle_indicator_panel_at(point, outcome)
+        {
+            return;
+        }
         match self.overlay {
             Some(ClientShellOverlay::NotificationCenter(_)) => {
                 return self.route_notification_center_mouse(mouse, outcome);
@@ -708,8 +722,29 @@ impl ClientShellState {
             Some(ClientShellOverlay::TodoPanel(_)) => {
                 return self.route_todo_panel_mouse(mouse, outcome);
             }
+            // The fork's editor lets the wheel through: it scrolls whatever
+            // is under the pointer, behind the modal, and the editor stays.
+            Some(ClientShellOverlay::TodoEdit(_))
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                ) =>
+            {
+                let editor = self.overlay.take();
+                self.handle_mouse(mouse, outcome);
+                if self.overlay.is_none() {
+                    self.overlay = editor;
+                }
+                return;
+            }
             Some(ClientShellOverlay::TodoEdit(_)) => {
                 return self.route_todo_edit_mouse(mouse, outcome);
+            }
+            Some(ClientShellOverlay::TodoBoard(_)) => {
+                return self.route_todo_board_mouse(mouse, outcome);
             }
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_mouse(mouse, outcome);
@@ -1056,6 +1091,7 @@ impl ClientShellState {
                         let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                         if next != self.workspace_scroll {
                             self.workspace_scroll = next;
+                            self.config.follow_workspace = false;
                             outcome.repaint = true;
                         }
                     }
@@ -1072,6 +1108,7 @@ impl ClientShellState {
                         let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                         if next != self.agent_scroll {
                             self.agent_scroll = next;
+                            self.config.follow_agent = false;
                             outcome.repaint = true;
                         }
                     }
@@ -1567,9 +1604,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                 } else if super::contains(self.hits.overlay_primary, point) {
                     self.apply_settings_choice(outcome);
-                } else if super::contains(self.hits.overlay_cancel, point)
-                    || !super::contains(self.hits.settings_popup, point)
-                {
+                } else {
+                    // As the fork: a click on the close button, outside the
+                    // popup or on its blank interior cancels.
                     let installing = matches!(
                         self.overlay,
                         Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
@@ -1713,7 +1750,7 @@ impl ClientShellState {
                         }
                         self.accept_navigator_selection(outcome);
                     } else if !super::contains(self.hits.navigator_popup, point) {
-                        self.overlay = None;
+                        self.dismiss_navigator();
                         outcome.repaint = true;
                     }
                 }
@@ -1746,6 +1783,9 @@ impl ClientShellState {
                     rename.input.clear();
                     outcome.repaint = true;
                 }
+            } else if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
+                // Any other click cancels, the way Esc does.
+                self.cancel_confirm_close(outcome);
             } else {
                 self.overlay = None;
                 outcome.repaint = true;
@@ -1858,6 +1898,26 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                let agent = self
+                    .hits
+                    .endpoint_agents
+                    .iter()
+                    .find(|(rect, endpoint, _)| {
+                        endpoint == &self.active_endpoint_id && super::contains(*rect, point)
+                    })
+                    .map(|(_, _, id)| id.clone())
+                    .or_else(|| {
+                        self.hits
+                            .agents
+                            .iter()
+                            .find(|(rect, _)| super::contains(*rect, point))
+                            .map(|(_, id)| id.clone())
+                    });
+                if let Some(pane_id) = agent {
+                    self.open_agent_context_menu(pane_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
                 let tab_id = self
                     .hits
                     .tabs
@@ -1914,6 +1974,7 @@ impl ClientShellState {
                 let next = self.agent_scroll.saturating_sub(1);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
+                    self.config.follow_agent = false;
                     outcome.repaint = true;
                 }
             }
@@ -1924,6 +1985,7 @@ impl ClientShellState {
                     .min(self.hits.agent_max_scroll);
                 if next != self.agent_scroll {
                     self.agent_scroll = next;
+                    self.config.follow_agent = false;
                     outcome.repaint = true;
                 }
             }
@@ -1931,6 +1993,7 @@ impl ClientShellState {
                 let next = self.workspace_scroll.saturating_sub(1);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
+                    self.config.follow_workspace = false;
                     outcome.repaint = true;
                 }
             }
@@ -1941,10 +2004,36 @@ impl ClientShellState {
                     .min(self.hits.workspace_max_scroll);
                 if next != self.workspace_scroll {
                     self.workspace_scroll = next;
+                    self.config.follow_workspace = false;
                     outcome.repaint = true;
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, agents, above, page)) = self
+                    .hits
+                    .overflow_edges
+                    .iter()
+                    .find(|(rect, _, _, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    if agents {
+                        self.config.follow_agent = false;
+                    } else {
+                        self.config.follow_workspace = false;
+                    }
+                    let (scroll, max) = if agents {
+                        (&mut self.agent_scroll, self.hits.agent_max_scroll)
+                    } else {
+                        (&mut self.workspace_scroll, self.hits.workspace_max_scroll)
+                    };
+                    *scroll = if above {
+                        scroll.saturating_sub(page)
+                    } else {
+                        scroll.saturating_add(page).min(max)
+                    };
+                    outcome.repaint = true;
+                    return;
+                }
                 if self.selection.take().is_some() {
                     outcome.repaint = true;
                 }
@@ -2007,6 +2096,7 @@ impl ClientShellState {
                             let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                             if next != self.workspace_scroll {
                                 self.workspace_scroll = next;
+                                self.config.follow_workspace = false;
                                 outcome.repaint = true;
                             }
                         }
@@ -2031,6 +2121,7 @@ impl ClientShellState {
                             let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                             if next != self.agent_scroll {
                                 self.agent_scroll = next;
+                                self.config.follow_agent = false;
                                 outcome.repaint = true;
                             }
                         }
@@ -2101,6 +2192,9 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                if self.unpin_marker_at(point, outcome) {
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {

@@ -344,6 +344,7 @@ impl ClientShellState {
                 } => {
                     if self.host_background != Some(color) {
                         self.host_background = Some(color);
+                        self.config.host_background = Some(color);
                         outcome.repaint = true;
                     }
                     if !self.host_appearance_explicit {
@@ -406,7 +407,16 @@ impl ClientShellState {
                 }
                 self.scroll_entry_repeats.remove(&lease_key);
                 let initial_context = self.input_context();
-                let target = self.route_key_press(&key, outcome);
+                let target = if self.label_key(&key, outcome) {
+                    None
+                } else {
+                    if self.mode != ClientShellMode::Resize {
+                        let visible = self.pane_labels_until.is_some();
+                        self.close_pane_labels();
+                        outcome.repaint |= visible;
+                    }
+                    self.route_key_press(&key, outcome)
+                };
                 if let Some(target) = target.as_ref() {
                     self.push_pane_key(target.clone(), key.clone(), outcome);
                 }
@@ -648,6 +658,12 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                | Some(ClientShellOverlay::TodoBoard(
+                    super::todo_board::ClientTodoBoardOverlay {
+                        search_focused: true,
+                        ..
+                    }
+                ))
         )
     }
 
@@ -1122,6 +1138,7 @@ impl ClientShellState {
             || resize_bindings.matches_prefix_key(key)
             || resize_bindings.matches_direct_key(key)
         {
+            self.close_pane_labels();
             self.mode = self.copy_or_terminal_mode();
             outcome.repaint = true;
             return;

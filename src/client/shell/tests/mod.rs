@@ -264,7 +264,9 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod force_confirm;
+mod fork_modals;
 mod graphics;
+mod indicator_clicks;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
@@ -273,7 +275,101 @@ mod link_hover;
 mod mobile;
 mod mouse_selection;
 mod move_picker;
+mod navigator_overlays;
 mod notification_center;
 mod popup_focus_projection;
 mod startup_overlays;
+mod todo_board;
 mod todo_overlays;
+
+#[test]
+fn resize_summary_survives_composition_with_connected_version() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_server_version(&ClientEndpointId::Local, Some("connected-build".into()));
+    let layout = state.layout(180, 30);
+    let mut surface = surface();
+    let area = Rect::new(0, 0, layout.pane_surface.width, layout.pane_surface.height);
+    surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&Buffer::empty(area), None, &[]);
+    surface.panes[0].rect.width = area.width;
+    surface.panes[0].rect.height = area.height;
+    surface.panes[0].inner_rect = surface.panes[0].rect;
+    state.set_pane_surface(surface);
+    state.mode = ClientShellMode::Resize;
+    let frame = state.compose(180, 30).unwrap();
+    let text = frame_rows(&frame).join("\n");
+    assert!(
+        text.contains("h/l width  j/k height  esc done  window 180x30"),
+        "{text}"
+    );
+    assert!(text.contains("VERSION  connected-build"), "{text}");
+}
+
+#[test]
+fn display_panes_digits_follow_server_layout_order_and_key_releases_keep_labels_open() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut snapshot = snapshot();
+    let pane = snapshot.panes[0].clone();
+    snapshot.panes = (1..=9)
+        .map(|index| ClientShellPane {
+            pane_id: format!("pane_{index}"),
+            focused: index == 1,
+            ..pane.clone()
+        })
+        .collect();
+    state.set_snapshot(Box::new(snapshot));
+    let mut surface = surface();
+    let pane = surface.panes[0].clone();
+    surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+        &Buffer::empty(Rect::new(0, 0, 60, 20)),
+        None,
+        &[],
+    );
+    surface.panes = (1..=9)
+        .rev()
+        .map(|index| {
+            let rect = SurfaceRect {
+                x: (index - 1) * 6,
+                y: 0,
+                width: 6,
+                height: 20,
+            };
+            PaneSurfacePane {
+                pane_id: format!("pane_{index}"),
+                rect,
+                inner_rect: rect,
+                focused: index == 1,
+                ..pane.clone()
+            }
+        })
+        .collect();
+    state.set_pane_surface(surface);
+    state.compose(140, 30).unwrap();
+    for (digit, expected) in ('1'..='9').zip((1..=9).rev()) {
+        state.arm_pane_labels(true, std::time::Instant::now());
+        let release = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char('i'), KeyModifiers::NONE)
+                .with_kind(crossterm::event::KeyEventKind::Release),
+        )]);
+        assert!(
+            state.pane_labels_explicit,
+            "prefix+i release must not close its view"
+        );
+        assert!(release.actions.is_empty() && release.requests.is_empty());
+        let press = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char(digit), KeyModifiers::NONE),
+        )]);
+        assert!(!state.pane_labels_explicit);
+        assert!(
+            matches!(&press.actions[..], [ClientShellAction::Endpoint { request, .. }] if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == format!("pane_{expected}")))
+        );
+        let release = state.handle_raw_events(vec![RawInputEvent::Key(
+            crate::input::TerminalKey::new(KeyCode::Char(digit), KeyModifiers::NONE)
+                .with_kind(crossterm::event::KeyEventKind::Release),
+        )]);
+        assert!(
+            release.actions.is_empty() && release.requests.is_empty(),
+            "consumed digit release never reaches the PTY"
+        );
+    }
+}

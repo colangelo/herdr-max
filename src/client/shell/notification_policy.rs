@@ -12,13 +12,21 @@ enum NotificationValidation {
     Stale,
 }
 
-fn notification_duration(kind: SemanticNotificationKind) -> std::time::Duration {
-    std::time::Duration::from_secs(match kind {
-        SemanticNotificationKind::NeedsAttention => 8,
-        SemanticNotificationKind::Finished => 5,
-        SemanticNotificationKind::UpdateInstalled => 3,
-        SemanticNotificationKind::Custom => 5,
-    })
+fn notification_deadline(
+    config: &ClientShellConfig,
+    kind: SemanticNotificationKind,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    let seconds = match kind {
+        SemanticNotificationKind::NeedsAttention => config.herdr_toast.needs_attention_seconds,
+        SemanticNotificationKind::Finished | SemanticNotificationKind::Custom => {
+            config.herdr_toast.finished_seconds
+        }
+        SemanticNotificationKind::UpdateInstalled => config.herdr_toast.update_seconds,
+    };
+    (seconds > 0)
+        .then(|| now.checked_add(std::time::Duration::from_secs(seconds)))
+        .flatten()
 }
 
 impl ClientShellState {
@@ -42,8 +50,17 @@ impl ClientShellState {
         mut notification: ClientVisibleNotification,
         now: std::time::Instant,
     ) {
-        if self.visible_notification.is_none() {
-            notification.deadline = now + notification_duration(notification.event.kind);
+        notification.deadline = notification_deadline(&self.config, notification.event.kind, now);
+        if self.visible_notification.is_none()
+            || notification.deadline.is_none()
+            || self
+                .visible_notification
+                .as_ref()
+                .is_some_and(|visible| visible.deadline.is_none())
+        {
+            if self.visible_notification.is_some() {
+                self.queued_notifications.clear();
+            }
             self.visible_notification = Some(notification);
             return;
         }
@@ -53,11 +70,38 @@ impl ClientShellState {
         self.queued_notifications.push_back(notification);
     }
 
+    /// A toast the client raises itself: the fork's action feedback (a pane
+    /// move refused or failed, a refused todo save), anchored to the focused
+    /// pane and never logged. Like the fork's, it replaces whatever toast is
+    /// showing at once rather than waiting its turn; the queue is kept.
+    /// Returns whether a repaint is due.
+    pub(super) fn push_feedback_toast(&mut self, title: &str, body: impl Into<String>) -> bool {
+        let snapshot = self.snapshot.as_deref();
+        let event = SemanticNotification {
+            kind: SemanticNotificationKind::NeedsAttention,
+            title: title.to_owned(),
+            body: Some(body.into()),
+            sound: None,
+            agent: None,
+            workspace_id: snapshot.and_then(|snapshot| snapshot.focused_workspace_id.clone()),
+            tab_id: snapshot.and_then(|snapshot| snapshot.focused_tab_id.clone()),
+            pane_id: snapshot.and_then(|snapshot| snapshot.focused_pane_id.clone()),
+            position: None,
+        };
+        let now = std::time::Instant::now();
+        self.visible_notification = Some(ClientVisibleNotification {
+            endpoint_id: self.active_endpoint_id.clone(),
+            deadline: notification_deadline(&self.config, event.kind, now),
+            event,
+        });
+        true
+    }
+
     fn promote_queued_notification(&mut self, now: std::time::Instant) -> bool {
         let Some(mut notification) = self.queued_notifications.pop_front() else {
             return false;
         };
-        notification.deadline = now + notification_duration(notification.event.kind);
+        notification.deadline = notification_deadline(&self.config, notification.event.kind, now);
         self.visible_notification = Some(notification);
         true
     }
@@ -152,7 +196,7 @@ impl ClientShellState {
         if self
             .visible_notification
             .as_ref()
-            .is_some_and(|visible| now >= visible.deadline)
+            .is_some_and(|visible| visible.deadline.is_some_and(|deadline| now >= deadline))
         {
             self.visible_notification = None;
             self.promote_queued_notification(now);
@@ -210,12 +254,17 @@ impl ClientShellState {
 
             match self.config.toast_delivery {
                 crate::config::ToastDelivery::Off => {}
-                crate::config::ToastDelivery::Herdr if !target_active => {
+                crate::config::ToastDelivery::Herdr
+                    if !target_active
+                        || (pending.event.kind == SemanticNotificationKind::Custom
+                            && self.config.herdr_toast.pane_feedback
+                                == crate::config::ToastPaneFeedback::Pane) =>
+                {
                     self.queue_visible_notification(
                         ClientVisibleNotification {
                             endpoint_id: pending.endpoint_id,
                             event: pending.event,
-                            deadline: now,
+                            deadline: Some(now),
                         },
                         now,
                     );
@@ -367,5 +416,71 @@ impl ClientShellState {
                 NotificationValidation::Stale
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+    fn note(title: &str) -> ClientVisibleNotification {
+        ClientVisibleNotification {
+            endpoint_id: ClientEndpointId::Local,
+            event: SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: title.into(),
+                body: None,
+                sound: None,
+                agent: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: None,
+                position: None,
+            },
+            deadline: None,
+        }
+    }
+    #[test]
+    fn zero_duration_persists_until_clicked_or_replaced_like_the_fork() {
+        let mut config = Config::default();
+        config.ui.toast.herdr.finished_seconds = 0;
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        let now = std::time::Instant::now();
+        state.queue_visible_notification(note("first"), now);
+        assert!(state
+            .visible_notification
+            .as_ref()
+            .unwrap()
+            .deadline
+            .is_none());
+        state.tick_notifications(now + std::time::Duration::from_secs(60));
+        assert_eq!(
+            state.visible_notification.as_ref().unwrap().event.title,
+            "first"
+        );
+        state.queue_visible_notification(note("replacement"), now);
+        assert_eq!(
+            state.visible_notification.as_ref().unwrap().event.title,
+            "replacement"
+        );
+        assert!(state.queued_notifications.is_empty());
+    }
+    #[test]
+    fn configured_positive_duration_controls_expiry_without_losing_arrival_order() {
+        let mut config = Config::default();
+        config.ui.toast.herdr.finished_seconds = 2;
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+        let now = std::time::Instant::now();
+        state.queue_visible_notification(note("first"), now);
+        state.queue_visible_notification(note("second"), now);
+        state.tick_notifications(now + std::time::Duration::from_secs(1));
+        assert_eq!(
+            state.visible_notification.as_ref().unwrap().event.title,
+            "first"
+        );
+        state.tick_notifications(now + std::time::Duration::from_secs(2));
+        assert_eq!(
+            state.visible_notification.as_ref().unwrap().event.title,
+            "second"
+        );
     }
 }
