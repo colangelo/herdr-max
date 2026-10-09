@@ -1085,7 +1085,7 @@ impl Workspace {
         }
     }
 
-    /// The branch name alone; rendering goes through [`Self::head_label`].
+    /// The branch name alone.
     #[cfg(test)]
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
@@ -1093,7 +1093,10 @@ impl Workspace {
 
     /// What the sidebar's branch slot shows: the branch name, or where a
     /// detached checkout is (`@a620c06`, `rebase @a620c06`) so the entry keeps
-    /// its row instead of quietly losing it. `None` outside a git repo.
+    /// its row instead of quietly losing it. `None` outside a git repo. The
+    /// client builds the same label from the snapshot's branch and its
+    /// `workspace_heads` fact; this copy checks the state those come from.
+    #[cfg(test)]
     pub fn head_label(&self) -> Option<String> {
         self.cached_git_branch.clone().or_else(|| {
             self.cached_git_detached_head

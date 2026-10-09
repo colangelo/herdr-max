@@ -151,6 +151,8 @@ pub struct App {
     pub(crate) session_save_deadline: Option<Instant>,
     /// When the working spinner last stepped; the next step is due one
     /// `status_spinner_interval` later while `AppState::spinner_active`.
+    // wired by the client sidebar motion port (issue 171 tier-2)
+    #[allow(dead_code)]
     pub(crate) last_spinner_tick: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
@@ -237,6 +239,8 @@ fn workspace_sort_from_config(sort: crate::config::WorkspaceSortConfig) -> state
     }
 }
 
+// wired by the client sidebar motion port (issue 171 tier-2)
+#[allow(dead_code)]
 fn sort_motion_bubble_from_config(motion: crate::config::SortMotionConfig) -> bool {
     matches!(motion, crate::config::SortMotionConfig::Bubble)
 }

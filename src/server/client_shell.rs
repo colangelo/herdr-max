@@ -319,26 +319,18 @@ fn resource_facts(
         if let Some(order) = terminal.pin_order {
             pane_pins.insert(public.pane_id.clone(), order);
         }
-        let mut open = 0;
-        let mut highest = None;
-        for todo in terminal.todos().iter().filter(|todo| !todo.done) {
-            open += 1;
-            highest = Some(
-                highest.map_or(todo.priority, |old: crate::terminal::todo::TodoPriority| {
-                    old.max(todo.priority)
-                }),
-            );
-        }
         pane_todos.insert(
             public.pane_id.clone(),
             protocol::ClientPaneTodoSummary {
                 total: terminal.todos().len(),
-                open,
-                highest_priority: highest.map(|priority| match priority {
-                    crate::terminal::todo::TodoPriority::High => "high".to_owned(),
-                    crate::terminal::todo::TodoPriority::Normal => "normal".to_owned(),
-                    crate::terminal::todo::TodoPriority::Low => "low".to_owned(),
-                }),
+                open: terminal.outstanding_todo_count(),
+                highest_priority: terminal
+                    .highest_outstanding_todo_priority()
+                    .map(|priority| match priority {
+                        crate::terminal::todo::TodoPriority::High => "high".to_owned(),
+                        crate::terminal::todo::TodoPriority::Normal => "normal".to_owned(),
+                        crate::terminal::todo::TodoPriority::Low => "low".to_owned(),
+                    }),
                 revision: terminal.todo_revision(),
             },
         );

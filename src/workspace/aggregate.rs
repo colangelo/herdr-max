@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::agent_priority::{attention_priority, display_priority};
+use crate::agent_priority::display_priority;
 use crate::detect::AgentState;
 use crate::layout::PaneId;
 use crate::terminal::{TerminalId, TerminalState};
@@ -95,35 +95,6 @@ impl Workspace {
             .unwrap_or((AgentState::Unknown, true))
     }
 
-    /// The state this workspace *wants the user for*, for attention-ordered
-    /// sorting. Not interchangeable with [`Workspace::display_state`]: a
-    /// finished-but-unseen pane outranks a working one here and only here.
-    pub fn attention_state(
-        &self,
-        terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> (AgentState, bool) {
-        self.pane_states(terminals)
-            .max_by_key(|(state, seen)| attention_priority(*state, *seen))
-            .unwrap_or((AgentState::Unknown, true))
-    }
-
-    /// Most recent agent state change across all panes, for recency tiebreaks
-    /// in attention-sorted lists. `None` when no pane has recorded a change.
-    pub fn last_agent_state_change_seq(
-        &self,
-        terminals: &HashMap<TerminalId, TerminalState>,
-    ) -> Option<u64> {
-        self.tabs
-            .iter()
-            .flat_map(|tab| tab.panes.values())
-            .filter_map(|pane| {
-                terminals
-                    .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.last_agent_state_change_seq)
-            })
-            .max()
-    }
-
     pub fn pane_details(&self, terminals: &HashMap<TerminalId, TerminalState>) -> Vec<PaneDetail> {
         self.tabs
             .iter()
@@ -203,8 +174,7 @@ mod tests {
     }
 
     /// The issue-39 fix: a pane that finished while unseen ("done") must not
-    /// mask an actively working sibling. The same pair still ranks the other
-    /// way for attention, which is what keeps the priority sorts useful.
+    /// mask an actively working sibling.
     ///
     /// <https://gitea.cat-bluegill.ts.net/AC-forks/herdr/issues/39>
     #[test]
@@ -213,7 +183,6 @@ mod tests {
             workspace_with_pane_states(&[(AgentState::Idle, false), (AgentState::Working, true)]);
 
         assert_eq!(ws.display_state(&terminals), (AgentState::Working, true));
-        assert_eq!(ws.attention_state(&terminals), (AgentState::Idle, false));
     }
 
     /// The displayed state is a function of the panes a row covers and nothing
@@ -280,38 +249,6 @@ mod tests {
             ws.tabs[0].display_state(&HashMap::new()),
             (AgentState::Unknown, true)
         );
-    }
-
-    #[test]
-    fn last_agent_state_change_seq_is_max_across_panes() {
-        let mut ws = Workspace::test_new("test");
-        let id2 = ws.test_split(Direction::Horizontal);
-        let root_id = ws.tabs[0]
-            .panes
-            .keys()
-            .find(|id| **id != id2)
-            .copied()
-            .unwrap();
-        let mut terminals = HashMap::new();
-        let mut root_terminal = terminal_for_pane(&ws, root_id);
-        root_terminal.last_agent_state_change_seq = Some(3);
-        terminals.insert(root_terminal.id.clone(), root_terminal);
-        let mut second_terminal = terminal_for_pane(&ws, id2);
-        second_terminal.last_agent_state_change_seq = Some(7);
-        terminals.insert(second_terminal.id.clone(), second_terminal);
-
-        assert_eq!(ws.last_agent_state_change_seq(&terminals), Some(7));
-    }
-
-    #[test]
-    fn last_agent_state_change_seq_none_without_changes() {
-        let ws = Workspace::test_new("test");
-        let mut terminals = HashMap::new();
-        let root = ws.tabs[0].root_pane;
-        let terminal = terminal_for_pane(&ws, root);
-        terminals.insert(terminal.id.clone(), terminal);
-
-        assert_eq!(ws.last_agent_state_change_seq(&terminals), None);
     }
 
     #[test]

@@ -1250,30 +1250,6 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
-/// This process's physical memory footprint in bytes, for tests that must see
-/// memory actually given back to the OS. On macOS that is `phys_footprint`
-/// (what Activity Monitor shows), not RSS: pages released with
-/// `MADV_FREE_REUSABLE` leave the footprint at once but stay in RSS until the
-/// kernel needs them.
-#[cfg(test)]
-pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
-    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
-    // SAFETY: proc_pid_rusage writes a rusage_info_v2 into the buffer for
-    // RUSAGE_INFO_V2, and the buffer is exactly that type.
-    let rc = unsafe {
-        libc::proc_pid_rusage(
-            std::process::id() as libc::c_int,
-            libc::RUSAGE_INFO_V2,
-            info.as_mut_ptr().cast(),
-        )
-    };
-    if rc != 0 {
-        return None;
-    }
-    // SAFETY: the call succeeded, so the struct is initialised.
-    Some(unsafe { info.assume_init() }.ri_phys_footprint)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

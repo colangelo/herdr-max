@@ -8,20 +8,6 @@ use super::state::AppState;
 use crate::layout::PaneId;
 
 impl AppState {
-    /// Turn sync on or off for the tab on screen. `true` when it is on now,
-    /// `false` when it went off or there is no tab.
-    pub(crate) fn toggle_sync_panes(&mut self) -> bool {
-        let Some(tab) = self
-            .active
-            .and_then(|ws_idx| self.workspaces.get_mut(ws_idx))
-            .and_then(crate::workspace::Workspace::active_tab_mut)
-        else {
-            return false;
-        };
-        tab.set_sync(!tab.is_syncing());
-        tab.is_syncing()
-    }
-
     /// Set sync for one tab. `false` when the tab does not exist.
     pub(crate) fn set_tab_sync(&mut self, ws_idx: usize, tab_idx: usize, on: bool) -> bool {
         let Some(tab) = self
@@ -33,39 +19,6 @@ impl AppState {
         };
         tab.set_sync(on);
         true
-    }
-
-    /// Start a group of the focused pane and `other` in one tab (fork issue
-    /// 155), replacing whatever sync state the tab had.
-    pub(crate) fn start_sync_pair(&mut self, ws_idx: usize, tab_idx: usize, other: PaneId) {
-        let Some(tab) = self
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|ws| ws.tabs.get_mut(tab_idx))
-        else {
-            return;
-        };
-        let focused = tab.layout.focused();
-        tab.start_sync_pair(focused, other);
-    }
-
-    /// "Sync input" in a pane menu (fork issue 155). On a pane other than the
-    /// focused one (`source_pane_id` names the focused pane the menu was
-    /// opened from) it starts a group of just those two; on the focused pane
-    /// it is the whole-tab switch, like the key.
-    pub(crate) fn sync_input_from_menu(
-        &mut self,
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: PaneId,
-        source_pane_id: Option<PaneId>,
-    ) {
-        match source_pane_id {
-            Some(source) if source != pane_id => self.start_sync_pair(ws_idx, tab_idx, pane_id),
-            _ => {
-                self.toggle_sync_panes();
-            }
-        }
     }
 
     /// When the earliest ending group's grace is up, for the loops' wake-up
@@ -149,22 +102,36 @@ mod tests {
         (state, [a, b, c])
     }
 
+    /// The whole-tab switch, as `tab.sync` flips it. `true` when it is on now.
+    fn toggle_sync(state: &mut AppState) -> bool {
+        let on = !state.workspaces[0].tabs[0].is_syncing();
+        state.set_tab_sync(0, 0, on);
+        on
+    }
+
+    /// A group of the focused pane and `other`, as `pane.sync_pair` starts it.
+    fn start_pair(state: &mut AppState, other: PaneId) {
+        let tab = &mut state.workspaces[0].tabs[0];
+        let focused = tab.layout.focused();
+        tab.start_sync_pair(focused, other);
+    }
+
     #[test]
     fn sync_is_off_by_default_and_toggles_per_tab() {
         let (mut state, _) = three_panes();
         assert!(!state.workspaces[0].tabs[0].is_syncing());
         assert!(state.sync_peer_panes(0).is_empty());
 
-        assert!(state.toggle_sync_panes());
+        assert!(toggle_sync(&mut state));
         assert!(state.workspaces[0].tabs[0].is_syncing());
-        assert!(!state.toggle_sync_panes());
+        assert!(!toggle_sync(&mut state));
         assert!(!state.workspaces[0].tabs[0].is_syncing());
     }
 
     #[test]
     fn turning_it_on_puts_every_pane_in_and_the_peers_exclude_the_focused_one() {
         let (mut state, [a, b, c]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         let tab = &state.workspaces[0].tabs[0];
         assert!([a, b, c].iter().all(|pane| tab.pane_synced(*pane)));
         let peers = state.sync_peer_panes(0);
@@ -175,7 +142,7 @@ mod tests {
     #[test]
     fn a_pane_can_be_taken_out_and_put_back() {
         let (mut state, [_, b, c]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
 
         assert_eq!(state.toggle_pane_sync(0, b), Some(false));
         assert_eq!(state.sync_peer_panes(0), vec![c]);
@@ -186,7 +153,7 @@ mod tests {
     #[test]
     fn an_excluded_focused_pane_is_typed_into_alone() {
         let (mut state, [a, _, _]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         state.toggle_pane_sync(0, a);
         assert!(state.sync_peer_panes(0).is_empty());
     }
@@ -201,7 +168,7 @@ mod tests {
     #[test]
     fn a_pane_made_while_sync_is_on_joins_and_a_closed_one_leaves() {
         let (mut state, [a, b, _]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         let d = state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].tabs[0].layout.focus_pane(a);
         assert!(
@@ -220,48 +187,34 @@ mod tests {
     #[test]
     fn turning_it_on_again_forgets_earlier_exclusions() {
         let (mut state, [_, b, _]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         state.toggle_pane_sync(0, b);
-        state.toggle_sync_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
+        toggle_sync(&mut state);
         assert!(state.workspaces[0].tabs[0].pane_synced(b));
     }
 
     // ---- fork issue 155: explicit members, a pair, a grace
 
     #[test]
-    fn the_menu_on_another_pane_starts_a_pair_and_the_rest_stay_out() {
+    fn the_whole_tab_switch_syncs_every_pane() {
         let (mut state, [a, b, c]) = three_panes();
-        state.sync_input_from_menu(0, 0, b, Some(a));
-        let tab = &state.workspaces[0].tabs[0];
-        assert!(tab.pane_synced(a) && tab.pane_synced(b) && !tab.pane_synced(c));
-        assert_eq!(state.sync_peer_panes(0), vec![b]);
-    }
-
-    #[test]
-    fn the_menu_on_the_focused_pane_and_the_key_sync_the_whole_tab() {
-        let (mut state, [a, b, c]) = three_panes();
-        state.sync_input_from_menu(0, 0, a, None);
+        toggle_sync(&mut state);
         let tab = &state.workspaces[0].tabs[0];
         assert!([a, b, c].iter().all(|pane| tab.pane_synced(*pane)));
         assert!(tab.sync.as_ref().unwrap().whole_tab);
-
-        let (mut state, [a, b, c]) = three_panes();
-        state.toggle_sync_panes();
-        let tab = &state.workspaces[0].tabs[0];
-        assert!([a, b, c].iter().all(|pane| tab.pane_synced(*pane)));
     }
 
     #[test]
     fn a_new_pane_joins_a_whole_tab_group_and_never_a_pair() {
         let (mut state, [a, b, _]) = three_panes();
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         let d = state.workspaces[0].test_split(Direction::Horizontal);
         assert!(state.workspaces[0].tabs[0].pane_synced(d));
 
         let (mut state, [a2, b2, _]) = three_panes();
         let _ = (a, b);
-        state.start_sync_pair(0, 0, b2);
+        start_pair(&mut state, b2);
         let d = state.workspaces[0].test_split(Direction::Horizontal);
         let tab = &state.workspaces[0].tabs[0];
         assert!(!tab.pane_synced(d), "a pair stays two");
@@ -271,7 +224,7 @@ mod tests {
     #[test]
     fn right_clicking_members_out_and_others_in_edits_the_group() {
         let (mut state, [a, b, c]) = three_panes();
-        state.start_sync_pair(0, 0, b);
+        start_pair(&mut state, b);
         assert_eq!(state.toggle_pane_sync(0, c), Some(true), "c joins");
         assert_eq!(state.toggle_pane_sync(0, a), Some(false), "a leaves");
         let tab = &state.workspaces[0].tabs[0];
@@ -281,7 +234,7 @@ mod tests {
     #[test]
     fn a_group_of_one_stays_in_sync_mode() {
         let (mut state, [a, b, _]) = three_panes();
-        state.start_sync_pair(0, 0, b);
+        start_pair(&mut state, b);
         state.toggle_pane_sync(0, a);
         let tab = &state.workspaces[0].tabs[0];
         assert!(tab.is_syncing() && !tab.sync_ending());
@@ -295,7 +248,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let (mut state, [a, b, _]) = three_panes();
         let t0 = Instant::now();
-        state.start_sync_pair(0, 0, b);
+        start_pair(&mut state, b);
         state.toggle_pane_sync_at(0, a, t0);
         state.toggle_pane_sync_at(0, b, t0);
 
@@ -324,7 +277,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let (mut state, [a, b, c]) = three_panes();
         let t0 = Instant::now();
-        state.start_sync_pair(0, 0, b);
+        start_pair(&mut state, b);
         state.toggle_pane_sync_at(0, a, t0);
         state.toggle_pane_sync_at(0, b, t0);
 
@@ -342,7 +295,7 @@ mod tests {
         use crate::workspace::SYNC_GRACE;
         use std::time::Instant;
         let (mut state, [a, b, _]) = three_panes();
-        state.start_sync_pair(0, 0, b);
+        start_pair(&mut state, b);
         state.workspaces[0].tabs[0].panes.remove(&a);
         state.workspaces[0].tabs[0].panes.remove(&b);
         let t0 = Instant::now();
@@ -357,7 +310,7 @@ mod tests {
         let (mut state, _) = three_panes();
         state.workspaces[0].test_add_tab(Some("two"));
         state.workspaces[0].switch_tab(0);
-        state.toggle_sync_panes();
+        toggle_sync(&mut state);
         assert!(state.workspaces[0].tabs[0].is_syncing());
         assert!(!state.workspaces[0].tabs[1].is_syncing());
     }

@@ -2402,6 +2402,8 @@ impl TerminalState {
         true
     }
 
+    /// Persistence reads the field itself; this is for the tests' asserts.
+    #[cfg(test)]
     pub fn reported_resume(&self) -> Option<&crate::agent_resume::ReportedAgentResume> {
         self.reported_resume.as_ref()
     }

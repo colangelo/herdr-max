@@ -42,20 +42,6 @@ impl LiveKeybindConfig {
     }
 }
 
-impl LiveKeybindConfig {
-    /// Restores the server's own `[[keys.command]]` bindings on a profile that
-    /// came from a client. Every other binding is the client's choice, but a
-    /// custom command runs a shell command on the server host, so its text may
-    /// only ever come from the server's config: the client's copy is dropped
-    /// on arrival and the server's is put back here. Without this a client on
-    /// local keybindings silently loses commands the server has configured —
-    /// they never fire and never show in the keybinding help.
-    pub fn with_server_custom_commands(mut self, server: &Keybinds) -> Self {
-        self.keybinds.custom_commands = server.custom_commands.clone();
-        self
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum BindingConfig {
@@ -3010,32 +2996,5 @@ width = "80%"
             .collect_diagnostics()
             .iter()
             .any(|diag| diag.contains("popup size on non-popup custom command")));
-    }
-    #[test]
-    fn server_custom_commands_survive_a_client_keybind_profile() {
-        // A client profile arrives with no custom commands: the transport
-        // clears whatever it sent, because the text runs on the server host.
-        let client = LiveKeybindConfig {
-            prefix: vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)],
-            keybinds: Keybinds::default(),
-        };
-        assert!(client.keybinds.custom_commands.is_empty());
-
-        let mut server = Keybinds::default();
-        server.custom_commands.push(CustomCommandKeybind {
-            bindings: ActionKeybinds::default(),
-            label: "git".into(),
-            command: "lazygit".into(),
-            action: CustomCommandAction::Popup,
-            description: None,
-            width: None,
-            height: None,
-        });
-
-        let merged = client.with_server_custom_commands(&server);
-        assert_eq!(merged.keybinds.custom_commands.len(), 1);
-        assert_eq!(merged.keybinds.custom_commands[0].command, "lazygit");
-        // The client still owns its prefix and every other binding.
-        assert_eq!(merged.prefix[0].0, KeyCode::Char('a'));
     }
 }

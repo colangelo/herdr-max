@@ -422,7 +422,6 @@ pub(super) struct ClientNavigatorRow {
     pub(super) label: String,
     pub(super) meta: String,
     pub(super) detail: String,
-    pub(super) agent: Option<String>,
     pub(super) status: Option<crate::api::schema::AgentStatus>,
     /// A pane row's status column: "{agent} · {state}" or "shell".
     pub(super) status_text: String,
@@ -2033,6 +2032,7 @@ impl ClientShellState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn show_copy_feedback(&mut self, now: std::time::Instant) -> bool {
         self.show_copy_feedback_for(None, None, now)
     }
