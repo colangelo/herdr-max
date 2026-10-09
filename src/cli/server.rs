@@ -14,6 +14,10 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
         "stop" => server_stop(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
+        "status" => {
+            eprintln!("{}", server_status_hint(&args[1..]));
+            Ok(Some(2))
+        }
         "reload-config" => server_reload_config(&args[1..]).map(Some),
         "agent-manifests" => server_agent_manifests(&args[1..]).map(Some),
         "update-agent-manifests" => server_update_agent_manifests(&args[1..]).map(Some),
@@ -27,6 +31,17 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
             Ok(Some(2))
         }
     }
+}
+
+/// `server status` does not exist; the server's status lives under `herdr
+/// status server`. Carry the caller's flags into the suggested command.
+fn server_status_hint(rest: &[String]) -> String {
+    let mut command = String::from("herdr status server");
+    for arg in rest {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    format!("herdr server has no status subcommand; use: {command}")
 }
 
 fn server_stop(args: &[String]) -> std::io::Result<i32> {
@@ -277,6 +292,22 @@ fn print_server_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_status_hint_points_at_the_status_command_and_keeps_the_flags() {
+        let args = |values: &[&str]| -> Vec<String> {
+            values.iter().map(|value| (*value).to_string()).collect()
+        };
+
+        assert_eq!(
+            server_status_hint(&args(&[])),
+            "herdr server has no status subcommand; use: herdr status server"
+        );
+        assert_eq!(
+            server_status_hint(&args(&["--json"])),
+            "herdr server has no status subcommand; use: herdr status server --json"
+        );
+    }
 
     #[test]
     fn update_agent_manifest_status_fetches_reloads_then_reads_status() {

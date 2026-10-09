@@ -365,7 +365,7 @@ Arguments after `--` are the command Herdr runs to resume this session after a s
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
 
-`agent get` (and `agent list --input-box`) also include `input_box: { "text": … }` for a Claude Code agent whose screen shows its input box: the draft typed there, without the `❯` marker. Faint text (Claude Code's grey reply suggestion, the argument hint of `/compact`) is not part of it, and a `[Pasted text #N]` placeholder is. The text is empty for an empty box, a multi-line draft keeps its lines, and the field is absent when no box is on screen or the agent is not Claude Code. `agent list` leaves it out unless `--input-box` is given, because it reads every Claude Code pane's screen. The `/compact` argument hint is matched by its exact grey (`38;2;153;153;153`), so a theme that draws it in another grey would show it as text; plain `--strip-dim` keeps that hint, which is not faint.
+`agent get` (and `agent list --input-box`) also include `input_box: { "text": … }` for a Claude Code agent whose screen shows its input box: the draft typed there, without the `❯` marker. Faint text (Claude Code's grey reply suggestion, the argument hint of `/compact`) is not part of it, and a `[Pasted text #N]` placeholder is. The text is empty for an empty box, a multi-line draft keeps its lines, and the field is absent when no box is on screen or the agent is not Claude Code. `agent list` leaves it out unless `--input-box` is given, because it reads every Claude Code pane's screen. `agent list` always prints JSON; `--json` is accepted and changes nothing. The `/compact` argument hint is matched by its exact grey (`38;2;153;153;153`), so a theme that draws it in another grey would show it as text; plain `--strip-dim` keeps that hint, which is not faint.
 
 Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
 
@@ -410,7 +410,7 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).
 
 ```bash
-herdr agent list [--input-box]
+herdr agent list [--input-box] [--json]
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]
 herdr agent send-keys <target> <key> [key ...]

@@ -440,12 +440,25 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
-fn agent_list(args: &[String]) -> std::io::Result<i32> {
-    let input_box = args == ["--input-box"];
-    if !args.is_empty() && !input_box {
-        eprintln!("usage: herdr agent list [--input-box]");
-        return Ok(2);
+/// `agent list` always prints JSON, so `--json` is accepted as a no-op for
+/// callers that pass it to every command that offers it.
+fn parse_agent_list_args(args: &[String]) -> Result<bool, ()> {
+    let mut input_box = false;
+    for arg in args {
+        match arg.as_str() {
+            "--input-box" => input_box = true,
+            "--json" => {}
+            _ => return Err(()),
+        }
     }
+    Ok(input_box)
+}
+
+fn agent_list(args: &[String]) -> std::io::Result<i32> {
+    let Ok(input_box) = parse_agent_list_args(args) else {
+        eprintln!("usage: herdr agent list [--input-box] [--json]");
+        return Ok(2);
+    };
 
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:list".into(),
@@ -990,4 +1003,34 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn agent_list_args_accept_json_because_the_output_is_already_json() {
+        assert_eq!(parse_agent_list_args(&args(&[])), Ok(false));
+        assert_eq!(parse_agent_list_args(&args(&["--json"])), Ok(false));
+        assert_eq!(parse_agent_list_args(&args(&["--input-box"])), Ok(true));
+        assert_eq!(
+            parse_agent_list_args(&args(&["--input-box", "--json"])),
+            Ok(true)
+        );
+        assert_eq!(
+            parse_agent_list_args(&args(&["--json", "--input-box"])),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn agent_list_args_reject_unknown_options() {
+        assert!(parse_agent_list_args(&args(&["--yaml"])).is_err());
+        assert!(parse_agent_list_args(&args(&["--json", "extra"])).is_err());
+    }
 }
