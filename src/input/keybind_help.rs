@@ -692,15 +692,19 @@ pub(crate) fn filter_keybind_help_groups(
 mod tests {
     use super::*;
 
+    fn pair(key: &'static str, label: &'static str) -> KeybindHelpEntry {
+        (key.into(), Cow::Borrowed(label))
+    }
+
     fn groups() -> Vec<KeybindHelpGroup> {
         vec![
             (
                 "workspaces / tabs",
-                vec![entry("w", "workspace navigation"), entry("c", "new tab")],
+                vec![pair("w", "workspace navigation"), pair("c", "new tab")],
             ),
             (
                 "panes",
-                vec![entry("v", "split vertical"), entry("x", "close pane")],
+                vec![pair("v", "split vertical"), pair("x", "close pane")],
             ),
         ]
     }

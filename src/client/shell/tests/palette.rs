@@ -368,6 +368,19 @@ fn sends(outcome: &ClientShellInput) -> Vec<(String, Method)> {
         .collect()
 }
 
+fn one(outcome: &ClientShellInput) -> (String, Method) {
+    let mut requests = sends(outcome);
+    assert_eq!(requests.len(), 1, "one request: {requests:?}");
+    requests.remove(0)
+}
+
+fn one_send(outcome: &ClientShellInput) -> (String, crate::api::schema::AgentSendParams) {
+    match one(outcome) {
+        (id, Method::AgentSend(params)) => (id, params),
+        other => panic!("expected an agent.send, got {other:?}"),
+    }
+}
+
 fn pick(state: &mut ClientShellState, name: &str) {
     open(state);
     type_text(state, &format!("send {name}"));
@@ -462,7 +475,7 @@ fn enter_sends_the_message_typed_as_you_and_the_receipt_says_what_it_means() {
     pick(&mut state, "reviewer");
     type_text(&mut state, "take a look at the diff");
     let outcome = state.handle_input_bytes(b"\r");
-    let [(id, method)] = sends(&outcome).try_into().expect("one request");
+    let (id, method) = one(&outcome);
     assert_eq!(
         method,
         Method::AgentSend(crate::api::schema::AgentSendParams {
@@ -495,9 +508,7 @@ fn tab_sends_it_as_a_note_and_a_held_note_is_shown_in_its_own_words() {
     type_text(&mut state, "fyi");
     state.handle_input_bytes(b"\t");
     let outcome = state.handle_input_bytes(b"\r");
-    let [(id, Method::AgentSend(params))] = sends(&outcome).try_into().expect("one request") else {
-        panic!("expected an agent.send");
-    };
+    let (id, params) = one_send(&outcome);
     assert_eq!(params.mode, AgentSendMode::Note);
 
     state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentSendMode::Note)));
@@ -530,9 +541,7 @@ fn a_working_session_queues_and_alt_enter_interrupts() {
 
     type_text(&mut state, "stop and rebase");
     let queued = state.handle_input_bytes(b"\r");
-    let [(_, Method::AgentSend(params))] = sends(&queued).try_into().expect("one request") else {
-        panic!("expected an agent.send");
-    };
+    let (_, params) = one_send(&queued);
     assert_eq!(params.busy, AgentSendBusy::Queue);
 
     // A fresh bar: alt+enter is escape then enter.
@@ -540,10 +549,7 @@ fn a_working_session_queues_and_alt_enter_interrupts() {
     pick(&mut state, "builder");
     type_text(&mut state, "stop and rebase");
     let interrupt = state.handle_input_bytes(b"\x1b\r");
-    let [(_, Method::AgentSend(params))] = sends(&interrupt).try_into().expect("one request")
-    else {
-        panic!("expected an agent.send");
-    };
+    let (_, params) = one_send(&interrupt);
     assert_eq!(params.busy, AgentSendBusy::Interrupt);
 }
 
@@ -578,9 +584,7 @@ fn a_blocked_session_is_offered_its_pane_not_free_text() {
     // The default is a note, never typed text.
     type_text(&mut state, "ping");
     let outcome = state.handle_input_bytes(b"\r");
-    let [(_, Method::AgentSend(params))] = sends(&outcome).try_into().expect("one request") else {
-        panic!("expected an agent.send");
-    };
+    let (_, params) = one_send(&outcome);
     assert_eq!(params.mode, AgentSendMode::Note);
 }
 
@@ -590,7 +594,7 @@ fn a_refusal_is_shown_under_the_message_and_the_message_is_kept() {
     pick(&mut state, "reviewer");
     type_text(&mut state, "hello there");
     let outcome = state.handle_input_bytes(b"\r");
-    let [(id, _)] = sends(&outcome).try_into().expect("one request");
+    let (id, _) = one(&outcome);
     state.handle_endpoint_result(
         "boot-1",
         &id,

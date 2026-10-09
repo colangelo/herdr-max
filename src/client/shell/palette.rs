@@ -1331,7 +1331,7 @@ impl ClientShellState {
         let filtering = palette.filtering();
         let hovered = layout
             .row_at(mouse.column, mouse.row, palette.items.len())
-            .filter(|index| filtering)
+            .filter(|_| filtering)
             .filter(|index| matches!(palette.items.get(*index), Some(PaletteItem::Command(_))));
         match mouse.kind {
             MouseEventKind::Moved => {
