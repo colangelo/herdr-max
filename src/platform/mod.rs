@@ -238,9 +238,17 @@ pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     Ok((cols, rows))
 }
 
+#[cfg(unix)]
+pub(crate) mod daemon_reaper;
+
 #[cfg(not(windows))]
 pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {
-    command.spawn().map(|child| child.id())
+    let pid = command.spawn().map(|child| child.id())?;
+    // The server is detached but still our child: reap it when it exits, or a
+    // client that outlives a live handoff keeps it as a zombie (issue 179).
+    #[cfg(unix)]
+    daemon_reaper::reap_when_it_exits(pid);
+    Ok(pid)
 }
 
 #[cfg(not(target_os = "macos"))]

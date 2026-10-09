@@ -181,6 +181,12 @@ fn run_client_with_mode(
             crate::config::config_diagnostic_summary(&loaded_config.diagnostics)
         };
     let startup_config_diagnostic = reexec::with_update_notice(startup_config_diagnostic);
+    #[cfg(unix)]
+    crate::platform::daemon_reaper::adopt_inherited(
+        std::env::var(crate::platform::daemon_reaper::SPAWNED_DAEMONS_ENV_VAR)
+            .ok()
+            .as_deref(),
+    );
     let shell_config = client_rendered_shell.then(|| {
         shell::ClientShellConfig::from_config(&loaded_config.config)
             .with_startup_config_diagnostic(startup_config_diagnostic)
