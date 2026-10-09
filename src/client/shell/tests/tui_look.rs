@@ -183,7 +183,7 @@ fn composed_bar(mode: ClientShellMode, explicit_labels: bool, sync: bool) -> (Fr
     if explicit_labels {
         state.arm_pane_labels(true, std::time::Instant::now());
     }
-    let frame = state.compose(140, 12).unwrap();
+    let frame = state.compose(140, 12).unwrap().frame;
     (frame, state.config.palette)
 }
 
