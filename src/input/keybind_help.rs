@@ -249,6 +249,10 @@ pub(crate) fn keybind_help_groups(
                     binding_label(&keybinds.focus_pane_right),
                     "focus pane right",
                 ),
+                entry(binding_label(&keybinds.swap_pane_left), "swap pane left"),
+                entry(binding_label(&keybinds.swap_pane_down), "swap pane down"),
+                entry(binding_label(&keybinds.swap_pane_up), "swap pane up"),
+                entry(binding_label(&keybinds.swap_pane_right), "swap pane right"),
                 entry(binding_label(&keybinds.cycle_pane_next), "cycle pane next"),
                 entry(
                     binding_label(&keybinds.cycle_pane_previous),
