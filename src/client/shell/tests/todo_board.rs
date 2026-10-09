@@ -286,12 +286,18 @@ fn row(inner: &str) -> String {
     format!("│{inner:<78}│")
 }
 
-/// The search row: the left part, the count one cell in from the right edge.
-fn search_row(left: &str, count: &str) -> String {
+/// The title row: `todos/notes`, the count one cell in from the right edge (fork issue 174).
+fn title_row(count: &str) -> String {
     row(&format!(
-        "{left:<width$}{count} ",
+        "{:<width$}{count} ",
+        " todos/notes",
         width = 78 - 1 - count.len()
     ))
+}
+
+/// A rule: `─` inset one column on both sides.
+fn rule_row() -> String {
+    row(&format!(" {} ", "─".repeat(76)))
 }
 
 /// A todo row: indented two cells, the glyph, the text, the id at the right.
@@ -353,9 +359,9 @@ fn snapshot_populated() {
         boxed(&mut state),
         vec![
             border("┌", "┐"),
-            row(" todos/notes"),
-            search_row(" / search todos", "3 todos"),
-            row(""),
+            title_row("3 todos"),
+            row(" / search todos"),
+            rule_row(),
             row(" board · pane 1"),
             todo_row(" ▲ ", "rerun the deploy", 1),
             todo_row(" ● ", "check the 403 on login", 2),
@@ -378,9 +384,9 @@ fn snapshot_two_groups_are_separated_by_a_blank_row() {
         boxed(&mut state),
         vec![
             border("┌", "┐"),
-            row(" todos/notes"),
-            search_row(" / search todos", "2 todos"),
-            row(""),
+            title_row("2 todos"),
+            row(" / search todos"),
+            rule_row(),
             row(" board · pane 1"),
             todo_row(" ▲ ", "rerun the deploy", 1),
             row(""),
@@ -405,9 +411,9 @@ fn snapshot_board_searching_keeps_the_box_and_the_count() {
         boxed(&mut state),
         vec![
             border("┌", "┐"),
-            row(" todos/notes"),
-            search_row(" / 403", "2 todos"),
-            row(""),
+            title_row("2 todos"),
+            row(" / 403"),
+            rule_row(),
             row(" board · pane 2"),
             todo_row(" ● ", "check the 403 on login", 1),
             row(""),
@@ -430,9 +436,9 @@ fn snapshot_empty() {
         boxed(&mut state),
         vec![
             border("┌", "┐"),
-            row(" todos/notes"),
-            search_row(" / search todos", "0 todos"),
-            row(""),
+            title_row("0 todos"),
+            row(" / search todos"),
+            rule_row(),
             row(" nothing outstanding"),
             row(""),
             footer_row(&[OPEN, CLOSE]),
@@ -587,7 +593,7 @@ fn a_todo_row_reads_as_it_does_on_the_pane_panel() {
 }
 
 #[test]
-fn a_multi_line_todo_shows_its_text_in_a_box_under_the_title() {
+fn a_multi_line_todo_shows_its_text_in_a_preview_under_the_list() {
     let mut state = state_with(session(&[("board", &[""])]));
     open_with(
         &mut state,
@@ -603,21 +609,29 @@ fn a_multi_line_todo_shows_its_text_in_a_box_under_the_title() {
         ],
     );
     let layout = layout(&state);
-    let detail = layout.detail.expect("detail box");
+    let detail = layout.detail.expect("preview");
     let title = layout.header_row(0);
     let search = layout.search_row();
-    let text = screen(&mut state).join("\n");
+    let rows = boxed(&mut state);
+    let text = rows.join("\n");
 
-    assert_eq!(detail.y, title.y + 1);
-    assert_eq!(search.y, detail.bottom());
+    // Fork issue 174: title, search, rule, list; the preview sits under the list after a rule,
+    // with no frame of its own.
+    assert_eq!(search.y, title.y + 1);
     assert_eq!(layout.list.y, search.y + 2);
+    assert_eq!(detail.y, layout.list.bottom());
+    assert_eq!(layout.footer_row.unwrap().y, detail.bottom() + 1);
+    let preview = usize::from(detail.y - layout.outer.y);
+    assert_eq!(rows[preview], rule_row());
+    assert_eq!(rows[preview + 1], row(" the plan"));
+    assert_eq!(rows[preview + 2], row(" second line"));
+    assert_eq!(rows[preview + 3], row(" third line"));
     assert!(text.contains("the plan ⏎"), "{text}");
-    assert!(text.contains("second line"), "{text}");
-    assert!(text.contains("third line"), "{text}");
+    assert_eq!(text.matches('┌').count(), 1, "no inner frame: {text}");
 }
 
 #[test]
-fn the_box_keeps_its_height_and_names_an_empty_detail_as_the_selection_moves() {
+fn the_preview_keeps_its_height_and_names_an_empty_detail_as_the_selection_moves() {
     let mut state = state_with(session(&[("board", &[""])]));
     open_with(
         &mut state,
@@ -1515,4 +1529,46 @@ fn keybind_help_lists_the_board_and_its_chords() {
         find("todo board", "close board").as_deref(),
         Some("esc / q")
     );
+}
+
+// -- the approved look (fork issue 174) -----------------------------------------
+
+#[test]
+fn the_board_title_row_carries_a_dim_count_and_the_rule_is_surface1() {
+    let mut state = sample();
+    let frame = state.compose(W, H).expect("frame");
+    let layout = layout(&state);
+    let title = layout.header_row(0);
+    let cell = |x: u16, y: u16| &frame.cells[usize::from(y) * usize::from(W) + usize::from(x)];
+    let p = &state.config.palette;
+    // The count's last digit is two cells in from the title row's right edge.
+    let count = cell(title.right() - 2, title.y);
+    assert_eq!(count.symbol, "s", "the count ends the title row");
+    assert_eq!(count.fg, crate::protocol::color_to_u32(p.overlay0));
+    let rule = cell(title.x + 1, layout.search_row().y + 1);
+    assert_eq!(rule.symbol, "─");
+    assert_eq!(rule.fg, crate::protocol::color_to_u32(p.surface1));
+}
+
+#[test]
+fn open_pane_is_always_the_accent_primary_and_the_rest_are_surface0() {
+    let mut state = sample();
+    let frame = state.compose(W, H).expect("frame");
+    let layout = layout(&state);
+    let p = &state.config.palette;
+    let at =
+        |rect: Rect| &frame.cells[usize::from(rect.y) * usize::from(W) + usize::from(rect.x + 1)];
+    for (rect, button) in &layout.buttons {
+        let cell = at(*rect);
+        let expected = if *button == TodoBoardButton::Open {
+            p.accent
+        } else {
+            p.surface0
+        };
+        assert_eq!(
+            cell.bg,
+            crate::protocol::color_to_u32(expected),
+            "{button:?}"
+        );
+    }
 }
