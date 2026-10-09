@@ -494,7 +494,8 @@ use windows_sys::{
                 OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
                 TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
                 PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+                THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -2671,12 +2672,22 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
     }
 
     for &pid in pids {
-        let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+        // TerminateProcess needs PROCESS_TERMINATE on the handle; a
+        // query-only handle makes it fail with access denied.
+        let Some(process) =
+            ProcessHandle::open(pid, PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION)
+        else {
+            eprintln!(
+                "[respawn-probe] signal_processes: OpenProcess({pid}) failed: {}",
+                std::io::Error::last_os_error()
+            );
             continue;
         };
-        unsafe {
-            TerminateProcess(process.0, 1);
-        }
+        let terminated = unsafe { TerminateProcess(process.0, 1) };
+        eprintln!(
+            "[respawn-probe] signal_processes: TerminateProcess({pid}) with a PROCESS_TERMINATE handle -> {terminated} (0 = failed), last error: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
 

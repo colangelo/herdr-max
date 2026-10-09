@@ -2287,8 +2287,18 @@ fn shutdown_pane_processes(
             std::time::Duration::from_millis(250),
         ),
     ] {
+        eprintln!(
+            "[respawn-probe] shutdown_pane_processes pane={} child_pid={child_pid} pids={pids:?} sending {signal:?}",
+            pane_id.raw()
+        );
         crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
+        let probe_exited =
+            wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace);
+        eprintln!(
+            "[respawn-probe] shutdown_pane_processes pane={} after {signal:?}: all exited={probe_exited}",
+            pane_id.raw()
+        );
+        if probe_exited {
             info!(
                 pane = pane_id.raw(),
                 pid = child_pid,
@@ -3287,9 +3297,18 @@ impl PaneRuntime {
                 child_pid.store(pid, Ordering::Release);
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
+            let probe_pid = child.process_id();
             tokio::task::spawn_blocking(move || {
+                eprintln!(
+                    "[respawn-probe] child watcher pane={} pid={probe_pid:?}: entering child.wait()",
+                    pane_id.raw()
+                );
                 let exit_reason = match child.wait() {
                     Ok(status) => {
+                        eprintln!(
+                            "[respawn-probe] child watcher pane={} pid={probe_pid:?}: child.wait() returned {status:?}",
+                            pane_id.raw()
+                        );
                         let exit_reason = crate::platform::classify_child_exit(&status);
                         let status_text = format!("{status:?}");
                         crate::logging::pane_exited(pane_id.raw(), &status_text);

@@ -29,6 +29,16 @@ function Invoke-CargoWithZigCacheRecovery {
     Invoke-Checked cargo $Arguments
 }
 
+# THROWAWAY PROBE (Herdr Max issue 188): run only the respawn probe tests, live
+# output, no fmt/clippy/retry. Never merge this.
+& cargo nextest run --locked `
+    -E "test(respawn_pane_runtime_falls_back_to_a_shell_without_launch_argv) | test(respawn_probe_settled_shell_shutdown) | test(respawn_does_not_pull_focus_to_the_pane_s_workspace) | test(replaced_runtime_exit_does_not_close_the_respawned_pane) | test(respawn_pane_runtime_clears_agent_runtime_identity) | test(respawn_pane_runtime_shell_target_ignores_the_launch_argv)" `
+    --no-fail-fast --no-capture --status-level all --final-status-level all
+if ($LASTEXITCODE -ne 0) {
+    throw "respawn probe: nextest exited with code $LASTEXITCODE"
+}
+return
+
 Invoke-Checked cargo @("fmt", "--check")
 Invoke-CargoWithZigCacheRecovery @(
     "clippy",

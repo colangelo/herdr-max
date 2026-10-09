@@ -2593,7 +2593,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn app_with_single_pane_workspace() -> (App, crate::layout::PaneId, crate::terminal::TerminalId)
     {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2693,24 +2692,147 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
-    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn respawn_pane_runtime_falls_back_to_a_shell_without_launch_argv() {
+    // ---- THROWAWAY PROBE (Herdr Max issue 188) -------------------------------
+    // Traces every step of spawn -> respawn -> shutdown with timestamps, and
+    // kills the whole test process 45 s after it starts (nextest's own
+    // slow-timeout is 60 s) after printing the last step reached and the
+    // process list. The watchdog stays armed after the test body returns, so a
+    // hang in the #[tokio::test] runtime drop (which joins spawn_blocking
+    // tasks, i.e. the child watcher's child.wait()) is reported too.
+
+    struct RespawnProbe {
+        start: std::time::Instant,
+        last_step: std::sync::Arc<std::sync::Mutex<String>>,
+    }
+
+    fn probe_dump_processes(label: &str) {
+        let output = if cfg!(windows) {
+            std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'pwsh|powershell|conhost|OpenConsole|herdr' } | Select-Object ProcessId,ParentProcessId,Name | Format-Table -AutoSize | Out-String -Width 200",
+                ])
+                .output()
+        } else {
+            std::process::Command::new("ps")
+                .args(["-eo", "pid,ppid,comm"])
+                .output()
+        };
+        match output {
+            Ok(output) => eprintln!(
+                "[respawn-probe] process list ({label}), test pid = {}:\n{}",
+                std::process::id(),
+                String::from_utf8_lossy(&output.stdout)
+            ),
+            Err(err) => eprintln!("[respawn-probe] process list ({label}) failed: {err}"),
+        }
+    }
+
+    impl RespawnProbe {
+        fn start(label: &'static str, timeout: Duration) -> Self {
+            let start = std::time::Instant::now();
+            let last_step = std::sync::Arc::new(std::sync::Mutex::new(String::from("started")));
+            let watched = std::sync::Arc::clone(&last_step);
+            let spawned = std::thread::Builder::new()
+                .name("respawn-probe-watchdog".into())
+                .spawn(move || {
+                    std::thread::sleep(timeout);
+                    let last = watched
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    eprintln!(
+                        "[respawn-probe] {label} WATCHDOG: still running {:.1}s after start; last step reached: {last}",
+                        start.elapsed().as_secs_f64()
+                    );
+                    probe_dump_processes("watchdog");
+                    std::process::exit(101);
+                });
+            if let Err(err) = spawned {
+                eprintln!("[respawn-probe] could not start the watchdog thread: {err}");
+            }
+            eprintln!(
+                "[respawn-probe] {label} started, pid {}",
+                std::process::id()
+            );
+            Self { start, last_step }
+        }
+
+        fn step(&self, what: &str) {
+            *self
+                .last_step
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = what.to_string();
+            eprintln!(
+                "[respawn-probe] +{:>7.3}s {what}",
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    // Poll the app's event channel for a PaneDied, which the child watcher
+    // sends only after child.wait() has returned.
+    fn probe_saw_pane_died(app: &mut App, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            while let Ok(event) = app.event_rx.try_recv() {
+                if matches!(event, AppEvent::PaneDied { .. }) {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn probe_wait_until_dead(pid: u32, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if !crate::platform::process_exists(pid) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // The original test body plus tracing. `settle` waits between respawn and
+    // shutdown so the teardown no longer races the shell's start-up.
+    fn respawn_probe_body(label: &'static str, settle: Duration) {
+        let probe = RespawnProbe::start(label, Duration::from_secs(45));
+        probe.step("building the app and a one-pane workspace");
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        probe.step(&format!(
+            "app built; state.default_shell = {:?}",
+            app.state.default_shell
+        ));
         assert!(app
             .state
             .terminals
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.launch_argv.is_none()));
 
-        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv));
+        probe.step("calling respawn_pane_runtime(LaunchArgv): spawns the shell");
+        let respawned = app.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv);
+        probe.step(&format!("respawn_pane_runtime returned {respawned}"));
+        assert!(respawned);
 
+        let pid = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.child_pid());
+        probe.step(&format!(
+            "child pid = {pid:?}, process_exists = {:?}",
+            pid.map(crate::platform::process_exists)
+        ));
         assert!(
-            app.terminal_runtimes
-                .get(&terminal_id)
-                .and_then(|runtime| runtime.child_pid())
-                .is_some(),
+            pid.is_some(),
             "a shell pane should come back with a live child"
         );
         assert!(app
@@ -2719,11 +2841,71 @@ mod tests {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.launch_argv.is_none()));
 
-        shutdown_test_runtimes(&mut app);
+        if !settle.is_zero() {
+            probe.step(&format!("settling for {settle:?} before shutdown"));
+            std::thread::sleep(settle);
+            probe.step(&format!(
+                "settled; process_exists = {:?}",
+                pid.map(crate::platform::process_exists)
+            ));
+        }
+
+        // Same as shutdown_test_runtimes, one step at a time.
+        probe.step("draining terminal_runtimes");
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            probe.step("calling runtime.shutdown() (actor shutdown + shutdown_pane_processes)");
+            runtime.shutdown();
+            probe.step("runtime.shutdown() returned");
+        }
+
+        if let Some(pid) = pid {
+            let dead = probe_wait_until_dead(pid, Duration::from_secs(5));
+            probe.step(&format!("child {pid} dead within 5 s of shutdown = {dead}"));
+            let died = probe_saw_pane_died(&mut app, Duration::from_secs(if dead { 5 } else { 1 }));
+            probe.step(&format!(
+                "PaneDied seen on event_rx (child watcher's child.wait() returned) = {died}"
+            ));
+            if !dead {
+                probe.step(
+                    "HYPOTHESIS: shutdown() left the shell running; process list, then force-kill",
+                );
+                probe_dump_processes("child survived shutdown");
+                let pid_arg = pid.to_string();
+                let killed = if cfg!(windows) {
+                    std::process::Command::new("taskkill")
+                        .args(["/PID", pid_arg.as_str(), "/T", "/F"])
+                        .output()
+                } else {
+                    std::process::Command::new("kill")
+                        .args(["-9", pid_arg.as_str()])
+                        .output()
+                };
+                probe.step(&format!(
+                    "force kill of {pid} -> {:?}",
+                    killed.as_ref().map(|output| output.status)
+                ));
+                let died = probe_saw_pane_died(&mut app, Duration::from_secs(5));
+                probe.step(&format!("PaneDied seen after the force kill = {died}"));
+            }
+        }
+
+        probe_dump_processes("end of test body");
+        probe.step(
+            "test body finished; the #[tokio::test] runtime drop now joins spawn_blocking tasks",
+        );
     }
 
-    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
-    #[cfg(unix)]
+    #[tokio::test]
+    async fn respawn_pane_runtime_falls_back_to_a_shell_without_launch_argv() {
+        respawn_probe_body("immediate-shutdown", Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn respawn_probe_settled_shell_shutdown() {
+        respawn_probe_body("settled-shutdown", Duration::from_secs(3));
+    }
+
     #[tokio::test]
     async fn respawn_pane_runtime_clears_agent_runtime_identity() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
@@ -2837,8 +3019,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(moved_to.parent().unwrap_or(&moved_to));
     }
 
-    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
-    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_does_not_pull_focus_to_the_pane_s_workspace() {
         let (mut app, pane_id, _) = app_with_single_pane_workspace();
@@ -2859,8 +3039,6 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
-    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
-    #[cfg(unix)]
     #[tokio::test]
     async fn replaced_runtime_exit_does_not_close_the_respawned_pane() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
@@ -2896,8 +3074,6 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
-    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
-    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_pane_runtime_shell_target_ignores_the_launch_argv() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
