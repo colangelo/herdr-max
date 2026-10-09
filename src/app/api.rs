@@ -2704,6 +2704,8 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
+    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
+    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_pane_runtime_clears_agent_runtime_identity() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
@@ -2867,6 +2869,8 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
+    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
+    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_pane_runtime_shell_target_ignores_the_launch_argv() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
