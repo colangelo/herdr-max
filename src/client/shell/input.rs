@@ -1090,6 +1090,7 @@ impl ClientShellState {
                     &self.endpoints,
                     &self.active_endpoint_id,
                     self.config.agent_panel_sort,
+                    Some(&self.config.sort_motion),
                 );
                 let exists = entries.get(*index).is_some();
                 if !exists {

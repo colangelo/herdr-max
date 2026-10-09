@@ -29,6 +29,7 @@ fn out_of_range_agent_jump_logs_the_displayed_count_and_sends_no_input() {
             &state.endpoints,
             &state.active_endpoint_id,
             state.config.agent_panel_sort,
+            Some(&state.config.sort_motion),
         )
         .len();
         assert!(entries < 8);

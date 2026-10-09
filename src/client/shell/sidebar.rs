@@ -60,7 +60,7 @@ pub(crate) fn render_collapsed_sidebar(
     let active_background = workspace_active_background(palette, selected_workspace_id.is_some());
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
-    let entries = workspace_entries(snapshot, collapsed_groups);
+    let entries = workspace_entries(snapshot, collapsed_groups, Some(&config.sort_motion));
     for (index, entry) in entries
         .iter()
         .take(workspace_area.height as usize)
@@ -134,10 +134,11 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
-        .into_iter()
-        .take(detail_content.height as usize)
-        .enumerate()
+    for (index, pane_id) in
+        super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort, Some(&config.sort_motion))
+            .into_iter()
+            .take(detail_content.height as usize)
+            .enumerate()
     {
         let Some(agent) = snapshot
             .agents
@@ -249,7 +250,7 @@ pub(crate) fn render_sidebar(
 
     render_host_label(buffer, workspace_area, snapshot, config);
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let entries = workspace_entries(snapshot, state.collapsed_groups, Some(&config.sort_motion));
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -526,9 +527,36 @@ pub(crate) fn render_sidebar(
     );
 }
 
+/// Worktree keys whose spaces form a group: a main checkout plus at least
+/// one linked worktree.
+pub(crate) fn grouped_worktree_keys(snapshot: &ClientShellSnapshot) -> HashSet<&str> {
+    let mut kinds = HashMap::<&str, (bool, bool)>::new();
+    for worktree in snapshot
+        .workspaces
+        .iter()
+        .filter_map(|workspace| workspace.worktree.as_ref())
+    {
+        let (linked, main) = kinds.entry(&worktree.key).or_default();
+        if worktree.is_linked_worktree {
+            *linked = true;
+        } else {
+            *main = true;
+        }
+    }
+    kinds
+        .into_iter()
+        .filter(|(_, (linked, main))| *linked && *main)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The space list in drawn order. `motion` applies the bubble-motion
+/// projection; pass `None` only for the sorted target itself or for lists
+/// that never animate.
 pub(crate) fn workspace_entries(
     snapshot: &ClientShellSnapshot,
     collapsed_groups: &HashSet<String>,
+    motion: Option<&crate::client::shell::sort_motion::SortMotion>,
 ) -> Vec<WorkspaceEntry> {
     let mut members = HashMap::<&str, Vec<usize>>::new();
     for (index, workspace) in snapshot.workspaces.iter().enumerate() {
@@ -536,23 +564,7 @@ pub(crate) fn workspace_entries(
             members.entry(&worktree.key).or_default().push(index);
         }
     }
-    let grouped = members
-        .iter()
-        .filter(|(_, indices)| {
-            indices.iter().any(|index| {
-                snapshot.workspaces[*index]
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|worktree| worktree.is_linked_worktree)
-            }) && indices.iter().any(|index| {
-                snapshot.workspaces[*index]
-                    .worktree
-                    .as_ref()
-                    .is_some_and(|worktree| !worktree.is_linked_worktree)
-            })
-        })
-        .map(|(key, _)| *key)
-        .collect::<HashSet<_>>();
+    let grouped = grouped_worktree_keys(snapshot);
     let mut emitted = HashSet::<&str>::new();
     let mut entries = Vec::new();
     for (index, workspace) in snapshot.workspaces.iter().enumerate() {
@@ -634,6 +646,9 @@ pub(crate) fn workspace_entries(
         }
     }
     super::pins::order_workspaces(snapshot, &grouped, &mut entries);
+    if let Some(motion) = motion {
+        motion.project_workspaces(snapshot, &grouped, &mut entries);
+    }
     for (visible_index, entry) in entries.iter_mut().enumerate() {
         entry.visible_index = visible_index;
         entry.group_collapsed = snapshot.workspaces[entry.index]

@@ -122,17 +122,18 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
-                                .into_iter()
-                                .filter_map(|entry| {
-                                    snapshot.workspaces.get(entry.index).map(|workspace| {
-                                        (
-                                            endpoint.endpoint_id.clone(),
-                                            workspace.workspace_id.clone(),
-                                        )
-                                    })
+                            render::workspace_entries(
+                                snapshot,
+                                &HashSet::new(),
+                                Some(&self.config.sort_motion),
+                            )
+                            .into_iter()
+                            .filter_map(|entry| {
+                                snapshot.workspaces.get(entry.index).map(|workspace| {
+                                    (endpoint.endpoint_id.clone(), workspace.workspace_id.clone())
                                 })
-                                .collect()
+                            })
+                            .collect()
                         })
                 })
                 .collect::<Vec<_>>();
@@ -171,6 +172,7 @@ impl ClientShellState {
                 &self.endpoints,
                 &self.active_endpoint_id,
                 self.config.agent_panel_sort,
+                Some(&self.config.sort_motion),
             );
             if agents.is_empty() {
                 return true;

@@ -360,8 +360,18 @@ fn activity_summary(snapshot: &ClientShellSnapshot, workspace_id: &str) -> Strin
 }
 
 /// Build the picker for the focused pane, or say why there is none.
+#[cfg(test)]
 pub(super) fn move_picker_for_snapshot(
     snapshot: &ClientShellSnapshot,
+) -> Result<ClientMovePickerOverlay, &'static str> {
+    move_picker_in_drawn_order(snapshot, None)
+}
+
+/// Destinations in the space list's drawn order at open time, bubble motion
+/// included, as the fork's picker listed them.
+pub(super) fn move_picker_in_drawn_order(
+    snapshot: &ClientShellSnapshot,
+    motion: Option<&super::sort_motion::SortMotion>,
 ) -> Result<ClientMovePickerOverlay, &'static str> {
     let source_pane = snapshot
         .focused_pane_id
@@ -400,7 +410,7 @@ pub(super) fn move_picker_for_snapshot(
 
     // The source space first, then the sidebar's order.
     let mut order = vec![source_workspace];
-    for entry in super::sidebar::workspace_entries(snapshot, &HashSet::new()) {
+    for entry in super::sidebar::workspace_entries(snapshot, &HashSet::new(), motion) {
         if let Some(workspace) = snapshot.workspaces.get(entry.index) {
             if workspace.workspace_id != source_workspace.workspace_id {
                 order.push(workspace);
@@ -1211,7 +1221,7 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        match move_picker_for_snapshot(snapshot) {
+        match move_picker_in_drawn_order(snapshot, Some(&self.config.sort_motion)) {
             Ok(picker) => {
                 self.overlay = Some(ClientShellOverlay::MovePicker(picker));
             }

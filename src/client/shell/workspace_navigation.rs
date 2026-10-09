@@ -114,7 +114,11 @@ impl ClientShellState {
                 self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups)
             };
-            let entries = render::workspace_entries(snapshot, collapsed_groups);
+            let entries = render::workspace_entries(
+                snapshot,
+                collapsed_groups,
+                Some(&self.config.sort_motion),
+            );
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {
                     endpoint_id: endpoint.endpoint_id.clone(),
