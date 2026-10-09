@@ -1197,7 +1197,7 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
 
     state.open_settings_overlay();
     state.compose(106, 30).expect("settings overlay");
-    for _ in 0..3 {
+    for _ in 0..4 {
         let next = state.handle_input_bytes(b"\t");
         assert!(next.actions.is_empty());
     }
@@ -1249,7 +1249,7 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
         .join("\n");
     assert!(text.contains("update available"));
     assert!(text.contains("not found"));
-    assert!(!text.contains("pane labels"));
+    assert!(text.contains("pane labels"));
 
     // A click on the blank interior cancels, as the fork's does; see
     // `settings_blank_interior_click_cancels_and_restores_the_theme` in

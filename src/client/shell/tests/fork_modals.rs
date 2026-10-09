@@ -3,9 +3,6 @@
 //! settings.rs at sync-snapshot/2026-10-08) over the client shell's own
 //! overlays. The boxes are exact rows of the composed frame; the padding is
 //! added by `framed`, so only the content of each row is written out.
-//!
-//! The fork's `pane labels` settings tab has no counterpart here, so its
-//! settings snapshot lists five tabs.
 
 use super::*;
 use crate::api::schema::ResponseResult;
@@ -869,7 +866,181 @@ fn settings_mut(state: &mut ClientShellState) -> &mut ClientSettingsOverlay {
 }
 
 const SETTINGS_POPUP: Rect = Rect::new(2, 1, 76, 22);
-const TABS: &str = " theme   indicators   sound   toasts   integrations";
+const TABS: &str = " theme   indicators   sound   toasts   pane labels   integrations";
+
+#[test]
+fn snapshot_settings_pane_labels() {
+    for enabled in [false, true] {
+        let mut state = settings_state();
+        state.config.show_agent_labels_on_pane_borders = enabled;
+        state.select_settings_section(
+            ClientSettingsSection::PaneLabels,
+            &mut ClientShellInput::default(),
+        );
+        let rows = screen(&mut state, 80, 25);
+        let rule = "─".repeat(74);
+        let buttons = centred(74, &button_group(&["↵ apply", "esc close"]));
+        let on = if enabled {
+            " agent border labels: on ✓"
+        } else {
+            " agent border labels: on"
+        };
+        let off = if enabled {
+            " agent border labels: off"
+        } else {
+            " agent border labels: off ✓"
+        };
+        let mut expected = vec![
+            " settings",
+            TABS,
+            rule.as_str(),
+            "",
+            " show detected agent names in split pane borders",
+            "",
+            "",
+            on,
+            off,
+        ];
+        expected.extend([""; 9]);
+        expected.extend([" ↑↓ select  tab section", buttons.as_str()]);
+        assert_eq!(region(&rows, SETTINGS_POPUP), framed(74, &expected));
+        assert_eq!(state.hits.settings_choices.len(), 2);
+        let selected = state.hits.settings_choices[usize::from(!enabled)].0;
+        let frame = state.compose(80, 25).expect("frame");
+        assert_eq!(
+            cell_at(&frame, selected.x + 1, selected.y).bg,
+            crate::protocol::color_to_u32(state.config.palette.surface0)
+        );
+    }
+}
+
+#[test]
+fn settings_pane_labels_tab_cycles_and_clicks_at_the_fork_position() {
+    for enabled in [false, true] {
+        let mut state = settings_state();
+        state.config.show_agent_labels_on_pane_borders = enabled;
+        for _ in 0..4 {
+            key(&mut state, KeyCode::Tab, KeyModifiers::empty());
+        }
+        assert_eq!(
+            settings_mut(&mut state).section,
+            ClientSettingsSection::PaneLabels
+        );
+        assert_eq!(settings_mut(&mut state).selected, usize::from(!enabled));
+        key(&mut state, KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(
+            settings_mut(&mut state).section,
+            ClientSettingsSection::Integrations
+        );
+        key(&mut state, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            settings_mut(&mut state).section,
+            ClientSettingsSection::PaneLabels
+        );
+        key(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+        assert_eq!(
+            settings_mut(&mut state).section,
+            ClientSettingsSection::Toast
+        );
+        state.compose(80, 25).expect("tab hits");
+        let tab = state
+            .hits
+            .settings_tabs
+            .iter()
+            .find(|(_, section)| *section == ClientSettingsSection::PaneLabels)
+            .unwrap()
+            .0;
+        let clicked = click_rect(&mut state, tab);
+        assert!(clicked.actions.is_empty());
+        assert_eq!(
+            settings_mut(&mut state).section,
+            ClientSettingsSection::PaneLabels
+        );
+        assert_eq!(settings_mut(&mut state).selected, usize::from(!enabled));
+        key(&mut state, KeyCode::End, KeyModifiers::empty());
+        assert_eq!(settings_mut(&mut state).selected, 1);
+        key(&mut state, KeyCode::Home, KeyModifiers::empty());
+        assert_eq!(settings_mut(&mut state).selected, 0);
+    }
+}
+
+#[test]
+fn settings_pane_labels_save_and_reload_from_keyboard_and_mouse() {
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    struct ConfigPathGuard {
+        original: Option<std::ffi::OsString>,
+        path: std::path::PathBuf,
+    }
+    impl Drop for ConfigPathGuard {
+        fn drop(&mut self) {
+            if let Some(original) = &self.original {
+                std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, original);
+            } else {
+                std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+    let guard = ConfigPathGuard {
+        original: std::env::var_os(crate::config::CONFIG_PATH_ENV_VAR),
+        path: std::env::temp_dir().join(format!(
+            "herdr-settings-pane-labels-{}.toml",
+            std::process::id()
+        )),
+    };
+    std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &guard.path);
+    for apply in [KeyCode::Enter, KeyCode::Char(' '), KeyCode::Null] {
+        for enabled in [false, true] {
+            let content = format!(
+                "# keep this comment\n[ui]\nshow_agent_labels_on_pane_borders = {}\nsidebar_width = 31\n[ui.sound]\nenabled = false\n", !enabled
+            );
+            std::fs::write(&guard.path, &content).unwrap();
+            let config: Config = toml::from_str(&content).unwrap();
+            let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+            state.set_snapshot(Box::new(snapshot()));
+            state.set_pane_surface(surface());
+            state.open_settings_overlay();
+            state.select_settings_section(
+                ClientSettingsSection::PaneLabels,
+                &mut ClientShellInput::default(),
+            );
+            let outcome = if apply == KeyCode::Null {
+                state.compose(80, 25).expect("choice hits");
+                let choice = state.hits.settings_choices[usize::from(!enabled)].0;
+                // Like the fork, clicking a toggle choice saves immediately.
+                click_rect(&mut state, choice)
+            } else {
+                key(
+                    &mut state,
+                    if enabled { KeyCode::Up } else { KeyCode::Down },
+                    KeyModifiers::empty(),
+                );
+                state.handle_raw_events(vec![RawInputEvent::Key(TerminalKey::new(
+                    apply,
+                    KeyModifiers::empty(),
+                ))])
+            };
+            let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+                panic!("saving must request endpoint reload: {:?}", outcome.actions);
+            };
+            assert!(matches!(
+                request.method,
+                crate::api::schema::Method::ServerReloadConfig(_)
+            ));
+            let saved = std::fs::read_to_string(&guard.path).unwrap();
+            let saved_config: Config = toml::from_str(&saved).unwrap();
+            assert_eq!(saved_config.ui.show_agent_labels_on_pane_borders, enabled);
+            assert_eq!(state.config.show_agent_labels_on_pane_borders, enabled);
+            assert_eq!(saved_config.ui.sidebar_width, 31);
+            assert!(!saved_config.ui.sound.enabled);
+            assert!(saved.contains("# keep this comment"));
+            assert_eq!(
+                settings_mut(&mut state).section,
+                ClientSettingsSection::PaneLabels
+            );
+        }
+    }
+}
 
 #[test]
 fn snapshot_settings_theme() {

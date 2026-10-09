@@ -3,6 +3,7 @@ pub(crate) enum ConfigEdit<'a> {
     Theme(&'a str),
     StatusIndicators(super::StatusIndicatorStyle),
     Sound(bool),
+    AgentBorderLabels(bool),
     ToastDelivery(super::ToastDelivery),
 }
 
@@ -12,6 +13,7 @@ impl ConfigEdit<'_> {
             Self::Theme(_) => "theme",
             Self::StatusIndicators(_) => "status indicators",
             Self::Sound(_) => "sound setting",
+            Self::AgentBorderLabels(_) => "agent border labels",
             Self::ToastDelivery(_) => "toast setting",
         }
     }
@@ -32,6 +34,12 @@ impl ConfigEdit<'_> {
             Self::Sound(enabled) => {
                 super::upsert_section_bool(content, "ui.sound", "enabled", enabled)
             }
+            Self::AgentBorderLabels(enabled) => super::upsert_section_bool(
+                content,
+                "ui",
+                "show_agent_labels_on_pane_borders",
+                enabled,
+            ),
             Self::ToastDelivery(delivery) => {
                 let value = match delivery {
                     super::ToastDelivery::Off => "\"off\"",
