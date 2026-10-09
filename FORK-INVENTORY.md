@@ -49,6 +49,7 @@ deliberate difference from upstream's contract or names).
 | release-channel | carried | `-ac` releases, beta channel, own Homebrew tap, ZIG pin, macOS windows-lint skip | `c42f9068` |
 | claude-background-shell | divergent | a Claude pane whose only activity is a background shell reads working; upstream 987b070f (#3468) removed that rule, the fork keeps it until #172's background mark replaces it | `db30c77a` |
 | handoff-compat | divergent | handoff manifest keeps the fork layout (`agent_state` string + `hook_agent_state`) so 0.8.x-ac servers hand off into this build | `src/handoff_runtime.rs` |
+| wire-protocol | divergent | the wire `PROTOCOL_VERSION` stays upstream's 22, although the fork's 0.8.2-ac also said 22 with another format: a fresh cross-version attach is refused both ways by `ENDPOINT_PROTOCOL_GENERATION` (an old client only prints "server closed connection"), and live handoff re-execs old clients (proofs 2-5 on #171). Bump only with upstream | `sync-merge/14` |
 | input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input`, merged through `bf8a056e` (`sync-merge/11`) |
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels, notification/todo indicators (click opens their panels) | `port/chrome`, merged `3e4827ff`, clicks `7e363fa4`/`3ccbf1e3` (`sync-merge/11`) |
 | overlays | port | todo panel/editor/board, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays`, merged through `sync-merge/11` |
