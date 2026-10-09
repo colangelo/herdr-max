@@ -2675,6 +2675,8 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
+    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
+    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_pane_runtime_falls_back_to_a_shell_without_launch_argv() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
@@ -2806,6 +2808,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(moved_to.parent().unwrap_or(&moved_to));
     }
 
+    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
+    #[cfg(unix)]
     #[tokio::test]
     async fn respawn_does_not_pull_focus_to_the_pane_s_workspace() {
         let (mut app, pane_id, _) = app_with_single_pane_workspace();
@@ -2826,6 +2830,8 @@ mod tests {
         shutdown_test_runtimes(&mut app);
     }
 
+    // Spawns a real shell; hangs under ConPTY on Windows CI (Herdr Max issue 188).
+    #[cfg(unix)]
     #[tokio::test]
     async fn replaced_runtime_exit_does_not_close_the_respawned_pane() {
         let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();

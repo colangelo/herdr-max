@@ -930,6 +930,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_is_expanded_in_the_socket_path() {
         let home = std::env::var("HOME").expect("HOME");
