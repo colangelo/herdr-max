@@ -238,9 +238,17 @@ pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     Ok((cols, rows))
 }
 
+#[cfg(unix)]
+pub(crate) mod daemon_reaper;
+
 #[cfg(not(windows))]
 pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {
-    command.spawn().map(|child| child.id())
+    let pid = command.spawn().map(|child| child.id())?;
+    // The server is detached but still our child: reap it when it exits, or a
+    // client that outlives a live handoff keeps it as a zombie (issue 179).
+    #[cfg(unix)]
+    daemon_reaper::reap_when_it_exits(pid);
+    Ok(pid)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -707,6 +715,30 @@ fn child_exit_classification_only_checkpoints_interruptions() {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A server the client started stays the client's child (it only setsid()s), and after a live
+    /// handoff the old server exits while the client lives on, so an unreaped child is a zombie until
+    /// the client exits. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/179
+    #[test]
+    fn a_launched_server_daemon_is_reaped_when_it_exits() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        let pid = launch_server_daemon_command(&mut command).expect("launch the stand-in daemon");
+
+        // kill(pid, 0) succeeds for a zombie and fails with ESRCH once it is reaped.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let reaped = loop {
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+            if !alive {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(reaped, "the exited daemon {pid} was left as a zombie");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

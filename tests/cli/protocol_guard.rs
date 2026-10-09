@@ -33,6 +33,8 @@ fn cli_rejects_protocol_mismatch_before_agent_wait_request() {
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((second_stream, _)) => {
+                    // macOS hands back an accepted socket that inherited the listener's non-blocking mode.
+                    second_stream.set_nonblocking(false).unwrap();
                     let mut line = String::new();
                     let mut reader = BufReader::new(second_stream);
                     reader.read_line(&mut line).unwrap();

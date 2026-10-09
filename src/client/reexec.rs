@@ -143,6 +143,13 @@ impl ReexecPlan {
         let mut command = std::process::Command::new(&self.program);
         command.args(&self.args);
         command.env(REEXEC_ENV_VAR, server_version);
+        // The re-exec'd image reaps the servers this one started (issue 179).
+        if let Some(pids) = crate::platform::daemon_reaper::live_pids_env() {
+            command.env(
+                crate::platform::daemon_reaper::SPAWNED_DAEMONS_ENV_VAR,
+                pids,
+            );
+        }
         {
             use std::os::unix::process::CommandExt as _;
             command.arg0(&self.argv0);
@@ -437,5 +444,31 @@ mod tests {
         assert_eq!(envs.len(), 1, "only the guard: {envs:?}");
         assert_eq!(envs[0].0, REEXEC_ENV_VAR);
         assert_eq!(envs[0].1, Some(std::ffi::OsStr::new(NEW)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_reexec_command_hands_the_running_server_pids_to_the_new_image() {
+        // An exec drops the reaper threads, so the new image must be told which servers to reap.
+        let child = std::process::Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn the stand-in daemon");
+        let pid = child.id();
+        crate::platform::daemon_reaper::reap_when_it_exits(pid);
+        let plan = plan(PathBuf::from("/bin/herdr"), &[OsString::from("herdr")]);
+        let command = plan.command(NEW);
+        let exported = command
+            .get_envs()
+            .find(|(key, _)| *key == crate::platform::daemon_reaper::SPAWNED_DAEMONS_ENV_VAR)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            exported.split(',').any(|part| part == pid.to_string()),
+            "{exported:?} should list {pid}"
+        );
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        std::mem::forget(child);
     }
 }

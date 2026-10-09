@@ -241,6 +241,10 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
         }
     }
 
+    // The server is not the client's parent: it must not try to reap the client's own daemons.
+    #[cfg(unix)]
+    command.env_remove(crate::platform::daemon_reaper::SPAWNED_DAEMONS_ENV_VAR);
+
     if crate::session::explicit_session_requested() {
         command
             .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
@@ -473,6 +477,18 @@ mod tests {
 
         assert!(envs.iter().any(|(key, value)| {
             *key == OsStr::new(STARTUP_CWD_ENV_VAR) && value == &Some(expected.as_os_str())
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn server_daemon_command_does_not_inherit_the_clients_daemon_pids() {
+        let command = build_server_daemon_command(PathBuf::from("/tmp/herdr-test"));
+        let envs: Vec<_> = command.get_envs().collect();
+
+        assert!(envs.iter().any(|(key, value)| {
+            *key == OsStr::new(crate::platform::daemon_reaper::SPAWNED_DAEMONS_ENV_VAR)
+                && value.is_none()
         }));
     }
 
