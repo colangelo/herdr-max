@@ -42,7 +42,10 @@ fn write_delayed_shell_and_fake_pi(
     fs::create_dir_all(&bin).unwrap();
     fs::write(
         &delayed_shell,
-        format!("#!/bin/sh\n/bin/sleep {shell_delay_seconds}\nexec /bin/sh\n"),
+        format!(
+            "#!/bin/sh\n'{}' {shell_delay_seconds}\nexec /bin/sh\n",
+            readable_sleep(&bin).display()
+        ),
     )
     .unwrap();
     fs::write(
@@ -141,10 +144,6 @@ fn agent_start_waits_for_a_new_pane_shell_to_finish_initializing() {
 }
 
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
-)]
 fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -169,6 +168,16 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     );
     let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
 
+    assert!(wait_until(
+        Duration::from_secs(2),
+        Duration::from_millis(20),
+        || {
+            String::from_utf8_lossy(
+                &run_cli(&socket_path, &["pane", "process-info", "--pane", pane_id]).stdout,
+            )
+            .contains(" 3.2")
+        },
+    ));
     let started_at = Instant::now();
     let unavailable = run_cli(
         &socket_path,
@@ -625,10 +634,6 @@ fn agent_start_timeout_releases_the_name_for_reuse() {
 }
 
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
-)]
 fn agent_start_reports_detected_kind_mismatch_before_released_name() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -641,7 +646,10 @@ fn agent_start_reports_detected_kind_mismatch_before_released_name() {
     let fake_pi = bin.join("pi");
     fs::write(
         &fake_pi,
-        "#!/bin/sh\nHERDR_AGENT=codex exec /bin/sleep 10\n",
+        format!(
+            "#!/bin/sh\nHERDR_AGENT=codex exec '{}' 10\n",
+            readable_sleep(&bin).display()
+        ),
     )
     .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
@@ -706,10 +714,6 @@ fn agent_start_reports_detected_kind_mismatch_before_released_name() {
 }
 
 #[test]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "fake agent not detected on macOS, see https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178"
-)]
 fn agent_start_follows_its_named_terminal_when_the_pane_moves() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -720,7 +724,14 @@ fn agent_start_follows_its_named_terminal_when_the_pane_moves() {
     let bin = base.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let fake_pi = bin.join("pi");
-    fs::write(&fake_pi, "#!/bin/sh\nHERDR_AGENT=pi exec /bin/sleep 10\n").unwrap();
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nHERDR_AGENT=pi exec '{}' 10\n",
+            readable_sleep(&bin).display()
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
 
     let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));

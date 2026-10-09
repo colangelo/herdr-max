@@ -285,6 +285,9 @@ impl App {
             .get_mut(&terminal_id)
             .ok_or_else(|| AgentStartError::TargetUnavailable(params.pane_id.clone()))?;
         terminal.begin_managed_agent(name.clone(), kind, now, AGENT_START_SETTLE_DELAY, timeout);
+        // The start cannot report ready before the settle delay; until then an identified agent is
+        // re-probed fast so a process that swapped itself in place is seen in time (issue 183).
+        runtime.probe_fast_until(now + AGENT_START_SETTLE_DELAY);
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));

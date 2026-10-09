@@ -259,6 +259,10 @@ impl TerminalRuntime {
         self.0.reset_agent_detection();
     }
 
+    pub fn probe_fast_until(&self, until: std::time::Instant) {
+        self.0.probe_fast_until(until);
+    }
+
     #[cfg(test)]
     pub(crate) fn agent_detection_reset_notify_for_test(
         &self,

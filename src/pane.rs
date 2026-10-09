@@ -270,6 +270,29 @@ pub(crate) enum AgentDetection {
     Disabled,
 }
 
+/// A managed `agent start` settles for a few seconds before it may report ready. An agent identified
+/// in that window is probed at the fast acquisition cadence, because a process that swaps itself in
+/// place (a script that execs the real agent keeps its pid and group) is otherwise only seen again
+/// after `PROCESS_RECHECK_IDENTIFIED`, longer than the settle, and the start would report the stale kind.
+/// https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/183
+fn probe_acquisition_age(
+    now: std::time::Instant,
+    managed_start_probe_until: Option<std::time::Instant>,
+    acquisition_age: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    if managed_start_probe_until.is_some_and(|until| now < until) {
+        Some(std::time::Duration::ZERO)
+    } else {
+        acquisition_age
+    }
+}
+
+fn managed_start_probe_until(
+    window: &Mutex<Option<std::time::Instant>>,
+) -> Option<std::time::Instant> {
+    window.lock().ok().and_then(|until| *until)
+}
+
 fn active_pending_release(
     pending_release: &Mutex<Option<PendingAgentRelease>>,
     now: std::time::Instant,
@@ -1313,6 +1336,7 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     self_reported_agent_active: Arc<AtomicBool>,
+    managed_start_probe_window: Arc<Mutex<Option<std::time::Instant>>>,
     state_events: mpsc::Sender<AppEvent>,
     agent_seed: Option<(Agent, AgentState)>,
 ) -> (
@@ -1436,8 +1460,11 @@ fn spawn_basic_detection_task(
                     foreground_pgid,
                     last_foreground_pgid,
                     has_process_probe,
-                    acquisition_age: acquisition_started_at
-                        .map(|started| now.duration_since(started)),
+                    acquisition_age: probe_acquisition_age(
+                        now,
+                        managed_start_probe_until(&managed_start_probe_window),
+                        acquisition_started_at.map(|started| now.duration_since(started)),
+                    ),
                     pending_foreground_shell_clear,
                     pending_restore_probe: false,
                     elapsed_since_process_check: now.duration_since(last_process_check),
@@ -1965,6 +1992,7 @@ pub struct PaneRuntime {
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_authority_active: Arc<AtomicBool>,
     self_reported_agent_active: Arc<AtomicBool>,
+    managed_start_probe_window: Arc<Mutex<Option<std::time::Instant>>>,
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
@@ -3139,6 +3167,7 @@ impl PaneRuntime {
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let self_reported_agent_active = Arc::new(AtomicBool::new(false));
+        let managed_start_probe_window = Arc::new(Mutex::new(None));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
@@ -3148,6 +3177,7 @@ impl PaneRuntime {
             detection_content_seq.clone(),
             full_lifecycle_authority_active.clone(),
             self_reported_agent_active.clone(),
+            managed_start_probe_window.clone(),
             events,
             agent_seed,
         );
@@ -3170,6 +3200,7 @@ impl PaneRuntime {
             detection_content_seq,
             full_lifecycle_authority_active,
             self_reported_agent_active,
+            managed_start_probe_window,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
@@ -3234,6 +3265,7 @@ impl PaneRuntime {
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let self_reported_agent_active = Arc::new(AtomicBool::new(false));
+        let managed_start_probe_window = Arc::new(Mutex::new(None));
         {
             let child_pid = child_pid.clone();
             let child_wait_completed = child_wait_completed.clone();
@@ -3363,6 +3395,7 @@ impl PaneRuntime {
             let detection_content_seq = detection_content_seq.clone();
             let full_lifecycle_authority_active_for_task = full_lifecycle_authority_active.clone();
             let self_reported_agent_active_for_task = self_reported_agent_active.clone();
+            let managed_start_probe_window_for_task = managed_start_probe_window.clone();
             let render_notify = render_notify.clone();
             let render_dirty = render_dirty.clone();
             let detect_reset_notify = Arc::new(Notify::new());
@@ -3487,8 +3520,11 @@ impl PaneRuntime {
                         foreground_pgid: last_foreground_pgid,
                         last_foreground_pgid,
                         has_process_probe,
-                        acquisition_age: acquisition_started_at
-                            .map(|started| now.duration_since(started)),
+                        acquisition_age: probe_acquisition_age(
+                            now,
+                            managed_start_probe_until(&managed_start_probe_window_for_task),
+                            acquisition_started_at.map(|started| now.duration_since(started)),
+                        ),
                         pending_foreground_shell_clear,
                         pending_restore_probe,
                         elapsed_since_process_check: now.duration_since(last_process_check),
@@ -3857,6 +3893,7 @@ impl PaneRuntime {
             detection_content_seq,
             full_lifecycle_authority_active,
             self_reported_agent_active,
+            managed_start_probe_window,
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
@@ -3888,6 +3925,13 @@ impl PaneRuntime {
     pub fn set_self_reported_agent_active(&self, active: bool) {
         self.self_reported_agent_active
             .store(active, Ordering::Release);
+    }
+
+    /// Probe an identified agent at the fast cadence until `until` (a managed `agent start` settling).
+    pub fn probe_fast_until(&self, until: std::time::Instant) {
+        if let Ok(mut window) = self.managed_start_probe_window.lock() {
+            *window = Some(until);
+        }
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
@@ -4680,6 +4724,7 @@ impl PaneRuntime {
                 detection_content_seq: Arc::new(AtomicU64::new(0)),
                 full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
                 self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+                managed_start_probe_window: Arc::new(Mutex::new(None)),
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
@@ -5923,6 +5968,7 @@ mod tests {
         let compression = TerminalCompressionTask::spawn(PaneId::from_raw(0), terminal.clone());
         let runtime = PaneRuntime {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            managed_start_probe_window: Arc::new(Mutex::new(None)),
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
@@ -5982,6 +6028,7 @@ mod tests {
         let compression = TerminalCompressionTask::spawn(PaneId::from_raw(0), terminal.clone());
         let runtime = PaneRuntime {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            managed_start_probe_window: Arc::new(Mutex::new(None)),
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
@@ -6034,6 +6081,7 @@ mod tests {
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             persistence_cwd: Mutex::new(None),
             pane_id,
@@ -6078,6 +6126,7 @@ mod tests {
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
+            managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             persistence_cwd: Mutex::new(None),
             pane_id,
@@ -7013,6 +7062,47 @@ mod tests {
             pending_restore_probe: false,
             elapsed_since_process_check: std::time::Duration::from_secs(1),
         }
+    }
+
+    #[test]
+    fn a_settling_managed_start_rechecks_an_identified_agent_fast_and_then_stops() {
+        // An identified agent whose process swapped itself in place (a script that execs the real
+        // thing keeps its pid and group) is only re-probed every PROCESS_RECHECK_IDENTIFIED, which
+        // is longer than an agent start settles. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/183
+        let now = std::time::Instant::now();
+        let settling = Some(now + std::time::Duration::from_secs(3));
+        let identified = ProcessProbeInput {
+            current_agent: Some(Agent::Pi),
+            elapsed_since_process_check: std::time::Duration::from_millis(600),
+            ..process_probe_input()
+        };
+        let probe = |until, input: ProcessProbeInput| {
+            should_probe_foreground_job(ProcessProbeInput {
+                acquisition_age: probe_acquisition_age(now, until, input.acquisition_age),
+                ..input
+            })
+        };
+        assert!(
+            !probe(None, identified),
+            "without a managed start the 5 s cadence stands"
+        );
+        assert!(
+            probe(settling, identified),
+            "while settling, 600 ms since the last probe is due"
+        );
+        let fresh = ProcessProbeInput {
+            elapsed_since_process_check: std::time::Duration::from_millis(100),
+            ..identified
+        };
+        assert!(
+            !probe(settling, fresh),
+            "but not more often than the fast recheck"
+        );
+        let over = Some(now - std::time::Duration::from_millis(1));
+        assert!(
+            !probe(over, identified),
+            "the window is over, back to the normal cadence"
+        );
     }
 
     #[test]

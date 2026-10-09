@@ -22,6 +22,36 @@ pub(super) fn unique_test_dir() -> PathBuf {
     tmp.join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 
+/// A `sleep` whose environment herdr can read. macOS hides the environment of
+/// SIP-protected binaries such as `/bin/sleep` from other processes, so a fake
+/// agent that execs it never shows its `HERDR_AGENT` hint. Elsewhere the system
+/// `sleep` is fine. See https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/178
+pub(super) fn readable_sleep(dir: &Path) -> PathBuf {
+    if !cfg!(target_os = "macos") {
+        return PathBuf::from("/bin/sleep");
+    }
+    fs::create_dir_all(dir).unwrap();
+    let source = dir.join("readable-sleep.c");
+    let binary = dir.join("readable-sleep");
+    fs::write(
+        &source,
+        "#include <stdlib.h>\n#include <unistd.h>\nint main(int c, char **v) { if (c > 1) sleep((unsigned)atoi(v[1])); return 0; }\n",
+    )
+    .unwrap();
+    let status = Command::new("cc")
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .status()
+        .expect("cc is needed to build the macOS sleep stand-in");
+    assert!(status.success(), "cc failed to build the sleep stand-in");
+    // macOS scans a new binary the first time it runs; take that delay here
+    // instead of inside the test's timing windows.
+    let warmed = Command::new(&binary).arg("0").status().unwrap();
+    assert!(warmed.success(), "the sleep stand-in did not run");
+    binary
+}
+
 pub(super) fn managed_github_plugin_dir(config_home: &Path) -> PathBuf {
     config_home
         .join("herdr-dev")
