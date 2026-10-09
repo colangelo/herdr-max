@@ -973,11 +973,6 @@ action = "open"
     /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
     /// before the command writes, so waiting on existence alone can read EOF.
     /// `pump` advances any event loop the command depends on.
-    #[cfg(unix)]
-    /// Wait for a plugin command's capture file. The commands write it to a
-    /// temporary name and rename it into place, so the file is whole the moment
-    /// it exists: reading it on the first non-empty poll raced a shell still
-    /// writing it, and failed under load.
     fn read_capture_when_ready(path: &std::path::Path, mut pump: impl FnMut()) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
