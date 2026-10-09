@@ -376,9 +376,10 @@ pub fn nested_foreground_job_with_owner(pid: u32) -> Option<(u32, ForegroundJob)
     }
 
     let parent_terminal = controlling_terminal(pid)?;
-    let children = process_task_ids(pid)
+    let mut budget = ForegroundScanBudget::for_probe();
+    let children = process_task_ids(pid, &mut budget)
         .into_iter()
-        .flat_map(|tid| process_task_children(pid, tid))
+        .flat_map(|tid| process_task_children(pid, tid, &mut budget))
         .map(|child| (child, controlling_terminal(child)));
     super::nested_foreground_job_from_children(parent_terminal, children, foreground_job)
 }
