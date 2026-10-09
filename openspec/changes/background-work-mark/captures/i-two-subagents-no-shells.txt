@@ -1,0 +1,49 @@
+
+
+⏺ Agent "Sleep 90 then answer ok (A)" finished · 6s
+
+⏺ Sleep 90 subagent A has not finished. Its Bash sleep was blocked, so it started a monitor for sleep 90; echo finished and is still waiting for that event. It has not
+  answered ok yet.
+
+  Sleep 90 subagent B is still running and has not reported.
+
+  Waiting on you (turn 12)
+  - Tell me whether to re-ask the colour question (red or blue). Your interrupt cancelled the earlier prompt. To get it again, reply ask colour. · since T9
+  - Decide whether to re-run the two-hellos workflow. Its two agents returned NO WORKFLOW TOOL instead of hi. Reply rerun hellos to launch it again with the prompt "Reply
+    with exactly one word: hi". · since T8
+
+  Waiting on other agents (turn 12)
+  - The sleep 100 subagent is still waiting on its monitor for sleep 100. It will notify when it finishes.
+  - Sleep 90 subagent A is still waiting on its monitor for sleep 90. It will answer ok when it finishes.
+  - Sleep 90 subagent B is still running its sleep. It will answer ok when it finishes.
+
+✻ Waiting for 1 background agent to finish
+
+⏺ Agent "Sleep 90 then answer ok (B)" finished · 5s
+
+⏺ Sleep 90 subagent B has not finished either. Its foreground sleep was blocked, so it started the same 90-second wait through a monitor and is still waiting for the finished
+  event. It has not answered ok yet.
+
+  Subagent A is in the same state, still waiting on its monitor.
+
+  Waiting on you (turn 13)
+  - Tell me whether to re-ask the colour question (red or blue). Your interrupt cancelled the earlier prompt. To get it again, reply ask colour. · since T9
+  - Decide whether to re-run the two-hellos workflow. Its two agents returned NO WORKFLOW TOOL instead of hi. Reply rerun hellos to launch it again with the prompt "Reply
+    with exactly one word: hi". · since T8
+
+  Waiting on other agents (turn 13)
+  - The sleep 100 subagent is still waiting on its monitor for sleep 100. It will notify when it finishes.
+  - Sleep 90 subagent A is still waiting on its monitor for sleep 90. It will answer ok when it finishes.
+  - Sleep 90 subagent B is still waiting on its monitor for sleep 90. It will answer ok when it finishes.
+
+✻ Cooked for 13s · done 10:40 PM · 2 monitors still running
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏸ manual mode on · 2 monitors · ← 1 agent
+
+  ⏺ main
+  ◯ general-purpose  Sleep 90 then answer ok (A)                                                                                                         6s · ↓ 79.1k tokens
+  ◯ general-purpose  Sleep 90 then answer ok (B)                                                                                                         5s · ↓ 78.9k tokens

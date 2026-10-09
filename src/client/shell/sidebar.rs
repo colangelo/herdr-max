@@ -1,3 +1,4 @@
+use super::state_presentation::Background;
 use super::*;
 use ratatui::{
     text::Line,
@@ -175,13 +176,7 @@ pub(crate) fn render_collapsed_sidebar(
             rect.width.saturating_sub(bar + 2),
             config.state_presentation.agent_icon(
                 agent.agent_status,
-                snapshot
-                    .resource_facts
-                    .as_ref()
-                    .and_then(|f| f.background_activity.as_ref())
-                    .and_then(|f| f.get(&agent.pane_id))
-                    .copied()
-                    .unwrap_or(false),
+                Background::from_snapshot(snapshot, &agent.pane_id),
                 agent.state_change_seq,
                 config,
             ),

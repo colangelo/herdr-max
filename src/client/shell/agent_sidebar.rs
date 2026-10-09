@@ -8,12 +8,13 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+use super::state_presentation::Background;
 use super::*;
 
 pub(super) struct AgentRow {
     pub(super) todos: crate::ui::TodoDisplaySummary,
     pub(super) state_change_seq: u64,
-    pub(super) background_work: bool,
+    pub(super) background: Background,
     pub(super) jump_index: usize,
     pub(super) pin_rank: Option<usize>,
     pub(super) pane_id: String,
@@ -403,13 +404,7 @@ pub(super) fn agent_row(
             .map(crate::ui::TodoDisplaySummary::from_fact)
             .unwrap_or_default(),
         state_change_seq: agent.state_change_seq,
-        background_work: snapshot
-            .resource_facts
-            .as_ref()
-            .and_then(|f| f.background_activity.as_ref())
-            .and_then(|f| f.get(&agent.pane_id))
-            .copied()
-            .unwrap_or(false),
+        background: Background::from_snapshot(snapshot, &agent.pane_id),
         jump_index: 0,
         pin_rank: None,
         pane_id: agent.pane_id.clone(),
@@ -442,7 +437,7 @@ pub(super) fn render_agent_row(
     };
     let status_style = Style::default().fg(config.state_presentation.agent_color(
         row.status,
-        row.background_work,
+        row.background,
         palette,
     ));
     let editorial = config.sidebar_style == crate::config::SidebarStyleConfig::Editorial;
@@ -470,13 +465,13 @@ pub(super) fn render_agent_row(
     let icon = (
         config.state_presentation.agent_icon(
             row.status,
-            row.background_work,
+            row.background,
             row.state_change_seq,
             config,
         ),
         Style::default().fg(config.state_presentation.agent_color(
             row.status,
-            row.background_work,
+            row.background,
             palette,
         )),
     );

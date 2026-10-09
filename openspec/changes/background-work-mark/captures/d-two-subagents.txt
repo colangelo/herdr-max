@@ -1,0 +1,49 @@
+  Waiting on you (turn 4)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 4)
+  - The sleep 120 subagent is still running its background sleep 120. It will notify again when it finishes. No action is needed from you.
+
+✻ Churned for 18s · done 10:36 PM · 3 shells, 1 monitor still running
+
+❯ Use the Agent tool with run_in_background=true to launch a second subagent whose task is to run 'sleep 100' with Bash and then report done. Then say only: launched two.
+
+⏺ Agent(Sleep 100 seconds and report)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ launched two.
+
+  Waiting on you (turn 5)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 5)
+  - The sleep 120 subagent from the previous turn is still running its background sleep and will notify again when it finishes.
+  - The sleep 100 subagent I just launched is running. It will report done once its sleep has truly finished, not early.
+
+✻ Waiting for 1 background agent to finish
+
+⏺ Agent "Sleep 100 seconds and report" finished · 6s
+
+⏺ The sleep 100 subagent has not finished. Its foreground sleep was refused, so it started a fallback monitor that is still waiting for the finished event. It has not replied
+  done.
+
+  The sleep 120 subagent from earlier is also still running its background sleep, and I have not seen its done yet.
+
+  Waiting on you (turn 6)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 6)
+  - The sleep 120 subagent is still running its background sleep 120. It will notify when it finishes.
+  - The sleep 100 subagent is still waiting on its monitor for sleep 100. It will notify when it finishes.
+
+✻ Brewed for 14s · done 10:36 PM · 3 shells, 1 monitor still running
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏸ manual mode on · 3 shells, 1 monitor · ← 1 agent
+
+  ⏺ main
+  ◯ general-purpose  Sleep 120 seconds and report                                                                                                       11s · ↓ 79.3k tokens
+  ◯ general-purpose  Sleep 100 seconds and report                                                                                                        6s · ↓ 79.0k tokens

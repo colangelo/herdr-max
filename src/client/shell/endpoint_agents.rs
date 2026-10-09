@@ -25,7 +25,7 @@ pub(super) fn render_collapsed(
                 "{initial}{}",
                 config.state_presentation.agent_icon(
                     row.agent.status,
-                    row.agent.background_work,
+                    row.agent.background,
                     row.agent.state_change_seq,
                     config
                 )
@@ -36,7 +36,7 @@ pub(super) fn render_collapsed(
                 } else {
                     config.state_presentation.agent_color(
                         row.agent.status,
-                        row.agent.background_work,
+                        row.agent.background,
                         &config.palette,
                     )
                 })

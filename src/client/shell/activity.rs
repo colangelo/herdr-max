@@ -1,6 +1,11 @@
 use super::*;
 use crate::api::schema::AgentStatus;
 
+/// Whether the pane is listed with background items in `snapshot`'s facts.
+fn has_background(snapshot: &ClientShellSnapshot, pane_id: &str) -> bool {
+    super::state_presentation::Background::from_snapshot(snapshot, pane_id).count > 0
+}
+
 impl ClientShellState {
     /// Steps the shared working spinner. The client loop calls this on every
     /// wake, so an armed tick that is not yet due returns before scanning the
@@ -35,7 +40,26 @@ impl ClientShellState {
                     })
                 })
         });
-        if !(local_working || remote_working) {
+        // The braille mark moves on the same tick, on idle and done rows too.
+        let braille = self.config.state_presentation.background_mark()
+            == crate::config::BackgroundMarkConfig::Braille;
+        let local_background = braille
+            && self.hits.agents.iter().any(|(_, id)| {
+                self.snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| has_background(snapshot, id))
+            });
+        let remote_background = braille
+            && self.hits.endpoint_agents.iter().any(|(_, endpoint, id)| {
+                self.endpoints
+                    .iter()
+                    .find(|e| {
+                        &e.endpoint_id == endpoint && e.status == ClientEndpointStatus::Online
+                    })
+                    .and_then(|e| e.snapshot.as_deref())
+                    .is_some_and(|snapshot| has_background(snapshot, id))
+            });
+        if !(local_working || remote_working || local_background || remote_background) {
             self.activity_deadline = None;
             return false;
         }
@@ -136,5 +160,41 @@ mod tests {
             std::time::Duration::from_millis(crate::config::MAX_STATUS_SPINNER_MS)
         );
         assert_eq!(interval(333), std::time::Duration::from_millis(333));
+    }
+    #[test]
+    fn an_idle_row_with_background_work_ticks_only_in_braille_mode() {
+        let idle: crate::protocol::ClientShellAgent = serde_json::from_value(serde_json::json!({
+            "pane_id":"pane_1","workspace_id":"ws_1","tab_id":"tab_1","name":null,"display_agent":null,"agent":null,"title":null,
+            "terminal_title":null,"terminal_title_stripped":null,"agent_status":"idle","state_change_seq":0,"state_labels":[],"tokens":[],"focused":true
+        })).unwrap();
+        for (mark, ticks) in [
+            (crate::config::BackgroundMarkConfig::Frames, false),
+            (crate::config::BackgroundMarkConfig::Braille, true),
+        ] {
+            let mut config = Config::default();
+            config.ui.background_mark = mark;
+            let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+            let mut snapshot = super::super::tests::snapshot();
+            snapshot.agents.push(idle.clone());
+            snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+                background_count: Some(std::collections::BTreeMap::from([(
+                    "pane_1".to_owned(),
+                    2,
+                )])),
+                ..Default::default()
+            });
+            state.set_snapshot(Box::new(snapshot));
+            state
+                .hits
+                .agents
+                .push((Rect::new(0, 0, 10, 1), "pane_1".into()));
+            let now = std::time::Instant::now();
+            assert!(!state.tick_activity(now));
+            assert_eq!(
+                state.tick_activity(now + state.config.status_spinner_interval),
+                ticks,
+                "{mark:?}"
+            );
+        }
     }
 }

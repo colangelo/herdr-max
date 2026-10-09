@@ -305,6 +305,7 @@ fn resource_facts(
     let mut pane_pins = BTreeMap::new();
     let mut pane_todos = BTreeMap::new();
     let mut background_activity = BTreeMap::new();
+    let mut background_count = BTreeMap::new();
     for public in &snapshot.panes {
         let Some((ws_idx, pane_id)) = app.parse_pane_id(&public.pane_id) else {
             continue;
@@ -335,6 +336,9 @@ fn resource_facts(
             },
         );
         background_activity.insert(public.pane_id.clone(), terminal.background_work());
+        if terminal.background_count() > 0 {
+            background_count.insert(public.pane_id.clone(), terminal.background_count());
+        }
     }
     let mut tab_sync = BTreeMap::new();
     for public in &snapshot.tabs {
@@ -371,6 +375,7 @@ fn resource_facts(
         workspace_heads: Some(workspace_heads),
         pane_todos: Some(pane_todos),
         background_activity: Some(background_activity),
+        background_count: Some(background_count),
         tab_sync: Some(tab_sync),
         notifications: Some(protocol::ClientNotificationSummary {
             total: app.state.notification_log.len(),

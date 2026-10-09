@@ -154,6 +154,21 @@ impl StatusIndicatorStyle {
     }
 }
 
+/// How a sidebar agent row shows background work: shells, monitors, agents
+/// and MCP tasks an agent launched and left running (fork issue 172).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundMarkConfig {
+    /// Today's look: an agent held Working by its background work turns
+    /// between the two `[ui.state_symbols]` background frames.
+    #[default]
+    Frames,
+    /// A braille cell whose dots count the background items (1 to 8, `⣿` for
+    /// more), alternating with the small dot on the spinner tick. Shown on
+    /// idle and done rows too, since background work does not change status.
+    Braille,
+}
+
 /// Whether the working state icon in the sidebar's agent rows animates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1513,6 +1528,8 @@ pub struct UiConfig {
     pub state_colors: StateColorsConfig,
     /// Per-state sidebar icon glyph overrides; see `StateSymbolsConfig`.
     pub state_symbols: StateSymbolsConfig,
+    /// How agent rows show background work: "frames" (default) or "braille".
+    pub background_mark: BackgroundMarkConfig,
     /// Working-icon animation in agent rows. Saved values are "on" or "off". Default: "on".
     pub status_spinner: StatusSpinnerConfig,
     /// Milliseconds between spinner frames, clamped to 50..=2000. Default: 200.
@@ -1909,6 +1926,7 @@ impl Default for UiConfig {
             sidebar_style: SidebarStyleConfig::Default,
             state_colors: StateColorsConfig::default(),
             state_symbols: StateSymbolsConfig::default(),
+            background_mark: BackgroundMarkConfig::default(),
             status_spinner: StatusSpinnerConfig::default(),
             status_spinner_ms: DEFAULT_STATUS_SPINNER_MS,
             display_panes_ms: DEFAULT_DISPLAY_PANES_MS,
@@ -3384,5 +3402,16 @@ scrollback_lines = 12345
         assert!(SidebarOverflowConfig::Rows.edge_rows() && !SidebarOverflowConfig::Rows.fog());
         assert!(!SidebarOverflowConfig::Fog.edge_rows() && SidebarOverflowConfig::Fog.fog());
         assert!(!SidebarOverflowConfig::Off.edge_rows() && !SidebarOverflowConfig::Off.fog());
+    }
+
+    #[test]
+    fn background_mark_defaults_to_frames_and_parses_braille() {
+        assert_eq!(
+            Config::default().ui.background_mark,
+            BackgroundMarkConfig::Frames
+        );
+        let config: Config = toml::from_str("[ui]\nbackground_mark = \"braille\"\n").unwrap();
+        assert_eq!(config.ui.background_mark, BackgroundMarkConfig::Braille);
+        assert!(toml::from_str::<Config>("[ui]\nbackground_mark = \"dots\"\n").is_err());
     }
 }

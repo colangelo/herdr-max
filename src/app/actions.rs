@@ -1495,6 +1495,13 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::BackgroundCountObserved { pane_id, count } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.set_background_count(count);
+                    None
+                })
+                .into_iter()
+                .collect(),
             AppEvent::AgentLaunchObserved {
                 pane_id,
                 agent,
