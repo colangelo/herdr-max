@@ -1,8 +1,11 @@
 //! The session todo board, `todos/notes` (fork 6e9d11ef, f55bfc4c, 7458d911,
 //! ef8adeac, 611316dc, 73c2b2a0, 18d15145, 5a326d81, 51f40966, 385eac83): every
 //! pane's todos in one centred modal, grouped by the pane that owns them, with
-//! a search row, a detail box for text a row cannot show and a footer of
-//! actions.
+//! a search row, a preview for text a row cannot show and a footer of
+//! actions. Its look is docs/ui-style.md's (fork issue 174): the count on the
+//! title row, the search as the subtitle, a rule, the list, the preview under
+//! the list after a rule with no frame of its own, and `↵ open pane` as the
+//! primary chip.
 //!
 //! A todo is written in a pane but read across panes, when deciding what to
 //! pick up next. The board is the pane panel widened: its rows are the panel's
@@ -26,7 +29,7 @@ use super::render::{display_width, put_text};
 use super::todo_edit::SuspendedTodoSurface;
 use super::todo_panel::{
     contrast, detail_rows, has_link, link_chip, link_chip_text, live_link_id, pane_set_fingerprint,
-    render_detail_box, render_panel_shell, render_row, row_chip_area, row_hides_text, row_id_text,
+    render_detail_text, render_panel_shell, render_row, row_chip_area, row_hides_text, row_id_text,
     width_of, BUTTON_GAP, DETAIL_MIN_ROWS, FOOTER_ROWS,
 };
 use super::todo_text::{apply_text_key, Shape, TextField};
@@ -46,7 +49,7 @@ const MAX_WIDTH: u16 = 120;
 /// narrowing the rect a row is drawn into, so the row renderer is the
 /// panel's, untouched; headings are not indented.
 const TODO_INDENT: u16 = 2;
-/// Title, search, and the blank row under them.
+/// Title, search, and the rule under them.
 const HEADER_ROWS: u16 = 3;
 const SEARCH_MAX_CHARS: usize = 256;
 
@@ -483,11 +486,10 @@ fn footer_buttons(row: Rect, buttons: Vec<TodoBoardButton>) -> Vec<(Rect, TodoBo
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TodoBoardLayout {
     pub(super) outer: Rect,
-    /// The title, the search and the blank row, with a detail box that sits
-    /// under the title counted in.
+    /// The title, the search and the rule.
     pub(super) header: Rect,
+    /// The preview under the list: its rule, then the selected todo's text.
     pub(super) detail: Option<Rect>,
-    detail_in_header: bool,
     pub(super) list: Rect,
     pub(super) footer_row: Option<Rect>,
     pub(super) buttons: Vec<(Rect, TodoBoardButton)>,
@@ -496,19 +498,9 @@ pub(super) struct TodoBoardLayout {
 }
 
 impl TodoBoardLayout {
-    /// Header row `index` (0 is the title), stepping over a detail box that
-    /// sits under the title.
+    /// Header row `index` (0 is the title).
     pub(super) fn header_row(&self, index: u16) -> Rect {
-        let skipped = match self.detail {
-            Some(detail) if self.detail_in_header && index >= 1 => detail.height,
-            _ => 0,
-        };
-        Rect::new(
-            self.header.x,
-            self.header.y + index + skipped,
-            self.header.width,
-            1,
-        )
+        Rect::new(self.header.x, self.header.y + index, self.header.width, 1)
     }
 
     pub(super) fn search_row(&self) -> Rect {
@@ -581,8 +573,9 @@ pub(super) fn todo_board_layout(
         .max(footer_floor)
         .clamp(usize::from(MIN_WIDTH), usize::from(MAX_WIDTH)) as u16)
         .min(screen.width.max(1));
-    // The detail box is sized from every todo, so it neither appears nor
-    // resizes with the query or the selection.
+    // The preview is sized from every todo, so it neither appears nor
+    // resizes with the query or the selection. It is a rule and the text
+    // rows, inset one column: the rows of a box two columns wider, less one.
     let list_width = width.saturating_sub(2);
     let row_width = list_width.saturating_sub(TODO_INDENT);
     let requested_detail = detail_rows(
@@ -591,8 +584,9 @@ pub(super) fn todo_board_layout(
             _ => None,
         }),
         row_width,
-        list_width,
-    );
+        list_width.saturating_add(2),
+    )
+    .saturating_sub(1);
     let rows = board.all_items.len().clamp(1, usize::from(u16::MAX));
     let height = (usize::from(HEADER_ROWS)
         + rows
@@ -620,34 +614,27 @@ pub(super) fn todo_board_layout(
     };
     // The header is carved off the top of the list.
     let header_height = HEADER_ROWS.min(list.height);
-    let mut header = Rect::new(list.x, list.y, list.width, header_height);
+    let header = Rect::new(list.x, list.y, list.width, header_height);
     let list = Rect::new(
         list.x,
         list.y + header_height,
         list.width,
         list.height - header_height,
     );
-    // The box yields to the list: a board squeezed to nothing shows its
-    // todos, and a box with no room for a row of text is not drawn.
+    // The preview yields to the list: a board squeezed to nothing shows its
+    // todos, and a preview with no room for a row of text is not drawn.
     let detail_height = requested_detail.min(list.height.saturating_sub(1));
-    let mut detail_in_header = false;
-    let (list, detail) = if detail_height >= DETAIL_MIN_ROWS {
+    let (list, detail) = if detail_height >= DETAIL_MIN_ROWS - 1 {
         let shrunk = list.height - detail_height;
-        if header.height == 0 {
-            (
-                Rect::new(list.x, list.y + detail_height, list.width, shrunk),
-                Some(Rect::new(list.x, list.y, list.width, detail_height)),
-            )
-        } else {
-            // Directly under the title: title, box, search, blank, list.
-            detail_in_header = true;
-            let detail = Rect::new(header.x, header.y + 1, header.width, detail_height);
-            header.height += detail_height;
-            (
-                Rect::new(list.x, list.y + detail_height, list.width, shrunk),
-                Some(detail),
-            )
-        }
+        (
+            Rect::new(list.x, list.y, list.width, shrunk),
+            Some(Rect::new(
+                list.x,
+                list.y + shrunk,
+                list.width,
+                detail_height,
+            )),
+        )
     } else {
         (list, None)
     };
@@ -661,7 +648,6 @@ pub(super) fn todo_board_layout(
         outer,
         header,
         detail,
-        detail_in_header,
         list,
         footer_row,
         buttons,
@@ -748,16 +734,32 @@ pub(super) fn render_todo_board(
                 Style::default().fg(p.text).add_modifier(Modifier::BOLD),
             );
         }
+        // The count sits right-aligned and dim on the title row.
         let count = board.todo_count();
+        let count = format!("{count} {}", if count == 1 { "todo" } else { "todos" });
+        let count_width = display_width(&count);
+        if display_width(" todos/notes") + 1 + count_width < title.width {
+            put_text(
+                b,
+                title.right() - 1 - count_width,
+                title.y,
+                count_width,
+                &count,
+                Style::default().fg(p.overlay0).bg(p.panel_bg),
+            );
+        }
         cursor = render_search_row(
             b,
             layout.search_row(),
             &board.search,
             board.search_focused,
             "search todos",
-            &format!("{count} {}", if count == 1 { "todo" } else { "todos" }),
+            "",
             p,
         );
+    }
+    if layout.header.height >= HEADER_ROWS {
+        render_rule(b, layout.header_row(2), p);
     }
 
     let list = layout.list;
@@ -819,11 +821,23 @@ pub(super) fn render_todo_board(
             .selected_todo()
             .filter(|todo| row_hides_text(row, todo))
             .map(|todo| todo.text.as_str());
-        render_detail_box(b, detail, text, p);
+        render_rule(b, Rect::new(detail.x, detail.y, detail.width, 1), p);
+        render_detail_text(
+            b,
+            Rect::new(
+                detail.x + 1,
+                detail.y + 1,
+                detail.width.saturating_sub(2),
+                detail.height - 1,
+            ),
+            text,
+            p,
+        );
     }
 
     for (rect, button) in &layout.buttons {
-        let style = if board.hovered_button == Some(*button) {
+        // `↵ open pane` is what enter does: the primary chip, always accent.
+        let style = if *button == TodoBoardButton::Open || board.hovered_button == Some(*button) {
             Style::default()
                 .fg(contrast(p))
                 .bg(p.accent)
@@ -847,6 +861,22 @@ pub(super) fn render_todo_board(
         );
     }
     Some((layout, cursor))
+}
+
+/// A rule: `─` in `surface1`, inset one column on both sides.
+fn render_rule(b: &mut Buffer, row: Rect, p: &Palette) {
+    let width = row.width.saturating_sub(2);
+    if width == 0 {
+        return;
+    }
+    put_text(
+        b,
+        row.x + 1,
+        row.y,
+        width,
+        &"─".repeat(usize::from(width)),
+        Style::default().fg(p.surface1).bg(p.panel_bg),
+    );
 }
 
 // -- behaviour ------------------------------------------------------------------

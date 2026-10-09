@@ -339,6 +339,26 @@ const MODAL_TITLE_INSET: u16 = 1;
 /// Columns between two buttons of a row.
 const BUTTON_GAP: u16 = 2;
 
+/// A footer key bar (docs/ui-style.md, Footer): ` key label  key label`,
+/// each key bold in the accent, each label dim, on `base`.
+fn key_bar_line<'a>(
+    pairs: &[(&'a str, &'a str)],
+    base: Style,
+    p: &Palette,
+) -> ratatui::text::Line<'a> {
+    let key = base.fg(p.accent).add_modifier(Modifier::BOLD);
+    let label = base.fg(p.overlay0);
+    let mut spans = vec![ratatui::text::Span::styled(" ", base)];
+    for (index, (keys, text)) in pairs.iter().enumerate() {
+        if index > 0 {
+            spans.push(ratatui::text::Span::styled("  ", base));
+        }
+        spans.push(ratatui::text::Span::styled(*keys, key));
+        spans.push(ratatui::text::Span::styled(format!(" {text}"), label));
+    }
+    ratatui::text::Line::from(spans)
+}
+
 /// One button of a modal's action row: its text is ` {hint} {label} `, and
 /// the width follows from it. A `fill` makes it the primary button (panel
 /// contrast text on that colour); without one it is a secondary button.
@@ -518,15 +538,12 @@ fn render_release_notes_overlay(
     }
 
     if let Some(footer_area) = stack.footer {
-        let footer_line = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(" scroll ", base.fg(p.overlay0)),
-            ratatui::text::Span::styled("wheel ↑↓", base.fg(p.text)),
-            ratatui::text::Span::styled("  ·  ", base.fg(p.overlay0)),
-            ratatui::text::Span::styled("close", base.fg(p.overlay0)),
-            ratatui::text::Span::styled(" esc / enter ", base.fg(p.text)),
-        ]);
         ratatui::widgets::Widget::render(
-            ratatui::widgets::Paragraph::new(footer_line),
+            ratatui::widgets::Paragraph::new(key_bar_line(
+                &[("wheel ↑↓", "scroll"), ("esc/enter", "close")],
+                base,
+                p,
+            )),
             footer_area,
             b,
         );
@@ -634,15 +651,12 @@ fn render_product_announcement_overlay(
     }
 
     if let Some(footer_area) = stack.footer {
-        let footer_line = ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(" scroll ", base.fg(p.overlay0)),
-            ratatui::text::Span::styled("wheel ↑↓", base.fg(p.text)),
-            ratatui::text::Span::styled("  ·  ", base.fg(p.overlay0)),
-            ratatui::text::Span::styled("close", base.fg(p.overlay0)),
-            ratatui::text::Span::styled(" esc / enter ", base.fg(p.text)),
-        ]);
         ratatui::widgets::Widget::render(
-            ratatui::widgets::Paragraph::new(footer_line),
+            ratatui::widgets::Paragraph::new(key_bar_line(
+                &[("wheel ↑↓", "scroll"), ("esc/enter", "close")],
+                base,
+                p,
+            )),
             footer_area,
             b,
         );
@@ -1398,7 +1412,6 @@ fn render_help_overlay(
     k: &LiveKeybindConfig,
     p: &Palette,
 ) -> Option<OverlayRender> {
-    use ratatui::text::{Line, Span};
     use ratatui::widgets::{Paragraph, Widget, Wrap};
 
     let q = popup(b.area, 76, 22)?;
@@ -1505,33 +1518,26 @@ fn render_help_overlay(
         crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.overlay1, "▐");
     }
 
-    // The fork's two-tone footer: labels dim, keys bright. The focused
-    // wording is the editor's own, which the fork's predates.
-    let label = Style::default().fg(p.overlay0).bg(p.panel_bg);
-    let keys = Style::default().fg(p.text).bg(p.panel_bg);
-    let parts: &[(&str, &str)] = if h.search_focused {
+    // The key bar (docs/ui-style.md, Footer): keys first in bold accent,
+    // labels dim. The focused wording is the editor's own.
+    let pairs: &[(&str, &str)] = if h.search_focused {
         &[
-            (" edit ", "←→/home/end"),
-            (" · kill ", "^u/^k"),
-            (" · yank ", "^y"),
-            (" · scroll ", "↑↓"),
-            (" · back ", "esc"),
+            ("←→/home/end", "edit"),
+            ("^u/^k", "kill"),
+            ("^y", "yank"),
+            ("↑↓", "scroll"),
+            ("esc", "back"),
         ]
     } else {
         &[
-            (" search ", "/"),
-            (" · scroll ", "j/k/↑↓/pgup/pgdn"),
-            (" · close ", "esc/enter"),
+            ("/", "search"),
+            ("j/k/↑↓/pgup/pgdn", "scroll"),
+            ("esc/enter", "close"),
         ]
     };
     if let Some(footer) = stack.footer {
         Widget::render(
-            Paragraph::new(Line::from(
-                parts
-                    .iter()
-                    .flat_map(|(text, key)| [Span::styled(*text, label), Span::styled(*key, keys)])
-                    .collect::<Vec<_>>(),
-            )),
+            Paragraph::new(key_bar_line(pairs, Style::default().bg(p.panel_bg), p)),
             footer,
             b,
         );

@@ -282,6 +282,7 @@ mod popup_focus_projection;
 mod startup_overlays;
 mod todo_board;
 mod todo_overlays;
+mod tui_look;
 
 #[test]
 fn resize_summary_survives_composition_with_connected_version() {
@@ -303,7 +304,21 @@ fn resize_summary_survives_composition_with_connected_version() {
         text.contains("h/l width  j/k height  esc done  window 180x30"),
         "{text}"
     );
-    assert!(text.contains("VERSION  connected-build"), "{text}");
+    // One chip per mode: the version is a dim label, not a second chip (fork issue 174).
+    assert!(text.contains("  version connected-build"), "{text}");
+    assert!(!text.contains("VERSION"), "{text}");
+    // RESIZE keeps its own colour for everything it paints: the chip, the keys and the size badges.
+    let mauve = crate::protocol::color_to_u32(state.config.palette.mauve);
+    let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), "h/l width");
+    assert_eq!(frame.cells[usize::from(y) * 180 + usize::from(x)].fg, mauve);
+    let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), " RESIZE ");
+    assert_eq!(frame.cells[usize::from(y) * 180 + usize::from(x)].bg, mauve);
+    let (spaces, _) =
+        crate::ui::expanded_sidebar_sections(layout.sidebar, state.sidebar_section_split);
+    assert!(spaces.height > 0, "the test layout shows the sidebar");
+    let badge =
+        &frame.cells[usize::from(spaces.bottom() - 1) * 180 + usize::from(spaces.right() - 2)];
+    assert_eq!(badge.bg, mauve, "sidebar size badge in RESIZE");
 }
 
 #[test]

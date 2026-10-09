@@ -156,6 +156,10 @@ pub(super) fn paint(
 ) -> Vec<Rect> {
     let mut covered = Vec::new();
     let p = &state.config.palette;
+    let resize = state.mode == ClientShellMode::Resize;
+    // PANES is red and RESIZE mauve: each mode paints its chip, its keys and its size badges in its
+    // own colour (docs/ui-style.md, Mode colour).
+    let mode_colour = if resize { p.mauve } else { p.red };
     // The surface preserves the server tile traversal used by the fork's
     // pane_infos. Geometric sorting changes numbering for mixed column splits.
     let panes = &state.hits.panes;
@@ -236,14 +240,13 @@ pub(super) fn paint(
     if !bar.is_empty() {
         covered.push(bar);
         Clear.render(bar, buffer);
-        let resize = state.mode == ClientShellMode::Resize;
         let chip = Style::default()
             .fg(if p.panel_bg == Color::Reset {
                 p.surface_dim
             } else {
                 p.panel_bg
             })
-            .bg(if resize { p.mauve } else { p.red })
+            .bg(mode_colour)
             .add_modifier(Modifier::BOLD);
         let version = connected_version(state, snapshot);
         let spans = summary_spans(
@@ -277,7 +280,7 @@ pub(super) fn paint(
                     usize::from(width),
                     Style::default()
                         .fg(panel_contrast_fg(p))
-                        .bg(p.red)
+                        .bg(mode_colour)
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -297,8 +300,9 @@ fn summary_spans<'a>(
     chip: Style,
     width: u16,
 ) -> Vec<Span<'a>> {
+    // The keys take the chip's colour: the mode's own.
     let key = Style::default()
-        .fg(if resize { p.accent } else { p.red })
+        .fg(chip.bg.unwrap_or(p.red))
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
     let value = Style::default().fg(p.text);
@@ -340,10 +344,11 @@ fn summary_spans<'a>(
         }
         spans.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
     }
-    // Keep the hints on narrow bars, dropping the version first, as in the fork.
+    // Keep the hints on narrow bars, dropping the version first, as in the fork. One chip per
+    // mode: the version is a dim label, not a second chip.
     let version_spans = [
         Span::raw("  "),
-        Span::styled(" VERSION ", chip),
+        Span::styled("version", dim),
         Span::raw(" "),
         Span::styled(version, value),
     ];
@@ -398,13 +403,16 @@ mod tests {
         assert!(!state.pane_labels_visible());
     }
     #[test]
-    fn summary_keeps_red_version_chip_key_colors_and_narrow_bar_priority() {
+    fn summary_has_one_chip_keys_in_the_modes_colour_and_a_dim_version_label() {
+        // Fork issue 174: one chip per mode, keys in the mode's colour, `version` a dim label.
         let config = ClientShellConfig::from_config(&Config::default());
         let p = &config.palette;
-        let chip = Style::default()
-            .fg(panel_contrast_fg(p))
-            .bg(p.red)
-            .add_modifier(Modifier::BOLD);
+        let chip = |colour| {
+            Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(colour)
+                .add_modifier(Modifier::BOLD)
+        };
         let spans = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
@@ -413,27 +421,50 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             140,
         );
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.ends_with("any key close   VERSION  server-build"));
-        assert_eq!(
-            spans
-                .iter()
-                .find(|s| s.content == " VERSION ")
-                .unwrap()
-                .style,
-            chip
+        assert!(text.starts_with(" PANES "), "{text}");
+        assert!(
+            text.ends_with("any key close  version server-build"),
+            "{text}"
         );
         assert_eq!(
+            spans.iter().filter(|s| s.style.bg == Some(p.red)).count(),
+            1,
+            "only the PANES chip is filled"
+        );
+        let find = |spans: &[Span<'_>], text: &str| {
             spans
                 .iter()
-                .find(|s| s.content == "any key")
-                .unwrap()
+                .find(|s| s.content == text)
+                .unwrap_or_else(|| panic!("{text:?}"))
                 .style
-                .fg,
-            Some(p.red)
+        };
+        assert_eq!(find(&spans, "any key").fg, Some(p.red));
+        assert_eq!(find(&spans, "version").fg, Some(p.overlay0));
+        assert_eq!(find(&spans, "server-build").fg, Some(p.text));
+        let resize = summary_spans(
+            Rect::new(0, 0, 140, 30),
+            Rect::new(26, 0, 114, 29),
+            2,
+            false,
+            true,
+            "server-build",
+            p,
+            chip(p.mauve),
+            140,
+        );
+        assert_eq!(find(&resize, "h/l").fg, Some(p.mauve));
+        assert_eq!(find(&resize, "esc").fg, Some(p.mauve));
+        assert_eq!(
+            resize
+                .iter()
+                .filter(|s| s.style.bg == Some(p.mauve))
+                .count(),
+            1,
+            "only the RESIZE chip is filled"
         );
         let narrow = summary_spans(
             Rect::new(0, 0, 70, 30),
@@ -443,12 +474,12 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             70,
         );
         let text: String = narrow.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.ends_with("any key close"));
-        assert!(!text.contains("VERSION"));
+        assert!(text.ends_with("any key close"), "{text}");
+        assert!(!text.contains("version"), "the version drops first: {text}");
         let passive = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
@@ -457,7 +488,7 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             140,
         );
         assert!(!passive.iter().any(|s| s.content.contains("focus")));

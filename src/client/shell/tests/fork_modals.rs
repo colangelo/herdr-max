@@ -654,7 +654,8 @@ fn snapshot_keybind_help() {
     assert_eq!(box_rows[3].trim_matches('│').trim_end(), "");
     assert_eq!(
         box_rows[20].trim_matches('│').trim_end(),
-        " search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter"
+        // Fork issue 174: the key bar rule, keys first.
+        " / search  j/k/↑↓/pgup/pgdn scroll  esc/enter close"
     );
     // The close button is 11 wide, flush right.
     assert_eq!(state.hits.overlay_cancel, Rect::new(66, 2, 11, 1));
@@ -665,7 +666,7 @@ fn snapshot_keybind_help() {
 }
 
 #[test]
-fn keybind_help_focused_search_keeps_its_wording_with_the_fork_colours() {
+fn keybind_help_focused_search_keeps_its_wording_as_a_key_bar() {
     let mut state = state_at(80, 25);
     state.overlay = Some(help_overlay(true));
     let frame = state.compose(80, 25).expect("frame");
@@ -675,13 +676,14 @@ fn keybind_help_focused_search_keeps_its_wording_with_the_fork_colours() {
     assert_eq!(box_rows[2].trim_matches('│').trim_end(), " /");
     assert_eq!(
         box_rows[20].trim_matches('│').trim_end(),
-        " edit ←→/home/end · kill ^u/^k · yank ^y · scroll ↑↓ · back esc"
+        " ←→/home/end edit  ^u/^k kill  ^y yank  ↑↓ scroll  esc back"
     );
     let p = &state.config.palette;
     let color = crate::protocol::color_to_u32;
-    // Footer row y 21: " edit " dim, "←→/home/end" bright.
-    assert_eq!(cell_at(&frame, 4, 21).fg, color(p.overlay0));
-    assert_eq!(cell_at(&frame, 10, 21).fg, color(p.text));
+    // Footer row y 21 (fork issue 174): the key "←→/home/end" bold accent, the label "edit" dim.
+    assert_eq!(cell_at(&frame, 4, 21).fg, color(p.accent));
+    assert!(has(&frame, 4, 21, Modifier::BOLD), "bold key");
+    assert_eq!(cell_at(&frame, 16, 21).fg, color(p.overlay0));
     // The caret is in the search row, after " / ".
     let cursor = frame.cursor.as_ref().expect("a host cursor");
     assert_eq!((cursor.x, cursor.y), (6, 3));
@@ -1232,4 +1234,13 @@ fn settings_moves_on_every_shared_chord() {
             crate::config::THEME_NAMES[expected]
         );
     }
+}
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_keybind_help_footer() {
+    let mut state = state_at(80, 25);
+    state.overlay = Some(help_overlay(false));
+    let frame = state.compose(80, 25).expect("frame");
+    super::tui_look::capture("keybind help", &frame, 1..23, &state.config.palette);
 }
