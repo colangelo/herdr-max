@@ -149,11 +149,6 @@ pub struct App {
     /// How Codex panes are launched and named (`[agents.codex]`).
     pub(crate) codex_app_server: crate::codex_app_server::CodexAppServer,
     pub(crate) session_save_deadline: Option<Instant>,
-    /// When the working spinner last stepped; the next step is due one
-    /// `status_spinner_interval` later while `AppState::spinner_active`.
-    // wired by the client sidebar motion port (issue 171 tier-2)
-    #[allow(dead_code)]
-    pub(crate) last_spinner_tick: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_pending: bool,
@@ -237,12 +232,6 @@ fn workspace_sort_from_config(sort: crate::config::WorkspaceSortConfig) -> state
         crate::config::WorkspaceSortConfig::Manual => state::WorkspaceSort::Manual,
         crate::config::WorkspaceSortConfig::Priority => state::WorkspaceSort::Priority,
     }
-}
-
-// wired by the client sidebar motion port (issue 171 tier-2)
-#[allow(dead_code)]
-fn sort_motion_bubble_from_config(motion: crate::config::SortMotionConfig) -> bool {
-    matches!(motion, crate::config::SortMotionConfig::Bubble)
 }
 
 /// Parse the configured agent name list into a deduplicated set of `Agent`
@@ -700,7 +689,6 @@ impl App {
                 &config.agents.codex,
             ),
             session_save_deadline: None,
-            last_spinner_tick: None,
             session_save_thread: None,
             session_writer,
             pane_exit_checkpoint_pending: false,

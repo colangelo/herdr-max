@@ -88,16 +88,6 @@ pub(crate) struct ListMotion<K> {
 }
 
 impl<K: Eq + Hash + Clone> ListMotion<K> {
-    pub(crate) fn new() -> Self {
-        Self {
-            display: Vec::new(),
-            diverged_since: HashMap::new(),
-            next_step_at: None,
-            steps_taken: 0,
-            target: Vec::new(),
-        }
-    }
-
     /// Pure projection of `target` through the current display order:
     /// keys already displayed keep their displayed relative order, keys new to
     /// `target` are inserted at their target position, and keys absent from
@@ -288,7 +278,7 @@ mod tests {
 
     #[test]
     fn stable_target_stays_put() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         assert_eq!(
             tick(&mut motion, t0, &["a", "b", "c"]),
@@ -303,7 +293,7 @@ mod tests {
 
     #[test]
     fn divergence_holds_through_settle_then_steps() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
 
@@ -328,7 +318,7 @@ mod tests {
 
     #[test]
     fn no_step_between_intervals() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
         let target = ["b", "c", "a"];
@@ -343,7 +333,7 @@ mod tests {
 
     #[test]
     fn reconvergence_cancels_pending_motion() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
         tick(&mut motion, t0, &["b", "a", "c"]);
@@ -368,7 +358,7 @@ mod tests {
 
     #[test]
     fn upward_move_uses_same_rules() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
 
@@ -385,7 +375,7 @@ mod tests {
 
     #[test]
     fn insertions_and_removals_are_instant() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
 
@@ -406,7 +396,7 @@ mod tests {
 
     #[test]
     fn project_is_pure_and_matches_display_between_ticks() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
         let target = keys(&["b", "c", "a"]);
@@ -426,7 +416,7 @@ mod tests {
 
     #[test]
     fn mid_flight_retarget_steps_toward_new_target() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c", "d"]);
 
@@ -456,7 +446,7 @@ mod tests {
     #[test]
     fn linear_easing_keeps_a_constant_cadence() {
         // Every gap is exactly `step`, whatever the burst length.
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         let start = keys(&["a", "b", "c", "d", "e"]);
         let target = keys(&["e", "a", "b", "c", "d"]);
@@ -479,7 +469,7 @@ mod tests {
         // "e" travels the full list, so the burst is long enough for the curve
         // to show: the first and last gaps are slower than `step`, and the
         // mid-burst gap is quicker.
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         let start = keys(&["a", "b", "c", "d", "e"]);
         let target = keys(&["e", "a", "b", "c", "d"]);
@@ -544,7 +534,7 @@ mod tests {
 
     #[test]
     fn swap_partner_alignment_clears_bookkeeping() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b"]);
 
@@ -558,7 +548,7 @@ mod tests {
 
     #[test]
     fn reset_snaps_to_target() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
         tick(&mut motion, t0, &["c", "a", "b"]);
@@ -579,7 +569,7 @@ mod tests {
     /// loop at 100% CPU forever.
     #[test]
     fn inversion_around_an_aligned_key_still_resolves() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["b", "a", "c"]);
         // "a" is already at index 1 in this target; "b" and "c" must cross it.
@@ -600,7 +590,7 @@ mod tests {
 
     #[test]
     fn next_due_waits_for_the_first_pair_that_can_legally_swap() {
-        let mut motion = ListMotion::new();
+        let mut motion = ListMotion::default();
         let t0 = Instant::now();
         tick(&mut motion, t0, &["a", "b", "c"]);
         tick(&mut motion, t0, &["a", "c", "b"]);
