@@ -129,8 +129,8 @@ pub(super) fn paint_floating(
 
 impl ClientShellState {
     /// The indicators toggle their panels as the fork's did: the notification
-    /// indicator opens and closes the notification center, a pane's todo mark
-    /// that pane's todo panel. They answer before an open panel routes the
+    /// indicator opens and closes the notification center, the tab bar's todo
+    /// count the todo board, a pane's todo mark that pane's todo panel. They answer before an open panel routes the
     /// click, so a second click on the same control closes it; a cell the todo
     /// panel covers belongs to the panel, not to a mark beneath it.
     pub(super) fn toggle_indicator_panel_at(
@@ -150,6 +150,13 @@ impl ClientShellState {
             && super::contains(self.hits.notification_indicator, point)
         {
             self.toggle_notification_center(outcome);
+            return true;
+        }
+        if chrome_mode
+            && matches!(self.overlay, None | Some(ClientShellOverlay::TodoBoard(_)))
+            && super::contains(self.hits.todo_board, point)
+        {
+            self.toggle_todo_board(outcome);
             return true;
         }
         let panel_covers = self

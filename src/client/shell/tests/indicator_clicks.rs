@@ -1,7 +1,7 @@
 //! Clicking chrome's indicators opens the overlays' panels, as in the fork
 //! (src/app/input/mouse.rs at sync-snapshot/2026-10-08): the notification
-//! indicator toggles the notification center, a pane's todo mark toggles
-//! that pane's todo panel.
+//! indicator toggles the notification center, the tab bar's todo count the
+//! todo board, a pane's todo mark that pane's todo panel.
 
 use super::*;
 use crate::api::schema::Method;
@@ -117,6 +117,23 @@ fn clicking_the_notification_indicator_toggles_the_center() {
 
     let at = indicator(&state);
     click(&mut state, at);
+    assert!(state.overlay.is_none(), "a second click closes it");
+}
+
+#[test]
+fn clicking_the_tab_bar_todo_count_toggles_the_board() {
+    let mut state = state();
+    let rect = state.hits.todo_board;
+    assert!(rect.width > 0, "chrome draws the todo count");
+
+    click(&mut state, (rect.x + 1, rect.y));
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::TodoBoard(_))
+    ));
+
+    let rect = state.hits.todo_board;
+    click(&mut state, (rect.x + 1, rect.y));
     assert!(state.overlay.is_none(), "a second click closes it");
 }
 
