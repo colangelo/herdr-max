@@ -1294,6 +1294,12 @@ impl ClientShellState {
                     pane_id: None,
                 },
             )),
+            KeybindAction::ToggleSyncPanes => {
+                Some(Method::TabSync(crate::api::schema::TabSyncParams {
+                    tab_id: Some(focused_tab?),
+                    mode: crate::api::schema::SyncMode::Toggle,
+                }))
+            }
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),

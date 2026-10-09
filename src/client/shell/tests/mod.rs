@@ -11,6 +11,7 @@ mod port_layout;
 mod port_layout_cycle;
 mod port_navigate;
 mod port_scroll;
+mod port_sync;
 mod text_editing;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {
