@@ -41,7 +41,7 @@ deliberate difference from upstream's contract or names).
 |---|---|---|---|
 | client-handoff | port | the client stays attached across a live handoff and re-execs onto a newer server build | `c0451a99` (fork f466236f, 91b9831a, 87690e3b, 7a3a6fba; issues 94, 165) |
 | agent-hints | carried | claude mod question hint raises blocked ahead of the screen, rings and toasts | `998ca4ee` (fork a9c099df) |
-| todos | carried + port | pane todos, board, editor; close/respawn refuse with open todos unless `force` | server carried; client dialogs on `port/overlays` |
+| todos | carried + port | pane todos, board, editor; close/respawn refuse with open todos unless `force` | server carried; client panel, editor and board merged at `sync-merge/11` (board `896aeb60`) |
 | close-force | divergent | `pane.close`, `tab.close`, `workspace.close` take an optional `force`; their v1 method shapes are frozen as fork shapes in `advertised_client_shell_method_shapes_stay_at_the_v1_contract` | `9fa78ab2` |
 | clear-scrollback | divergent | the fork's scrollback purge is `pane.clear_scrollback` (CLI `herdr pane clear`); upstream `pane.clear` clears the screen | `9fa78ab2` (fork a81f9743) |
 | update-manifest | divergent | updates read `distribution/latest.json` on the fork repo; the release flow also writes `website/latest.json` for 0.8.x-ac binaries | `c42f9068` |
@@ -49,9 +49,9 @@ deliberate difference from upstream's contract or names).
 | release-channel | carried | `-ac` releases, beta channel, own Homebrew tap, ZIG pin, macOS windows-lint skip | `c42f9068` |
 | claude-background-shell | divergent | a Claude pane whose only activity is a background shell reads working; upstream 987b070f (#3468) removed that rule, the fork keeps it until #172's background mark replaces it | `db30c77a` |
 | handoff-compat | divergent | handoff manifest keeps the fork layout (`agent_state` string + `hook_agent_state`) so 0.8.x-ac servers hand off into this build | `src/handoff_runtime.rs` |
-| input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input` |
-| chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels | `port/chrome` |
-| overlays | port | todo panel/editor, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays` |
+| input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input`, merged through `bf8a056e` (`sync-merge/11`) |
+| chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels, notification/todo indicators (click opens their panels) | `port/chrome`, merged `3e4827ff`, clicks `7e363fa4`/`3ccbf1e3` (`sync-merge/11`) |
+| overlays | port | todo panel/editor/board, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays`, merged through `sync-merge/11` |
 | sync-frame-hold | port | upstream holds mid-sync surfaces; the fork adds the 200 ms cap so a stuck app cannot freeze a pane | fork 839473d8 (issue 126) |
 | prefix-list | superseded | `keys.prefix` as a list | upstream 7f89b11a (fork 73a00623) |
 | detached-split-size | superseded | split sizes while detached | upstream new_pane_size (fork b943d332) |
