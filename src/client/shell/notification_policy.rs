@@ -70,6 +70,33 @@ impl ClientShellState {
         self.queued_notifications.push_back(notification);
     }
 
+    /// A toast the client raises itself: the fork's action feedback (a pane
+    /// move refused or failed, a refused todo save), anchored to the focused
+    /// pane and never logged. Like the fork's, it replaces whatever toast is
+    /// showing at once rather than waiting its turn; the queue is kept.
+    /// Returns whether a repaint is due.
+    pub(super) fn push_feedback_toast(&mut self, title: &str, body: impl Into<String>) -> bool {
+        let snapshot = self.snapshot.as_deref();
+        let event = SemanticNotification {
+            kind: SemanticNotificationKind::NeedsAttention,
+            title: title.to_owned(),
+            body: Some(body.into()),
+            sound: None,
+            agent: None,
+            workspace_id: snapshot.and_then(|snapshot| snapshot.focused_workspace_id.clone()),
+            tab_id: snapshot.and_then(|snapshot| snapshot.focused_tab_id.clone()),
+            pane_id: snapshot.and_then(|snapshot| snapshot.focused_pane_id.clone()),
+            position: None,
+        };
+        let now = std::time::Instant::now();
+        self.visible_notification = Some(ClientVisibleNotification {
+            endpoint_id: self.active_endpoint_id.clone(),
+            deadline: notification_deadline(&self.config, event.kind, now),
+            event,
+        });
+        true
+    }
+
     fn promote_queued_notification(&mut self, now: std::time::Instant) -> bool {
         let Some(mut notification) = self.queued_notifications.pop_front() else {
             return false;

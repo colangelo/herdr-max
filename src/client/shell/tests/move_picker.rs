@@ -238,9 +238,11 @@ fn hover(state: &mut ClientShellState, x: u16, y: u16) {
     })]);
 }
 
+/// The fork's feedback toast (never an endpoint notice).
 fn notice(state: &ClientShellState) -> (String, String) {
-    let notice = state.visible_endpoint_notice.as_ref().expect("a notice");
-    (notice.title.clone(), notice.body.clone())
+    assert!(state.visible_endpoint_notice.is_none());
+    let toast = &state.visible_notification.as_ref().expect("a toast").event;
+    (toast.title.clone(), toast.body.clone().unwrap_or_default())
 }
 
 fn move_result(changed: bool, reason: Option<&str>) -> ResponseResult {
@@ -861,6 +863,7 @@ fn a_move_that_landed_shows_nothing() {
     let (id, _) = only(&state.handle_input_bytes(b"\r"));
     state.handle_endpoint_result("boot-1", &id, Ok(move_result(true, None)));
     assert!(state.visible_endpoint_notice.is_none());
+    assert!(state.visible_notification.is_none());
 }
 
 // -- mouse ----------------------------------------------------------------------

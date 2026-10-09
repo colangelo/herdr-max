@@ -511,9 +511,15 @@ fn a_save_the_store_rejects_keeps_the_editor_open_with_the_typed_text() {
     );
 
     assert_eq!(edit(&state).text.text(), "too many");
-    let notice = state.visible_endpoint_notice.as_ref().expect("notice");
-    assert_eq!(notice.title, "todo save failed");
-    assert!(notice.body.contains("maximum"));
+    // The fork's toast, anchored to the focused pane; no endpoint notice.
+    assert!(state.visible_endpoint_notice.is_none());
+    let toast = &state.visible_notification.as_ref().expect("toast").event;
+    assert_eq!(toast.title, "todo save failed");
+    assert!(toast
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("maximum")));
+    assert_eq!(toast.pane_id.as_deref(), Some("pane_1"));
     // And it can be saved again.
     assert!(matches!(
         only(&state.handle_input_bytes(b"\x13")).1,
