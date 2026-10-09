@@ -749,6 +749,17 @@ impl ClientShellState {
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
                 {
+                    // A held sync switch must not toggle the group back off.
+                    if key.kind == KeyEventKind::Repeat
+                        && matches!(
+                            binding,
+                            crate::input::KeybindMatch::Action(
+                                crate::input::KeybindAction::ToggleSyncPanes
+                            )
+                        )
+                    {
+                        return None;
+                    }
                     self.record_binding(binding, outcome);
                     return None;
                 }
@@ -1075,13 +1086,21 @@ impl ClientShellState {
                 })
                 .is_some(),
             KeybindMatch::Action(KeybindAction::FocusAgent(index)) => {
-                super::aggregate_navigation::online_agent_targets(
+                let entries = super::aggregate_navigation::online_agent_targets(
                     &self.endpoints,
                     &self.active_endpoint_id,
                     self.config.agent_panel_sort,
-                )
-                .get(*index)
-                .is_some()
+                );
+                let exists = entries.get(*index).is_some();
+                if !exists {
+                    tracing::debug!(
+                        idx = *index,
+                        jump_symbol = ?crate::config::jump_symbol(*index),
+                        entries = entries.len(),
+                        "focus_agent: no agent panel entry at index"
+                    );
+                }
+                exists
             }
             _ => true,
         }

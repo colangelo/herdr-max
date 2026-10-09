@@ -82,6 +82,7 @@ mod notifications;
 mod render;
 mod retained_surface;
 mod surface_interest;
+mod sync_input;
 
 // Producers can refill even a bounded channel while it is being drained.
 // Yield to scheduled work and rendering between batches; select! below
@@ -994,6 +995,10 @@ impl HeadlessServer {
         if let Some(mut removed) = removed {
             let held_inputs = removed.drain_shell_held_inputs();
             self.release_client_shell_inputs(client_id, held_inputs);
+            let held_sync = removed.sync_input_leases.drain().collect::<Vec<_>>();
+            for held in held_sync {
+                self.deliver_captured_input(&held.recipients, &held.release);
+            }
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
             if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
                 self.terminal_attach_owners.remove(&terminal_id);
@@ -2381,89 +2386,7 @@ impl HeadlessServer {
                 client_id,
                 pane_id,
                 events,
-            } => {
-                if self.handoff_in_progress
-                    || !self
-                        .clients
-                        .get(&client_id)
-                        .is_some_and(ClientConnection::is_active_shell_client)
-                {
-                    return false;
-                }
-                let pixel_mouse = self.clients.get(&client_id).is_some_and(|client| {
-                    client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
-                });
-                let mut events = events;
-                let Some((workspace_index, runtime_pane_id)) = self.app.parse_pane_id(&pane_id)
-                else {
-                    return false;
-                };
-                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                    &self.app.terminal_runtimes,
-                    workspace_index,
-                    runtime_pane_id,
-                ) else {
-                    return false;
-                };
-                super::pane_input::downgrade_ineligible_pixel_mouse(
-                    &mut events,
-                    pixel_mouse,
-                    runtime.current_size(),
-                    runtime.pixel_size(),
-                );
-                let popup_blocks_input = self.app.state.popup_pane.is_some()
-                    && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
-                if popup_blocks_input
-                    || !self.shell_client_views_pane(client_id, workspace_index, runtime_pane_id)
-                {
-                    let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                        &self.app.terminal_runtimes,
-                        workspace_index,
-                        runtime_pane_id,
-                    ) else {
-                        return false;
-                    };
-                    let releases = events
-                        .into_iter()
-                        .filter(client_pane_input_releases_press)
-                        .collect::<Vec<_>>();
-                    if releases.is_empty() {
-                        return false;
-                    }
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.track_shell_input(
-                            ClientShellInputTarget::Pane(pane_id.clone()),
-                            &releases,
-                        );
-                    }
-                    let scroll_before = runtime.scroll_metrics();
-                    if let Err(err) = apply_client_pane_input_events(runtime, &releases) {
-                        warn!(client_id, pane_id, err = %err, "targeted client shell release failed");
-                    }
-                    return runtime.scroll_metrics() != scroll_before;
-                }
-                let interaction = client_pane_input_has_interaction(&events);
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client
-                        .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
-                }
-                let foreground_changed =
-                    interaction && self.promote_client_to_foreground(client_id);
-                let geometry_changed =
-                    interaction && self.claim_shell_tab_geometry(client_id, false);
-                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                    &self.app.terminal_runtimes,
-                    workspace_index,
-                    runtime_pane_id,
-                ) else {
-                    return foreground_changed | geometry_changed;
-                };
-                let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_pane_input_events(runtime, &events) {
-                    warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
-                }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
-            }
+            } => self.route_synced_pane_input(client_id, pane_id, events),
             ServerEvent::ClientShellPopupInput {
                 client_id,
                 terminal_id,

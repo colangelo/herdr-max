@@ -5,11 +5,13 @@ use crate::protocol::{
     PaneSurfaceSplit, PaneSurfaceSplitDirection, SurfaceRect,
 };
 use crossterm::event::MouseEvent;
+mod port_clear_scrollback;
 mod port_input;
 mod port_layout;
 mod port_layout_cycle;
 mod port_navigate;
 mod port_scroll;
+mod port_sync;
 mod text_editing;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {

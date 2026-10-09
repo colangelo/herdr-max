@@ -20,6 +20,13 @@ impl ClientShellState {
                 self.persist_chrome_preferences(outcome);
             }
             crate::input::KeybindMatch::Action(action) => {
+                if matches!(action, crate::input::KeybindAction::FocusAgent(_))
+                    && !self.indexed_navigation_target_exists(&crate::input::KeybindMatch::Action(
+                        action,
+                    ))
+                {
+                    return;
+                }
                 if self.workspace_preview_action_blocked()
                     && matches!(
                         action,
@@ -1278,12 +1285,21 @@ impl ClientShellState {
             KeybindAction::ClearPane => Some(Method::PaneClear(PaneTarget {
                 pane_id: focused_pane?,
             })),
+            KeybindAction::ClearScrollback => Some(Method::PaneClearScrollback(PaneTarget {
+                pane_id: focused_pane?,
+            })),
             KeybindAction::BalancePanes => Some(Method::LayoutBalance(
                 crate::api::schema::LayoutBalanceParams {
                     tab_id: Some(focused_tab?),
                     pane_id: None,
                 },
             )),
+            KeybindAction::ToggleSyncPanes => {
+                Some(Method::TabSync(crate::api::schema::TabSyncParams {
+                    tab_id: Some(focused_tab?),
+                    mode: crate::api::schema::SyncMode::Toggle,
+                }))
+            }
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),

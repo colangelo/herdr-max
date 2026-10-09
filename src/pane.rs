@@ -1937,6 +1937,19 @@ pub struct PaneRuntime {
     detect_handle: Option<tokio::task::AbortHandle>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PaneRuntimeInputIdentity(std::sync::Weak<PaneTerminal>);
+
+impl PaneRuntime {
+    pub(crate) fn input_terminal_identity(&self) -> PaneRuntimeInputIdentity {
+        PaneRuntimeInputIdentity(Arc::downgrade(&self.terminal))
+    }
+
+    pub(crate) fn has_input_identity(&self, identity: &PaneRuntimeInputIdentity) -> bool {
+        std::sync::Weak::ptr_eq(&Arc::downgrade(&self.terminal), &identity.0)
+    }
+}
+
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
     #[cfg(test)]

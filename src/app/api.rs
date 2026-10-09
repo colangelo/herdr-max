@@ -10,6 +10,7 @@ mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
+mod sync_pair;
 mod tabs;
 mod todos;
 mod workspaces;
@@ -1332,6 +1333,7 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabSync(params) => return self.handle_tab_sync(request.id, params),
             Method::PaneSync(params) => return self.handle_pane_sync(request.id, params),
+            Method::PaneSyncPair(params) => return self.handle_pane_sync_pair(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(params) => return self.handle_tab_close(request.id, params),
             Method::AgentList(params) => return self.handle_agent_list(request.id, params),
