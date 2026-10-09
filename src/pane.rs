@@ -47,6 +47,7 @@ use self::agent_detection::{should_hold_seeded_detection, BasicDetectionSeedInit
 use self::background_agent::{AgentJobStatus, AgentJobTracker};
 #[cfg(test)]
 pub(crate) use self::terminal::test_encode_key_for_app;
+#[cfg(any(unix, test))]
 pub use self::terminal::InputState;
 #[cfg(test)]
 pub(crate) use self::terminal::SYNC_HOLD_MAX;
