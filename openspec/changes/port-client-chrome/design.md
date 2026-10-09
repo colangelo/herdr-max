@@ -31,3 +31,11 @@ Commit this plan before code. Commit each topic with lead trailers and issue URL
 ## Roundtable
 
 Two read-only reviewers confirmed binary snapshot reachability, three attention-ranked display rollups, conditional-token preservation, client help in src/input/keybind_help.rs, and target-specific pane rendering. Do not transplant server app.mode faint or global active-tab lookups into target-specific client presentation.
+
+## Motion projection seam (roundtable, sync-merge/11)
+
+Keep motion client-owned and keyed by endpoint and boot. Workspace animation acts on whole worktree units, before visible members are flattened; each endpoint has a separate unit engine. One aggregate agent engine receives the existing fully filtered/sorted/pin-ordered target, keyed by endpoint, boot and pane ID. Local and aggregate rendering, jump indexes, focus/reveal and input target resolution consume pure projections of those engines. Rendering never ticks motion.
+
+Bubble mode applies only to the relevant priority sort, using fork defaults (settle 2000 ms, step 150 ms, linear easing). Instant/manual/grouped modes reset immediately. Pin/unpin transitions animate; settled pins retain their precedence during ordinary status resorting. Endpoint boots/removals and reload to Instant discard old projection state. Cosmetic ticks redraw client chrome only.
+
+The fork primitive's deadline must account for the earliest legally swappable inverted neighbor pair, including both keys' settle releases and step cadence. Using the earliest individual divergence can leave a past due time after a no-op tick. Virtual-time coverage protects future deadlines, coherent row/hit/index ordering, contiguous groups, pins, endpoint identity/reboot, view filters and zero runtime requests.
