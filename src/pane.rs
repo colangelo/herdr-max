@@ -2754,7 +2754,14 @@ impl PaneRuntime {
             return None;
         }
         self.snapshot_history().map(|history| {
-            truncate_handoff_history(history, crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE)
+            let mut history = truncate_handoff_history(
+                history,
+                crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE,
+            );
+            if !history.is_empty() {
+                history.push_str(&self.terminal.handoff_cursor_tail());
+            }
+            history
         })
     }
 
