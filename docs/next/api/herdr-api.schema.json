@@ -1424,6 +1424,68 @@
           },
           "type": "object"
         },
+        "AgentMessageBusy": {
+          "description": "What `agent.message` does when the agent is working.",
+          "oneOf": [
+            {
+              "const": "queue",
+              "description": "Deliver now; the agent takes it at its next pause.",
+              "type": "string"
+            },
+            {
+              "const": "interrupt",
+              "description": "Interrupt the agent first (`esc` for a typed send, `--interrupt` for a note).",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentMessageMode": {
+          "description": "How `agent.message` delivers the text (fork issue 182).",
+          "oneOf": [
+            {
+              "const": "typed",
+              "description": "Herdr types the text into the agent's pane, as if the user were there.",
+              "type": "string"
+            },
+            {
+              "const": "note",
+              "description": "A peer message through the configured note command. It approves nothing.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentMessageParams": {
+          "description": "Send one line of text to an agent without switching to it (fork issue 182).",
+          "properties": {
+            "answer": {
+              "description": "For an agent that is blocked on a prompt: the key of the option to\npress (for example `1`) instead of typing text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "busy": {
+              "$ref": "#/schemas/request/$defs/AgentMessageBusy",
+              "default": "queue"
+            },
+            "mode": {
+              "$ref": "#/schemas/request/$defs/AgentMessageMode",
+              "default": "typed"
+            },
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "default": "",
+              "description": "One line, at most 4000 bytes. Empty only with `answer`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1521,21 +1583,6 @@
           ],
           "type": "object"
         },
-        "AgentSendBusy": {
-          "description": "What `agent.send` does when the agent is working.",
-          "oneOf": [
-            {
-              "const": "queue",
-              "description": "Deliver now; the agent takes it at its next pause.",
-              "type": "string"
-            },
-            {
-              "const": "interrupt",
-              "description": "Interrupt the agent first (`esc` for a typed send, `--interrupt` for a note).",
-              "type": "string"
-            }
-          ]
-        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -1551,53 +1598,6 @@
           "required": [
             "target",
             "keys"
-          ],
-          "type": "object"
-        },
-        "AgentSendMode": {
-          "description": "How `agent.send` delivers the text (fork issue 182).",
-          "oneOf": [
-            {
-              "const": "typed",
-              "description": "Herdr types the text into the agent's pane, as if the user were there.",
-              "type": "string"
-            },
-            {
-              "const": "note",
-              "description": "A peer message through the configured note command. It approves nothing.",
-              "type": "string"
-            }
-          ]
-        },
-        "AgentSendParams": {
-          "description": "Send one line of text to an agent without switching to it (fork issue 182).",
-          "properties": {
-            "answer": {
-              "description": "For an agent that is blocked on a prompt: the key of the option to\npress (for example `1`) instead of typing text.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "busy": {
-              "$ref": "#/schemas/request/$defs/AgentSendBusy",
-              "default": "queue"
-            },
-            "mode": {
-              "$ref": "#/schemas/request/$defs/AgentSendMode",
-              "default": "typed"
-            },
-            "target": {
-              "type": "string"
-            },
-            "text": {
-              "default": "",
-              "description": "One line, at most 4000 bytes. Empty only with `answer`.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "target"
           ],
           "type": "object"
         },
@@ -6334,11 +6334,11 @@
         {
           "properties": {
             "method": {
-              "const": "agent.send",
+              "const": "agent.message",
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/AgentSendParams"
+              "$ref": "#/schemas/request/$defs/AgentMessageParams"
             }
           },
           "required": [
@@ -7852,18 +7852,8 @@
           ],
           "type": "object"
         },
-        "AgentNameSource": {
-          "description": "Where an agent's reported `name` comes from when it is not an explicit\nherdr name (fork issue 130).",
-          "oneOf": [
-            {
-              "const": "title",
-              "description": "The agent's terminal title (its stripped form).",
-              "type": "string"
-            }
-          ]
-        },
-        "AgentSendMode": {
-          "description": "How `agent.send` delivers the text (fork issue 182).",
+        "AgentMessageMode": {
+          "description": "How `agent.message` delivers the text (fork issue 182).",
           "oneOf": [
             {
               "const": "typed",
@@ -7877,7 +7867,7 @@
             }
           ]
         },
-        "AgentSendNote": {
+        "AgentMessageNote": {
           "description": "What the note command reported for a `note` send.",
           "properties": {
             "detail": {
@@ -7894,6 +7884,16 @@
             "detail"
           ],
           "type": "object"
+        },
+        "AgentNameSource": {
+          "description": "Where an agent's reported `name` comes from when it is not an explicit\nherdr name (fork issue 130).",
+          "oneOf": [
+            {
+              "const": "title",
+              "description": "The agent's terminal title (its stripped form).",
+              "type": "string"
+            }
+          ]
         },
         "AgentSessionInfo": {
           "properties": {
@@ -10866,13 +10866,13 @@
               "type": "object"
             },
             {
-              "description": "Answer to `agent.send`: how the text went out.",
+              "description": "Answer to `agent.message`: how the text went out.",
               "properties": {
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
                 },
                 "delivery": {
-                  "$ref": "#/schemas/success_response/$defs/AgentSendMode"
+                  "$ref": "#/schemas/success_response/$defs/AgentMessageMode"
                 },
                 "enter_sent": {
                   "description": "Typed: whether Enter was pressed after the text.",
@@ -10885,7 +10885,7 @@
                 "note": {
                   "anyOf": [
                     {
-                      "$ref": "#/schemas/success_response/$defs/AgentSendNote"
+                      "$ref": "#/schemas/success_response/$defs/AgentMessageNote"
                     },
                     {
                       "type": "null"
@@ -10900,7 +10900,7 @@
                   "type": "integer"
                 },
                 "type": {
-                  "const": "agent_sent",
+                  "const": "agent_messaged",
                   "type": "string"
                 }
               },

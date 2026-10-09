@@ -452,7 +452,7 @@ mod tests {
         // bar can send a message to a session (fork issue 182).
         assert_eq!(
             actual.remove("agent.message").as_deref(),
-            Some("07cc36012debee2c0d337024ff875a8c6f3a651ed19322998414fdef830bb59d")
+            Some("45849f796f0739ce5baeb3287ec246c7710368e7549836af38634c6b6a31cd91")
         );
         let mut expected = expected;
         for method in [
