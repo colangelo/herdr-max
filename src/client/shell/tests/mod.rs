@@ -278,6 +278,7 @@ mod mouse_selection;
 mod move_picker;
 mod navigator_overlays;
 mod notification_center;
+mod palette;
 mod popup_focus_projection;
 mod startup_overlays;
 mod todo_board;

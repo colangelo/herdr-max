@@ -750,6 +750,9 @@ impl ClientShellState {
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_mouse(mouse, outcome);
             }
+            Some(ClientShellOverlay::Palette(_)) => {
+                return self.route_palette_mouse(mouse, outcome);
+            }
             _ => {}
         }
         if matches!(

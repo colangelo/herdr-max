@@ -109,7 +109,8 @@ pub(crate) fn render_client_overlay(
         | ClientShellOverlay::TodoPanel(_)
         | ClientShellOverlay::TodoEdit(_)
         | ClientShellOverlay::TodoBoard(_)
-        | ClientShellOverlay::MovePicker(_) => None,
+        | ClientShellOverlay::MovePicker(_)
+        | ClientShellOverlay::Palette(_) => None,
     }
 }
 

@@ -882,6 +882,14 @@ impl ClientShellState {
                 }
                 self.hits.move_picker = rendered.map(|(layout, _)| layout);
                 cursor
+            } else if let ClientShellOverlay::Palette(palette) = overlay {
+                let rendered = super::palette::render_palette(&mut composed, palette, &self.config);
+                let cursor = rendered.as_ref().and_then(|(_, cursor)| cursor.clone());
+                if let Some((layout, _)) = rendered.as_ref() {
+                    occlusion.cover(layout.outer);
+                }
+                self.hits.palette = rendered.map(|(layout, _)| layout);
+                cursor
             } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
                 let rendered = render::render_global_menu(
                     &mut composed,
