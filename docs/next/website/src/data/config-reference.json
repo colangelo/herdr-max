@@ -1286,6 +1286,16 @@
           "description": "Milliseconds between working-spinner frames, clamped to 50..=2000."
         },
         {
+          "key": "ui.background_mark",
+          "type": "enum",
+          "default": "\"frames\"",
+          "description": "How sidebar agent rows show background work (shells, monitors, agents and MCP tasks an agent launched and left running). `frames` keeps the two-frame pulse for an agent held working by it; `braille` alternates the small dot (`ui.state_symbols.background`, default `·`) with a braille cell of one dot per item, `⠁` to `⣿` (eight or more), on idle and done rows too, at the spinner's speed. Reloads live.",
+          "values": [
+            "frames",
+            "braille"
+          ]
+        },
+        {
           "key": "ui.display_panes_ms",
           "type": "integer",
           "default": "3000",

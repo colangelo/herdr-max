@@ -1,15 +1,53 @@
 use ratatui::style::Color;
 
-use super::{status_color, status_icon, ClientShellConfig, Palette};
+use super::{status_color, status_icon, ClientShellConfig, ClientShellSnapshot, Palette};
 use crate::{
     api::schema::AgentStatus,
-    config::{Config, StateSymbolsConfig, StatusIndicatorStyle},
+    config::{BackgroundMarkConfig, Config, StateSymbolsConfig, StatusIndicatorStyle},
 };
+
+/// The braille cell for 1 to 8 background items, one more dot each; more than
+/// eight stay on the full cell.
+const BRAILLE: [&str; 8] = ["⠁", "⠃", "⠇", "⡇", "⡏", "⡟", "⡿", "⣿"];
+
+/// What the server says an agent row has running in the background.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Background {
+    /// Held Working by work it launched (an upstream `background_*` rule).
+    pub(super) work: bool,
+    /// Background items listed on the agent's screen; 0 for none.
+    pub(super) count: u8,
+}
+
+impl From<bool> for Background {
+    fn from(work: bool) -> Self {
+        Self { work, count: 0 }
+    }
+}
+
+impl Background {
+    pub(super) fn from_snapshot(snapshot: &ClientShellSnapshot, pane_id: &str) -> Self {
+        let facts = snapshot.resource_facts.as_ref();
+        Self {
+            work: facts
+                .and_then(|facts| facts.background_activity.as_ref())
+                .and_then(|map| map.get(pane_id))
+                .copied()
+                .unwrap_or(false),
+            count: facts
+                .and_then(|facts| facts.background_count.as_ref())
+                .and_then(|map| map.get(pane_id))
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+}
 
 /// Local appearance, resolved once at startup/reload rather than in row loops.
 pub(super) struct StatePresentation {
     colors: [Option<Color>; 6],
     symbols: StateSymbolsConfig,
+    background_mark: BackgroundMarkConfig,
 }
 
 impl StatePresentation {
@@ -40,7 +78,26 @@ impl StatePresentation {
                 parse(&colors.background),
             ],
             symbols,
+            background_mark: config.ui.background_mark,
         }
+    }
+
+    /// Whether `background` is drawn as the braille mark on this row: the mark
+    /// style is on and the row is idle or done with items running, or is
+    /// parked Working on them. A working turn keeps its spinner; blocked and
+    /// unknown rows keep their own glyph.
+    fn braille(&self, status: AgentStatus, background: Background) -> bool {
+        self.background_mark == BackgroundMarkConfig::Braille
+            && background.count > 0
+            && match status {
+                AgentStatus::Idle | AgentStatus::Done => true,
+                AgentStatus::Working => background.work,
+                AgentStatus::Blocked | AgentStatus::Unknown => false,
+            }
+    }
+
+    pub(super) fn background_mark(&self) -> BackgroundMarkConfig {
+        self.background_mark
     }
 
     pub(super) fn icon(&self, status: AgentStatus, style: StatusIndicatorStyle) -> &str {
@@ -59,17 +116,26 @@ impl StatePresentation {
     pub(super) fn agent_icon(
         &self,
         status: AgentStatus,
-        background: bool,
+        background: impl Into<Background>,
         seq: u64,
         config: &ClientShellConfig,
     ) -> &str {
         const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let background: Background = background.into();
+        let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
+            .then_some(config.spinner_frame.wrapping_add(seq as u8));
+        if self.braille(status, background) {
+            // The same phase as the frames pulse: one swap per eight ticks.
+            return if frame.is_some_and(|frame| (frame / 8) % 2 == 1) {
+                BRAILLE[usize::from(background.count.min(8)) - 1]
+            } else {
+                self.symbols.background.as_deref().unwrap_or("·")
+            };
+        }
         if status != AgentStatus::Working {
             return self.icon(status, config.status_indicators);
         }
-        let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
-            .then_some(config.spinner_frame.wrapping_add(seq as u8));
-        if background {
+        if background.work {
             return if frame.is_some_and(|frame| (frame / 8) % 2 == 1) {
                 self.symbols.background_alt.as_deref().unwrap_or("◆")
             } else {
@@ -83,10 +149,11 @@ impl StatePresentation {
     pub(super) fn agent_color(
         &self,
         status: AgentStatus,
-        background: bool,
+        background: impl Into<Background>,
         palette: &Palette,
     ) -> Color {
-        if status == AgentStatus::Working && background {
+        let background: Background = background.into();
+        if (status == AgentStatus::Working && background.work) || self.braille(status, background) {
             self.colors[5].unwrap_or_else(|| self.color(status, palette))
         } else {
             self.color(status, palette)
@@ -229,9 +296,15 @@ mod tests {
     fn frames_mode_keeps_an_idle_row_with_background_work_plain() {
         let config = ClientShellConfig::from_config(&Config::default());
         assert_eq!(
-            config
-                .state_presentation
-                .agent_icon(AgentStatus::Idle, Background { work: false, count: 3 }, 0, &config),
+            config.state_presentation.agent_icon(
+                AgentStatus::Idle,
+                Background {
+                    work: false,
+                    count: 3
+                },
+                0,
+                &config
+            ),
             config.state_icon(AgentStatus::Idle)
         );
     }
@@ -251,7 +324,10 @@ mod tests {
     fn braille_with_the_spinner_off_shows_only_the_dot() {
         let mut config = braille_config();
         config.status_spinner = crate::config::StatusSpinnerConfig::Off;
-        let background = Background { work: false, count: 3 };
+        let background = Background {
+            work: false,
+            count: 3,
+        };
         assert_eq!(
             config
                 .state_presentation
@@ -266,7 +342,10 @@ mod tests {
         cfg.ui.background_mark = crate::config::BackgroundMarkConfig::Braille;
         cfg.ui.state_colors.background = Some("#112233".into());
         let config = ClientShellConfig::from_config(&cfg);
-        let background = Background { work: false, count: 2 };
+        let background = Background {
+            work: false,
+            count: 2,
+        };
         assert_eq!(
             config
                 .state_presentation

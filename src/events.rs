@@ -103,6 +103,9 @@ pub enum AppEvent {
     },
     /// The current Codex input screen is visible during managed startup.
     CodexPromptObserved { pane_id: PaneId, ready: bool },
+    /// How many background items the agent's screen lists (fork issue 172);
+    /// sent when the count changes, 0 when the agent or its work is gone.
+    BackgroundCountObserved { pane_id: PaneId, count: u8 },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,

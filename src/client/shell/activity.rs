@@ -1,6 +1,11 @@
 use super::*;
 use crate::api::schema::AgentStatus;
 
+/// Whether the pane is listed with background items in `snapshot`'s facts.
+fn has_background(snapshot: &ClientShellSnapshot, pane_id: &str) -> bool {
+    super::state_presentation::Background::from_snapshot(snapshot, pane_id).count > 0
+}
+
 impl ClientShellState {
     pub(crate) fn tick_activity(&mut self, now: std::time::Instant) -> bool {
         let local_working = self.hits.agents.iter().any(|(_, id)| {
@@ -22,8 +27,27 @@ impl ClientShellState {
                     })
                 })
         });
+        // The braille mark moves on the same tick, on idle and done rows too.
+        let braille = self.config.state_presentation.background_mark()
+            == crate::config::BackgroundMarkConfig::Braille;
+        let local_background = braille
+            && self.hits.agents.iter().any(|(_, id)| {
+                self.snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| has_background(snapshot, id))
+            });
+        let remote_background = braille
+            && self.hits.endpoint_agents.iter().any(|(_, endpoint, id)| {
+                self.endpoints
+                    .iter()
+                    .find(|e| {
+                        &e.endpoint_id == endpoint && e.status == ClientEndpointStatus::Online
+                    })
+                    .and_then(|e| e.snapshot.as_deref())
+                    .is_some_and(|snapshot| has_background(snapshot, id))
+            });
         let working = self.config.status_spinner == crate::config::StatusSpinnerConfig::On
-            && (local_working || remote_working);
+            && (local_working || remote_working || local_background || remote_background);
         if !working {
             self.activity_deadline = None;
             return false;
@@ -92,11 +116,17 @@ mod tests {
             let mut snapshot = super::super::tests::snapshot();
             snapshot.agents.push(idle.clone());
             snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
-                background_count: Some(std::collections::BTreeMap::from([("pane_1".to_owned(), 2)])),
+                background_count: Some(std::collections::BTreeMap::from([(
+                    "pane_1".to_owned(),
+                    2,
+                )])),
                 ..Default::default()
             });
             state.set_snapshot(Box::new(snapshot));
-            state.hits.agents.push((Rect::new(0, 0, 10, 1), "pane_1".into()));
+            state
+                .hits
+                .agents
+                .push((Rect::new(0, 0, 10, 1), "pane_1".into()));
             let now = std::time::Instant::now();
             assert!(!state.tick_activity(now));
             assert_eq!(

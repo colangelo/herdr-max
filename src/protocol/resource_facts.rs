@@ -18,6 +18,10 @@ pub struct ClientShellResourceFacts {
     pub pane_todos: Option<BTreeMap<String, ClientPaneTodoSummary>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_activity: Option<BTreeMap<String, bool>>,
+    /// Background items (shells, monitors, agents, MCP tasks) an agent's
+    /// screen lists, for panes where there are any (fork issue 172).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_count: Option<BTreeMap<String, u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_sync: Option<BTreeMap<String, ClientTabSync>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +100,7 @@ impl ClientShellResourceFacts {
             workspace_heads: map(get("workspace_heads")),
             pane_todos: map(get("pane_todos")),
             background_activity: map(get("background_activity")),
+            background_count: map(get("background_count")),
             tab_sync: map(get("tab_sync")),
             notifications: get("notifications").and_then(|v| serde_json::from_value(v).ok()),
             workspace_sort: get("workspace_sort").and_then(|v| serde_json::from_value(v).ok()),
@@ -138,7 +143,10 @@ mod tests {
             "background_count": {"pane": 4, "bad": "wrong type"}
         }))
         .unwrap();
-        assert_eq!(facts.background_count.unwrap(), BTreeMap::from([("pane".into(), 4)]));
+        assert_eq!(
+            facts.background_count.unwrap(),
+            BTreeMap::from([("pane".into(), 4)])
+        );
         let old = ClientShellResourceFacts::decode(&serde_json::json!({
             "background_activity": {"pane": true}
         }))

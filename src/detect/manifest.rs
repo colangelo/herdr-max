@@ -449,8 +449,10 @@ impl DetectionExplain {
 }
 
 /// Rules that report work the agent launched rather than work it is doing:
-/// the manifests name them `background_shell_working`,
-/// `background_agents_working`, `background_mcp_task_working`. Matching on the
+/// the manifests name them `background_agents_working` and
+/// `background_mcp_task_working`; a background shell is no longer one (the
+/// fork follows upstream 987b070f and counts shells for the sidebar mark
+/// instead, see `detect::background_count`). Matching on the
 /// prefix keeps new siblings working without a code change; a manifest that
 /// renames them only costs the distinct icon, never correctness.
 fn is_background_work_rule(rule_id: &str) -> bool {

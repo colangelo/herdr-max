@@ -370,6 +370,34 @@ async fn publish_codex_prompt_observation(
     }
 }
 
+/// Publishes the number of background items a Claude screen lists whenever it
+/// changes (fork issue 172). `last` starts at `u8::MAX` so the first look at a
+/// new agent always publishes, which also clears a count a previous agent left.
+async fn publish_background_count_observation(
+    state_events: &mpsc::Sender<AppEvent>,
+    pane_id: PaneId,
+    agent: Option<Agent>,
+    content: &str,
+    process_exited: bool,
+    last: &mut u8,
+) {
+    let count = if process_exited {
+        0
+    } else {
+        crate::detect::background_count(agent, content)
+    };
+    if count == *last {
+        return;
+    }
+    *last = count;
+    if let Err(err) = state_events
+        .send(AppEvent::BackgroundCountObserved { pane_id, count })
+        .await
+    {
+        warn!(pane = pane_id.raw(), %err, "failed to deliver background count observation");
+    }
+}
+
 /// Reads the command line of the agent a probe identified, once per agent
 /// process: on its first sighting, and for an agent already running when this
 /// task started (a live handoff or restore carries the agent over without a
@@ -1325,6 +1353,7 @@ fn spawn_basic_detection_task(
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut last_codex_prompt_ready = false;
+        let mut last_background_count = u8::MAX;
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
         let mut last_resolved_cwd_refresh = None;
@@ -1473,6 +1502,7 @@ fn spawn_basic_detection_task(
                     if agent_changed {
                         pending_idle.clear();
                         last_codex_prompt_ready = false;
+                        last_background_count = u8::MAX;
                         last_screen_scan_detection_content_seq = None;
                         // A replacement agent must not inherit OSC evidence
                         // from the previous process; a first acquisition keeps
@@ -1578,6 +1608,15 @@ fn spawn_basic_detection_task(
                 screen_detection.as_ref(),
                 process_exited,
                 &mut last_codex_prompt_ready,
+            )
+            .await;
+            publish_background_count_observation(
+                &state_events,
+                pane_id,
+                agent,
+                &content,
+                process_exited,
+                &mut last_background_count,
             )
             .await;
             let Some(screen_detection) = screen_detection else {
@@ -3347,6 +3386,7 @@ impl PaneRuntime {
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut last_codex_prompt_ready = false;
+                let mut last_background_count = u8::MAX;
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
                 let mut last_resolved_cwd_refresh = None;
@@ -3555,6 +3595,7 @@ impl PaneRuntime {
                                 {
                                     pending_idle.clear();
                                     last_codex_prompt_ready = false;
+                                    last_background_count = u8::MAX;
                                     last_screen_scan_detection_content_seq = None;
                                     // A replacement agent must not inherit OSC
                                     // evidence from the previous process; a first
@@ -3694,6 +3735,15 @@ impl PaneRuntime {
                         screen_detection.as_ref(),
                         process_exited,
                         &mut last_codex_prompt_ready,
+                    )
+                    .await;
+                    publish_background_count_observation(
+                        &state_events,
+                        pane_id,
+                        agent,
+                        &content,
+                        process_exited,
+                        &mut last_background_count,
                     )
                     .await;
                     let Some(screen_detection) = screen_detection else {

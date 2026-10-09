@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.10.08.1"
+version = "2026.10.09.1"
 min_engine_version = 2
-updated_at = "2026-10-08T00:00:00Z"
+updated_at = "2026-10-09T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -22,22 +22,6 @@ visible_working = true
 any = [
   { line_regex = ['^\s*[⏸⏵].*esc to interrupt(?:\s|·|$)'] },
   { line_regex = ['^\s*[\x{002A}\x{00B7}\x{2722}\x{2733}\x{2736}\x{273B}\x{273D}]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)'] },
-]
-
-[[rules]]
-id = "background_shell_working"
-state = "working"
-priority = 965
-region = "bottom_non_empty_lines(5)"
-visible_working = true
-# The count can end the footer (`· 2 shells`) or be followed by more segments.
-line_regex = ['^\s*[⏸⏵].*·\s+[1-9]\d*\s+shells?\s*(?:·|$)']
-# A permission or question dialog outranks the shell count: its footer keeps
-# listing the shells, but the pane is waiting for an answer.
-not = [
-  { contains = ["esc to cancel"] },
-  { contains = ["tab to amend"] },
-  { contains = ["waiting for permission"] },
 ]
 
 [[rules]]

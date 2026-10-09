@@ -198,6 +198,10 @@ pub struct TerminalState {
     /// [`Self::background_work`], which also requires the live state to be
     /// Working so a stale flag can never reach the UI.
     background_work_observed: bool,
+    /// Background items (shells, monitors, agents, MCP tasks) the agent's
+    /// screen lists, for the sidebar mark. A presentation fact: unlike
+    /// [`Self::background_work`] it says nothing about the status.
+    background_count: u8,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
@@ -268,6 +272,7 @@ impl TerminalState {
             agent_launch: None,
             terminal_title: None,
             background_work_observed: false,
+            background_count: 0,
             manual_label: None,
             agent_name: None,
             agent_name_owner: None,
@@ -462,6 +467,15 @@ impl TerminalState {
 
     pub(crate) fn set_background_work_observed(&mut self, observed: bool) {
         self.background_work_observed = observed;
+    }
+
+    /// Background items the agent's screen lists; 0 when none or no agent.
+    pub fn background_count(&self) -> u8 {
+        self.background_count
+    }
+
+    pub(crate) fn set_background_count(&mut self, count: u8) {
+        self.background_count = count;
     }
 
     /// Why the agent is blocked; `None` unless the state is Blocked.
