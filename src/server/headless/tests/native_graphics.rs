@@ -941,6 +941,14 @@ async fn native_file_render_scale_profile() {
     const IMAGE_HEIGHT: u32 = 480;
     for count in [1, 15] {
         for (native, source_retention) in [(false, false), (true, false), (true, true)] {
+            if source_retention && !cfg!(target_os = "linux") {
+                // Kernel CoW source snapshots (FICLONE) exist only on Linux; elsewhere
+                // `FileStore::snapshot` is unsupported and the terminal always decodes.
+                println!(
+                    "native_file_render_scale retained=true native_files={native} source_retention={source_retention} populated_panes={count} SKIPPED: CoW source retention is Linux-only"
+                );
+                continue;
+            }
             let (mut server, _control, _render, root) =
                 retained_test_server_with_control(b"populated root terminal\r\n");
             if source_retention {
