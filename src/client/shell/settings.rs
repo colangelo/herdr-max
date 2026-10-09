@@ -51,6 +51,9 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
+            ClientSettingsSection::PaneLabels => {
+                usize::from(!self.config.show_agent_labels_on_pane_borders)
+            }
             ClientSettingsSection::Integrations => 0,
         }
     }
@@ -97,7 +100,9 @@ impl ClientShellState {
         match self.overlay.as_ref() {
             Some(ClientShellOverlay::Settings(settings)) => match settings.section {
                 ClientSettingsSection::Theme => crate::config::THEME_NAMES.len(),
-                ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
+                ClientSettingsSection::Indicators
+                | ClientSettingsSection::Sound
+                | ClientSettingsSection::PaneLabels => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
             },
@@ -241,6 +246,12 @@ impl ClientShellState {
                 };
                 self.save_settings_edit(
                     crate::config::ConfigEdit::ToastDelivery(delivery),
+                    outcome,
+                );
+            }
+            ClientSettingsSection::PaneLabels => {
+                self.save_settings_edit(
+                    crate::config::ConfigEdit::AgentBorderLabels(selected == 0),
                     outcome,
                 );
             }

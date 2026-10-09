@@ -234,6 +234,22 @@ pub(super) fn render_settings_overlay(
                 &mut choice_hits,
             );
         }
+        ClientSettingsSection::PaneLabels => {
+            render_choice_list(
+                buffer,
+                content,
+                ChoiceList {
+                    title: "agent border labels",
+                    description: "show detected agent names in split pane borders",
+                    options: &["on", "off"],
+                    current: usize::from(!config.show_agent_labels_on_pane_borders),
+                    selected: settings.selected,
+                    row_height: 1,
+                },
+                palette,
+                &mut choice_hits,
+            );
+        }
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }

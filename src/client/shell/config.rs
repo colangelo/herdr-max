@@ -178,6 +178,7 @@ impl ClientShellConfig {
             spinner_frame: 0,
             status_indicators: config.ui.status_indicators,
             sound_enabled: config.ui.sound.enabled,
+            show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             toast_delivery: config.ui.toast.delivery,
             toast_delay_seconds: config.ui.toast.delay_seconds,
             herdr_toast: config.ui.toast.herdr,
@@ -453,6 +454,7 @@ impl ClientShellConfig {
                     ));
                 self.status_indicators = ui.status_indicators;
                 self.sound_enabled = ui.sound.enabled;
+                self.show_agent_labels_on_pane_borders = ui.show_agent_labels_on_pane_borders;
                 self.toast_delivery = ui.toast.delivery;
                 self.toast_delay_seconds = ui.toast.delay_seconds;
                 self.herdr_toast = ui.toast.herdr;
@@ -590,6 +592,7 @@ mod tests {
         next.ui.tab_bar_position = TabBarPositionConfig::Bottom;
         next.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
         next.ui.status_indicators = crate::config::StatusIndicatorStyle::Symbols;
+        next.ui.show_agent_labels_on_pane_borders = true;
         next.ui.sidebar.agents = toml::from_str("rows = [[{ token = 'machine', rules = [{ equals = 'Local', bold = true }] }]]\nrow_gap = 2").unwrap();
         next.keys.prefix = crate::config::BindingConfig::one("ctrl+a");
 
@@ -607,6 +610,7 @@ mod tests {
             crate::config::StatusIndicatorStyle::Symbols
         );
         assert_eq!(shell.agents.row_gap, 2);
+        assert!(shell.show_agent_labels_on_pane_borders);
         assert_eq!(
             shell.agents.rows[0][0]
                 .style_for_value("Local")
@@ -621,10 +625,13 @@ mod tests {
             &["ui".to_owned(), "keys".to_owned()],
         );
         assert_eq!(shell.agents, previous);
+        assert!(shell.show_agent_labels_on_pane_borders);
         assert_eq!(
             shell.keybinds.prefix,
             vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]
         );
+        shell.apply_live_config(&Config::default(), &[], &[]);
+        assert!(!shell.show_agent_labels_on_pane_borders);
     }
 
     #[test]

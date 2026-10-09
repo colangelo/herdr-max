@@ -48,6 +48,8 @@ herdr server reload-config
 
 You can also open the global menu in Herdr and choose `reload config`.
 
+In Settings, the **pane labels** tab toggles `ui.show_agent_labels_on_pane_borders`. Its **agent border labels** choices show or hide detected agent names on split-pane borders; assigned pane labels remain visible. Applying a choice saves the config and reloads the selected server, as with the other settings sections.
+
 Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
 
 Themes, sidebar layouts, copy behavior, and other presentation settings come from the client's local config, including when viewing an SSH machine. Pane defaults, worktrees, integrations, and custom commands belong to the server where the panes run. The UI's `reload config` action reloads both the client's local settings and the selected server's config. Local keybindings reload too; `--remote-keybindings server` instead uses the selected server's keybindings.
