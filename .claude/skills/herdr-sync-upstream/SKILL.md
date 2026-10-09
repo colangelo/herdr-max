@@ -18,8 +18,8 @@ https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/173
 - Remotes: `origin` = github.com/colangelo/herdr-max (CI and releases run there),
   `internal` = Gitea AC-forks/herdr-max (issue tracker, integration remote, what you
   push to first), `upstream` = github.com/herdrdev/herdr (read only).
-- Integration points are tags `sync-merge/N` (the counter is global; 30 at the cutover;
-  next is `git tag -l 'sync-merge/*' | sort -V | tail -1` plus one). Tag every merge
+- Integration points are tags `sync-merge/N` (the counter is global, so other trains take numbers too: 31 went to
+  the post-cutover batch. Never pick a number from memory; the next one is `git tag -l 'sync-merge/*' | sort -V | tail -1` plus one). Tag every merge
   result, every green check and the commit you ask others to test.
 - `FORK-INVENTORY.md` (repo root) is the map of what the fork carries. Rows have a status:
   **carried** (fork behaviour, present), **port** (re-implemented on the client shell),
@@ -257,8 +257,9 @@ command gh pr create --repo colangelo/herdr-max --draft --base master --head syn
 command gh pr checks --repo colangelo/herdr-max --watch
 ```
 
-If the push to `origin` is refused (the GitHub token was revoked in October 2026), do not
-look for another path: tell `herdr`, it asks ac. The draft PR is for CI only; nobody reviews
+If `gh` or the push to `origin` says the token is invalid, ask mac-m4 to log in again
+(`gh auth login` on m4m); the Gitea steps keep working meanwhile. Do not look for another
+path or another token. The draft PR is for CI only; nobody reviews
 or merges it on GitHub.
 
 Windows lint is skipped on macOS by design; the Windows CI job is where upstream's
