@@ -43,6 +43,7 @@ rustPlatform.buildRustPackage {
         ../crates
         ../distribution/install.ps1
         ../docs/next/api/herdr-api.schema.json
+        ../integrations/claude-mod
         ../src
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
