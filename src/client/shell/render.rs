@@ -56,8 +56,15 @@ pub(super) fn render_mode_bar(
         buffer[(x, bar.y)].set_symbol(" ").set_style(base);
     }
 
+    // A mode keeps its own colour for its chip and its keys; the accent is the colour of the
+    // modes without one (docs/ui-style.md, Mode colour).
+    let mode_colour = if mode == ClientShellMode::Resize {
+        palette.mauve
+    } else {
+        palette.accent
+    };
     let key = Style::default()
-        .fg(palette.accent)
+        .fg(mode_colour)
         .bg(palette.panel_bg)
         .add_modifier(Modifier::BOLD);
     let mode_style = Style::default()
@@ -65,11 +72,7 @@ pub(super) fn render_mode_bar(
             ratatui::style::Color::Reset => palette.surface_dim,
             color => color,
         })
-        .bg(if mode == ClientShellMode::Resize {
-            palette.mauve
-        } else {
-            palette.accent
-        })
+        .bg(mode_colour)
         .add_modifier(Modifier::BOLD);
     let prefix_rhs = |bindings: &crate::config::ActionKeybinds| {
         bindings
