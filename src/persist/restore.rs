@@ -2346,37 +2346,51 @@ mod tests {
                     }
                 }
             }
-            let todo = |id: u64, text: &str, link_pane: u32, link_label: &str| {
+            // Every field differs from its default, so a restore that dropped
+            // or reset one would show in the full-snapshot comparisons below.
+            let todo = |id: u64,
+                        text: &str,
+                        done: bool,
+                        priority: crate::terminal::todo::TodoPriority,
+                        link_pane: Option<u32>| {
                 super::super::snapshot::PaneTodoSnapshot {
                     id,
                     text: text.into(),
-                    done: false,
-                    priority: crate::terminal::todo::TodoPriority::High,
-                    link_pane: Some(link_pane),
-                    link_label: Some(link_label.into()),
-                    created_at_unix: 100,
+                    done,
+                    priority,
+                    link_pane,
+                    link_label: link_pane.map(|raw| format!("pane {raw}")),
+                    created_at_unix: 100 + id,
                     updated_at_unix: 140 + id,
                 }
             };
+            let launch = |agent: &str, flag: &str, started_at_ms: i64| {
+                super::super::snapshot::PaneAgentLaunchSnapshot {
+                    agent: agent.into(),
+                    flags: vec!["--model".into(), flag.into()],
+                    started_at_ms: Some(started_at_ms),
+                }
+            };
+            use crate::terminal::todo::TodoPriority::{High, Low};
             // Pane 1 has lost its directory. Pane 3, in the other workspace,
             // either starts or, with `missing_shell`, fails to start its shell.
             // Each has a todo linking to the other.
             let lost = snapshot.workspaces[0].tabs[0].panes.get_mut(&1).unwrap();
             lost.cwd = missing.clone();
-            lost.todos = vec![todo(4, "ship it", 3, "infra")];
-            lost.next_todo_id = 5;
+            lost.todos = vec![
+                todo(4, "ship it", false, High, Some(3)),
+                todo(5, "done already", true, Low, None),
+            ];
+            lost.next_todo_id = 6;
             lost.pin_order = Some(2);
             lost.last_input_at_ms = Some(1_700_000_000_000);
-            lost.agent_launch = Some(super::super::snapshot::PaneAgentLaunchSnapshot {
-                agent: "claude".into(),
-                flags: vec!["--model".into(), "opus".into()],
-                started_at_ms: Some(1_700_000_000_001),
-            });
+            lost.agent_launch = Some(launch("claude", "opus", 1_700_000_000_001));
             let other = snapshot.workspaces[1].tabs[0].panes.get_mut(&3).unwrap();
-            other.todos = vec![todo(7, "review", 1, "lost")];
+            other.todos = vec![todo(7, "review", true, High, Some(1))];
             other.next_todo_id = 9;
             other.pin_order = Some(1);
             other.last_input_at_ms = Some(1_700_000_000_002);
+            other.agent_launch = Some(launch("codex", "gpt", 1_700_000_000_003));
 
             let (events, _rx) = mpsc::channel(32);
             let (workspaces, terminals, runtimes) = restore(
@@ -2411,28 +2425,43 @@ mod tests {
 
             let captured =
                 crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
+            // Links are captured as the target's new raw id; the label stays
+            // the saved one.
+            let relinked = |mut snap: super::super::snapshot::PaneTodoSnapshot, raw: u32| {
+                snap.link_pane = Some(raw);
+                snap
+            };
             let lost = &captured.workspaces[0].tabs[0].panes[&lost_id.raw()];
-            assert_eq!(lost.todos.len(), 1, "missing_shell={missing_shell}");
-            assert_eq!(lost.todos[0].text, "ship it");
             assert_eq!(
-                lost.todos[0].link_pane,
-                Some(other_id.raw()),
-                "a link out of an unavailable pane is remapped"
+                lost.todos,
+                vec![
+                    relinked(todo(4, "ship it", false, High, Some(3)), other_id.raw()),
+                    todo(5, "done already", true, Low, None),
+                ],
+                "missing directory, missing_shell={missing_shell}: todos kept whole and a link out of the pane remapped"
             );
-            assert_eq!(lost.todos[0].link_label.as_deref(), Some("infra"));
-            assert_eq!(lost.next_todo_id, 5);
+            assert_eq!(lost.next_todo_id, 6);
             assert_eq!(lost.pin_order, Some(2));
             assert_eq!(lost.last_input_at_ms, Some(1_700_000_000_000));
-            let launch = lost.agent_launch.as_ref().expect("launch flags kept");
-            assert_eq!(launch.agent, "claude");
-            assert_eq!(launch.flags, ["--model", "opus"]);
+            assert_eq!(
+                lost.agent_launch,
+                Some(launch("claude", "opus", 1_700_000_000_001)),
+                "missing directory: launch flags kept"
+            );
 
             let other = &captured.workspaces[1].tabs[0].panes[&other_id.raw()];
-            assert_eq!(other.todos.len(), 1, "missing_shell={missing_shell}");
             assert_eq!(
-                other.todos[0].link_pane,
-                Some(lost_id.raw()),
-                "a link into an unavailable pane still resolves"
+                other.todos,
+                vec![relinked(
+                    todo(7, "review", true, High, Some(1)),
+                    lost_id.raw()
+                )],
+                "missing_shell={missing_shell}: a link into an unavailable pane still resolves"
+            );
+            assert_eq!(
+                other.agent_launch,
+                Some(launch("codex", "gpt", 1_700_000_000_003)),
+                "missing_shell={missing_shell}: launch flags kept on the started and the shell-failure path"
             );
             assert_eq!(other.next_todo_id, 9);
             assert_eq!(other.pin_order, Some(1));
