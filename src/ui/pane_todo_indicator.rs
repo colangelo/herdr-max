@@ -51,7 +51,7 @@ pub(crate) fn todo_priority_color(
     palette: &Palette,
     override_color: Option<Color>,
 ) -> Color {
-    override_color.unwrap_or_else(|| match priority {
+    override_color.unwrap_or(match priority {
         Some(TodoPriority::High) => palette.red,
         Some(TodoPriority::Normal) => palette.yellow,
         Some(TodoPriority::Low) => palette.blue,

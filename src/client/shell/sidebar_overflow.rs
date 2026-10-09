@@ -590,8 +590,8 @@ fn fit(heights: &[u16], gaps: &[u16], start: usize, available: u16) -> usize {
     }
     let mut used = 0u16;
     let mut count = 0;
-    for index in start..heights.len() {
-        let h = heights[index].max(1).min(available);
+    for (index, &height) in heights.iter().enumerate().skip(start) {
+        let h = height.max(1).min(available);
         if used.saturating_add(h) > available {
             break;
         }

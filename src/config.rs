@@ -10,6 +10,8 @@ mod theme;
 mod window_title;
 mod write;
 
+pub(crate) use self::model::HerdrToastConfig;
+
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
@@ -600,5 +602,3 @@ command = "echo one"
         assert_eq!(drawn.ui.host_cursor, HostCursorModeConfig::Drawn);
     }
 }
-
-pub(crate) use self::model::HerdrToastConfig;
