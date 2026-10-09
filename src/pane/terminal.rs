@@ -4772,14 +4772,16 @@ mod tests {
                 .observe(Some(previous), now - Duration::from_millis(200));
         }
 
-        for bytes in [
-            b"\x1b[?2026h\x1b[15;4Hx\x1b[13;1H".as_slice(),
-            b"\x1b[0 q\x1b[13;1H \x1b[15;5H",
-            b"\x1b[?25h",
+        // Fork issue 126: the frame that opens a synchronized block schedules
+        // the SYNC_HOLD_MAX fallback render; the frames inside it do not.
+        for (bytes, opens_block) in [
+            (b"\x1b[?2026h\x1b[15;4Hx\x1b[13;1H".as_slice(), true),
+            (b"\x1b[0 q\x1b[13;1H \x1b[15;5H", false),
+            (b"\x1b[?25h", false),
         ] {
             let result = pane.process_pty_bytes(pane_id, 0, bytes, &tx);
             assert!(!result.request_render);
-            assert_eq!(result.render_delay, None);
+            assert_eq!(result.render_delay, opens_block.then_some(SYNC_HOLD_MAX));
             assert_eq!(pane.cursor_state(), Some(previous));
             assert!(pane.core.lock().unwrap().cursor_settle_state.pending());
         }
