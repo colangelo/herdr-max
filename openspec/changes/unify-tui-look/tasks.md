@@ -29,23 +29,23 @@ Planned 2026-10-08. Issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/
 - [ ] 3.4 optional: bring the 0.9.3 help and navigator footers to the key bar rule (keys first, bold accent) and drop hints that do nothing (upstream #2880); shape it so it can go upstream
 - [ ] 3.5 dogfood each fix with `herdr-dogfood`, then close its issue with how it was checked
 
-### Phase 3 file map (checked 2026-10-08 against `sync/merge` @ 7670867d, v0.9.3 + port, and `port/chrome`/`port/overlays`)
+### Phase 3 file map (refreshed 2026-10-09 against `sync/merge` @ 240f6d5b, v0.9.3 + port)
 
-Paths are `src/client/shell/` unless noted. **Clash:** commit 8a5d2b91 ("strip client-only fork code") removed `src/ui/display_panes.rs`, `menus.rs`, `navigator.rs`, `todo_panel.rs` from the port trees, so the PANES / RESIZE-summary bar, the VERSION chip and the SYNC chip have no client-shell code yet. Items 3.2 to 3.4 re-port them onto the files below; the old implementations to port from are in this branch's tree.
+Paths are `src/client/shell/` unless noted. The earlier map (7670867d) listed the PANES bar, VERSION chip and SYNC chip as having no client-shell code; the port has since re-landed them, so 3.2 and 3.3 restyle code that exists instead of re-porting it. Line numbers drift: find by function name.
 
-| Surface | Where in the 0.9.3 tree | Function | Tests that pin it |
+| Surface | Where | Function / anchor | Tests that pin it |
 |---|---|---|---|
-| NAVIGATE / RESIZE / PREFIX / COPY / ERROR mode bar | `render.rs:31` (labels at 88/102/114/131/179; colour at ~58-70: mauve for RESIZE, accent for the rest; hint `segments` at ~83-190) | `render_mode_bar` | `tests/agents_worktrees_notifications.rs:1156`; `tests/startup_overlays.rs:752` (text only, none check style) |
-| Mode bar restore | `composition.rs:3`, callers at 128 and 324 | `restore_mode_bar` | none |
-| PANES bar + VERSION chip (to re-port) | not in the 0.9.3 tree; old code: `src/ui/display_panes.rs:200` (label at 231, VERSION spans 280-290, red at :73) | `render_summary_bar`, `mode_chip_style` | old tests in this branch: `display_panes.rs:460, 490, 516, 624` (the one at 490 says the VERSION chip is styled like PANES; 624 asserts PANES and VERSION `bg` are red) |
-| RESIZE size summary (to re-port) | old code: `display_panes.rs:36/56` | `render_resize_mode_bar`, `render_window_resize_summary` | old tests `display_panes.rs:416, 532, 570, 593, 607` |
-| SYNC chip and yellow borders (to re-port) | old code: `src/ui/panes.rs:~565-580` (`SYNC_YELLOW`, `sync_outsider()`); sync logic `src/app/sync_panes.rs` exists in all trees; no `SYNC` string draws in the client shell yet (3a65d4bc mentions the chip, not located) | find the draw site first (task 3.2a) | none found |
-| Todos / notes panel | `todo_panel.rs`: layout 403 (`todo_panel_layout`), render 579 (`render_todo_panel`), detail box 535 (`render_detail_box`), footer buttons 361 (`footer_buttons`, the open-pane button is `TodoPanelButton::Go`). No search or count row yet | as listed | `tests/todo_overlays.rs:134, 189, 396, 427, 723` |
-| Todo editor | `todo_edit.rs:123` layout, `:227` `render_todo_edit` | as listed | `tests/todo_overlays.rs:638` |
-| Navigator footer | `overlays.rs:1036-1038` hint strings; `render_navigator_overlay` at 710 | | `tests/copy.rs:1654` (no footer text assertion) |
-| Help footer | `overlays.rs:1242-1247` (`esc back`/`esc close` at 1152-1154); `render_help_overlay` at 1123, `help_lines` at 1059 | | `tests/input.rs:788`, `tests/keybindings_settings.rs:837` |
-| Release notes / announcement footer | `overlays.rs:405`, `:521` | `render_release_notes_overlay` (314), `render_product_announcement_overlay` (430) | none |
-| Notification centre footer | `notification_center.rs:80` (`footer_width`), `:93` (`footer_buttons`) | | `tests/notification_center.rs:152, 351` |
+| NAVIGATE / RESIZE / PREFIX / COPY / ERROR mode bar | `render.rs:34`; colours 58-72 (key style 59-61, `mode_style` 62-72: `palette.mauve` for Resize, `palette.accent` otherwise); labels ERROR 83, NAVIGATE 90, RESIZE 126, COPY 143 and 191 | `render_mode_bar` | `tests/keybindings_settings.rs:374` (pins `" NAVIGATE  esc back  "`), `tests/agents_worktrees_notifications.rs:1208` (contains only), `tests/startup_overlays.rs:752`, `tests/port_navigate.rs`, `tests/port_scroll.rs:239` (calls it directly); none check style except the last |
+| Mode bar restore | `composition.rs:3`, callers 415, 586, 800 | `restore_mode_bar` | none |
+| PANES bar, RESIZE summary, VERSION chip | `display_panes.rs`: `paint` 151, chip style 240-246 (`bg` mauve for resize, red otherwise), `summary_spans` 289, `" RESIZE "`/`" PANES "` 306, `" VERSION "` 346, pane borders red/`muted_red` 179 | `paint`, `summary_spans` | inline tests in `display_panes.rs` (~420), `tests/mod.rs:306` |
+| SYNC chip | `sync_chrome.rs`: `paint` 4, text `" SYNC {n} pane(s) "` and `" SYNC ending… "` 20-24, `bg` `SYNC_YELLOW` 41. Constant: `src/app/state.rs:78`. Yellow pane borders still in `src/ui/panes.rs` (~673, ~1087, `sync_outsider()`); sync logic `src/app/sync_panes.rs` | `paint` | inline tests 51-93; `tests/port_sync.rs` |
+| Todos / notes panel | `todo_panel.rs`: `footer_buttons` 367, `todo_panel_layout` 409, `render_detail_box` 541, `render_todo_panel` 585; the open-pane button is `TodoPanelButton::Go`, text `" g go "` (350). `todo_board.rs` exists beside it. No search or count row yet | as listed | `tests/todo_overlays.rs`, `tests/indicator_clicks.rs:141`, `tests/todo_board.rs` |
+| Todo editor | `todo_edit.rs`: `todo_edit_layout` 133, `render_todo_edit` 237 (panel shell in `p.accent`) | as listed | `tests/todo_overlays.rs` |
+| Navigator footer | `overlays.rs`: `render_navigator_overlay` 911; hint strings need re-finding (old 1036-1038 is stale) | | `tests/navigator_overlays.rs`, `tests/copy.rs` |
+| Help footer | `overlays.rs`: `help_lines` 1331, `render_help_overlay` 1395, `esc back` / `esc close` button 1420-1422 | | `tests/input.rs`, `tests/keybindings_settings.rs` |
+| Release notes / announcement footer | `overlays.rs`: `render_release_notes_overlay` 429 (footer `" esc close "` 493), `render_product_announcement_overlay` 545 (609) | | `tests/startup_overlays.rs` |
+| Notification centre footer | `notification_center.rs`: `footer_width` 80, `footer_buttons` 93 | | `tests/notification_center.rs` |
 
-- [ ] 3.2a find where the SYNC chip is drawn on the 0.9.3 base (grep the sync state in `render.rs` / `composition.rs`) and add it to the table
+Still absent from the client shell (old files removed by 8a5d2b91): `src/ui/navigator.rs`, `menus.rs`, `todo_panel.rs`, `display_panes.rs`; their client-shell successors are the files above.
 
+- [x] 3.2a find where the SYNC chip is drawn on the 0.9.3 base: `sync_chrome.rs` `paint`
