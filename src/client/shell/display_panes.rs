@@ -398,13 +398,16 @@ mod tests {
         assert!(!state.pane_labels_visible());
     }
     #[test]
-    fn summary_keeps_red_version_chip_key_colors_and_narrow_bar_priority() {
+    fn summary_has_one_chip_keys_in_the_modes_colour_and_a_dim_version_label() {
+        // Fork issue 174: one chip per mode, keys in the mode's colour, `version` a dim label.
         let config = ClientShellConfig::from_config(&Config::default());
         let p = &config.palette;
-        let chip = Style::default()
-            .fg(panel_contrast_fg(p))
-            .bg(p.red)
-            .add_modifier(Modifier::BOLD);
+        let chip = |colour| {
+            Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(colour)
+                .add_modifier(Modifier::BOLD)
+        };
         let spans = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
@@ -413,27 +416,50 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             140,
         );
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.ends_with("any key close   VERSION  server-build"));
-        assert_eq!(
-            spans
-                .iter()
-                .find(|s| s.content == " VERSION ")
-                .unwrap()
-                .style,
-            chip
+        assert!(text.starts_with(" PANES "), "{text}");
+        assert!(
+            text.ends_with("any key close  version server-build"),
+            "{text}"
         );
         assert_eq!(
+            spans.iter().filter(|s| s.style.bg == Some(p.red)).count(),
+            1,
+            "only the PANES chip is filled"
+        );
+        let find = |spans: &[Span<'_>], text: &str| {
             spans
                 .iter()
-                .find(|s| s.content == "any key")
-                .unwrap()
+                .find(|s| s.content == text)
+                .unwrap_or_else(|| panic!("{text:?}"))
                 .style
-                .fg,
-            Some(p.red)
+        };
+        assert_eq!(find(&spans, "any key").fg, Some(p.red));
+        assert_eq!(find(&spans, "version").fg, Some(p.overlay0));
+        assert_eq!(find(&spans, "server-build").fg, Some(p.text));
+        let resize = summary_spans(
+            Rect::new(0, 0, 140, 30),
+            Rect::new(26, 0, 114, 29),
+            2,
+            false,
+            true,
+            "server-build",
+            p,
+            chip(p.mauve),
+            140,
+        );
+        assert_eq!(find(&resize, "h/l").fg, Some(p.mauve));
+        assert_eq!(find(&resize, "esc").fg, Some(p.mauve));
+        assert_eq!(
+            resize
+                .iter()
+                .filter(|s| s.style.bg == Some(p.mauve))
+                .count(),
+            1,
+            "only the RESIZE chip is filled"
         );
         let narrow = summary_spans(
             Rect::new(0, 0, 70, 30),
@@ -443,12 +469,12 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             70,
         );
         let text: String = narrow.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.ends_with("any key close"));
-        assert!(!text.contains("VERSION"));
+        assert!(text.ends_with("any key close"), "{text}");
+        assert!(!text.contains("version"), "the version drops first: {text}");
         let passive = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
@@ -457,7 +483,7 @@ mod tests {
             false,
             "server-build",
             p,
-            chip,
+            chip(p.red),
             140,
         );
         assert!(!passive.iter().any(|s| s.content.contains("focus")));

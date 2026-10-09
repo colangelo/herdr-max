@@ -94,4 +94,38 @@ mod tests {
         snapshot.resource_facts = None;
         assert!(paint(&mut buffer, area, &snapshot, &palette).is_none());
     }
+
+    #[test]
+    fn sync_chip_keeps_its_yellow_with_dark_bold_text_on_every_palette() {
+        // Fork issue 174: SYNC keeps its own colour, and its text is the dark chip text the other
+        // mode chips use, also on the terminal palette whose panel background is the terminal's.
+        let mut snapshot = crate::client::shell::tests::snapshot();
+        let tab = snapshot.focused_tab_id.clone().unwrap();
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            tab_sync: Some(
+                [(
+                    tab,
+                    crate::protocol::ClientTabSync {
+                        members: vec!["w1:p1".into(), "w1:p2".into()],
+                        ending: false,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        for palette in [
+            ClientShellConfig::from_config(&Config::default()).palette,
+            crate::app::state::Palette::terminal(),
+        ] {
+            let area = Rect::new(0, 0, 30, 3);
+            let mut buffer = Buffer::empty(area);
+            let rect = paint(&mut buffer, area, &snapshot, &palette).unwrap();
+            let cell = &buffer[(rect.x + 1, rect.y)];
+            assert_eq!(cell.bg, crate::app::state::SYNC_YELLOW);
+            assert_eq!(cell.fg, panel_contrast_fg(&palette));
+            assert_ne!(cell.fg, ratatui::style::Color::Reset);
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
+    }
 }
