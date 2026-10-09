@@ -587,7 +587,7 @@ fn pane_codex_process(runtime: &crate::terminal::TerminalRuntime) -> Option<Pane
     })
 }
 
-fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
+pub(super) fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
         return Some("sh".into());
