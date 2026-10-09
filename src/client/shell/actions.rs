@@ -180,6 +180,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if action == crate::input::KeybindAction::OpenTodoBoard {
+                    self.open_todo_board(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::WorkspacePicker {
                     self.pending_workspace_highlight = None;
                     self.mobile_switcher_scroll = 0;
@@ -903,6 +907,11 @@ impl ClientShellState {
             } => {
                 let repaint = self.handle_todo_list_result(&pane_id, revision, panes, result);
                 return (repaint, Vec::new());
+            }
+            PendingEndpointKind::TodoBoardList { key } => {
+                let mut outcome = ClientShellInput::default();
+                let repaint = self.handle_todo_board_list_result(key, result, &mut outcome);
+                return (repaint || outcome.repaint, outcome.actions);
             }
             PendingEndpointKind::TodoMutation { pane_id } => {
                 let mut outcome = ClientShellInput::default();

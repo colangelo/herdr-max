@@ -126,6 +126,7 @@ pub(super) struct ShellHitMap {
     pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
     pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
     pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,
+    pub(super) todo_board_layout: Option<super::todo_board::TodoBoardLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -305,6 +306,7 @@ pub(super) enum ClientShellOverlayKind {
     NotificationCenter,
     TodoPanel,
     TodoEdit,
+    TodoBoard,
     MovePicker,
 }
 
@@ -659,6 +661,7 @@ pub(super) enum ClientShellOverlay {
     NotificationCenter(super::notification_center::ClientNotificationCenterOverlay),
     TodoPanel(super::todo_panel::ClientTodoPanelOverlay),
     TodoEdit(super::todo_edit::ClientTodoEditOverlay),
+    TodoBoard(super::todo_board::ClientTodoBoardOverlay),
     MovePicker(super::move_picker::ClientMovePickerOverlay),
 }
 
@@ -681,6 +684,7 @@ impl ClientShellOverlay {
             Self::NotificationCenter(_) => ClientShellOverlayKind::NotificationCenter,
             Self::TodoPanel(_) => ClientShellOverlayKind::TodoPanel,
             Self::TodoEdit(_) => ClientShellOverlayKind::TodoEdit,
+            Self::TodoBoard(_) => ClientShellOverlayKind::TodoBoard,
             Self::MovePicker(_) => ClientShellOverlayKind::MovePicker,
         }
     }
@@ -743,6 +747,11 @@ pub(super) enum PendingEndpointKind {
         pane_id: String,
         revision: Option<u64>,
         panes: u64,
+    },
+    /// `todo.list` with no pane: every pane's todos, for the board. `key` is
+    /// the snapshot's todo state the request was made against.
+    TodoBoardList {
+        key: u64,
     },
     TodoMutation {
         pane_id: String,

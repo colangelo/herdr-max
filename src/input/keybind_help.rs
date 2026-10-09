@@ -184,6 +184,10 @@ pub(crate) fn keybind_help_groups(
                 entry(binding_label(&keybinds.clear_pane), "clear pane"),
                 entry(binding_label(&keybinds.open_pane_todos), "pane todos"),
                 entry(binding_label(&keybinds.add_pane_todo), "add pane todo"),
+                entry(
+                    binding_label(&keybinds.open_todo_board),
+                    "session todo board",
+                ),
                 entry(binding_label(&keybinds.copy_mode), "copy mode"),
                 entry(binding_label(&keybinds.copy_mode_page_up), "scroll page up"),
                 entry(
@@ -269,6 +273,19 @@ pub(crate) fn keybind_help_groups(
             entry("ctrl+u / ctrl+d", "half page up / down"),
             entry("home / end", "first / last destination"),
             entry("esc", "leave search / clear search / close"),
+        ],
+    ));
+    groups.push((
+        "todo board",
+        vec![
+            entry("enter / click twice", "open owner pane"),
+            entry("e", "edit todo"),
+            entry("spc", "toggle done"),
+            entry("g", "follow link"),
+            entry("d", "remove todo"),
+            entry("c", "clear done"),
+            entry("/", "search todos"),
+            entry("esc / q", "close board"),
         ],
     ));
     groups.push((

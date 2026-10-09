@@ -543,6 +543,7 @@ impl ClientShellState {
                 | PendingEndpointKind::NotificationList { .. }
                 | PendingEndpointKind::NotificationMutation
                 | PendingEndpointKind::TodoList { .. }
+                | PendingEndpointKind::TodoBoardList { .. }
                 | PendingEndpointKind::TodoMutation { .. }
                 | PendingEndpointKind::TodoSave { .. }
                 | PendingEndpointKind::PaneMove,

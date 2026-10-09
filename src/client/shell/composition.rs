@@ -701,6 +701,19 @@ impl ClientShellState {
                 }
                 self.hits.todo_edit = rendered;
                 None
+            } else if let ClientShellOverlay::TodoBoard(board) = overlay {
+                let rendered = super::todo_board::render_todo_board(
+                    &mut composed,
+                    board,
+                    self.config.pane_todo_color,
+                    &self.config.palette,
+                );
+                let cursor = rendered.as_ref().and_then(|(_, cursor)| cursor.clone());
+                if let Some((layout, _)) = rendered.as_ref() {
+                    occlusion.cover(layout.outer);
+                }
+                self.hits.todo_board_layout = rendered.map(|(layout, _)| layout);
+                cursor
             } else if let ClientShellOverlay::MovePicker(picker) = overlay {
                 let rendered = super::move_picker::render_move_picker(
                     &mut composed,

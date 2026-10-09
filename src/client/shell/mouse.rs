@@ -729,6 +729,9 @@ impl ClientShellState {
             Some(ClientShellOverlay::TodoEdit(_)) => {
                 return self.route_todo_edit_mouse(mouse, outcome);
             }
+            Some(ClientShellOverlay::TodoBoard(_)) => {
+                return self.route_todo_board_mouse(mouse, outcome);
+            }
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_mouse(mouse, outcome);
             }

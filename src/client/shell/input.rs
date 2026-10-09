@@ -623,6 +623,12 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                | Some(ClientShellOverlay::TodoBoard(
+                    super::todo_board::ClientTodoBoardOverlay {
+                        search_focused: true,
+                        ..
+                    }
+                ))
         )
     }
 

@@ -12,6 +12,7 @@
 //! is drawn as a row, a chip or a button is the cell the mouse hits.
 
 use super::render::{display_width, put_text};
+use super::todo_edit::SuspendedTodoSurface;
 use super::*;
 use crate::api::schema::{
     Method, PaneTarget, TodoClearParams, TodoInfo, TodoListParams, TodoRemoveParams,
@@ -28,15 +29,15 @@ const MAX_WIDTH: u16 = 60;
 /// Content width an empty panel sizes itself to.
 const EMPTY_CONTENT_WIDTH: usize = 16;
 /// The blank row above the footer and the footer row itself.
-const FOOTER_ROWS: u16 = 2;
+pub(super) const FOOTER_ROWS: u16 = 2;
 /// Text rows a detail box draws at most.
 const DETAIL_MAX_TEXT_ROWS: u16 = 6;
 /// A detail box shorter than this (its two borders and one text row) is not
 /// drawn at all.
-const DETAIL_MIN_ROWS: u16 = 3;
+pub(super) const DETAIL_MIN_ROWS: u16 = 3;
 /// Columns the todo's own text keeps whatever its link is called.
 const CHIP_MIN_TEXT_COLUMNS: usize = 8;
-const BUTTON_GAP: u16 = 2;
+pub(super) const BUTTON_GAP: u16 = 2;
 /// What the detail box says for a selection that hides nothing.
 const NOTHING_HIDDEN: &str = "full text in the row";
 
@@ -136,43 +137,43 @@ pub(super) fn todo_priority_color(
     })
 }
 
-fn contrast(p: &Palette) -> Color {
+pub(super) fn contrast(p: &Palette) -> Color {
     match p.panel_bg {
         Color::Reset => p.surface_dim,
         c => c,
     }
 }
 
-fn width_of(text: &str) -> usize {
+pub(super) fn width_of(text: &str) -> usize {
     usize::from(display_width(text))
 }
 
 // -- one todo row (fork src/ui/todo_panel.rs) ---------------------------------
 
-fn row_id_text(todo_id: u64) -> String {
+pub(super) fn row_id_text(todo_id: u64) -> String {
     format!("#{todo_id}")
 }
 
 /// The part of a row the link chip may occupy: everything left of the id and
 /// the space before it.
-fn row_chip_area(row: Rect, todo_id: u64) -> Rect {
+pub(super) fn row_chip_area(row: Rect, todo_id: u64) -> Rect {
     let reserved = display_width(&row_id_text(todo_id)).saturating_add(1);
     Rect::new(row.x, row.y, row.width.saturating_sub(reserved), row.height)
 }
 
 /// The public id a live link leads with; `None` for a dead link.
-fn live_link_id(todo: &TodoInfo) -> Option<&str> {
+pub(super) fn live_link_id(todo: &TodoInfo) -> Option<&str> {
     todo.link_alive
         .then_some(todo.link_pane_id.as_deref())
         .flatten()
 }
 
-fn has_link(todo: &TodoInfo) -> bool {
+pub(super) fn has_link(todo: &TodoInfo) -> bool {
     todo.link_pane_id.is_some() || todo.link_label.is_some()
 }
 
 /// The chip's text before any truncation.
-fn link_chip_text(public_id: Option<&str>, label: &str) -> String {
+pub(super) fn link_chip_text(public_id: Option<&str>, label: &str) -> String {
     match public_id {
         Some(id) if label.is_empty() => format!(" → {id} "),
         Some(id) => format!(" → {id} · {label} "),
@@ -181,7 +182,7 @@ fn link_chip_text(public_id: Option<&str>, label: &str) -> String {
 }
 
 /// The link chip at the right of `chip_area`, for a todo that carries a link.
-fn link_chip(chip_area: Rect, todo: &TodoInfo) -> Option<(Rect, String)> {
+pub(super) fn link_chip(chip_area: Rect, todo: &TodoInfo) -> Option<(Rect, String)> {
     if !has_link(todo) {
         return None;
     }
@@ -228,7 +229,7 @@ fn row_text_budget(row: Rect, todo: &TodoInfo) -> usize {
 
 /// Whether a todo's row hides some of its text: a second line, or a first
 /// line wider than the row gives it.
-fn row_hides_text(row: Rect, todo: &TodoInfo) -> bool {
+pub(super) fn row_hides_text(row: Rect, todo: &TodoInfo) -> bool {
     todo.text.contains('\n') || width_of(&todo.text) > row_text_budget(row, todo)
 }
 
@@ -242,14 +243,19 @@ fn detail_box_rows(text: &str, width: u16) -> u16 {
 }
 
 /// Rows of detail box the todos need so any of them can be selected without
-/// the panel changing height.
-fn detail_rows(todos: &[TodoInfo], list_width: u16) -> u16 {
+/// the panel changing height. `row_width` is what a todo's row is drawn in
+/// (the panel's list width; the board's, indented), `box_width` the box's.
+pub(super) fn detail_rows<'a>(
+    todos: impl IntoIterator<Item = &'a TodoInfo>,
+    row_width: u16,
+    box_width: u16,
+) -> u16 {
     let most = 2 + DETAIL_MAX_TEXT_ROWS;
-    let row = Rect::new(0, 0, list_width, 1);
+    let row = Rect::new(0, 0, row_width, 1);
     let mut rows = 0;
     for todo in todos {
         if row_hides_text(row, todo) {
-            rows = rows.max(detail_box_rows(&todo.text, list_width));
+            rows = rows.max(detail_box_rows(&todo.text, box_width));
             if rows >= most {
                 break;
             }
@@ -269,7 +275,7 @@ fn todo_glyph(todo: &TodoInfo) -> &'static str {
     }
 }
 
-fn render_row(
+pub(super) fn render_row(
     b: &mut Buffer,
     row: Rect,
     todo: &TodoInfo,
@@ -432,7 +438,7 @@ pub(super) fn todo_panel_layout(
     let width = (content.clamp(usize::from(MIN_WIDTH), usize::from(MAX_WIDTH)) as u16)
         .min(screen.width.max(1));
     let list_width = width.saturating_sub(2);
-    let requested_detail = detail_rows(&panel.todos, list_width);
+    let requested_detail = detail_rows(&panel.todos, list_width, list_width);
     let rows = panel.todos.len().clamp(1, MAX_ROWS) as u16;
     let height = (rows + 2 + FOOTER_ROWS + requested_detail).min(screen.height.max(1));
     let x = anchor.right().saturating_sub(width).max(screen.x);
@@ -532,7 +538,7 @@ pub(super) fn render_panel_shell(
     render_shell(b, rect.intersection(b.area), border, bg)
 }
 
-fn render_detail_box(b: &mut Buffer, area: Rect, text: Option<&str>, p: &Palette) {
+pub(super) fn render_detail_box(b: &mut Buffer, area: Rect, text: Option<&str>, p: &Palette) {
     let Some(inner) = render_panel_shell(b, area, p.overlay0, p.panel_bg) else {
         return;
     };
@@ -654,7 +660,7 @@ enum PanelAction {
 
 /// A cheap fingerprint of the snapshot's panes: a link's liveness and public
 /// id move with it.
-fn pane_set_fingerprint(snapshot: &ClientShellSnapshot) -> u64 {
+pub(super) fn pane_set_fingerprint(snapshot: &ClientShellSnapshot) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for pane in &snapshot.panes {
@@ -855,7 +861,7 @@ impl ClientShellState {
                 let Some(ClientShellOverlay::TodoPanel(panel)) = self.overlay.take() else {
                     return;
                 };
-                self.open_todo_editor(pane_id, None, Some(panel));
+                self.open_todo_editor(pane_id, None, Some(SuspendedTodoSurface::Panel(panel)));
             }
             PanelAction::Edit => {
                 let Some(todo) = selected else {
@@ -864,7 +870,11 @@ impl ClientShellState {
                 let Some(ClientShellOverlay::TodoPanel(panel)) = self.overlay.take() else {
                     return;
                 };
-                self.open_todo_editor(pane_id, Some(todo), Some(panel));
+                self.open_todo_editor(
+                    pane_id,
+                    Some(todo),
+                    Some(SuspendedTodoSurface::Panel(panel)),
+                );
             }
             PanelAction::ToggleDone => {
                 let Some(todo) = selected else {
@@ -943,6 +953,11 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         if !ok {
+            return;
+        }
+        // The board lists every pane, so a change to any of them moves it.
+        if matches!(self.overlay, Some(ClientShellOverlay::TodoBoard(_))) {
+            self.request_todo_board_list(outcome);
             return;
         }
         if self
