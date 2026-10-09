@@ -1,0 +1,49 @@
+
+ ▐▛███▛█   Claude Code v2.1.295
+▝▜██████▀  Haiku 5.5 with high effort · API Usage Billing
+ ▝▝   ▝▝   /private/var/tmp/bgcap-scratch.EboE
+
+
+❯ Using the Bash tool with run_in_background=true, run: sleep 300. Then say only: started.
+
+  Ran 1 shell command
+
+⏺ started.
+
+  Waiting on you (turn 1)
+  Nothing is waiting on you.
+
+✻ Baked for 10s · done 10:34 PM · 2 shells still running
+
+❯ Using the Bash tool with run_in_background=true, run: sleep 301. Then say only: started two.
+
+  Ran 1 shell command
+
+⏺ started two.
+
+  Waiting on you (turn 2)
+  Nothing is waiting on you.
+
+✻ Churned for 5s · done 10:35 PM · 2 shells still running
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏸ manual mode on · 2 shells · ← 1 agent

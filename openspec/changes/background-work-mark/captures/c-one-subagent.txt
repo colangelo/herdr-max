@@ -1,0 +1,49 @@
+  Waiting on you (turn 1)
+  Nothing is waiting on you.
+
+✻ Baked for 10s · done 10:34 PM · 3 shells still running
+
+❯ Using the Bash tool with run_in_background=true, run: sleep 301. Then say only: started two.
+
+  Ran 1 shell command
+
+⏺ started two.
+
+  Waiting on you (turn 2)
+  Nothing is waiting on you.
+
+✻ Churned for 5s · done 10:35 PM · 3 shells still running
+
+❯ Use the Agent tool with run_in_background=true to launch one subagent whose task is to run 'sleep 120' with Bash and then report done. Then say only: launched.
+
+⏺ Agent(Sleep 120 seconds and report)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+⏺ launched.
+
+  Waiting on you (turn 3)
+  Nothing is waiting on you.
+
+✻ Waiting for 1 background agent to finish
+
+⏺ Agent "Sleep 120 seconds and report" finished · 11s
+
+⏺ The sleep 120 subagent has not finished. It reports that the Bash tool blocked its foreground sleep 120, so it started the sleep in the background instead, and it will send
+  done when that completes. I haven't seen a done yet.
+
+  Waiting on you (turn 4)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 4)
+  - The sleep 120 subagent is still running its background sleep 120. It will notify again when it finishes. No action is needed from you.
+
+✻ Churned for 18s · done 10:36 PM · 3 shells still running
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏸ manual mode on · 3 shells · ← 1 agent
+
+  ⏺ main
+  ◯ general-purpose  Sleep 120 seconds and report                                                                                                       11s · ↓ 79.3k tokens

@@ -1,0 +1,49 @@
+⏺ launched two.
+
+  Waiting on you (turn 5)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 5)
+  - The sleep 120 subagent from the previous turn is still running its background sleep and will notify again when it finishes.
+  - The sleep 100 subagent I just launched is running. It will report done once its sleep has truly finished, not early.
+
+✻ Waiting for 1 background agent to finish
+
+⏺ Agent "Sleep 100 seconds and report" finished · 6s
+
+⏺ The sleep 100 subagent has not finished. Its foreground sleep was refused, so it started a fallback monitor that is still waiting for the finished event. It has not replied
+  done.
+
+  The sleep 120 subagent from earlier is also still running its background sleep, and I have not seen its done yet.
+
+  Waiting on you (turn 6)
+  Nothing is waiting on you.
+
+  Waiting on other agents (turn 6)
+  - The sleep 120 subagent is still running its background sleep 120. It will notify when it finishes.
+  - The sleep 100 subagent is still waiting on its monitor for sleep 100. It will notify when it finishes.
+
+✻ Brewed for 14s · done 10:36 PM · 2 shells, 1 monitor still running
+
+❯ If you have a Workflow tool, run a tiny workflow that spawns two agents each saying hi. If you do not have such a tool, reply exactly: NO WORKFLOW TOOL.
+
+⏺ Workflow(Spawn two agents that each reply with a greeting)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Run a dynamic workflow?
+
+  Spawn two agents that each reply with a greeting
+
+  This dynamic workflow will spin up multiple subagents across the following phases:
+    1. Greet
+       · "Reply with exactly one word: hi"
+
+  Dynamic workflows can use a lot of tokens quickly by running many subagents in parallel — which counts against your usage limit. Stop a running workflow at any time with
+  /workflows, or disable dynamic workflows in /config.
+
+  ❯ 1. Yes, run it
+    2. View raw script
+    3. No
+
+  Esc to cancel · Tab to amend
+  ctrl+g to edit script in $EDITOR
