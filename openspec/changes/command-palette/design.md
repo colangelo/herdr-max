@@ -432,3 +432,47 @@ The four questions for ac are in `proposal.md` § "Open questions for ac": the k
 the busy policy, and cross-Mac `as me` in v1. Technical ones, decided here unless someone objects:
 the server reads `agent-bell who` (not the client); a note is sent `--from herdr-palette`; the
 interrupt wait is 3 s.
+
+## As built (2026-10-10)
+
+Built in `feat/command-palette-182`, with ac's four open questions answered by their recommended
+option and each one a config switch, so any of them flips without a code change (asks row
+a1009-06 stays open for ac to change them):
+
+| Question | Built as | Switch |
+| --- | --- | --- |
+| 1. key | `prefix+:` | `keys.command_palette` (any binding, for example `ctrl+shift+p`) |
+| 2. default send mode | typed as you | `palette.send.default_mode = "note"` |
+| 3. busy target | queue, `alt+enter` interrupts | `palette.send.busy = "ask"` |
+| 4. cross-Mac | notes only | `palette.send.cross_machine_typed` is reserved, documented as not built, no effect |
+
+What differs from the plan above, and why:
+
+- **The command table** is `command_table` in `src/input/keybind_help.rs`; `keybind_help_groups`
+  is a projection of it. Rows carry `CommandAction::Run(action)` or `Indexed(fn)` (the digit
+  ranges); fixed overlay chords and `prefix mode` carry none and are not palette rows.
+- **The overlay** is `src/client/shell/palette.rs`: the move picker's idiom (`TextField` with
+  `apply_text_key`, `list_chord`, `render_panel_shell`), not new kit types. It has four stages:
+  commands, sessions, compose, receipt. `send ` typed over the commands turns the bar into the
+  session list.
+- **`agent.send` has no `AgentSendReceipt` event and no polling in v1.** The answer carries the
+  receipt: typed gives `pieces`, `enter_sent`, `interrupted`; a note gives the note command's own
+  words and a state (`held`, `injected` or `queued`, read from them). Following a note to
+  `injected` needs `events.subscribe` plumbing and is a later task.
+- **The note command** is run as `<note_command> send --to NAME --from herdr-palette
+  [--interrupt] TEXT`, 10 s timeout, by the agent's herdr name. agent-bell's `--json` flags do not
+  exist yet (design § "What agent-bell would need"), so the state is read from its words.
+- **Interrupt does not wait.** A typed interrupt presses `esc`, then types: the terminal buffers
+  the input and Claude Code takes it when the turn stops. The planned wait-up-to-3-s, send-nothing
+  variant needs a waiting server method; not built.
+- **One line.** A typed newline inside the text is rejected (`multi_line_send`) until task 2.2
+  checks it live. Text is limited to 4000 bytes.
+- **Pacing blocks the app thread for (pieces - 1) x 20 ms** (the last piece and Enter go through
+  the pty actor's delayed submission, like `agent.prompt`). A 4000-byte message is 14 pieces,
+  about 260 ms. Moving the pacing into the actor is a later task.
+- **Blocked targets.** `prompt_options` and `agent.directory` are not built. A blocked agent is
+  never typed into: `agent.send` refuses free text (`agent_blocked`) and accepts `answer` (one key,
+  for a caller that read the prompt); the bar offers a note, or `open pane` for an unnamed one.
+- **Cross-Mac.** The bar sends to the agents of the server it is looking at. On a remote endpoint
+  typed is not offered, only a note, which that server's note command delivers.
+- `herdr agent send <target> <text> [--note] [--interrupt]` and `--answer KEY` are the CLI.

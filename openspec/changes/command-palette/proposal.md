@@ -64,6 +64,10 @@ a shell.
 
 ## Open questions for ac
 
+Built 2026-10-10 with the recommended answer to each (1a, 2a, 3a, 4b) and every one a config
+switch, so ac can flip it without a code change; see design § "As built". The questions stay open
+for ac on asks row a1009-06.
+
 Each has options and my recommendation. Plain answers ("1a, 2a, 3b, 4b") are enough.
 
 1. **The key that opens the bar.**
