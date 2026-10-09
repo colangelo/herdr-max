@@ -448,6 +448,19 @@ fn agent_command() -> Command {
                 .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
         )
         .subcommand(
+            Command::new("send")
+                .about("Send one line of text to an agent, typed as you or as a note")
+                .override_usage("herdr agent send <TARGET> <TEXT> [OPTIONS]\n       herdr agent send <TARGET> --answer KEY")
+                .arg(required("target", "TARGET"))
+                .arg(Arg::new("text").value_name("TEXT").num_args(0..).trailing_var_arg(true))
+                .arg(flag("note").help("Send a peer message through the note command instead of typing the text"))
+                .arg(flag("interrupt").help("Interrupt a working agent first"))
+                .arg(option("answer", "KEY").help("Press this option's key for an agent blocked on a prompt, instead of typing text"))
+                .after_help(
+                    "Typed text goes in as typing, in pieces, then Enter, so it works with agents that collapse a large paste. A working agent takes it at its next pause unless --interrupt is given. Free text is refused for an agent that is blocked on a prompt; answer it with --answer. A note is delivered by palette.send.note_command (agent-bell by default) and approves nothing.",
+                ),
+        )
+        .subcommand(
             Command::new("prompt")
                 .about("Submit a prompt to an agent")
                 .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
