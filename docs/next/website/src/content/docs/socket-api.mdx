@@ -1215,3 +1215,13 @@ The numbered binary protocol remains for same-install and internal operations,
 including direct terminal attach and live handoff. Check `ping` or `herdr status`
 before using those operations across different builds. JSON API clients should
 ignore unknown fields and handle unsupported methods as normal errors.
+
+### Identity across restarts and live handoff
+
+`terminal_id`, `state_change_seq` and `completion_seq` are valid for one server
+instance. A server restart or a live handoff (`herdr update`, `server
+live-handoff`) gives every pane a new `terminal_id` and starts the sequences
+again from zero, while pane ids, agent names and agent sessions are kept. Clients
+that need a key across a restart or handoff should use the pane id, the agent
+name or the agent session, and should not compare sequence numbers from before
+the handoff with numbers from after it.
