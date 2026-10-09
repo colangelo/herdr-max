@@ -4685,6 +4685,8 @@ fn unchanged_git_refresh_does_not_request_headless_render() {
     workspace.cached_auto_label = "cached".into();
     workspace.cached_git_status_key = cwd.clone();
     workspace.cached_git_branch = None;
+    // test_new reads the real checkout; CI checks a pull request out detached.
+    workspace.cached_git_detached_head = None;
     server.app.state.workspaces.push(workspace);
 
     let changed = server.handle_internal_event_with_forwarding(AppEvent::GitStatusRefreshed {
