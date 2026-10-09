@@ -156,6 +156,10 @@ pub(super) fn paint(
 ) -> Vec<Rect> {
     let mut covered = Vec::new();
     let p = &state.config.palette;
+    let resize = state.mode == ClientShellMode::Resize;
+    // PANES is red and RESIZE mauve: each mode paints its chip, its keys and its size badges in its
+    // own colour (docs/ui-style.md, Mode colour).
+    let mode_colour = if resize { p.mauve } else { p.red };
     // The surface preserves the server tile traversal used by the fork's
     // pane_infos. Geometric sorting changes numbering for mixed column splits.
     let panes = &state.hits.panes;
@@ -236,14 +240,13 @@ pub(super) fn paint(
     if !bar.is_empty() {
         covered.push(bar);
         Clear.render(bar, buffer);
-        let resize = state.mode == ClientShellMode::Resize;
         let chip = Style::default()
             .fg(if p.panel_bg == Color::Reset {
                 p.surface_dim
             } else {
                 p.panel_bg
             })
-            .bg(if resize { p.mauve } else { p.red })
+            .bg(mode_colour)
             .add_modifier(Modifier::BOLD);
         let version = connected_version(state, snapshot);
         let spans = summary_spans(
@@ -277,7 +280,7 @@ pub(super) fn paint(
                     usize::from(width),
                     Style::default()
                         .fg(panel_contrast_fg(p))
-                        .bg(p.red)
+                        .bg(mode_colour)
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -297,8 +300,9 @@ fn summary_spans<'a>(
     chip: Style,
     width: u16,
 ) -> Vec<Span<'a>> {
+    // The keys take the chip's colour: the mode's own.
     let key = Style::default()
-        .fg(if resize { p.accent } else { p.red })
+        .fg(chip.bg.unwrap_or(p.red))
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
     let value = Style::default().fg(p.text);
@@ -340,10 +344,11 @@ fn summary_spans<'a>(
         }
         spans.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
     }
-    // Keep the hints on narrow bars, dropping the version first, as in the fork.
+    // Keep the hints on narrow bars, dropping the version first, as in the fork. One chip per
+    // mode: the version is a dim label, not a second chip.
     let version_spans = [
         Span::raw("  "),
-        Span::styled(" VERSION ", chip),
+        Span::styled("version", dim),
         Span::raw(" "),
         Span::styled(version, value),
     ];
