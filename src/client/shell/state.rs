@@ -17,6 +17,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
     pub(super) display_panes_duration: std::time::Duration,
     pub(super) show_pane_todos: bool,
+    /// `ui.pane_todo_color`: one colour for every open todo's mark instead of
+    /// the priority colours.
     pub(super) todo_color: Option<ratatui::style::Color>,
     pub(super) follow_workspace: bool,
     pub(super) follow_agent: bool,
@@ -71,10 +73,6 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) confirm_close: bool,
-    /// `ui.pane_todo_color`: one colour for every open todo's mark instead of
-    /// the priority colours.
-    pub(super) pane_todo_color: Option<ratatui::style::Color>,
-    pub(super) notification_center_position: crate::config::NotificationCenterPositionConfig,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
@@ -118,6 +116,8 @@ pub(super) enum ClientMobileTarget {
 #[derive(Default)]
 pub(super) struct ShellHitMap {
     pub(super) pin_markers: Vec<(Rect, ClientEndpointId, crate::api::schema::Method)>,
+    /// The floating notification indicator, when chrome draws one; the
+    /// bottom-right notification center opens above it.
     pub(super) notification_indicator: Rect,
     pub(super) todo_board: Rect,
     pub(super) pane_todos: Vec<(Rect, String)>,
@@ -155,9 +155,6 @@ pub(super) struct ShellHitMap {
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) notification_center: Option<super::notification_center::NotificationCenterLayout>,
-    /// The floating notification indicator, when chrome draws one; the
-    /// bottom-right notification center opens above it.
-    pub(super) notification_indicator: Rect,
     pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
     pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
     pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,

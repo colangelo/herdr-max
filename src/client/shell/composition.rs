@@ -840,7 +840,7 @@ impl ClientShellState {
                     &mut composed,
                     panel,
                     anchor,
-                    self.config.pane_todo_color,
+                    self.config.todo_color,
                     &self.config.palette,
                 );
                 if let Some(rendered) = rendered.as_ref() {
@@ -852,7 +852,7 @@ impl ClientShellState {
                 let rendered = super::todo_edit::render_todo_edit(
                     &mut composed,
                     edit,
-                    self.config.pane_todo_color,
+                    self.config.todo_color,
                     &self.config.palette,
                 );
                 if let Some(rendered) = rendered.as_ref() {

@@ -78,20 +78,6 @@ pub(crate) fn middle_elide(text: &str, max_width: usize) -> String {
     format!("{prefix}…{suffix}")
 }
 
-fn take_suffix_width(text: &str, max_width: usize) -> String {
-    let mut output = Vec::new();
-    let mut width = 0usize;
-    for ch in text.chars().rev() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > max_width {
-            break;
-        }
-        output.push(ch);
-        width += ch_width;
-    }
-    output.into_iter().rev().collect()
-}
-
 // Restored fork items (v0.9.3 sync): re-home next to their kin later.
 pub(crate) fn relative_time_label(now_unix: u64, then_unix: u64) -> String {
     let seconds = now_unix.saturating_sub(then_unix);
