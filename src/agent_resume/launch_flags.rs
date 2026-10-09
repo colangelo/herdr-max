@@ -334,6 +334,13 @@ pub fn compose_resume_argv(agent: &str, base: &[String], launch_flags: &[String]
 mod tests {
     use super::*;
 
+    /// A rooted path in the host's separator ("/work/other" or "\\work\\other").
+    fn rooted(parts: &[&str]) -> String {
+        let mut path = std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR);
+        path.extend(parts);
+        path.display().to_string()
+    }
+
     fn words(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
     }
@@ -537,12 +544,12 @@ mod tests {
         ]);
         assert_eq!(
             carried_launch_flags("claude", &argv, Some(Path::new("/work/repo"))),
-            words(&[
-                "--settings",
-                "/work/repo/cfg/gpt.json",
-                "--add-dir",
-                "/work/other"
-            ])
+            vec![
+                "--settings".to_string(),
+                rooted(&["work", "repo", "cfg", "gpt.json"]),
+                "--add-dir".to_string(),
+                rooted(&["work", "other"]),
+            ]
         );
     }
 
