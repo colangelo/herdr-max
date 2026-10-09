@@ -64,7 +64,8 @@ impl ClientShellState {
         }
     }
 
-    pub(super) fn move_global_menu_selection(&mut self, delta: isize) {
+    /// A shared list chord: a row, half the menu, or an end; clamped.
+    pub(super) fn chord_global_menu_selection(&mut self, chord: super::move_picker::Chord) {
         let item_count = self
             .snapshot
             .as_deref()
@@ -73,8 +74,10 @@ impl ClientShellState {
         let Some(ClientShellOverlay::GlobalMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
-        menu.highlighted = (menu.highlighted as isize + delta)
-            .clamp(0, item_count.saturating_sub(1) as isize) as usize;
+        if item_count == 0 {
+            return;
+        }
+        menu.highlighted = chord.target(menu.highlighted, item_count, item_count);
     }
 
     pub(super) fn activate_global_menu_item(

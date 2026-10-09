@@ -263,6 +263,7 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod force_confirm;
+mod fork_modals;
 mod graphics;
 mod indicator_clicks;
 mod input_conformance;

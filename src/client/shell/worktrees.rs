@@ -14,6 +14,19 @@ fn checkout_path_preview(root: &str, repo: &str, branch: &str) -> String {
     )
 }
 
+/// What the open picker calls a checkout, as the fork does: its branch, else
+/// the last segment of its path, else the whole path. The endpoint's own
+/// `label` is the repo's name, the same for every row.
+fn worktree_display_name(branch: Option<&str>, path: &str) -> String {
+    branch.map(str::to_owned).unwrap_or_else(|| {
+        path.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| path.to_owned(), str::to_owned)
+    })
+}
+
 impl ClientShellState {
     fn endpoint_worktree_directory(&self) -> Option<String> {
         self.snapshot
@@ -408,7 +421,7 @@ impl ClientShellState {
                     .into_iter()
                     .filter(|entry| !entry.is_bare && !entry.is_prunable)
                     .map(|entry| {
-                        let label = entry.branch.clone().unwrap_or_else(|| entry.label.clone());
+                        let label = worktree_display_name(entry.branch.as_deref(), &entry.path);
                         ClientWorktreeOpenEntry {
                             path: entry.path,
                             branch: entry.branch,

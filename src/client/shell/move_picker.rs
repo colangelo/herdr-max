@@ -1137,6 +1137,24 @@ pub(super) enum Chord {
     Last,
 }
 
+impl Chord {
+    /// Where this chord takes `selected` in a list of `len` rows shown
+    /// `visible` at a time: one row, half a page, or an end. Clamped, never
+    /// wrapping.
+    pub(super) fn target(self, selected: usize, visible: usize, len: usize) -> usize {
+        let half = (visible / 2).max(1);
+        let last = len.saturating_sub(1);
+        match self {
+            Self::Prev => selected.saturating_sub(1),
+            Self::Next => selected.saturating_add(1).min(last),
+            Self::HalfPageUp => selected.saturating_sub(half),
+            Self::HalfPageDown => selected.saturating_add(half).min(last),
+            Self::First => 0,
+            Self::Last => last,
+        }
+    }
+}
+
 /// While the search has focus plain letters are text; otherwise `j`/`k` and
 /// `ctrl+u`/`ctrl+d` move too.
 pub(super) fn list_chord(
