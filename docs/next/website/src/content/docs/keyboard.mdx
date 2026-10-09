@@ -29,6 +29,23 @@ Press `prefix+?` at any time to see every active binding. Press `/` in the keybi
 
 These cover most daily movement. Everything else can stay on the mouse.
 
+## The command bar
+
+`prefix+:` (`keys.command_palette`) opens a bar that lists every Herdr command with its current shortcut, grouped as in the keybinds panel (`prefix+?`). Type to filter: the letters have to appear in order in the group and the command's words, best match first, so `spl` finds the two split commands before anything looser, and the count reads `3 of 94`. `Up`/`Down`, `ctrl+j`/`ctrl+k`, `ctrl+n`/`ctrl+p`, `ctrl+d`/`ctrl+u`, `Home` and `End` move the selection. `Enter` closes the bar and runs the command exactly as its key would, so a command that opens a prompt (`rename tab`) opens it. `Tab` completes the selected command's words into the query. `Esc` clears the query, and closes the bar when it is already empty. A command that takes a number (`switch workspace 1-9`) runs when you type the digit after it: `switch workspace 3`.
+
+A command with no key shows `unset` and still runs from the bar. The bar reads the same table as the keybinds panel, so a command added there is in the bar.
+
+### Sending a message to a session
+
+`send to a session…` in the bar (or typing `send ` and part of a name) lists the agents of the server you are on, with their state. Choose one and write a line. `Enter` sends it, `Tab` switches how it goes out, `Esc` goes back. There are two ways:
+
+- **As you** (the default): Herdr types the line into the agent's pane, in pieces, then presses Enter, so it arrives as typing even for an agent that collapses a large paste. The agent can act on it with your authority, as if you were at its pane.
+- **As a note:** a peer message through `palette.send.note_command` (`agent-bell` by default). The agent may act on it, but it approves nothing, and a note can come back *held* with the reason in the note command's own words.
+
+A working agent takes a typed line at its next pause. `alt+enter` interrupts it first (`esc`, then the line). With `palette.send.busy = "ask"` the bar asks "queue or interrupt?" before sending to a working agent. An agent that is blocked on a prompt is never typed into: only a note can go to it, and a blocked agent with no name gets an `open pane` button instead. After a send the bar shows what happened ("typed to reviewer in 2 pieces, enter pressed", or the note's state) and says what it does not mean: it arrived, not that it was read or done.
+
+Sending as you to a session on another machine is not built yet: from a remote server's view a message goes as a note. `palette.send.cross_machine_typed` is reserved for it and has no effect. The same send is available from scripts as `herdr agent send` and the `agent.send` API method.
+
 ## The rest, by task
 
 Panes:
