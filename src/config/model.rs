@@ -3385,4 +3385,15 @@ scrollback_lines = 12345
         assert!(!SidebarOverflowConfig::Fog.edge_rows() && SidebarOverflowConfig::Fog.fog());
         assert!(!SidebarOverflowConfig::Off.edge_rows() && !SidebarOverflowConfig::Off.fog());
     }
+
+    #[test]
+    fn background_mark_defaults_to_frames_and_parses_braille() {
+        assert_eq!(
+            Config::default().ui.background_mark,
+            BackgroundMarkConfig::Frames
+        );
+        let config: Config = toml::from_str("[ui]\nbackground_mark = \"braille\"\n").unwrap();
+        assert_eq!(config.ui.background_mark, BackgroundMarkConfig::Braille);
+        assert!(toml::from_str::<Config>("[ui]\nbackground_mark = \"dots\"\n").is_err());
+    }
 }

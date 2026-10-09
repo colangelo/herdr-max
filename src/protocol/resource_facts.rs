@@ -130,4 +130,19 @@ mod tests {
         assert!(facts.notifications.is_none());
         assert!(ClientShellResourceFacts::decode(&serde_json::json!(false)).is_none());
     }
+
+    #[test]
+    fn background_count_decodes_and_is_optional() {
+        let facts = ClientShellResourceFacts::decode(&serde_json::json!({
+            "background_activity": {"pane": true},
+            "background_count": {"pane": 4, "bad": "wrong type"}
+        }))
+        .unwrap();
+        assert_eq!(facts.background_count.unwrap(), BTreeMap::from([("pane".into(), 4)]));
+        let old = ClientShellResourceFacts::decode(&serde_json::json!({
+            "background_activity": {"pane": true}
+        }))
+        .unwrap();
+        assert!(old.background_count.is_none());
+    }
 }

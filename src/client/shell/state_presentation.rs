@@ -190,4 +190,96 @@ mod tests {
             "●"
         );
     }
+
+    fn braille_config() -> ClientShellConfig {
+        let mut config = Config::default();
+        config.ui.background_mark = crate::config::BackgroundMarkConfig::Braille;
+        ClientShellConfig::from_config(&config)
+    }
+
+    fn mark(status: AgentStatus, count: u8, frame: u8) -> String {
+        let mut config = braille_config();
+        config.spinner_frame = frame;
+        config
+            .state_presentation
+            .agent_icon(status, Background { work: false, count }, 0, &config)
+            .to_owned()
+    }
+
+    #[test]
+    fn braille_mark_alternates_the_dot_and_the_count_for_an_idle_row() {
+        // Phase A (frame / 8 even): the small dot. Phase B: the braille cell.
+        assert_eq!(mark(AgentStatus::Idle, 3, 0), "·");
+        assert_eq!(mark(AgentStatus::Idle, 3, 8), "⠇");
+        assert_eq!(mark(AgentStatus::Done, 1, 8), "⠁");
+        assert_eq!(mark(AgentStatus::Idle, 4, 8), "⡇");
+        assert_eq!(mark(AgentStatus::Idle, 8, 8), "⣿");
+        assert_eq!(mark(AgentStatus::Idle, 200, 8), "⣿");
+    }
+
+    #[test]
+    fn braille_table_has_eight_one_cell_glyphs() {
+        for glyph in BRAILLE {
+            assert_eq!(unicode_width::UnicodeWidthStr::width(glyph), 1, "{glyph}");
+        }
+        assert_eq!(BRAILLE.len(), 8);
+    }
+
+    #[test]
+    fn frames_mode_keeps_an_idle_row_with_background_work_plain() {
+        let config = ClientShellConfig::from_config(&Config::default());
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Idle, Background { work: false, count: 3 }, 0, &config),
+            config.state_icon(AgentStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn braille_leaves_blocked_and_a_working_turn_alone() {
+        let config = braille_config();
+        assert_eq!(
+            mark(AgentStatus::Blocked, 3, 8),
+            config.state_icon(AgentStatus::Blocked)
+        );
+        // Working because of the agent's own turn keeps the spinner.
+        assert_eq!(mark(AgentStatus::Working, 3, 0), "⠋");
+    }
+
+    #[test]
+    fn braille_with_the_spinner_off_shows_only_the_dot() {
+        let mut config = braille_config();
+        config.status_spinner = crate::config::StatusSpinnerConfig::Off;
+        let background = Background { work: false, count: 3 };
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_icon(AgentStatus::Idle, background, 8, &config),
+            "·"
+        );
+    }
+
+    #[test]
+    fn braille_rows_take_the_background_colour() {
+        let mut cfg = Config::default();
+        cfg.ui.background_mark = crate::config::BackgroundMarkConfig::Braille;
+        cfg.ui.state_colors.background = Some("#112233".into());
+        let config = ClientShellConfig::from_config(&cfg);
+        let background = Background { work: false, count: 2 };
+        assert_eq!(
+            config
+                .state_presentation
+                .agent_color(AgentStatus::Idle, background, &config.palette),
+            Color::Rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            config.state_presentation.agent_color(
+                AgentStatus::Idle,
+                Background::default(),
+                &config.palette
+            ),
+            config.state_color(AgentStatus::Idle)
+        );
+    }
 }
