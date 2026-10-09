@@ -101,7 +101,6 @@ fn row(label: &str, status: Option<AgentStatus>, status_text: &str) -> ClientNav
         label: label.into(),
         meta: String::new(),
         detail: String::new(),
-        agent: None,
         status,
         status_text: status_text.into(),
         stale: false,

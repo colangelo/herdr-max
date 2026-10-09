@@ -333,7 +333,6 @@ pub(super) fn navigator_rows(
             label: "no link".to_owned(),
             meta: String::new(),
             detail: "leave this todo with no link".to_owned(),
-            agent: None,
             status: Some(crate::api::schema::AgentStatus::Unknown),
             status_text: "clear".to_owned(),
             stale: false,
@@ -454,7 +453,6 @@ pub(super) fn navigator_rows(
                                     "{} / {} / {}",
                                     workspace.label, tab.label, pane.pane_id
                                 ),
-                                agent: agent_kind.map(str::to_owned),
                                 status: Some(status),
                                 status_text: match agent_kind {
                                     Some(agent) => {
@@ -482,7 +480,6 @@ pub(super) fn navigator_rows(
                         label: workspace.label.clone(),
                         meta: workspace.branch.clone().unwrap_or_default(),
                         detail: workspace.new_workspace_cwd.clone(),
-                        agent: None,
                         status: None,
                         status_text: String::new(),
                         stale,
@@ -503,7 +500,6 @@ pub(super) fn navigator_rows(
                     label: endpoint.label.to_owned(),
                     meta: String::new(),
                     detail: String::new(),
-                    agent: None,
                     status: None,
                     status_text: String::new(),
                     stale,

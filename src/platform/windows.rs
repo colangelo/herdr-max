@@ -3354,13 +3354,6 @@ impl Drop for InputSourceRestore {
     }
 }
 
-/// This process's physical memory footprint in bytes, for tests that must see
-/// memory actually given back to the OS. Not measured on this platform.
-#[cfg(test)]
-pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::{

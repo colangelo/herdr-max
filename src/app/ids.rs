@@ -37,16 +37,6 @@ impl App {
         ))
     }
 
-    /// [`Self::public_pane_id`] for a caller that does not know which
-    /// workspace holds the pane. `PaneId` is unique across the session while
-    /// public pane ids are workspace-scoped, so resolving a cross-workspace
-    /// target against the *active* workspace yields `None` and silently drops
-    /// whatever was being built from it.
-    pub(super) fn session_public_pane_id(&self, pane_id: crate::layout::PaneId) -> Option<String> {
-        let (ws_idx, _) = self.find_pane(pane_id)?;
-        self.public_pane_id(ws_idx, pane_id)
-    }
-
     pub(super) fn pane_launch_env(
         &self,
         ws_idx: usize,

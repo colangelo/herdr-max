@@ -825,6 +825,8 @@ impl NotificationLog {
         self.entries.len()
     }
 
+    // Nothing asks yet, but clippy's len_without_is_empty wants it next to `len`.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -906,14 +908,6 @@ pub struct AgentNotificationDelivery {
 pub struct CopyFeedback {
     pub message: String,
     /// The pane the copied text came from, when known (fork issue 129).
-    pub source_pane: Option<PaneId>,
-}
-
-/// A clipboard write herdr's own UI asked for, and the pane the text came
-/// from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClipboardWriteRequest {
-    pub content: Vec<u8>,
     pub source_pane: Option<PaneId>,
 }
 

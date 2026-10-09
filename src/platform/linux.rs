@@ -1303,20 +1303,6 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
-/// This process's physical memory footprint in bytes, for tests that must see
-/// memory actually given back to the OS. On Linux that is RSS:
-/// `MADV_DONTNEED` drops released pages from it at once.
-#[cfg(test)]
-pub(crate) fn process_memory_footprint_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    // SAFETY: sysconf has no preconditions.
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    u64::try_from(page_size)
-        .ok()
-        .map(|page_size| resident_pages * page_size)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

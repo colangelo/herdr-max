@@ -1,9 +1,3 @@
-// TEMPORARY for the v0.9.3 sync (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/171):
-// fork server facts whose client half is still being ported (pins, sync panes, sidebar
-// styling, todo counts, spinners, ...) have no caller yet. Removed before cutover; every
-// item clippy then reports gets wired or deleted.
-#![allow(dead_code, unused_imports)]
-
 use std::io;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
