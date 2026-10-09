@@ -28,3 +28,21 @@ A client SHALL decode the baseline independently of optional facts. Invalid or u
 #### Scenario: Invalid optional facts
 - **WHEN** otherwise valid baseline JSON includes malformed optional facts
 - **THEN** the client accepts the baseline and omits those unsupported facts
+
+### Requirement: Canonical pane labels remain cached resource facts
+Optional pane name facts SHALL retain the fork's cached label precedence: reported title, assigned label, terminal title, agent name or kind, launch command, and stable pane number. Their computation SHALL NOT inspect runtime terminal buffers or processes during client rendering. They SHALL NOT reinterpret the baseline pane label field.
+
+#### Scenario: Pane terminal state is unavailable
+- **WHEN** a known pane temporarily has no terminal state
+- **THEN** its projected name retains its stable pane-number fallback
+
+#### Scenario: Older endpoint lacks canonical names
+- **WHEN** an endpoint provides no pane name facts
+- **THEN** the client uses available baseline title and label metadata without rejecting the endpoint
+
+### Requirement: Version labels identify the connected server
+Clients SHALL retain the welcome server version as the compatibility-floor version source. A coherent current server-version fact SHALL replace it for presentation after a live handoff, even when the client socket remains attached.
+
+#### Scenario: Live handoff preserves a client connection
+- **WHEN** a newer server advertises its version in the matching snapshot facts
+- **THEN** pane-label summaries identify that server build rather than the client's earlier welcome build
