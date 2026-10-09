@@ -56,3 +56,30 @@ fn mode_bar_labels_are_dim() {
     assert_eq!(buffer[(x, 2)].fg, p.overlay0);
     assert!(!buffer[(x, 2)].modifier.contains(Modifier::BOLD));
 }
+
+#[test]
+fn the_announcement_footer_is_a_key_bar() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut endpoint_snapshot = snapshot();
+    endpoint_snapshot.product_announcement =
+        Some(crate::protocol::ClientShellProductAnnouncement {
+            version: "0.8.2".into(),
+            id: "client-shell".into(),
+            title: "A client-owned announcement".into(),
+            body: "one line".into(),
+            preview: false,
+        });
+    state.set_snapshot(Box::new(endpoint_snapshot));
+    state.set_pane_surface(surface_with_popup());
+    let frame = state.compose(106, 30).expect("announcement frame");
+    let area = Rect::new(0, 0, 106, 30);
+    let (x, y) = cell_symbol_position(&frame, area, "wheel ↑↓ scroll  esc/enter close");
+    let p = &state.config.palette;
+    let cell = |x: u16| &frame.cells[usize::from(y) * 106 + usize::from(x)];
+    assert_eq!(cell(x).fg, crate::protocol::color_to_u32(p.accent), "key");
+    assert_eq!(
+        cell(x + 9).fg,
+        crate::protocol::color_to_u32(p.overlay0),
+        "label"
+    );
+}
