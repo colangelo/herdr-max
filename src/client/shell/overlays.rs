@@ -43,15 +43,31 @@ pub(crate) fn render_client_overlay(
     k: &LiveKeybindConfig,
     p: &Palette,
     config: &ClientShellConfig,
+    pane_area: Rect,
 ) -> Option<OverlayRender> {
+    // The fork centres the close confirmation on the pane area and dims only
+    // that, so the sidebar stays lit; everything else uses the whole screen.
+    let confirm_area = {
+        let area = pane_area.intersection(b.area);
+        if popup(area, CONFIRM_CLOSE_SIZE.0, CONFIRM_CLOSE_SIZE.1).is_some() {
+            area
+        } else {
+            b.area
+        }
+    };
     if !matches!(
         o,
         ClientShellOverlay::Navigator(_)
             | ClientShellOverlay::ContextMenu(_)
             | ClientShellOverlay::GlobalMenu(_)
     ) {
-        for y in b.area.y..b.area.bottom() {
-            for x in b.area.x..b.area.right() {
+        let dim = if matches!(o, ClientShellOverlay::ConfirmClose(_)) {
+            confirm_area
+        } else {
+            b.area
+        };
+        for y in dim.y..dim.bottom() {
+            for x in dim.x..dim.right() {
                 let c = &mut b[(x, y)];
                 c.set_style(c.style().add_modifier(Modifier::DIM));
             }
@@ -64,14 +80,18 @@ pub(crate) fn render_client_overlay(
             render_release_notes_overlay(b, v, &s.update_install_command, p)
         }
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
-        ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
+        ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, confirm_area, p),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
         ClientShellOverlay::Navigator(v) => {
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, p, config)
         }
-        ClientShellOverlay::Settings(v) => {
-            settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
-        }
+        ClientShellOverlay::Settings(v) => settings_overlay::render_settings_overlay(
+            b,
+            v,
+            s.integration_updates_available,
+            config,
+            p,
+        ),
         ClientShellOverlay::WorktreeCreate(v) => {
             worktree_overlays::render_worktree_create_overlay(b, v, p)
         }
@@ -140,8 +160,10 @@ pub(crate) fn render_global_menu(
         } else {
             Style::default().fg(palette.text).bg(palette.panel_bg)
         };
-        buffer.set_style(row, style);
+        // As the fork draws it: the highlight covers the spans, " label ",
+        // and not the rest of the row.
         let has_badge = super::super::global_menu::global_menu_item_has_badge(snapshot, *action);
+        let mut x = row.x;
         if has_badge {
             let badge_style = if highlighted {
                 style
@@ -151,18 +173,9 @@ pub(crate) fn render_global_menu(
                     .bg(palette.panel_bg)
                     .add_modifier(Modifier::BOLD)
             };
-            put_text(buffer, row.x, row.y, row.width.min(2), " ●", badge_style);
-            put_text(
-                buffer,
-                row.x.saturating_add(2),
-                row.y,
-                row.width.saturating_sub(2),
-                &format!(" {label}"),
-                style,
-            );
-        } else {
-            put_text(buffer, row.x, row.y, row.width, &format!(" {label}"), style);
+            x = put_segment(buffer, x, row.y, row.right(), " ●", badge_style);
         }
+        put_segment(buffer, x, row.y, row.right(), &format!(" {label} "), style);
         rows.push((row, index));
     }
     Some(OverlayRender {
@@ -218,7 +231,15 @@ pub(crate) fn render_context_menu(
             Style::default().fg(palette.text).bg(palette.panel_bg)
         };
         buffer.set_style(row, style);
-        put_text(buffer, row.x, row.y, row.width, item.label, style);
+        // The fork's List gives every row a one-column gutter.
+        put_text(
+            buffer,
+            row.x,
+            row.y,
+            row.width,
+            &format!(" {}", item.label),
+            style,
+        );
         rows.push((row, index));
     }
     Some(OverlayRender {
@@ -293,22 +314,112 @@ fn button(b: &mut Buffer, r: Rect, t: &str, s: Style) {
     let w = display_width(t).min(r.width);
     put_text(b, r.x + (r.width - w) / 2, r.y, w, t, s)
 }
-fn row(i: Rect, ws: &[u16], gap: u16, off: u16) -> Vec<Rect> {
-    let total = ws.iter().sum::<u16>() + gap * (ws.len().saturating_sub(1) as u16);
-    let mut x = i.x + i.width.saturating_sub(total) / 2;
-    ws.iter()
-        .map(|w| {
-            let r = Rect::new(
-                x,
-                i.y + off.min(i.height.saturating_sub(1)),
-                (*w).min(i.width.saturating_sub(x - i.x)),
-                1,
-            );
-            x += *w + gap;
-            r
-        })
-        .collect()
+/// The fork's modal title: bold text, held one column off the frame on each
+/// side so it lines up with the rows under it. Dropped when there is no room.
+fn render_modal_header(b: &mut Buffer, area: Rect, title: &str, p: &Palette) {
+    let width = area.width.saturating_sub(MODAL_TITLE_INSET * 2);
+    if width == 0 || area.height == 0 {
+        return;
+    }
+    put_text(
+        b,
+        area.x + MODAL_TITLE_INSET,
+        area.y,
+        width,
+        title,
+        Style::default()
+            .fg(p.text)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
 }
+
+/// Columns a modal title is held off the frame on each side.
+const MODAL_TITLE_INSET: u16 = 1;
+/// Columns between two buttons of a row.
+const BUTTON_GAP: u16 = 2;
+
+/// One button of a modal's action row: its text is ` {hint} {label} `, and
+/// the width follows from it. A `fill` makes it the primary button (panel
+/// contrast text on that colour); without one it is a secondary button.
+#[derive(Clone, Copy)]
+struct ModalButton<'a> {
+    hint: Option<&'a str>,
+    label: &'a str,
+    fill: Option<ratatui::style::Color>,
+}
+
+impl<'a> ModalButton<'a> {
+    fn primary(hint: &'a str, label: &'a str, fill: ratatui::style::Color) -> Self {
+        Self {
+            hint: Some(hint),
+            label,
+            fill: Some(fill),
+        }
+    }
+
+    fn secondary(hint: &'a str, label: &'a str) -> Self {
+        Self {
+            hint: Some(hint),
+            label,
+            fill: None,
+        }
+    }
+
+    fn text(&self) -> String {
+        match self.hint {
+            Some(hint) => format!(" {hint} {} ", self.label),
+            None => format!(" {} ", self.label),
+        }
+    }
+}
+
+/// Draws a row of buttons centred in `area` on its row `row_offset` (clamped
+/// to the area), `gap` apart, each as wide as its own text. When the group is
+/// wider than the area the last buttons are dropped, never the first. Returns
+/// one rect per button, in order; a dropped button's rect is empty.
+fn render_button_row(
+    b: &mut Buffer,
+    area: Rect,
+    buttons: &[ModalButton<'_>],
+    gap: u16,
+    row_offset: u16,
+    p: &Palette,
+) -> Vec<Rect> {
+    let texts: Vec<String> = buttons.iter().map(ModalButton::text).collect();
+    let widths: Vec<u16> = texts.iter().map(|text| display_width(text)).collect();
+    let group =
+        |kept: usize| widths.iter().take(kept).sum::<u16>() + gap * (kept.saturating_sub(1) as u16);
+    let mut kept = buttons.len();
+    while kept > 1 && group(kept) > area.width {
+        kept -= 1;
+    }
+    let y = area.y + row_offset.min(area.height.saturating_sub(1));
+    let mut x = area.x + area.width.saturating_sub(group(kept)) / 2;
+    let mut rects = Vec::with_capacity(buttons.len());
+    for (index, button_spec) in buttons.iter().enumerate() {
+        if index >= kept {
+            rects.push(Rect::default());
+            continue;
+        }
+        let rect = Rect::new(x, y, widths[index].min(area.right().saturating_sub(x)), 1);
+        x = x.saturating_add(widths[index] + gap);
+        let style = match button_spec.fill {
+            Some(fill) => Style::default()
+                .fg(contrast(p))
+                .bg(fill)
+                .add_modifier(Modifier::BOLD),
+            None => Style::default()
+                .fg(p.text)
+                .bg(p.surface0)
+                .add_modifier(Modifier::BOLD),
+        };
+        button(b, rect, &texts[index], style);
+        rects.push(rect);
+    }
+    rects
+}
+
 fn contrast(p: &Palette) -> ratatui::style::Color {
     match p.panel_bg {
         ratatui::style::Color::Reset => p.surface_dim,
@@ -658,17 +769,13 @@ fn render_rename_overlay(
 ) -> Option<OverlayRender> {
     let q = popup(b.area, 56, 7)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
-    put_text(
-        b,
-        i.x,
-        i.y,
-        i.width,
-        v.title,
-        Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
+    if i.height < 4 {
+        return Some(OverlayRender {
+            area: q,
+            ..OverlayRender::default()
+        });
+    }
+    render_modal_header(b, Rect::new(i.x, i.y, i.width, 1), v.title, p);
     let input = Rect::new(i.x, i.y + 2, i.width, 1);
     b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
     let cursor = text_editor::render(
@@ -677,35 +784,26 @@ fn render_rename_overlay(
         &v.input,
         Style::default().fg(p.text).bg(p.surface0),
     );
-    let rs = row(i, &[8, 10, 12], 2, 3);
-    let [save, clear, cancel] = rs.as_slice() else {
+    let rects = render_button_row(
+        b,
+        i,
+        &[
+            ModalButton::primary("↵", "save", p.accent),
+            ModalButton::secondary("^c", "clear"),
+            ModalButton::secondary("esc", "cancel"),
+        ],
+        BUTTON_GAP,
+        3,
+        p,
+    );
+    let [save, clear, cancel] = rects.as_slice() else {
         return None;
     };
-    button(
-        b,
-        *save,
-        " ↵ save ",
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD),
-    );
-    let n = Style::default()
-        .fg(p.text)
-        .bg(p.surface0)
-        .add_modifier(Modifier::BOLD);
-    button(b, *clear, " ^c clear ", n);
-    button(b, *cancel, " esc cancel ", n);
     Some(OverlayRender {
         area: q,
         primary: *save,
         clear: *clear,
         cancel: *cancel,
-        navigator_popup: Rect::default(),
-        navigator_search: Rect::default(),
-        navigator_rows: Vec::new(),
-        worktree_search: Rect::default(),
-        worktree_rows: Vec::new(),
         cursor,
         ..OverlayRender::default()
     })
@@ -1300,25 +1398,21 @@ fn render_help_overlay(
     k: &LiveKeybindConfig,
     p: &Palette,
 ) -> Option<OverlayRender> {
+    use ratatui::text::{Line, Span};
     use ratatui::widgets::{Paragraph, Widget, Wrap};
 
     let q = popup(b.area, 76, 22)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
     if i.width < 20 || i.height < 6 {
-        return None;
+        return Some(OverlayRender {
+            area: q,
+            ..OverlayRender::default()
+        });
     }
-    put_text(
-        b,
-        i.x,
-        i.y,
-        i.width,
-        "keybinds",
-        Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
-    let close = Rect::new(i.right() - 13, i.y, 13, 1);
+    let stack = crate::ui::modal_stack_areas(i, 2, 1, 0, 1);
+    let title_row = Rect::new(stack.header.x, stack.header.y, stack.header.width, 1);
+    render_modal_header(b, title_row, "keybinds", p);
+    let close = crate::ui::release_notes_close_button_rect(title_row);
     button(
         b,
         close,
@@ -1332,33 +1426,45 @@ fn render_help_overlay(
             .bg(p.accent)
             .add_modifier(Modifier::BOLD),
     );
-    let sy = i.y + 1;
-    put_text(
-        b,
-        i.x,
-        sy,
-        i.width,
-        &if h.search_focused {
-            " / ".to_owned()
-        } else {
-            " / press / to filter by command or shortcut".to_owned()
-        },
-        Style::default()
-            .fg(if h.search_focused { p.text } else { p.overlay0 })
-            .bg(p.panel_bg),
-    );
+    let search_row = Rect::new(stack.header.x, stack.header.y + 1, stack.header.width, 1);
+    let sy = search_row.y;
+    if h.search_focused {
+        put_text(
+            b,
+            search_row.x,
+            sy,
+            search_row.width.min(3),
+            " / ",
+            Style::default()
+                .fg(p.accent)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+    } else {
+        put_text(
+            b,
+            search_row.x,
+            sy,
+            search_row.width,
+            " press / to filter by command or shortcut",
+            Style::default().fg(p.overlay0).bg(p.panel_bg),
+        );
+    }
     let cursor = if h.search_focused {
         text_editor::render(
             b,
-            Rect::new(i.x + 3, sy, i.width.saturating_sub(3), 1),
+            Rect::new(search_row.x + 3, sy, search_row.width.saturating_sub(3), 1),
             &h.query,
-            Style::default().fg(p.text).bg(p.panel_bg),
+            Style::default()
+                .fg(p.text)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         None
     };
 
-    let body = Rect::new(i.x, i.y + 3, i.width, i.height.saturating_sub(5));
+    let body = stack.content;
     let lines = help_lines(k, &h.query, p);
     let viewport_rows = usize::from(body.height.max(1));
     let wrapped_rows = |width: u16| {
@@ -1396,32 +1502,40 @@ fn render_help_overlay(
         b,
     );
     if let Some(track) = scrollbar {
-        if let Some(thumb) = crate::ui::scrollbar_thumb(metrics, track) {
-            for y in track.y..track.bottom() {
-                b[(track.x, y)]
-                    .set_symbol("▐")
-                    .set_style(Style::default().fg(p.overlay0).bg(p.panel_bg));
-            }
-            for y in thumb.top..thumb.top.saturating_add(thumb.len) {
-                b[(track.x, y)]
-                    .set_symbol("▐")
-                    .set_style(Style::default().fg(p.overlay1).bg(p.panel_bg));
-            }
-        }
+        crate::ui::render_scrollbar_buffer(b, metrics, track, p.overlay0, p.overlay1, "▐");
     }
 
-    put_text(
-        b,
-        i.x,
-        i.bottom() - 1,
-        i.width,
-        if h.search_focused {
-            " edit ←→/home/end · kill ^u/^k · yank ^y · scroll ↑↓ · back esc"
-        } else {
-            " search / · scroll j/k/↑↓/pgup/pgdn · close esc/enter"
-        },
-        Style::default().fg(p.overlay0).bg(p.panel_bg),
-    );
+    // The fork's two-tone footer: labels dim, keys bright. The focused
+    // wording is the editor's own, which the fork's predates.
+    let label = Style::default().fg(p.overlay0).bg(p.panel_bg);
+    let keys = Style::default().fg(p.text).bg(p.panel_bg);
+    let parts: &[(&str, &str)] = if h.search_focused {
+        &[
+            (" edit ", "←→/home/end"),
+            (" · kill ", "^u/^k"),
+            (" · yank ", "^y"),
+            (" · scroll ", "↑↓"),
+            (" · back ", "esc"),
+        ]
+    } else {
+        &[
+            (" search ", "/"),
+            (" · scroll ", "j/k/↑↓/pgup/pgdn"),
+            (" · close ", "esc/enter"),
+        ]
+    };
+    if let Some(footer) = stack.footer {
+        Widget::render(
+            Paragraph::new(Line::from(
+                parts
+                    .iter()
+                    .flat_map(|(text, key)| [Span::styled(*text, label), Span::styled(*key, keys)])
+                    .collect::<Vec<_>>(),
+            )),
+            footer,
+            b,
+        );
+    }
     Some(OverlayRender {
         area: q,
         cancel: close,
@@ -1433,13 +1547,24 @@ fn render_help_overlay(
         ..OverlayRender::default()
     })
 }
+
+/// The fork's confirmation popup: 64 by 6.
+const CONFIRM_CLOSE_SIZE: (u16, u16) = (64, 6);
+
 fn render_confirm_close_overlay(
     b: &mut Buffer,
     c: &ClientConfirmCloseOverlay,
+    area: Rect,
     p: &Palette,
 ) -> Option<OverlayRender> {
-    let q = popup(b.area, 64, 6)?;
+    let q = popup(area, CONFIRM_CLOSE_SIZE.0, CONFIRM_CLOSE_SIZE.1)?;
     let i = panel(b, q, p.red, p.panel_bg)?;
+    if i.height < 3 {
+        return Some(OverlayRender {
+            area: q,
+            ..OverlayRender::default()
+        });
+    }
     put_text(
         b,
         i.x,
@@ -1481,39 +1606,24 @@ fn render_confirm_close_overlay(
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
-    let rs = row(i, &[13, 12], 2, 3);
-    let [ok, cancel] = rs.as_slice() else {
+    let rects = render_button_row(
+        b,
+        i,
+        &[
+            ModalButton::primary("↵", "confirm", p.red),
+            ModalButton::secondary("esc", "cancel"),
+        ],
+        BUTTON_GAP,
+        3,
+        p,
+    );
+    let [ok, cancel] = rects.as_slice() else {
         return None;
     };
-    button(
-        b,
-        *ok,
-        " ↵ confirm ",
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.red)
-            .add_modifier(Modifier::BOLD),
-    );
-    button(
-        b,
-        *cancel,
-        " esc cancel ",
-        Style::default()
-            .fg(p.text)
-            .bg(p.surface0)
-            .add_modifier(Modifier::BOLD),
-    );
     Some(OverlayRender {
         area: q,
         primary: *ok,
-        clear: Rect::default(),
         cancel: *cancel,
-        navigator_popup: Rect::default(),
-        navigator_search: Rect::default(),
-        navigator_rows: Vec::new(),
-        worktree_search: Rect::default(),
-        worktree_rows: Vec::new(),
-        cursor: None,
         ..OverlayRender::default()
     })
 }

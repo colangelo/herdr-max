@@ -903,6 +903,7 @@ impl ClientShellState {
                     &self.config.keybinds,
                     &self.config.palette,
                     &self.config,
+                    layout.pane_surface,
                 )?;
                 occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;

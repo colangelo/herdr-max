@@ -1251,19 +1251,9 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
     assert!(text.contains("not found"));
     assert!(!text.contains("pane labels"));
 
-    let popup = state.hits.settings_popup;
-    let blank_click =
-        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: popup.right().saturating_sub(2),
-            row: popup.y + 3,
-            modifiers: KeyModifiers::empty(),
-        })]);
-    assert!(!blank_click.repaint);
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(_))
-    ));
+    // A click on the blank interior cancels, as the fork's does; see
+    // `settings_blank_interior_click_cancels_and_restores_the_theme` in
+    // tests/fork_modals.rs.
 
     let install = state.handle_input_bytes(b"\r");
     assert_eq!(install.actions.len(), 1);
