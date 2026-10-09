@@ -903,7 +903,8 @@ fn the_count_stays_at_the_whole_board_while_a_query_narrows_it() {
     state.handle_input_bytes(b"/403");
     let rows = boxed(&mut state);
 
-    assert!(rows[2].ends_with("6 todos │"), "{}", rows[2]);
+    // The count is on the title row (fork issue 174).
+    assert!(rows[1].ends_with("6 todos │"), "{}", rows[1]);
 }
 
 #[test]
