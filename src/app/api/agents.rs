@@ -3,14 +3,26 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentPromptParams, AgentRenameParams, AgentSendBusy, AgentSendKeysParams, AgentSendMode,
+    AgentSendNote, AgentSendParams, AgentStartParams, AgentStatus, AgentTarget, PaneReadResult,
+    ResponseResult,
 };
 use crate::app::App;
 
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+
+/// `agent.send` writes typed text in pieces of at most this many bytes, with
+/// a short gap between them: a TUI that classifies input by the size of a
+/// burst (Claude Code collapses ~1000 bytes into `[Pasted text]`) then sees
+/// typing, not a paste. The same sizes as `herdr pane send-text --chunk 300`.
+const AGENT_SEND_PIECE_BYTES: usize = 300;
+const AGENT_SEND_PIECE_GAP: Duration = Duration::from_millis(20);
+/// One line; a longer message belongs in a file the agent can read.
+const AGENT_SEND_MAX_BYTES: usize = 4000;
+const AGENT_NOTE_TIMEOUT: Duration = Duration::from_secs(10);
+const AGENT_NOTE_SENDER: &str = "herdr-palette";
 
 // Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
 // "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
@@ -132,8 +144,13 @@ impl App {
         request: crate::api::schema::Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
-        let crate::api::schema::Method::AgentPrompt(params) = request.method else {
-            return false;
+        let params = match request.method {
+            crate::api::schema::Method::AgentPrompt(params) => params,
+            crate::api::schema::Method::AgentSend(params) => {
+                self.handle_deferred_agent_send(request.id, params, respond_to);
+                return true;
+            }
+            _ => return false,
         };
         let validated = match self.validate_agent_prompt(request.id, &params) {
             Ok(validated) => validated,
@@ -182,6 +199,245 @@ impl App {
             }
         }
         true
+    }
+
+    /// `agent.send` (fork issue 182): type one line into an agent as the user
+    /// would, or hand it to the note command. Answers through `respond_to`
+    /// once the text is out, so the app thread never waits on the Enter delay
+    /// or on the note command.
+    fn handle_deferred_agent_send(
+        &mut self,
+        id: String,
+        params: AgentSendParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let respond = |response: String| {
+            let _ = respond_to.send(response);
+        };
+        let resolved = match self.resolve_agent_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return respond(encode_error_body(id, self.agent_target_error_body(err))),
+        };
+        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+            return respond(agent_not_found(id, &params.target));
+        };
+        if params.answer.is_none() {
+            if params.text.is_empty() {
+                return respond(encode_error(
+                    id,
+                    "empty_agent_send",
+                    "agent send must not be empty",
+                ));
+            }
+            if params.text.len() > AGENT_SEND_MAX_BYTES {
+                return respond(encode_error(
+                    id,
+                    "agent_send_too_long",
+                    format!("agent send is limited to {AGENT_SEND_MAX_BYTES} bytes"),
+                ));
+            }
+            if params.text.chars().any(char::is_control) {
+                return respond(encode_error(
+                    id,
+                    "multi_line_send",
+                    "agent send is one line: remove line breaks and control characters",
+                ));
+            }
+        }
+        let blocked = agent.agent_status == AgentStatus::Blocked;
+        if blocked && params.answer.is_none() {
+            return respond(encode_error(
+                id,
+                "agent_blocked",
+                format!(
+                    "agent {} is blocked on a prompt: answer it (answer) or open its pane",
+                    params.target
+                ),
+            ));
+        }
+        if !blocked && params.answer.is_some() {
+            return respond(encode_error(
+                id,
+                "agent_not_blocked",
+                format!("agent {} is not blocked on a prompt", params.target),
+            ));
+        }
+        if params.mode == AgentSendMode::Note {
+            return self.send_agent_note(id, agent, params, respond_to);
+        }
+
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
+            .cloned()
+        else {
+            return respond(agent_not_found(id, &params.target));
+        };
+        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+            return respond(agent_not_found(id, &params.target));
+        };
+        let Some(expected_agent) = terminal.effective_known_agent() else {
+            return respond(agent_not_ready(id, &params.target));
+        };
+        if terminal.managed_agent_launch_pending() {
+            return respond(agent_not_ready(id, &params.target));
+        }
+        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
+            return respond(agent_not_found(id, &params.target));
+        };
+        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
+            return respond(agent_not_ready(id, &params.target));
+        }
+        let sent = |pieces, enter_sent, interrupted| ResponseResult::AgentSent {
+            agent: agent.clone(),
+            delivery: AgentSendMode::Typed,
+            pieces,
+            enter_sent,
+            interrupted,
+            note: None,
+        };
+        let key_bytes = |key: &str| -> Result<Vec<u8>, String> {
+            super::super::api_helpers::encode_api_keys(runtime, &[key.to_owned()])
+                .map(|encoded| encoded.into_iter().flatten().collect())
+        };
+
+        if let Some(answer) = &params.answer {
+            let bytes = match key_bytes(answer) {
+                Ok(bytes) => bytes,
+                Err(key) => {
+                    return respond(encode_error(
+                        id,
+                        "invalid_key",
+                        format!("unsupported key {key}"),
+                    ))
+                }
+            };
+            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                return respond(encode_error(id, "agent_send_failed", err.to_string()));
+            }
+            return respond(encode_success(id, sent(0, false, false)));
+        }
+
+        let mut interrupted = false;
+        if params.busy == AgentSendBusy::Interrupt && agent.agent_status == AgentStatus::Working {
+            let bytes = match key_bytes("esc") {
+                Ok(bytes) => bytes,
+                Err(key) => {
+                    return respond(encode_error(
+                        id,
+                        "invalid_key",
+                        format!("unsupported key {key}"),
+                    ))
+                }
+            };
+            if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
+                return respond(encode_error(id, "agent_send_failed", err.to_string()));
+            }
+            interrupted = true;
+            std::thread::sleep(AGENT_SEND_PIECE_GAP);
+        }
+
+        // Raw writes, not a bracketed paste: the point is that the text
+        // arrives as typed. Every piece but the last goes out now; the last
+        // goes with Enter, which the pty actor delays after it.
+        let pieces =
+            super::super::api_helpers::split_utf8_chunks(&params.text, AGENT_SEND_PIECE_BYTES);
+        let count = pieces.len();
+        let Some((last, head)) = pieces.split_last() else {
+            return respond(encode_error(
+                id,
+                "empty_agent_send",
+                "agent send must not be empty",
+            ));
+        };
+        for piece in head {
+            if let Err(err) = runtime.try_send_bytes(Bytes::copy_from_slice(piece.as_bytes())) {
+                return respond(encode_error(id, "agent_send_failed", err.to_string()));
+            }
+            std::thread::sleep(AGENT_SEND_PIECE_GAP);
+        }
+        let (_, enter) = super::super::api_helpers::encode_api_submission_parts(runtime, "");
+        let completion = match runtime.queue_user_input_submission(
+            Bytes::copy_from_slice(last.as_bytes()),
+            Bytes::from(enter),
+            AGENT_PROMPT_SUBMIT_DELAY,
+            None,
+        ) {
+            Ok(completion) => completion,
+            Err(err) => return respond(encode_error(id, "agent_send_failed", err.to_string())),
+        };
+        let result = sent(count, true, interrupted);
+        let waiter_id = id.clone();
+        let waiter_respond_to = respond_to.clone();
+        let spawned = crate::thread_spawn::spawn_named("herdr-agent-send", move || {
+            let response = match completion.recv() {
+                Ok(Ok(())) => encode_success(waiter_id, result),
+                Ok(Err(err)) => encode_error(waiter_id, "agent_send_failed", err.to_string()),
+                Err(_) => encode_error(waiter_id, "agent_send_failed", "pty actor closed"),
+            };
+            let _ = waiter_respond_to.send(response);
+        });
+        if let Err(err) = spawned {
+            tracing::warn!(err = %err, "failed to spawn agent send thread");
+            respond(encode_error(
+                id,
+                "agent_send_failed",
+                format!("could not start send completion waiter: {err}"),
+            ));
+        }
+    }
+
+    /// A note goes to the agent through the configured note command (by
+    /// default `agent-bell`), named by the agent's herdr name.
+    fn send_agent_note(
+        &self,
+        id: String,
+        agent: crate::api::schema::AgentInfo,
+        params: AgentSendParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let Some(name) = agent.name.clone() else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "agent_unnamed",
+                "a note is addressed by name: rename the agent first",
+            ));
+            return;
+        };
+        let interrupt = params.busy == AgentSendBusy::Interrupt;
+        let text = params.text;
+        let thread_id = id.clone();
+        let thread_respond_to = respond_to.clone();
+        let spawned = crate::thread_spawn::spawn_named("herdr-agent-note", move || {
+            let command = crate::config::load_live_config()
+                .map(|loaded| loaded.config.palette.send.note_command)
+                .unwrap_or_else(|_| "agent-bell".to_owned());
+            let response = match run_note_command(&command, &name, &text, interrupt) {
+                Ok(note) => encode_success(
+                    thread_id,
+                    ResponseResult::AgentSent {
+                        agent,
+                        delivery: AgentSendMode::Note,
+                        pieces: 0,
+                        enter_sent: false,
+                        interrupted: interrupt,
+                        note: Some(note),
+                    },
+                ),
+                Err((code, message)) => encode_error(thread_id, code, message),
+            };
+            let _ = thread_respond_to.send(response);
+        });
+        if let Err(err) = spawned {
+            tracing::warn!(err = %err, "failed to spawn agent note thread");
+            let _ = respond_to.send(encode_error(
+                id,
+                "agent_send_failed",
+                format!("could not start the note command: {err}"),
+            ));
+        }
     }
 
     /// Runs every check that can reject a prompt without touching the pane.
@@ -482,6 +738,89 @@ struct ValidatedAgentPrompt {
     pane_id: crate::layout::PaneId,
     expected_agent: crate::detect::Agent,
     agent: crate::api::schema::AgentInfo,
+}
+
+/// Run `<command> send --to NAME --from herdr-palette [--interrupt] TEXT` and
+/// read its answer. The command is split on whitespace (a program and its
+/// leading arguments); its words become the note's `detail`, and `held` or
+/// `injected` in them its `state`, else `queued`.
+pub(crate) fn run_note_command(
+    command: &str,
+    name: &str,
+    text: &str,
+    interrupt: bool,
+) -> Result<AgentSendNote, (&'static str, String)> {
+    use std::process::{Command, Stdio};
+
+    let mut words = command.split_whitespace();
+    let Some(program) = words.next() else {
+        return Err((
+            "note_command_missing",
+            "palette.send.note_command is empty".to_owned(),
+        ));
+    };
+    let mut note = Command::new(program);
+    note.args(words)
+        .args(["send", "--to", name, "--from", AGENT_NOTE_SENDER]);
+    if interrupt {
+        note.arg("--interrupt");
+    }
+    note.arg(text)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = note.spawn().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            (
+                "note_command_missing",
+                format!("{program} not found: set palette.send.note_command"),
+            )
+        } else {
+            ("note_failed", err.to_string())
+        }
+    })?;
+    let deadline = std::time::Instant::now() + AGENT_NOTE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err((
+                    "note_timeout",
+                    format!("{program} did not answer in {AGENT_NOTE_TIMEOUT:?}"),
+                ));
+            }
+            Err(err) => return Err(("note_failed", err.to_string())),
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| ("note_failed", err.to_string()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        let words = if stderr.is_empty() { stdout } else { stderr };
+        return Err((
+            "note_failed",
+            format!("{program} exited with {}: {words}", output.status),
+        ));
+    }
+    let lower = stdout.to_lowercase();
+    let state = if lower.contains("held") {
+        "held"
+    } else if lower.contains("injected") {
+        "injected"
+    } else {
+        "queued"
+    };
+    Ok(AgentSendNote {
+        state: state.to_owned(),
+        detail: stdout.chars().take(400).collect(),
+    })
 }
 
 fn agent_not_ready(id: String, target: &str) -> String {
@@ -1174,5 +1513,298 @@ mod tests {
                 Some("shell-pane")
             );
         }
+    }
+    fn named_agent(app: &mut App, agent: Agent, state: AgentState) -> crate::layout::PaneId {
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(agent), state);
+        pane_id
+    }
+
+    fn send(app: &mut App, params: AgentSendParams) -> String {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_agent_api_request(
+            crate::api::schema::Request {
+                id: "send".into(),
+                method: crate::api::schema::Method::AgentSend(params),
+            },
+            respond_to,
+        ));
+        response_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("agent send responds")
+    }
+
+    fn params(text: &str) -> AgentSendParams {
+        AgentSendParams {
+            target: "reviewer".into(),
+            text: text.into(),
+            mode: AgentSendMode::Typed,
+            busy: AgentSendBusy::Queue,
+            answer: None,
+        }
+    }
+
+    fn error_code(response: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(response).unwrap()["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[test]
+    fn split_utf8_chunks_never_cuts_a_character_and_round_trips() {
+        let text = "héllo wörld ".repeat(50);
+        let pieces = crate::app::api_helpers::split_utf8_chunks(&text, 7);
+        assert!(pieces
+            .iter()
+            .all(|piece| !piece.is_empty() && piece.len() <= 7));
+        assert_eq!(pieces.concat(), text);
+        assert_eq!(
+            crate::app::api_helpers::split_utf8_chunks("日本語", 2),
+            ["日", "本", "語"],
+            "a character wider than the limit is a piece of its own"
+        );
+        assert_eq!(crate::app::api_helpers::split_utf8_chunks("", 300), [""]);
+    }
+
+    #[tokio::test]
+    async fn agent_send_types_the_text_in_pieces_then_presses_enter() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Idle);
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 16,
+            );
+        // Bracketed paste on: a send is still raw typing, never a paste.
+        runtime.test_process_pty_bytes(b"\x1b[?2004h");
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let text = "a".repeat(700);
+        let started = std::time::Instant::now();
+        let response = send(&mut app, params(&text));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentSent {
+            delivery,
+            pieces,
+            enter_sent,
+            interrupted,
+            note,
+            ..
+        } = success.result
+        else {
+            panic!("expected a sent response: {response}");
+        };
+        assert_eq!(delivery, AgentSendMode::Typed);
+        assert_eq!((pieces, enter_sent, interrupted), (3, true, false));
+        assert!(note.is_none());
+        assert_eq!(rx.try_recv().unwrap().len(), 300);
+        assert_eq!(rx.try_recv().unwrap().len(), 300);
+        assert_eq!(rx.try_recv().unwrap().len(), 100);
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+        assert!(started.elapsed() >= AGENT_PROMPT_SUBMIT_DELAY);
+    }
+
+    #[tokio::test]
+    async fn agent_send_to_a_working_agent_queues_unless_told_to_interrupt() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Working);
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 16,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let queued = send(&mut app, params("later"));
+        let queued: SuccessResponse = serde_json::from_str(&queued).unwrap();
+        let ResponseResult::AgentSent { interrupted, .. } = queued.result else {
+            panic!("expected a sent response");
+        };
+        assert!(!interrupted);
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"later"));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+
+        let mut now = params("now");
+        now.busy = AgentSendBusy::Interrupt;
+        let interrupted = send(&mut app, now);
+        let interrupted: SuccessResponse = serde_json::from_str(&interrupted).unwrap();
+        let ResponseResult::AgentSent { interrupted, .. } = interrupted.result else {
+            panic!("expected a sent response");
+        };
+        assert!(interrupted);
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x1b"));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"now"));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+    }
+
+    #[tokio::test]
+    async fn interrupt_does_nothing_extra_to_an_idle_agent() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Idle);
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 16,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let mut idle = params("hello");
+        idle.busy = AgentSendBusy::Interrupt;
+        send(&mut app, idle);
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"hello"));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+    }
+
+    #[tokio::test]
+    async fn agent_send_refuses_free_text_for_a_blocked_agent_and_answers_with_a_key() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Blocked);
+        let (runtime, mut rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 16,
+            );
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        assert_eq!(
+            error_code(&send(&mut app, params("yes please"))),
+            "agent_blocked"
+        );
+        assert!(rx.try_recv().is_err(), "nothing was typed");
+
+        let mut answer = params("");
+        answer.answer = Some("1".into());
+        let answered: SuccessResponse = serde_json::from_str(&send(&mut app, answer)).unwrap();
+        let ResponseResult::AgentSent {
+            pieces, enter_sent, ..
+        } = answered.result
+        else {
+            panic!("expected a sent response");
+        };
+        assert_eq!((pieces, enter_sent), (0, false));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"1"));
+        assert!(rx.try_recv().is_err(), "an answer is a key, not a line");
+    }
+
+    #[tokio::test]
+    async fn agent_send_answer_needs_a_blocked_agent() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Idle);
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let mut answer = params("");
+        answer.answer = Some("1".into());
+        assert_eq!(error_code(&send(&mut app, answer)), "agent_not_blocked");
+    }
+
+    #[tokio::test]
+    async fn agent_send_is_one_line_and_bounded() {
+        let mut app = app_with_agent();
+        let pane_id = named_agent(&mut app, Agent::Claude, AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        assert_eq!(error_code(&send(&mut app, params(""))), "empty_agent_send");
+        assert_eq!(
+            error_code(&send(&mut app, params("one\ntwo"))),
+            "multi_line_send"
+        );
+        assert_eq!(
+            error_code(&send(&mut app, params("esc\x1b[2J"))),
+            "multi_line_send"
+        );
+        assert_eq!(
+            error_code(&send(&mut app, params(&"a".repeat(4001)))),
+            "agent_send_too_long"
+        );
+        assert!(rx.try_recv().is_err(), "nothing reached the pane");
+    }
+
+    #[tokio::test]
+    async fn agent_send_to_a_plain_shell_is_not_ready() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_name("reviewer".into());
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        assert_eq!(error_code(&send(&mut app, params("hi"))), "agent_not_ready");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-note-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn note_script(dir: &std::path::Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-note");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.display().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_note_command_is_run_with_the_target_sender_and_text() {
+        let dir = scratch_dir("args");
+        let command = note_script(&dir, "echo \"queued $*\"");
+        let note = run_note_command(&command, "reviewer", "look at this", false).unwrap();
+        assert_eq!(note.state, "queued");
+        assert_eq!(
+            note.detail,
+            "queued send --to reviewer --from herdr-palette look at this"
+        );
+
+        let note = run_note_command(&command, "reviewer", "now", true).unwrap();
+        assert!(note.detail.contains("--interrupt now"), "{}", note.detail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_held_note_says_held_in_the_commands_own_words() {
+        let dir = scratch_dir("held");
+        let command = note_script(
+            &dir,
+            "echo 'held until morning: if urgent, tell your gestore'",
+        );
+        let note = run_note_command(&command, "reviewer", "hi", false).unwrap();
+        assert_eq!(note.state, "held");
+        assert_eq!(
+            note.detail,
+            "held until morning: if urgent, tell your gestore"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_or_missing_note_command_is_an_error_not_a_receipt() {
+        let dir = scratch_dir("fail");
+        let failing = note_script(&dir, "echo 'no such session' >&2; exit 3");
+        let (code, message) = run_note_command(&failing, "ghost", "hi", false).unwrap_err();
+        assert_eq!(code, "note_failed");
+        assert!(message.contains("no such session"), "{message}");
+
+        let (code, message) =
+            run_note_command("/nonexistent/agent-bell", "x", "hi", false).unwrap_err();
+        assert_eq!(code, "note_command_missing");
+        assert!(message.contains("palette.send.note_command"), "{message}");
+
+        let (code, _) = run_note_command("  ", "x", "hi", false).unwrap_err();
+        assert_eq!(code, "note_command_missing");
     }
 }

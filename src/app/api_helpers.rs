@@ -12,6 +12,31 @@ fn normalize_api_key_alias(key: &str) -> &str {
     }
 }
 
+/// Split `text` into pieces of at most `max_bytes` bytes without cutting a
+/// UTF-8 character. A character wider than `max_bytes` becomes a piece of its
+/// own, so every piece is non-empty and valid UTF-8. Empty text yields one
+/// empty piece.
+pub(super) fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
+    let max_bytes = max_bytes.max(1);
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + max_bytes).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        pieces.push(&text[start..end]);
+        start = end;
+    }
+    if pieces.is_empty() {
+        pieces.push("");
+    }
+    pieces
+}
+
 pub(super) fn encode_api_text(runtime: &crate::terminal::TerminalRuntime, text: &str) -> Vec<u8> {
     let bracketed = runtime.bracketed_paste_enabled();
     if bracketed {

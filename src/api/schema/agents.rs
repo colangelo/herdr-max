@@ -186,6 +186,58 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
+/// How `agent.send` delivers the text (fork issue 182).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSendMode {
+    /// Herdr types the text into the agent's pane, as if the user were there.
+    #[default]
+    Typed,
+    /// A peer message through the configured note command. It approves nothing.
+    Note,
+}
+
+/// What `agent.send` does when the agent is working.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSendBusy {
+    /// Deliver now; the agent takes it at its next pause.
+    #[default]
+    Queue,
+    /// Interrupt the agent first (`esc` for a typed send, `--interrupt` for a note).
+    Interrupt,
+}
+
+/// Send one line of text to an agent without switching to it (fork issue 182).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSendParams {
+    pub target: String,
+    /// One line, at most 4000 bytes. Empty only with `answer`.
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub mode: AgentSendMode,
+    #[serde(default)]
+    pub busy: AgentSendBusy,
+    /// For an agent that is blocked on a prompt: the key of the option to
+    /// press (for example `1`) instead of typing text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+}
+
+/// What the note command reported for a `note` send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSendNote {
+    /// `queued`, `held` or `injected`.
+    pub state: String,
+    /// The note command's own words, verbatim.
+    pub detail: String,
+}
+
 /// Where an agent's reported `name` comes from when it is not an explicit
 /// herdr name (fork issue 130).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

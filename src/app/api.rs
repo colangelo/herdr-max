@@ -1354,6 +1354,13 @@ impl App {
                     "agent.prompt is handled asynchronously by the app runtime",
                 );
             }
+            Method::AgentSend(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.send is handled asynchronously by the app runtime",
+                );
+            }
             Method::AgentWait(_) => {
                 return responses::encode_error(
                     request.id,
