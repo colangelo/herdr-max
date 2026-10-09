@@ -1,6 +1,9 @@
 # THROWAWAY PROBE (Herdr Max issue 188). Never merge this file as is.
-# A hung test is terminated after 2 x 30 s instead of holding the CI job for
-# 15 minutes, and one failure does not cancel the remaining tests.
+# A hung respawn test is terminated after 2 x 30 s instead of holding the CI
+# job for 15 minutes, and one failure does not cancel the remaining tests.
 [profile.default]
 fail-fast = false
+
+[[profile.default.overrides]]
+filter = 'test(respawn_) | test(replaced_runtime_exit)'
 slow-timeout = { period = "30s", terminate-after = 2 }
