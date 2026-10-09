@@ -1229,27 +1229,23 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
 }
 
 /// Parse `pane send-text`. `--chunk` and `--chunk-delay` are recognised
-/// anywhere after the pane id; `--` ends option parsing so text that starts
-/// with those words can still be sent. Every other word is text, joined with
-/// single spaces exactly as before.
+/// anywhere, before or after the pane id; `--` ends option parsing so text
+/// that starts with those words can still be sent. The first other word is the
+/// pane id and the rest is text, joined with single spaces exactly as before.
 fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String> {
-    let Some((raw_pane_id, rest)) = args.split_first() else {
-        return Err(PANE_SEND_TEXT_USAGE.into());
-    };
-
     let mut words: Vec<&str> = Vec::new();
     let mut chunk = None;
     let mut delay_ms = None;
     let mut index = 0;
-    while index < rest.len() {
-        let arg = rest[index].as_str();
+    while index < args.len() {
+        let arg = args[index].as_str();
         let (flag, attached) = match arg.split_once('=') {
             Some((flag, value)) => (flag, Some(value)),
             None => (arg, None),
         };
         match flag {
             "--" if attached.is_none() => {
-                words.extend(rest[index + 1..].iter().map(String::as_str));
+                words.extend(args[index + 1..].iter().map(String::as_str));
                 break;
             }
             "--chunk" | "--chunk-delay" => {
@@ -1257,7 +1253,7 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
                     Some(value) => value,
                     None => {
                         index += 1;
-                        rest.get(index)
+                        args.get(index)
                             .map(String::as_str)
                             .ok_or_else(|| format!("missing value for {flag}"))?
                     }
@@ -1282,7 +1278,10 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
         index += 1;
     }
 
-    if words.is_empty() {
+    let Some((raw_pane_id, text_words)) = words.split_first() else {
+        return Err(PANE_SEND_TEXT_USAGE.into());
+    };
+    if text_words.is_empty() {
         return Err(PANE_SEND_TEXT_USAGE.into());
     }
     if chunk.is_none() && delay_ms.is_some() {
@@ -1291,7 +1290,7 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
 
     Ok(PaneSendTextArgs {
         pane_id: super::normalize_pane_id(raw_pane_id),
-        text: words.join(" "),
+        text: text_words.join(" "),
         chunk: chunk.map(|max_bytes| ChunkPacing {
             max_bytes,
             delay: std::time::Duration::from_millis(delay_ms.unwrap_or(DEFAULT_CHUNK_DELAY_MS)),
@@ -2167,6 +2166,32 @@ mod tests {
             (args(&["p1", "x", "--chunk", "0"]), "at least 1"),
             (
                 args(&["p1", "x", "--chunk", "-3"]),
+    #[test]
+    fn parse_pane_send_text_args_accepts_chunk_options_before_the_pane() {
+        for form in [
+            args(&["--chunk", "300", "p1", "hi", "there"]),
+            args(&["--chunk=300", "p1", "hi", "there"]),
+            args(&["--chunk-delay", "5", "--chunk", "300", "p1", "hi", "there"]),
+        ] {
+            let parsed = parse_pane_send_text_args(&form).unwrap();
+            assert_eq!(parsed.pane_id, "p1", "{form:?}");
+            assert_eq!(parsed.text, "hi there", "{form:?}");
+            assert_eq!(
+                parsed.chunk.map(|pacing| pacing.max_bytes),
+                Some(300),
+                "{form:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_double_dash_before_the_pane_ends_options() {
+        let parsed = parse_pane_send_text_args(&args(&["--chunk", "4", "--", "p1", "--chunk"]))
+            .unwrap();
+        assert_eq!(parsed.pane_id, "p1");
+        assert_eq!(parsed.text, "--chunk");
+    }
+
                 "invalid value for --chunk",
             ),
             (args(&["p1", "x", "--chunk-delay", "5"]), "requires --chunk"),
@@ -2190,6 +2215,7 @@ mod tests {
         );
         assert_eq!(pieces.concat(), text);
     }
+            (args(&["--chunk", "300", "p1"]), "usage"),
 
     #[test]
     fn split_utf8_chunks_never_cuts_a_multibyte_character() {
