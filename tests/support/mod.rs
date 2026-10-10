@@ -137,14 +137,31 @@ pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
 pub fn register_runtime_dir(path: &Path) {
     ensure_cleanup_hooks();
 
-    let _ = fs::create_dir_all(path);
-    let _ = fs::write(
-        path.join(RUNTIME_OWNER_MARKER),
-        std::process::id().to_string(),
-    );
-
     let mut runtime_dirs = runtime_dir_registry_lock();
+    // Every client spawn registers the dir again, after the server is already
+    // running. The marker names this process and does not change, so leave it
+    // alone: the watchdog reads it once a second, and a rewrite that truncates
+    // it first lets the watchdog read an empty file and SIGTERM the live server.
+    // A marker that went missing (the dir was recreated) is still restored.
+    if runtime_dirs.contains(path) && path.join(RUNTIME_OWNER_MARKER).exists() {
+        return;
+    }
+
+    let _ = fs::create_dir_all(path);
+    write_runtime_owner_marker(path);
     runtime_dirs.insert(path.to_path_buf());
+}
+
+/// Writes the marker whole or not at all. A reader sees either no file or the
+/// complete pid, never the empty file a truncating write leaves behind.
+fn write_runtime_owner_marker(runtime_dir: &Path) {
+    let pid = std::process::id();
+    let staging = runtime_dir.join(format!("{RUNTIME_OWNER_MARKER}.{pid}.tmp"));
+    if fs::write(&staging, pid.to_string()).is_ok()
+        && fs::rename(&staging, runtime_dir.join(RUNTIME_OWNER_MARKER)).is_err()
+    {
+        let _ = fs::remove_file(&staging);
+    }
 }
 
 pub fn unregister_runtime_dir(path: &Path) {
@@ -842,6 +859,13 @@ fn runtime_dir_owner_alive(runtime_dir: &Path) -> bool {
         return false;
     };
 
+    // Our own writer never leaves the file empty. If one does, treat it as a
+    // write in progress; a dead owner leaves a full pid that process_exists
+    // rejects.
+    if contents.trim().is_empty() {
+        return true;
+    }
+
     let Ok(owner_pid) = contents.trim().parse::<libc::pid_t>() else {
         return false;
     };
@@ -991,6 +1015,48 @@ mod tests {
         let should_terminate = should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs);
         fs::remove_dir_all(runtime_dir).unwrap();
         assert!(!should_terminate, "a live test owner must remain protected");
+    }
+
+    // The watchdog thread scans every second and reads the owner marker of each
+    // registered runtime dir. A marker it finds empty used to read as "owner
+    // gone" and got the live server SIGTERMed, which the attaching client saw as
+    // ECONNRESET (issue 203). `fs::write` leaves exactly that empty file between
+    // its truncate and its write, and every client spawn rewrote the marker.
+
+    #[test]
+    fn runtime_owner_marker_registering_a_registered_dir_does_not_rewrite_the_marker() {
+        let runtime_dir = unique_missing_runtime_dir("marker-rewrite");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        register_runtime_dir(&runtime_dir);
+        let marker = runtime_dir.join(RUNTIME_OWNER_MARKER);
+        fs::write(&marker, "kept").unwrap();
+
+        // A client spawn registers the dir again after the server is running.
+        register_runtime_dir(&runtime_dir);
+
+        let contents = fs::read_to_string(&marker).unwrap();
+        unregister_runtime_dir(&runtime_dir);
+        fs::remove_dir_all(&runtime_dir).unwrap();
+        assert_eq!(
+            contents, "kept",
+            "re-registering must not truncate the marker the watchdog is reading"
+        );
+    }
+
+    #[test]
+    fn runtime_owner_marker_empty_marker_is_not_a_dead_owner() {
+        let runtime_dir = unique_missing_runtime_dir("marker-empty");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::write(runtime_dir.join(RUNTIME_OWNER_MARKER), "").unwrap();
+        let registered_runtime_dirs = HashSet::from([runtime_dir.clone()]);
+
+        let should_terminate = should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs);
+
+        fs::remove_dir_all(&runtime_dir).unwrap();
+        assert!(
+            !should_terminate,
+            "an empty marker is a writer between truncate and write, not a dead owner"
+        );
     }
 
     #[test]
