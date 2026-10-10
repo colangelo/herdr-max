@@ -59,48 +59,81 @@ pub fn run_server() -> io::Result<()> {
         .build()
         .map_err(io::Error::other)?;
 
-    let result = rt.block_on(async {
-        // Create the App (with AppState, event channels, etc.).
-        let mut app = app::App::try_new(
-            &loaded_config.config,
-            app::AppPolicy::PRODUCTION,
-            config::config_diagnostic_summary(&loaded_config.diagnostics),
-            api_rx,
-            event_hub,
-        )?;
-        seed_startup_workspace_if_empty(&mut app);
+    let result = run_then_shut_down(rt, |rt| {
+        rt.block_on(async {
+            // Create the App (with AppState, event channels, etc.).
+            let mut app = app::App::try_new(
+                &loaded_config.config,
+                app::AppPolicy::PRODUCTION,
+                config::config_diagnostic_summary(&loaded_config.diagnostics),
+                api_rx,
+                event_hub,
+            )?;
+            seed_startup_workspace_if_empty(&mut app);
 
-        // Create the headless server.
-        let mut server = match HeadlessServer::new(
-            app,
-            &loaded_config.diagnostics,
-            Some(api_tx.clone()),
-            Some(_api_server),
-            server_stop,
-        ) {
-            Ok(server) => server,
-            Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
-                eprintln!("error: herdr server is already running");
-                eprintln!("client socket: {}", client_socket_path().display());
-                std::process::exit(1);
-            }
-            Err(err) => return Err(err),
-        };
+            // Create the headless server.
+            let mut server = match HeadlessServer::new(
+                app,
+                &loaded_config.diagnostics,
+                Some(api_tx.clone()),
+                Some(_api_server),
+                server_stop,
+            ) {
+                Ok(server) => server,
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                    eprintln!("error: herdr server is already running");
+                    eprintln!("client socket: {}", client_socket_path().display());
+                    std::process::exit(1);
+                }
+                Err(err) => return Err(err),
+            };
 
-        info!(
-            api_socket = %api::socket_path().display(),
-            client_socket = %client_socket_path().display(),
-            "herdr server started"
-        );
-        print_ready_message(&api::socket_path(), &client_socket_path());
-        server.app.run_plugin_startup_hooks();
+            info!(
+                api_socket = %api::socket_path().display(),
+                client_socket = %client_socket_path().display(),
+                "herdr server started"
+            );
+            print_ready_message(&api::socket_path(), &client_socket_path());
+            server.app.run_plugin_startup_hooks();
 
-        server.run().await
+            server.run().await
+        })
     });
 
-    rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+/// How long a server that is ending waits for blocking tasks still running. A
+/// pane's child wait (`wait4` on a live shell) never ends on its own.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+
+/// Runs the server on `rt`, then shuts `rt` down within
+/// [`RUNTIME_SHUTDOWN_GRACE`], also when the server panics. Dropping a runtime
+/// during an unwind waits on every blocking task without a bound, so a panic
+/// used to leave the process stuck in a pane's `wait4`, where SIGTERM no
+/// longer reached anything (fork issue 197). The panic still surfaces once the
+/// runtime is down.
+fn run_then_shut_down<T>(
+    rt: tokio::runtime::Runtime,
+    run: impl FnOnce(&tokio::runtime::Runtime) -> T,
+) -> T {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&rt)));
+    rt.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    match outcome {
+        Ok(value) => value,
+        Err(panic) => {
+            // A daemon's stderr goes nowhere; the log is the only trace.
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default();
+            tracing::error!(%message, "server panicked; runtime shut down");
+            crate::logging::shutdown("server");
+            std::panic::resume_unwind(panic)
+        }
+    }
 }
 
 fn seed_startup_workspace_if_empty(app: &mut app::App) {
@@ -160,57 +193,58 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .build()
         .map_err(io::Error::other)?;
 
-    let result = rt.block_on(async {
-        let app = app::App::new_from_handoff(
-            &loaded_config.config,
-            config::config_diagnostic_summary(&loaded_config.diagnostics),
-            api_rx,
-            event_hub.clone(),
-            &received.manifest.snapshot,
-            &mut imports,
-        )?;
-        crate::server::handoff::report_restored(&mut received.stream)?;
-        if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
-            return Err(io::Error::other(
-                "test handoff import failure after restored",
-            ));
-        }
-        wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+    let result = run_then_shut_down(rt, |rt| {
+        rt.block_on(async {
+            let app = app::App::new_from_handoff(
+                &loaded_config.config,
+                config::config_diagnostic_summary(&loaded_config.diagnostics),
+                api_rx,
+                event_hub.clone(),
+                &received.manifest.snapshot,
+                &mut imports,
+            )?;
+            crate::server::handoff::report_restored(&mut received.stream)?;
+            if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
+                return Err(io::Error::other(
+                    "test handoff import failure after restored",
+                ));
+            }
+            wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
 
-        let api_server = api::start_server_with_stop_control(
-            api_tx.clone(),
-            event_hub.clone(),
-            server_stop.clone(),
-        )?;
-        let mut server = HeadlessServer::new(
-            app,
-            &loaded_config.diagnostics,
-            Some(api_tx.clone()),
-            Some(api_server),
-            server_stop,
-        )?;
-        // Carried across before any client attaches, so the first title sent is
-        // the override rather than the configured one it replaced.
-        server.api_window_title = received.manifest.api_window_title.take();
-        // Keep panes at the size they had rather than shrinking them to the
-        // headless default on the first frame, until a client reattaches.
-        server.handoff_client_size = received.manifest.client_size;
-        server.effective_size = server.detached_size();
-        crate::server::handoff::report_ready(&mut received.stream)?;
-        crate::server::handoff::wait_committed(&mut received.stream)?;
-        server.app.assume_handoff_ownership();
-        server.app.unpause_handoff_readers();
-        server.begin_handoff_detection_sweep();
-        if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
-            warn!(err = %err, "failed to report handoff ownership; continuing as owner");
-        }
-        info!("handoff import server started");
-        print_ready_message(&api::socket_path(), &client_socket_path());
-        server.app.run_plugin_startup_hooks();
-        server.run().await
+            let api_server = api::start_server_with_stop_control(
+                api_tx.clone(),
+                event_hub.clone(),
+                server_stop.clone(),
+            )?;
+            let mut server = HeadlessServer::new(
+                app,
+                &loaded_config.diagnostics,
+                Some(api_tx.clone()),
+                Some(api_server),
+                server_stop,
+            )?;
+            // Carried across before any client attaches, so the first title sent is
+            // the override rather than the configured one it replaced.
+            server.api_window_title = received.manifest.api_window_title.take();
+            // Keep panes at the size they had rather than shrinking them to the
+            // headless default on the first frame, until a client reattaches.
+            server.handoff_client_size = received.manifest.client_size;
+            server.effective_size = server.detached_size();
+            crate::server::handoff::report_ready(&mut received.stream)?;
+            crate::server::handoff::wait_committed(&mut received.stream)?;
+            server.app.assume_handoff_ownership();
+            server.app.unpause_handoff_readers();
+            server.begin_handoff_detection_sweep();
+            if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
+                warn!(err = %err, "failed to report handoff ownership; continuing as owner");
+            }
+            info!("handoff import server started");
+            print_ready_message(&api::socket_path(), &client_socket_path());
+            server.app.run_plugin_startup_hooks();
+            server.run().await
+        })
     });
 
-    rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
 }
@@ -240,4 +274,62 @@ fn print_ready_message(api_socket: &Path, client_socket: &Path) {
 /// Initialize logging for the server process.
 fn init_logging() {
     crate::logging::init_file_logging("herdr-server.log");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+
+    /// A runtime with a blocking task that never returns on its own, as a
+    /// pane's child wait on a live shell. Runs `body` (which receives that
+    /// runtime) through [`run_then_shut_down`] on its own thread and reports
+    /// whether it returned (Ok(value)) or panicked (Err) within 10 s; `None`
+    /// means it hung. The blocking task's channel stays open until then.
+    fn with_endless_blocking_task<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<Result<T, ()>> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (keep_open, never) = std::sync::mpsc::channel::<()>();
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_then_shut_down(rt, |rt| {
+                    rt.block_on(async {
+                        let (started_tx, started) = tokio::sync::oneshot::channel();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = started_tx.send(());
+                            let _ = never.recv();
+                        });
+                        let _ = started.await;
+                    });
+                    body()
+                })
+            }));
+            drop(keep_open);
+            let _ = done_tx.send(outcome.map_err(|_| ()));
+        });
+        done_rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[test]
+    fn a_server_that_ends_does_not_wait_on_an_endless_blocking_task() {
+        assert_eq!(with_endless_blocking_task(|| 7), Some(Ok(7)));
+    }
+
+    /// Fork issue 197: a server that panicked dropped its runtime during the
+    /// unwind, which waits on every blocking task without a bound, so the
+    /// process hung in a pane's `wait4` where SIGTERM no longer reached it.
+    #[test]
+    fn a_server_that_panics_does_not_wait_on_an_endless_blocking_task() {
+        assert_eq!(
+            with_endless_blocking_task(|| -> u8 { panic!("the server failed") }),
+            Some(Err(())),
+            "the panic must surface instead of hanging in the runtime drop"
+        );
+    }
 }
