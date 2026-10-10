@@ -122,14 +122,15 @@ pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
 /// the host, such as a socket or a link, or to assert on a path inside it. It
 /// holds [`test_config_env_lock`] and restores the environment on drop, so it is
 /// safe under `cargo test` as well as nextest.
-#[cfg(test)]
+// Every user is a Unix test; on Windows it would be dead code.
+#[cfg(all(test, unix))]
 pub(crate) struct IsolatedHostEnv {
     _lock: std::sync::MutexGuard<'static, ()>,
     dir: std::path::PathBuf,
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl IsolatedHostEnv {
     pub(crate) fn new(name: &str) -> Self {
         let lock = test_config_env_lock()
@@ -174,7 +175,7 @@ impl IsolatedHostEnv {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for IsolatedHostEnv {
     fn drop(&mut self) {
         for (var, value) in self.saved.drain(..) {

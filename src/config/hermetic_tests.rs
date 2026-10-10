@@ -3,15 +3,18 @@
 //! directory, `HOME` or socket path that lies in the scratch area, and ignores
 //! the value the developer's shell exports for the machine's real one.
 
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::*;
 
 /// Sets or clears variables for one test and puts them back afterwards. Hold
-/// [`test_config_env_lock`] for as long as it lives.
+/// [`test_config_env_lock`] for as long as it lives. Only the Unix tests use it.
+#[cfg(unix)]
 struct EnvRestore(Vec<(&'static str, Option<OsString>)>);
 
+#[cfg(unix)]
 impl EnvRestore {
     fn new(vars: &[&'static str]) -> Self {
         Self(
@@ -22,6 +25,7 @@ impl EnvRestore {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EnvRestore {
     fn drop(&mut self) {
         for (var, value) in self.0.drain(..) {
