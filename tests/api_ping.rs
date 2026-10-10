@@ -147,6 +147,8 @@ fn spawn_herdr_with_options(
         cmd.env("PATH", path);
     }
 
+    // Read the server's terminal so a chatty server never blocks on a full pty buffer.
+    crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
 

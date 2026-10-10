@@ -94,6 +94,7 @@ pub(super) fn create_committed_repo(path: &Path) {
 
 pub(super) struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
+    tail: crate::support::PtyTail,
     pub(super) child: Box<dyn Child + Send + Sync>,
 }
 
@@ -112,6 +113,9 @@ impl Drop for SpawnedServerProcess {
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.tail.report("the spawned herdr");
+        }
         let pid = self.child.process_id();
         crate::support::stop_spawned_herdr(&mut *self.child);
 
@@ -328,15 +332,6 @@ pub(super) fn spawn_herdr_with_config(
     )
     .unwrap();
 
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     isolate_herdr_test_process(&mut cmd);
     cmd.env_remove("HERDR_STARTUP_CWD");
@@ -351,10 +346,29 @@ pub(super) fn spawn_herdr_with_config(
         cmd.env("PATH", path);
     }
 
+    spawn_in_pty(cmd)
+}
+
+/// Runs `cmd` with a pseudo-terminal as its stdio and keeps the master end
+/// for as long as the returned handle lives. The master is read continuously,
+/// so a process that prints a lot is never blocked on it; the end of its
+/// output is shown if the test fails.
+fn spawn_in_pty(cmd: CommandBuilder) -> SpawnedHerdr {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+
+    let tail = crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     SpawnedHerdr {
         _master: pair.master,
+        tail,
         child,
     }
 }
@@ -663,6 +677,49 @@ pub(super) fn accept_fake_cli_operation(listener: &UnixListener) -> (UnixStream,
 #[cfg(test)]
 mod harness_env_tests {
     use super::*;
+
+    /// A process whose terminal is never read blocks once the pty buffer is
+    /// full, which froze whole test runs when a server printed a lot at
+    /// start-up. This one prints about 590 KB and must still exit.
+    #[test]
+    fn a_process_that_floods_its_terminal_is_not_blocked_by_the_harness() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "seq 1 100000"]);
+        let mut spawned = spawn_in_pty(cmd);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = spawned.child.try_wait().unwrap() {
+                assert!(status.success(), "{status:?}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the process is still blocked writing to its terminal"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_harness_keeps_only_the_end_of_a_terminals_output() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "seq 1 100000"]);
+        let spawned = spawn_in_pty(cmd);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !spawned.tail.text().trim_end().ends_with("100000") {
+            assert!(Instant::now() < deadline, "{:?}", spawned.tail.text());
+            thread::sleep(Duration::from_millis(20));
+        }
+        let text = spawned.tail.text();
+        assert!(
+            text.len() <= crate::support::PTY_TAIL_BYTES,
+            "{}",
+            text.len()
+        );
+        assert!(!text.contains("\n1\r\n"), "the start was dropped");
+    }
 
     #[test]
     fn caller_pane_identity_is_not_inherited_by_spawned_herdr() {

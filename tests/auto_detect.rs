@@ -112,6 +112,8 @@ fn spawn_server(
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
 
+    // Read the server's terminal so a chatty server never blocks on a full pty buffer.
+    crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
@@ -612,6 +614,8 @@ fn auto_detect_default_socket_path_from_config_dir() {
     cmd.env_remove("HERDR_SOCKET_PATH");
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
 
+    // Read the server's terminal so a chatty server never blocks on a full pty buffer.
+    crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);

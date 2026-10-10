@@ -148,6 +148,8 @@ fn spawn_server_with_config(
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
 
+    // Read the server's terminal so a chatty server never blocks on a full pty buffer.
+    crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
