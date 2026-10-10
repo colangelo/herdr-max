@@ -750,13 +750,23 @@ impl ClientShellState {
             ClientShellMode::Terminal => {
                 if let Some(binding) =
                     crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
+                        // The pane-sync key is the pane's own key outside sync mode.
+                        .filter(|binding| {
+                            !matches!(
+                                binding,
+                                crate::input::KeybindMatch::Action(
+                                    crate::input::KeybindAction::TogglePaneSync
+                                )
+                            ) || self.focused_tab_syncs()
+                        })
                 {
-                    // A held sync switch must not toggle the group back off.
+                    // A held sync switch must not toggle the group or the pane back.
                     if key.kind == KeyEventKind::Repeat
                         && matches!(
                             binding,
                             crate::input::KeybindMatch::Action(
                                 crate::input::KeybindAction::ToggleSyncPanes
+                                    | crate::input::KeybindAction::TogglePaneSync
                             )
                         )
                     {
@@ -1197,6 +1207,19 @@ impl ClientShellState {
         self.snapshot
             .as_deref()
             .and_then(|snapshot| snapshot.focused_pane_id.clone())
+    }
+
+    /// The focused tab is in sync mode, its grace included.
+    pub(super) fn focused_tab_syncs(&self) -> bool {
+        self.snapshot.as_deref().is_some_and(|snapshot| {
+            snapshot.focused_tab_id.as_ref().is_some_and(|tab_id| {
+                snapshot
+                    .resource_facts
+                    .as_ref()
+                    .and_then(|facts| facts.tab_sync.as_ref())
+                    .is_some_and(|tabs| tabs.contains_key(tab_id))
+            })
+        })
     }
 
     pub(crate) fn clipboard_image_target(

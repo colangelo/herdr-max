@@ -542,6 +542,12 @@
           "description": "Type into every pane of the current tab at once, or stop."
         },
         {
+          "key": "keys.toggle_pane_sync",
+          "type": "keybinding",
+          "default": "\"ctrl+space\"",
+          "description": "While the focused tab syncs, take the focused pane out of the synced group or put it back. Outside sync mode the key goes to the pane."
+        },
+        {
           "key": "keys.toggle_pin_workspace",
           "type": "keybinding",
           "default": "unset",

@@ -172,6 +172,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_workspace = "prefix+shift+w"
 # toggle_pin_agent = ""      # optional, unset by default; pin or unpin the focused pane's agent to the top of the agent panel
 # toggle_sync_panes = "prefix+shift+s"  # type into every pane of the current tab at once
+# toggle_pane_sync = "ctrl+space"        # while syncing: focused pane out of the group or back in; else sent to the pane
 # toggle_pin_workspace = ""  # optional, unset by default; pin or unpin the selected space to the top of the list
 # close_workspace = "prefix+shift+d"
 # previous_workspace = "" # optional, unset by default

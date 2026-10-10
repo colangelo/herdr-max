@@ -399,6 +399,7 @@ pub struct Keybinds {
     pub rename_workspace: ActionKeybinds,
     pub toggle_pin_workspace: ActionKeybinds,
     pub toggle_sync_panes: ActionKeybinds,
+    pub toggle_pane_sync: ActionKeybinds,
     pub toggle_pin_agent: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
@@ -626,6 +627,7 @@ impl Config {
             rename_workspace: empty_action!(),
             toggle_pin_workspace: empty_action!(),
             toggle_sync_panes: empty_action!(),
+            toggle_pane_sync: empty_action!(),
             toggle_pin_agent: empty_action!(),
             close_workspace: empty_action!(),
             workspace_picker: empty_action!(),
@@ -778,6 +780,7 @@ impl Config {
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
             apply_action!(keybinds.toggle_pin_workspace, toggle_pin_workspace, source);
             apply_action!(keybinds.toggle_sync_panes, toggle_sync_panes, source);
+            apply_action!(keybinds.toggle_pane_sync, toggle_pane_sync, source);
             apply_action!(keybinds.toggle_pin_agent, toggle_pin_agent, source);
             apply_action!(keybinds.close_workspace, close_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
