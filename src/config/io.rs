@@ -126,9 +126,29 @@ pub(crate) fn unit_test_host_dir(kind: &str) -> PathBuf {
     } else {
         std::env::temp_dir()
     };
+    #[cfg(unix)]
+    remove_unit_test_host_dir_at_exit();
     base.join(format!("herdr-ut-{}", std::process::id()))
         .join(kind)
         .join(app_dir_name())
+}
+
+/// The first test that writes below the stand-in creates it; remove the whole
+/// per-process directory when the test process exits normally, so a full run
+/// leaves no `/tmp/herdr-ut-<pid>` behind. A killed process can still leave one.
+#[cfg(all(test, unix))]
+fn remove_unit_test_host_dir_at_exit() {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        extern "C" fn remove() {
+            let _ = std::fs::remove_dir_all(format!("/tmp/herdr-ut-{}", std::process::id()));
+        }
+        // SAFETY: `remove` is a plain `extern "C" fn` without captured state, and
+        // registering it only schedules it to run during normal process exit.
+        unsafe {
+            libc::atexit(remove);
+        }
+    });
 }
 
 #[cfg(all(windows, not(test)))]
