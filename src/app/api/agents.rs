@@ -226,21 +226,21 @@ impl App {
                 return respond(encode_error(
                     id,
                     "empty_agent_send",
-                    "agent send must not be empty",
+                    "agent message must not be empty",
                 ));
             }
             if params.text.len() > AGENT_SEND_MAX_BYTES {
                 return respond(encode_error(
                     id,
                     "agent_send_too_long",
-                    format!("agent send is limited to {AGENT_SEND_MAX_BYTES} bytes"),
+                    format!("agent message is limited to {AGENT_SEND_MAX_BYTES} bytes"),
                 ));
             }
             if params.text.chars().any(char::is_control) {
                 return respond(encode_error(
                     id,
                     "multi_line_send",
-                    "agent send is one line: remove line breaks and control characters",
+                    "agent message is one line: remove line breaks and control characters",
                 ));
             }
         }
@@ -350,7 +350,7 @@ impl App {
             return respond(encode_error(
                 id,
                 "empty_agent_send",
-                "agent send must not be empty",
+                "agent message must not be empty",
             ));
         };
         for piece in head {
