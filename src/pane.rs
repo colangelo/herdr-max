@@ -52,6 +52,17 @@ pub use self::terminal::InputState;
 #[cfg(test)]
 pub(crate) use self::terminal::SYNC_HOLD_MAX;
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
+
+// THROWAWAY PROBE (Herdr Max issue 188): trace only on Windows, where the
+// probe runs. Elsewhere a real server's stderr can be a pipe nobody drains (the
+// CLI tests), and a blocking write there freezes the server.
+macro_rules! probe_trace {
+    ($($arg:tt)*) => {
+        if cfg!(windows) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 pub(crate) use self::terminal::{
     TerminalCompressionStep, TerminalDirtyPatch, TerminalDirtyPatchOutcome, TerminalReadSnapshot,
     TerminalSearchDirection, TerminalSearchWindow, TerminalTextPoint, TerminalWordMotion,
@@ -2287,14 +2298,14 @@ fn shutdown_pane_processes(
             std::time::Duration::from_millis(250),
         ),
     ] {
-        eprintln!(
+        probe_trace!(
             "[respawn-probe] shutdown_pane_processes pane={} child_pid={child_pid} pids={pids:?} sending {signal:?}",
             pane_id.raw()
         );
         crate::platform::signal_processes(&pids, signal);
         let probe_exited =
             wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace);
-        eprintln!(
+        probe_trace!(
             "[respawn-probe] shutdown_pane_processes pane={} after {signal:?}: all exited={probe_exited}",
             pane_id.raw()
         );
@@ -3299,13 +3310,13 @@ impl PaneRuntime {
             }
             let probe_pid = child.process_id();
             tokio::task::spawn_blocking(move || {
-                eprintln!(
+                probe_trace!(
                     "[respawn-probe] child watcher pane={} pid={probe_pid:?}: entering child.wait()",
                     pane_id.raw()
                 );
                 let exit_reason = match child.wait() {
                     Ok(status) => {
-                        eprintln!(
+                        probe_trace!(
                             "[respawn-probe] child watcher pane={} pid={probe_pid:?}: child.wait() returned {status:?}",
                             pane_id.raw()
                         );
