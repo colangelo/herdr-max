@@ -125,7 +125,6 @@ fn pane_run_read_and_wait_commands_work() {
     );
     assert!(create.status.success());
 
-    let started = Instant::now();
     let waited = run_cli(
         &socket_path,
         &[
@@ -142,18 +141,66 @@ fn pane_run_read_and_wait_commands_work() {
             "5000",
         ],
     );
-    let elapsed = started.elapsed();
     assert!(
         waited.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&waited.stderr)
     );
-    assert!(
-        elapsed < Duration::from_millis(500),
-        "already-matching wait took {elapsed:?}"
-    );
     let waited_json: serde_json::Value = serde_json::from_slice(&waited.stdout).unwrap();
     assert_eq!(waited_json["result"]["type"], "output_matched");
+
+    // The output is on the pane now. A wait with no time budget at all can
+    // only succeed if it matches what is already there before it looks at
+    // its deadline, so success proves the match is not deferred behind a
+    // poll or the timeout, however slow the machine running this test is.
+    let already_there = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "wait-output",
+            "1-1",
+            "--match",
+            "ready",
+            "--source",
+            "recent",
+            "--lines",
+            "40",
+            "--timeout",
+            "0",
+        ],
+    );
+    assert!(
+        already_there.status.success(),
+        "a zero-budget wait on already-present output failed: stdout {} stderr {}",
+        String::from_utf8_lossy(&already_there.stdout),
+        String::from_utf8_lossy(&already_there.stderr)
+    );
+    let already_there_json: serde_json::Value =
+        serde_json::from_slice(&already_there.stdout).unwrap();
+    assert_eq!(already_there_json["result"]["type"], "output_matched");
+
+    // Control: the same zero budget does fail when nothing matches, so the
+    // success above is the match and not a wait that never times out.
+    let never = run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "wait-output",
+            "1-1",
+            "--match",
+            "text-this-pane-never-printed",
+            "--source",
+            "recent",
+            "--lines",
+            "40",
+            "--timeout",
+            "0",
+        ],
+    );
+    assert!(
+        !never.status.success(),
+        "a zero-budget wait on absent output succeeded"
+    );
 
     let read = run_cli(
         &socket_path,
