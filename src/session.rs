@@ -81,7 +81,7 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 
     if let Some(session) = requested_session {
         apply_explicit_name(&session)?;
-    } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
+    } else if crate::config::path_env(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
         EXPLICIT_SESSION_REQUESTED.store(false, Ordering::Relaxed);
     } else if let Ok(session) = std::env::var(SESSION_ENV_VAR) {
         if normalize_name(&session)?.is_none() {
@@ -132,7 +132,7 @@ pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<
 
 pub fn active_restart_after_update_guidance() -> String {
     if !explicit_session_requested() {
-        if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+        if let Some(socket_path) = socket_path_override() {
             return restart_after_update_guidance(
                 &format!(
                     "{}={} herdr server stop",
@@ -172,11 +172,18 @@ pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
     data_dir_for(name).join("herdr.sock")
 }
 
+/// The `HERDR_SOCKET_PATH` override, when one is set and usable.
+fn socket_path_override() -> Option<String> {
+    crate::config::path_env(crate::api::SOCKET_PATH_ENV_VAR)?
+        .into_string()
+        .ok()
+}
+
 pub fn active_api_socket_path() -> PathBuf {
     if explicit_session_requested() {
         return api_socket_path_for(active_name().as_deref());
     }
-    if let Ok(path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+    if let Some(path) = socket_path_override() {
         return PathBuf::from(path);
     }
     api_socket_path_for(active_name().as_deref())

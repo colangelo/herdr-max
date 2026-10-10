@@ -29,20 +29,109 @@ pub fn app_dir_name() -> &'static str {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join(app_dir_name());
+    if let Some(dir) = xdg_dir("XDG_CONFIG_HOME") {
+        return dir.join(app_dir_name());
     }
-    platform_config_dir()
+    default_config_dir()
 }
 
 pub fn state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
-        return PathBuf::from(dir).join(app_dir_name());
+    if let Some(dir) = xdg_dir("XDG_STATE_HOME") {
+        return dir.join(app_dir_name());
     }
+    default_state_dir()
+}
+
+/// A path-valued environment variable.
+///
+/// A unit-test binary does not honor an absolute path outside the scratch area
+/// (see [`is_unit_test_scratch`]): that is the developer's own
+/// `HERDR_SOCKET_PATH`, `CLAUDE_CONFIG_DIR` and the like, and following it would
+/// read or rewrite state of a herdr or agent running on the machine that runs
+/// the tests. A test that needs a path points the variable into a temp
+/// directory, which is honored.
+pub(crate) fn path_env(name: &str) -> Option<std::ffi::OsString> {
+    let value = std::env::var_os(name)?;
+    #[cfg(test)]
+    if std::path::Path::new(&value).is_absolute() && !is_unit_test_scratch(Path::new(&value)) {
+        return None;
+    }
+    Some(value)
+}
+
+/// The user's home directory from `HOME`.
+///
+/// A unit-test binary only honors a `HOME` inside the scratch area; the
+/// developer's own gets a private stand-in (never created), so a test cannot
+/// read their dotfiles, agent configs, ssh config or transcripts.
+pub(crate) fn home_env() -> Option<std::ffi::OsString> {
+    let home = std::env::var_os("HOME")?;
+    #[cfg(test)]
+    if !is_unit_test_scratch(Path::new(&home)) {
+        return Some(unit_test_host_dir("home").into_os_string());
+    }
+    Some(home)
+}
+
+/// The XDG base directory named by `var`.
+///
+/// A unit-test binary only honors one that points into a scratch area (see
+/// [`is_unit_test_scratch`]). The value a developer's shell exports for the
+/// machine's real config or state directory is ignored, so a test that has not
+/// pointed the variable at its own directory still cannot read or overwrite the
+/// config, session, release notes or manifest cache of a herdr running on the
+/// same machine.
+fn xdg_dir(var: &str) -> Option<PathBuf> {
+    path_env(var)?.into_string().ok().map(PathBuf::from)
+}
+
+/// Where herdr keeps its config when no XDG base directory applies.
+fn default_config_dir() -> PathBuf {
+    #[cfg(test)]
+    return unit_test_host_dir("config");
+    #[cfg(not(test))]
+    platform_config_dir()
+}
+
+/// The state-directory counterpart of [`default_config_dir`].
+fn default_state_dir() -> PathBuf {
+    #[cfg(test)]
+    return unit_test_host_dir("state");
+    #[cfg(not(test))]
     platform_state_dir()
 }
 
-#[cfg(windows)]
+/// Whether `path` lies in the temporary area unit tests are allowed to use.
+#[cfg(test)]
+pub(crate) fn is_unit_test_scratch(path: &Path) -> bool {
+    [
+        std::env::temp_dir().as_path(),
+        Path::new("/tmp"),
+        Path::new("/private/tmp"),
+        Path::new("/var/folders"),
+        Path::new("/private/var/folders"),
+    ]
+    .iter()
+    .any(|root| path.starts_with(root))
+}
+
+/// A per-process directory that is only named here, never created; the first
+/// test that writes into it creates it. Kept short because Unix socket paths
+/// are limited to roughly 100 bytes and tests bind sockets below the config
+/// directory.
+#[cfg(test)]
+pub(crate) fn unit_test_host_dir(kind: &str) -> PathBuf {
+    let base = if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    base.join(format!("herdr-ut-{}", std::process::id()))
+        .join(kind)
+        .join(app_dir_name())
+}
+
+#[cfg(all(windows, not(test)))]
 fn platform_config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("APPDATA") {
         return PathBuf::from(dir).join(app_dir_name());
@@ -59,7 +148,7 @@ fn platform_config_dir() -> PathBuf {
     std::env::temp_dir().join(app_dir_name())
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(test)))]
 fn platform_config_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(format!(".config/{}", app_dir_name()))
@@ -68,7 +157,7 @@ fn platform_config_dir() -> PathBuf {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn platform_state_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("LOCALAPPDATA") {
         return PathBuf::from(dir).join(app_dir_name());
@@ -85,7 +174,7 @@ fn platform_state_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{}-state", app_dir_name()))
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(test)))]
 fn platform_state_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(format!(".local/state/{}", app_dir_name()))
@@ -199,7 +288,7 @@ pub(super) fn resolve_config_relative_path(path: &Path) -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
-    if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
+    if let Some(path) = path_env(CONFIG_PATH_ENV_VAR).and_then(|path| path.into_string().ok()) {
         return PathBuf::from(path);
     }
     config_dir().join("config.toml")

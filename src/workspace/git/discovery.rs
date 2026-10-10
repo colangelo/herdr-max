@@ -28,7 +28,7 @@ pub fn derive_label_from_cwd(cwd: &Path) -> String {
 }
 
 pub fn fallback_label_from_cwd(cwd: &Path) -> String {
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = crate::config::home_env() {
         let home = Path::new(&home);
         if cwd == home {
             return "~".to_string();
