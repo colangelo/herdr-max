@@ -7,6 +7,9 @@ pub fn run_server() -> io::Result<()> {
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     let process_context = crate::platform::prepare_server_process(handoff_import);
     init_logging();
+    // Test-owned servers (HERDR_TEST_PARENT_PID) end with the test that spawned them.
+    #[cfg(unix)]
+    crate::server::test_parent_watchdog::spawn_from_env();
     match process_context {
         Ok(true) => info!("server using persistent user service context"),
         Ok(false) => {}

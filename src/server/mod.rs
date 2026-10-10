@@ -22,3 +22,5 @@ pub(crate) mod shutdown;
 pub mod socket_paths;
 pub(crate) mod sync_input;
 pub(crate) mod terminal_attach;
+#[cfg(unix)]
+pub(crate) mod test_parent_watchdog;
