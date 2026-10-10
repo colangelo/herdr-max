@@ -1054,7 +1054,7 @@ fn plugin_command() -> Command {
                         .arg(option("entrypoint", "ID"))
                         .arg(
                             option("placement", "PLACEMENT")
-                                .value_parser(["overlay", "split", "tab", "zoomed"]),
+                                .value_parser(["overlay", "popup", "split", "tab", "zoomed"]),
                         )
                         .arg(option("workspace", "ID"))
                         .arg(option("target-pane", "PANE"))
@@ -1438,7 +1438,9 @@ mod tests {
         assert!(open
             .get_arguments()
             .any(|arg| arg.get_long() == Some("entrypoint")));
-        assert!(option_values(open, "placement").contains(&"zoomed".to_string()));
+        let placements = option_values(open, "placement");
+        assert!(placements.contains(&"zoomed".to_string()));
+        assert!(placements.contains(&"popup".to_string()));
     }
 
     #[test]
