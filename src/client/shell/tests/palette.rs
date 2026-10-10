@@ -633,3 +633,54 @@ fn esc_from_a_message_goes_back_to_the_sessions() {
     state.handle_input_bytes(b"\x1b");
     assert_eq!(palette(&state).labels(), ["reviewer", "builder", "gate"]);
 }
+
+// -- captures for review (run with `--run-ignored only --no-capture -E 'test(capture_)'`) ----------
+
+fn snap(state: &mut ClientShellState, name: &str) {
+    let frame = state.compose(W, H).expect("frame").frame;
+    let p = state.config.palette.clone();
+    super::tui_look::capture(name, &frame, 0..H, &p);
+}
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_palette_bar_open() {
+    let mut state = state_with_agents(Config::default());
+    open(&mut state);
+    snap(&mut state, "palette: bar open (prefix+:)");
+}
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_palette_filtered_list() {
+    let mut state = state_with_agents(Config::default());
+    open(&mut state);
+    type_text(&mut state, "split");
+    snap(&mut state, "palette: filtered list (\"split\")");
+}
+
+#[test]
+#[ignore = "capture for review, not a check"]
+fn capture_palette_send_flow() {
+    let mut state = state_with_agents(Config::default());
+    open(&mut state);
+    type_text(&mut state, "send ");
+    snap(&mut state, "send 1/4: sessions with their state");
+    type_text(&mut state, "reviewer");
+    state.handle_input_bytes(b"\r");
+    state.compose(W, H).unwrap();
+    type_text(&mut state, "take a look at the diff");
+    snap(&mut state, "send 2/4: message, typed as you");
+    let outcome = state.handle_input_bytes(b"\r");
+    let (id, _) = one(&outcome);
+    state.handle_endpoint_result("boot-1", &id, Ok(sent_result(AgentMessageMode::Typed)));
+    snap(&mut state, "send 3/4: receipt");
+
+    let mut state = state_with_agents(Config::default());
+    pick(&mut state, "builder");
+    type_text(&mut state, "run the slow tests next");
+    snap(
+        &mut state,
+        "send 4/4: a working session queues, alt+enter interrupts",
+    );
+}
