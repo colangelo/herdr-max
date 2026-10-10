@@ -68,6 +68,7 @@ pub(crate) enum KeybindAction {
     BalancePanes,
     NextLayout,
     ToggleSyncPanes,
+    TogglePaneSync,
     CopyMode,
     CopyModePageUp,
     CopyModeHalfPageUp,
@@ -159,6 +160,7 @@ pub(crate) fn resolve_non_indexed_action(
         (&keybinds.balance_panes, KeybindAction::BalancePanes),
         (&keybinds.next_layout, KeybindAction::NextLayout),
         (&keybinds.toggle_sync_panes, KeybindAction::ToggleSyncPanes),
+        (&keybinds.toggle_pane_sync, KeybindAction::TogglePaneSync),
         (&keybinds.copy_mode, KeybindAction::CopyMode),
         (&keybinds.copy_mode_page_up, KeybindAction::CopyModePageUp),
         (

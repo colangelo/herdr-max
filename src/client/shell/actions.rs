@@ -1315,6 +1315,14 @@ impl ClientShellState {
                     mode: crate::api::schema::SyncMode::Toggle,
                 }))
             }
+            // Fork issue 202. Only while the tab syncs: a prefix binding
+            // outside sync mode does nothing.
+            KeybindAction::TogglePaneSync if self.focused_tab_syncs() => {
+                Some(Method::PaneSync(crate::api::schema::PaneSyncParams {
+                    pane_id: Some(focused_pane?),
+                    mode: crate::api::schema::SyncMode::Toggle,
+                }))
+            }
             KeybindAction::EditScrollback => Some(Method::PaneEditScrollback(PaneTarget {
                 pane_id: focused_pane?,
             })),

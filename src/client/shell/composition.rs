@@ -436,13 +436,7 @@ impl ClientShellState {
         }
         if self.mode == ClientShellMode::Terminal
             && !self.pane_labels_visible()
-            && snapshot.focused_tab_id.as_ref().is_some_and(|tab_id| {
-                snapshot
-                    .resource_facts
-                    .as_ref()
-                    .and_then(|facts| facts.tab_sync.as_ref())
-                    .is_some_and(|tabs| tabs.contains_key(tab_id))
-            })
+            && self.focused_tab_syncs()
         {
             let mut composed = frame.to_ratatui_buffer()?;
             if let Some(rect) = super::sync_chrome::paint(

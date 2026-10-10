@@ -451,6 +451,25 @@ mod tests {
         assert!(tab.sync);
         assert!(!app.state.workspaces[0].tabs[0].pane_synced(right));
 
+        // Fork issue 202: the toggle_pane_sync key sends `pane.sync` toggles.
+        // The last member out starts the grace; a pane back in cancels it.
+        let left = app.state.workspaces[0].tabs[0].root_pane;
+        let left_id = app.public_pane_id(0, left).unwrap();
+        let toggle = |app: &mut App, pane_id: &str| {
+            pane_of(app.handle_pane_sync(
+                "req".into(),
+                PaneSyncParams {
+                    pane_id: Some(pane_id.to_owned()),
+                    mode: SyncMode::Toggle,
+                },
+            ))
+        };
+        assert!(!toggle(&mut app, &left_id).synced);
+        assert!(app.state.workspaces[0].tabs[0].sync_ending());
+        assert!(toggle(&mut app, &right_id).synced);
+        assert!(!app.state.workspaces[0].tabs[0].sync_ending());
+        assert!(toggle(&mut app, &left_id).synced);
+
         let tab = tab_of(app.handle_tab_sync(
             "req".into(),
             TabSyncParams {

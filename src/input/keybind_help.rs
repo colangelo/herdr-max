@@ -459,6 +459,11 @@ pub(crate) fn command_table(
                     "sync panes",
                 ),
                 act(
+                    KeybindAction::TogglePaneSync,
+                    binding_label(&keybinds.toggle_pane_sync),
+                    "pane in/out of sync (sync mode)",
+                ),
+                act(
                     KeybindAction::EnterResizeMode,
                     binding_label(&keybinds.resize_mode),
                     "resize mode",

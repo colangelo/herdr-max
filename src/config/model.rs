@@ -708,6 +708,10 @@ pub struct KeysConfig {
     pub toggle_pin_workspace: BindingConfig,
     /// Type into every pane of the current tab at once. Default: "prefix+shift+s"
     pub toggle_sync_panes: BindingConfig,
+    /// While the focused tab syncs, take the focused pane out of the synced
+    /// group or put it back. Outside sync mode the key goes to the pane.
+    /// Default: "ctrl+space"
+    pub toggle_pane_sync: BindingConfig,
     /// Pin or unpin the focused pane's agent to the top of the agent panel. Default: unset
     pub toggle_pin_agent: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
@@ -895,6 +899,8 @@ pub(crate) struct KeysConfigOverlay {
     toggle_pin_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sync_panes: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_pane_sync: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_pin_agent: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1101,6 +1107,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(rename_workspace);
         apply_field!(toggle_pin_workspace);
         apply_field!(toggle_sync_panes);
+        apply_field!(toggle_pane_sync);
         apply_field!(toggle_pin_agent);
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
@@ -1229,6 +1236,7 @@ impl KeysConfig {
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
         copy_effective_action_field!(toggle_pin_workspace, keybinds.toggle_pin_workspace);
         copy_effective_action_field!(toggle_sync_panes, keybinds.toggle_sync_panes);
+        copy_effective_action_field!(toggle_pane_sync, keybinds.toggle_pane_sync);
         copy_effective_action_field!(toggle_pin_agent, keybinds.toggle_pin_agent);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
@@ -1858,6 +1866,7 @@ impl Default for KeysConfig {
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             toggle_pin_workspace: BindingConfig::empty(),
             toggle_sync_panes: BindingConfig::one("prefix+shift+s"),
+            toggle_pane_sync: BindingConfig::one("ctrl+space"),
             toggle_pin_agent: BindingConfig::empty(),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
