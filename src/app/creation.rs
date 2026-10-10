@@ -468,13 +468,13 @@ fn terminal_agent_session_info(
         })
 }
 
-#[cfg(test)]
+// Unix-only: the codex app-server socket the test fakes is a unix path.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// Fork issue 201: `agent_session.restore_argv` is the command a restore
     /// types, daemon arguments included, built by the typing path itself.
-    #[cfg(unix)]
     #[test]
     fn restore_argv_dry_run_is_what_a_codex_restore_types() {
         let socket = std::env::temp_dir().join(format!("herdr-201-{}.sock", std::process::id()));
