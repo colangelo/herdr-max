@@ -3704,71 +3704,193 @@ fn install_and_uninstall_letta_preserve_unrelated_settings_and_hooks() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// The installed Letta session hook plus a fake `herdr` that records its
+/// arguments, with `HOME` pointed at a scratch directory. Restores `HOME` and
+/// removes the scratch directory on drop, including when a test panics.
 #[cfg(unix)]
-#[test]
-fn letta_session_hook_is_silent_and_encodes_default_conversation() {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::process::{Command, Stdio};
+struct LettaHookFixture {
+    base: PathBuf,
+    previous_home: Option<std::ffi::OsString>,
+    hook_path: PathBuf,
+    fake_herdr: PathBuf,
+    capture: PathBuf,
+}
 
-    let _lock = integration_env_lock();
-    let base = unique_base();
-    let home = base.join("home");
-    fs::create_dir_all(home.join(".letta")).unwrap();
-    let previous_home = std::env::var_os("HOME");
-    std::env::set_var("HOME", &home);
-    let installed = install_letta().unwrap();
+#[cfg(unix)]
+impl LettaHookFixture {
+    /// `fake_body` is the shell body of the fake herdr; it receives the capture
+    /// path and a counter path (unique to this fixture) it may use for state.
+    fn new(fake_body: impl FnOnce(&Path, &Path) -> String) -> Self {
+        use std::os::unix::fs::PermissionsExt;
 
-    let capture = base.join("args.txt");
-    let fake_herdr = base.join("herdr");
-    fs::write(
-        &fake_herdr,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\n",
-            capture.display()
-        ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&fake_herdr).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_herdr, permissions).unwrap();
+        let base = unique_base();
+        let home = base.join("home");
+        fs::create_dir_all(home.join(".letta")).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let installed = install_letta().unwrap();
 
-    let mut child = Command::new("sh")
-        .arg(&installed.hook_path)
-        .arg("session")
-        .env("HERDR_ENV", "1")
-        .env("HERDR_PANE_ID", "w1:p2")
-        .env("HERDR_SOCKET_PATH", "/tmp/herdr.sock")
-        .env("HERDR_BIN_PATH", &fake_herdr)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(
-            br#"{"event_type":"SessionStart","conversation_id":"default","agent_id":"agent-123","is_new_session":false}"#,
+        let capture = base.join("args.txt");
+        let counter = base.join("attempts");
+        let fake_herdr = base.join("herdr");
+        fs::write(
+            &fake_herdr,
+            format!("#!/bin/sh\n{}", fake_body(&capture, &counter)),
         )
         .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
-    let args = fs::read_to_string(capture).unwrap();
+        let mut permissions = fs::metadata(&fake_herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_herdr, permissions).unwrap();
+
+        Self {
+            base,
+            previous_home,
+            hook_path: installed.hook_path,
+            fake_herdr,
+            capture,
+        }
+    }
+
+    /// Runs the hook once and checks the contract that holds whether or not
+    /// herdr answered in time: success, and nothing on stdout or stderr
+    /// (SessionStart stdout is injected into Letta's next message).
+    fn run_hook_once(&self) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .arg(&self.hook_path)
+            .arg("session")
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p2")
+            .env("HERDR_SOCKET_PATH", "/tmp/herdr.sock")
+            .env("HERDR_BIN_PATH", &self.fake_herdr)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                br#"{"event_type":"SessionStart","conversation_id":"default","agent_id":"agent-123","is_new_session":false}"#,
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+
+    /// What the fake herdr recorded, if it got as far as recording anything.
+    fn captured_args(&self) -> Option<String> {
+        fs::read_to_string(&self.capture)
+            .ok()
+            .filter(|args| !args.is_empty())
+    }
+
+    /// Runs the hook until the fake herdr has recorded its arguments, and
+    /// returns them with the number of attempts it took.
+    ///
+    /// The hook gives herdr a fixed 1 s budget and then abandons it silently,
+    /// by design. On a loaded machine the fake herdr (a fresh `sh`) can miss
+    /// that budget and be killed before it writes, so one run is not
+    /// guaranteed to leave a capture (fork issue 207). Each attempt keeps the
+    /// hook's real budget; the test just does not read a capture that an
+    /// abandoned attempt never wrote.
+    fn run_hook_until_captured(&self, max_attempts: usize) -> (String, usize) {
+        for attempt in 1..=max_attempts {
+            self.run_hook_once();
+            if let Some(args) = self.captured_args() {
+                return (args, attempt);
+            }
+        }
+        panic!(
+            "the fake herdr recorded nothing in {max_attempts} hook runs: every run gave up \
+             on it at the hook's 1 s budget, or the hook never called it"
+        );
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LettaHookFixture {
+    fn drop(&mut self) {
+        if let Some(home) = self.previous_home.take() {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+#[cfg(unix)]
+fn assert_letta_default_conversation_args(args: &str) {
     assert!(args.contains("report-agent-session w1:p2"));
     assert!(args.contains("--source herdr:letta --agent letta"));
     assert!(args.contains("--agent-session-id default:agent-123"));
     assert!(args.contains("--session-start-source resume"));
+}
 
-    if let Some(home) = previous_home {
-        std::env::set_var("HOME", home);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    let _ = fs::remove_dir_all(base);
+#[cfg(unix)]
+#[test]
+fn letta_session_hook_is_silent_and_encodes_default_conversation() {
+    let _lock = integration_env_lock();
+    let fixture = LettaHookFixture::new(|capture, _| {
+        format!("printf '%s\\n' \"$*\" > '{}'\n", capture.display())
+    });
+
+    let (args, _attempts) = fixture.run_hook_until_captured(10);
+    assert_letta_default_conversation_args(&args);
+}
+
+/// Forces the slow path of the test above: the fake herdr stalls past the
+/// hook's 1 s budget on its first runs, so those runs leave no capture. The
+/// hook must still be silent and successful, and the next run that herdr
+/// answers in time must be captured (fork issue 207).
+#[cfg(unix)]
+#[test]
+fn letta_session_hook_capture_survives_runs_herdr_answers_too_late() {
+    const STALLED_RUNS: usize = 2;
+
+    let _lock = integration_env_lock();
+    let fixture = LettaHookFixture::new(|capture, counter| {
+        format!(
+            "n=$(cat '{counter}' 2>/dev/null || echo 0)\n\
+             echo $((n + 1)) > '{counter}'\n\
+             if [ \"$n\" -lt {STALLED_RUNS} ]; then exec sleep 60; fi\n\
+             printf '%s\\n' \"$*\" > '{capture}'\n",
+            counter = counter.display(),
+            capture = capture.display(),
+        )
+    });
+
+    let (args, attempts) = fixture.run_hook_until_captured(10);
+    assert!(
+        attempts > STALLED_RUNS,
+        "the first {STALLED_RUNS} runs stall past the hook's budget and cannot be captured, \
+         but a capture appeared after {attempts}"
+    );
+    assert_letta_default_conversation_args(&args);
+}
+
+/// The hook's design, kept as a test: herdr slower than the budget is
+/// abandoned silently, the hook returns promptly, and nothing is reported.
+#[cfg(unix)]
+#[test]
+fn letta_session_hook_abandons_herdr_that_never_answers_silently() {
+    let _lock = integration_env_lock();
+    let fixture = LettaHookFixture::new(|_, _| "exec sleep 60\n".to_string());
+
+    let started = std::time::Instant::now();
+    fixture.run_hook_once();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "the hook waited on a stalled herdr instead of abandoning it at its 1 s budget"
+    );
+    assert!(fixture.captured_args().is_none());
 }
 
 #[test]
