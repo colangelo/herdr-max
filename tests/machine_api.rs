@@ -89,8 +89,17 @@ exec "$TEST_REMOTE_HERDR" "$@"
         remote.set_nonblocking(true).unwrap();
         let local = UnixListener::bind(root.join("local.sock")).unwrap();
         local.set_nonblocking(true).unwrap();
+        // `status client` loads the config, so point it at this test's own
+        // directories rather than the developer's.
         let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
             .args(["status", "client", "--json"])
+            .env("HOME", &root)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env_remove("HERDR_CONFIG_PATH")
+            .env_remove("HERDR_SESSION")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_CLIENT_SOCKET_PATH")
             .output()
             .unwrap();
         let status: Value = serde_json::from_slice(&status.stdout).unwrap();
