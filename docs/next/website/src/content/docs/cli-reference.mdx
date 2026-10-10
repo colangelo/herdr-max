@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Herdr commands for sessions, workspaces, tabs, panes, notifications, todos, agents, waits, integrations, and status.
+description: Herdr commands for sessions, workspaces, tabs, panes, popups, notifications, todos, agents, waits, integrations, and status.
 ---
 
 Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
@@ -78,7 +78,7 @@ herdr --machine "Build machine" worktree create --cwd /srv/project --branch revi
 
 The selector must match an enabled saved profile ID or a unique, case-sensitive label, not an arbitrary SSH hostname. The saved remote session is used; combining `--machine` with `--session` or `--remote` is an error. Without the prefix, commands retain their existing local session/socket behavior.
 
-Supported commands are `workspace`, `worktree`, `tab`, `pane`, `notification`, `agent` (except `attach` and local `explain --file`), `api snapshot`, `status server`, and API-backed plugin commands (`link`, `unlink`, `enable`, `disable`, `list`, `action`, `log`, `pane`). Server commands support `stop`, `reload-config`, `agent-manifests`, and `reload-agent-manifests`. Local installation/configuration commands, plugin installation, session management, and interactive terminal attachment are not forwarded.
+Supported commands are `workspace`, `worktree`, `tab`, `pane`, `popup`, `notification`, `agent` (except `attach` and local `explain --file`), `api snapshot`, `status server`, and API-backed plugin commands (`link`, `unlink`, `enable`, `disable`, `list`, `action`, `log`, `pane`). Server commands support `stop`, `reload-config`, `agent-manifests`, and `reload-agent-manifests`. Local installation/configuration commands, plugin installation, session management, and interactive terminal attachment are not forwarded.
 
 Requests and responses travel through the JSON API over non-interactive SSH; API payloads are not interpolated into the SSH shell command. No open TUI is required, and the bridge never installs, starts, or restarts a server. Update the local CLI and remote Herdr installation to support machine forwarding, and keep the running remote server's API protocol compatible. Authentication, unavailable machines, and incompatible versions fail without falling back to Local. Requests are not automatically retried after connection failure.
 
@@ -537,6 +537,25 @@ herdr integration uninstall mastracode
 herdr integration uninstall grok
 herdr integration status [--outdated-only]
 ```
+
+## Popups
+
+```bash
+herdr popup close [--plugin ID]
+```
+
+A session has one popup slot. A popup opened through the API (`plugin pane open`
+with `popup` placement) appears on the tab of the client you last used, the one
+with the latest input; with no client attached it belongs to the focused tab. A
+popup opened from a client's own key stays in that client.
+
+`popup close` closes the open popup and prints `popup_not_open` when there is
+none. Use it when a popup is stuck in another window and its key only shows
+`popup already open`. With `--plugin ID` it closes the popup only if that plugin
+opened it: another plugin's popup, or one you opened from a key, stays open and
+the command fails with `popup_not_owned`. `--plugin` uses the
+`plugin.popup.close` method, so against a server that does not have it the
+command fails instead of closing an unrelated popup.
 
 ## Plugins
 

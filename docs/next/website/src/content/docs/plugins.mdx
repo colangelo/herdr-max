@@ -336,6 +336,9 @@ Its process does not receive `HERDR_PANE_ID`; the underlying tiled pane remains
 available through `HERDR_PLUGIN_CONTEXT_JSON`.
 Opening a popup returns `ui_busy` while Settings, Copy mode, or another Herdr
 modal is active, and `plugin.pane.open` returns an `ok` result after launch.
+A popup opened this way appears on the tab of the client the user last used.
+The `ui_busy` message names the open popup's tab; `herdr popup close --plugin ID`
+(`plugin.popup.close`) closes it only if your plugin opened it.
 
 On Windows, build commands, action commands, and event commands resolve common
 `PATHEXT` shims such as `npm.cmd`, `bun.cmd`, and `pnpm.cmd` when the bare

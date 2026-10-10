@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
-| Popup | `popup.close` |
+| Popup | `popup.close`, `plugin.popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.message`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
@@ -809,9 +809,17 @@ percentages such as `"80%"`. Omitted dimensions default to half the terminal
 size, with too-small values clamped to the popup minimum. A popup has no pane
 ID, remains outside all `pane.*` and agent APIs, emits no pane lifecycle events,
 leaves plugin focus context on the underlying tiled pane, and does not export
-`HERDR_PANE_ID` to its process. Popup launch returns `ok`; `popup.close` closes
-the active popup and returns
-`popup_not_open` when none exists. Split and zoomed panes target an existing
+`HERDR_PANE_ID` to its process. Popup launch returns `ok`. A popup opened
+through this method belongs to the tab of the foreground client (the one with
+the latest input), or to the focused tab when no client is attached; only
+clients viewing that tab see it. There is one popup slot, so a second popup
+open returns `ui_busy` with a message naming the open popup's tab. `popup.close`
+closes the active popup and returns `popup_not_open` when none exists.
+`plugin.popup.close` takes `{"plugin_id": "example.board"}` and closes the
+active popup only when that plugin opened it; it returns `popup_not_open` when
+none exists and `popup_not_owned`, leaving the popup open, when another plugin
+or a keybinding opened it. It is a separate method because a server that does
+not know a new `popup.close` field would ignore it and close any popup. Split and zoomed panes target an existing
 pane; tab panes can target a workspace. Split, tab, zoomed, and overlay panes
 behave like normal Herdr panes, and `plugin.pane.focus` and `plugin.pane.close`
 continue to operate on those panes.
