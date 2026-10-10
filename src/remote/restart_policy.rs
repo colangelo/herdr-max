@@ -158,4 +158,42 @@ mod tests {
             RemoteInstallRunningServerPlan::LiveHandoff
         );
     }
+
+    #[test]
+    fn attach_without_the_handoff_flag_never_plans_a_live_handoff() {
+        // The same outdated server as above, but `--handoff` was not given: the
+        // running server is only stopped after the user confirms, never handed off.
+        assert!(matches!(
+            remote_install_running_server_plan(
+                Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
+                true,
+                false,
+                false,
+                true,
+                false,
+                true
+            ),
+            RemoteInstallRunningServerPlan::StopRequired(_)
+        ));
+    }
+
+    #[test]
+    fn compatible_running_server_keeps_running_with_or_without_the_handoff_flag() {
+        // A version mismatch alone installs the new binary next to the running
+        // server and leaves it running; only a missing capability can restart it.
+        for live_handoff_enabled in [false, true] {
+            assert_eq!(
+                remote_install_running_server_plan(
+                    Some(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION),
+                    true,
+                    true,
+                    true,
+                    true,
+                    live_handoff_enabled,
+                    true
+                ),
+                RemoteInstallRunningServerPlan::KeepRunning
+            );
+        }
+    }
 }
