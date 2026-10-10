@@ -7914,39 +7914,55 @@ mod tests {
 
     #[test]
     fn pane_launch_env_removes_stale_ssh_connection_vars() {
-        let mut cmd = CommandBuilder::new("shell");
-        cmd.env("SSH_CLIENT", "10.0.0.1 51234 22");
-        cmd.env("SSH_CONNECTION", "10.0.0.1 51234 10.0.0.2 22");
-        cmd.env("SSH_TTY", "/dev/pts/0");
-        cmd.env("SSH_AUTH_SOCK", "/tmp/agent.sock");
-
-        apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
-
-        for var in STALE_SSH_CONNECTION_ENV_VARS {
-            assert!(cmd.get_env(var).is_none(), "{var} should not reach panes");
+        fn launch() -> CommandBuilder {
+            let mut cmd = CommandBuilder::new("shell");
+            cmd.env("SSH_CLIENT", "10.0.0.1 51234 22");
+            cmd.env("SSH_CONNECTION", "10.0.0.1 51234 10.0.0.2 22");
+            cmd.env("SSH_TTY", "/dev/pts/0");
+            cmd.env("SSH_AUTH_SOCK", "/tmp/agent.sock");
+            apply_pane_launch_env(&mut cmd, &PaneLaunchEnv::default());
+            cmd
         }
-        // Forwarding goes through herdr's stable agent link when the session
-        // has one (it depends on this machine's live session, not the test),
-        // and otherwise keeps the inherited socket. Either way it stays set.
-        let inherited = std::ffi::OsString::from("/tmp/agent.sock");
-        #[cfg(unix)]
-        let expected = {
-            let stable_agent = crate::platform::ssh_agent::socket_path();
-            if std::fs::symlink_metadata(&stable_agent)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                stable_agent.into_os_string()
-            } else {
-                inherited
+        fn assert_connection_vars_removed(cmd: &CommandBuilder) {
+            for var in STALE_SSH_CONNECTION_ENV_VARS {
+                assert!(cmd.get_env(var).is_none(), "{var} should not reach panes");
             }
+        }
+
+        // Forwarding goes through herdr's stable agent link when the session
+        // has one, and otherwise keeps the inherited socket. The test builds
+        // that session itself, so it does not depend on a herdr running on the
+        // machine that runs the tests.
+        #[cfg(unix)]
+        let host = crate::config::IsolatedHostEnv::new("pane-ssh-agent");
+        #[cfg(unix)]
+        let link = {
+            let link = crate::platform::ssh_agent::socket_path();
+            assert_eq!(link, host.dir().join("herdr.sock.agent"));
+            link
         };
-        #[cfg(not(unix))]
-        let expected = inherited;
+
+        // No link in the session: the inherited agent socket stays.
+        let cmd = launch();
+        assert_connection_vars_removed(&cmd);
         assert_eq!(
             cmd.get_env("SSH_AUTH_SOCK"),
-            Some(expected.as_os_str()),
-            "agent forwarding stays usable in panes"
+            Some(OsStr::new("/tmp/agent.sock")),
+            "without a stable link, agent forwarding keeps the inherited socket"
         );
+
+        // A link in the session: panes get it instead of the inherited socket.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/tmp/agent.sock", &link).unwrap();
+            let cmd = launch();
+            assert_connection_vars_removed(&cmd);
+            assert_eq!(
+                cmd.get_env("SSH_AUTH_SOCK"),
+                Some(link.as_os_str()),
+                "with a stable link, panes forward through it"
+            );
+        }
     }
 
     #[test]
