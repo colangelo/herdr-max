@@ -27,11 +27,17 @@ const OWNED_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 // batch stays well below both limits and the number of panes stays unbounded.
 #[cfg(unix)]
 const FDS_PER_MESSAGE: usize = 64;
-// An importer that announces this capability receives descriptors in batches of
-// any size. One that announces nothing predates batching: it reads them with a
-// single recvmsg, so they must all arrive in one message.
+// An importer that announces this capability receives descriptors in batches.
+// One that announces nothing is either a batching build from before the
+// capability (v0.9.1 up to this change) or a build from before batching, which
+// reads them all with a single recvmsg; its version tells them apart.
 #[cfg(unix)]
 const FD_BATCHES_CAPABILITY: &str = "fd-batches";
+// The first release whose importer reads descriptors in batches (d66c39d5).
+#[cfg(unix)]
+const FIRST_BATCHING_VERSION: (u64, u64, u64) = (0, 9, 1);
+#[cfg(unix)]
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 // The most descriptors one SCM_RIGHTS message carries on every supported
 // platform (Linux's SCM_MAX_FD), so the most panes a pre-batching importer can
 // take.
@@ -82,19 +88,60 @@ pub(crate) enum FdTransport {
     SingleMessage,
 }
 
-/// The transport an importer's validation line allows for `panes` panes. A
-/// pre-batching importer that could not take them all in one message is
-/// refused here, before any descriptor moves, so the exporter rolls back with
-/// every pane intact.
+/// Whether the build at `import_exe` receives descriptors in batches, judged
+/// by its `--version`. `None` is this build. A version that can't be read
+/// counts as batching: every build since v0.9.1 is, and up to one batch reaches
+/// an older importer intact either way.
 #[cfg(unix)]
-fn fd_transport_for(validated: &str, panes: usize) -> io::Result<FdTransport> {
-    let mut words = validated.split_whitespace();
-    if words.next() != Some("validated") {
-        return Err(io::Error::other("handoff import did not validate manifest"));
+pub(crate) fn importer_receives_batches(import_exe: Option<&Path>) -> bool {
+    let Some(exe) = import_exe else {
+        return true;
+    };
+    version_receives_batches(probe_version(exe).as_deref())
+}
+
+#[cfg(unix)]
+fn version_receives_batches(version_output: Option<&str>) -> bool {
+    version_output
+        .and_then(crate::integration::version::extract_version_triple)
+        .is_none_or(|version| version >= FIRST_BATCHING_VERSION)
+}
+
+/// `exe --version`, or `None` when it fails or takes longer than
+/// [`VERSION_PROBE_TIMEOUT`].
+#[cfg(unix)]
+fn probe_version(exe: &Path) -> Option<String> {
+    let mut child = Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + VERSION_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                warn!(exe = %exe.display(), "could not read the handoff target's version");
+                return None;
+            }
+        }
     }
-    if words.any(|capability| capability == FD_BATCHES_CAPABILITY) {
-        return Ok(FdTransport::Batches);
-    }
+    let mut output = String::new();
+    child.stdout.take()?.read_to_string(&mut output).ok()?;
+    Some(output)
+}
+
+/// Refuses a handoff of more panes than one message carries to an importer
+/// that needs them in one message.
+#[cfg(unix)]
+pub(crate) fn check_single_message_fits(panes: usize) -> io::Result<()> {
     if panes > SINGLE_MESSAGE_FD_LIMIT {
         let excess = panes - SINGLE_MESSAGE_FD_LIMIT;
         return Err(io::Error::new(
@@ -105,6 +152,28 @@ fn fd_transport_for(validated: &str, panes: usize) -> io::Result<FdTransport> {
             ),
         ));
     }
+    Ok(())
+}
+
+/// The transport an importer's validation line allows for `panes` panes;
+/// `importer_batches` is what its version says (see
+/// [`importer_receives_batches`]). A pre-batching importer that could not take
+/// them all in one message is refused here, before any descriptor moves, so
+/// the exporter rolls back with every pane intact.
+#[cfg(unix)]
+fn fd_transport_for(
+    validated: &str,
+    panes: usize,
+    importer_batches: bool,
+) -> io::Result<FdTransport> {
+    let mut words = validated.split_whitespace();
+    if words.next() != Some("validated") {
+        return Err(io::Error::other("handoff import did not validate manifest"));
+    }
+    if importer_batches || words.any(|capability| capability == FD_BATCHES_CAPABILITY) {
+        return Ok(FdTransport::Batches);
+    }
+    check_single_message_fits(panes)?;
     Ok(FdTransport::SingleMessage)
 }
 
@@ -218,6 +287,7 @@ pub(crate) fn accept_and_validate_on(
     socket_path: &Path,
     token: &str,
     manifest: &HandoffManifest,
+    importer_batches: bool,
 ) -> io::Result<(UnixStream, FdTransport)> {
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     stream.set_nonblocking(false)?;
@@ -237,7 +307,7 @@ pub(crate) fn accept_and_validate_on(
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let validated = read_line_unbuffered(&mut stream)?;
-    let transport = fd_transport_for(&validated, manifest.panes.len())?;
+    let transport = fd_transport_for(&validated, manifest.panes.len(), importer_batches)?;
     let _ = std::fs::remove_file(socket_path);
     Ok((stream, transport))
 }
@@ -704,7 +774,7 @@ mod tests {
     #[test]
     fn a_pre_batching_importer_with_too_many_panes_is_refused_before_any_descriptor_moves() {
         let panes = SINGLE_MESSAGE_FD_LIMIT + 1;
-        let err = fd_transport_for("validated\n", panes)
+        let err = fd_transport_for("validated\n", panes, false)
             .expect_err("an importer that takes one message cannot take this many");
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         let reason = err.to_string();
@@ -717,14 +787,14 @@ mod tests {
         );
         // The refusal is the validation step's answer: accept_and_validate_on
         // returns it, so the exporter rolls back before send_fds runs.
-        assert!(fd_transport_for("validated\n", SINGLE_MESSAGE_FD_LIMIT).is_ok());
+        assert!(fd_transport_for("validated\n", SINGLE_MESSAGE_FD_LIMIT, false).is_ok());
     }
 
     #[test]
     fn a_pre_batching_importer_takes_more_than_one_batch_in_a_single_message() {
         let panes = FDS_PER_MESSAGE + 1;
         assert_eq!(
-            fd_transport_for("validated\n", panes).unwrap(),
+            fd_transport_for("validated\n", panes, false).unwrap(),
             FdTransport::SingleMessage
         );
         let moved = transfer(
@@ -753,7 +823,12 @@ mod tests {
     fn importers_that_announce_batches_take_any_number_of_panes() {
         // Past the single-message limit the capability is all that matters.
         assert_eq!(
-            fd_transport_for("validated fd-batches\n", SINGLE_MESSAGE_FD_LIMIT + 47).unwrap(),
+            fd_transport_for(
+                "validated fd-batches\n",
+                SINGLE_MESSAGE_FD_LIMIT + 47,
+                false
+            )
+            .unwrap(),
             FdTransport::Batches
         );
         // Two batches and part of a third, staying under macOS's default
@@ -813,17 +888,19 @@ mod tests {
         assert!(!older.announce_capabilities);
         assert_eq!(validated_line(&older), "validated\n");
 
-        assert!(fd_transport_for("ready\n", 1).is_err());
+        assert!(fd_transport_for("ready\n", 1, true).is_err());
     }
 
     #[test]
     fn the_handshake_negotiates_the_transport_end_to_end() {
-        for (announcing_importer, expected) in [
-            (true, FdTransport::Batches),
-            (false, FdTransport::SingleMessage),
+        // (importer announces, its version batches, transport expected)
+        for (announcing_importer, version_batches, expected) in [
+            (true, false, FdTransport::Batches),
+            (false, true, FdTransport::Batches),
+            (false, false, FdTransport::SingleMessage),
         ] {
             let dir = std::env::temp_dir().join(format!(
-                "herdr-handoff-190-{}-{announcing_importer}",
+                "herdr-handoff-190-{}-{announcing_importer}-{version_batches}",
                 std::process::id()
             ));
             std::fs::create_dir_all(&dir).unwrap();
@@ -845,14 +922,97 @@ mod tests {
                 }
             });
             let (_stream, transport) =
-                accept_and_validate_on(listener, &socket, "token", &manifest).unwrap();
+                accept_and_validate_on(listener, &socket, "token", &manifest, version_batches)
+                    .unwrap();
             assert_eq!(
                 transport, expected,
-                "announcing_importer={announcing_importer}"
+                "announcing_importer={announcing_importer} version_batches={version_batches}"
             );
             assert_eq!(importer.join().unwrap().unwrap(), 0);
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The importer of every batching build from before the capability
+    /// (v0.9.1 up to this change): batches of at most 64 per recvmsg.
+    fn pre_capability_batching_recv_fds(
+        stream: &UnixStream,
+        expected: usize,
+    ) -> io::Result<Vec<RawFd>> {
+        let mut out = Vec::new();
+        while out.len() < expected {
+            match recv_fd_batch(stream, (expected - out.len()).min(FDS_PER_MESSAGE)) {
+                Ok(batch) if !batch.is_empty() => out.extend(batch),
+                Ok(_) => {
+                    close_raw_fds(&out);
+                    return Err(io::Error::other("stream closed"));
+                }
+                Err(err) => {
+                    close_raw_fds(&out);
+                    return Err(err);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn a_batching_build_from_before_the_capability_still_gets_batches() {
+        // Rolling back to a 0.9.3 beta: it answers a bare `validated` like a
+        // pre-batching build, but its version says it batches.
+        let panes = FDS_PER_MESSAGE + 6;
+        assert_eq!(
+            fd_transport_for("validated\n", panes, true).unwrap(),
+            FdTransport::Batches
+        );
+        let moved = transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::Batches),
+            pre_capability_batching_recv_fds,
+        )
+        .expect("a 0.9.3 importer takes batches");
+        assert_eq!(moved, panes);
+        // One message is what broke it: its 64-descriptor buffer truncates it.
+        assert!(transfer(
+            panes,
+            |stream, fds| send_fds(stream, fds, FdTransport::SingleMessage),
+            pre_capability_batching_recv_fds,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_target_version_says_whether_it_batches() {
+        for (output, batches) in [
+            (Some("herdr 0.8.2-ac-beta.146-higuain\n"), false),
+            (Some("herdr 0.8.2\n"), false),
+            (Some("herdr 0.9.0\n"), false),
+            (Some("herdr 0.9.1\n"), true),
+            (Some("herdr 0.9.3-ac-beta.150-cuadrado\n"), true),
+            (Some("herdr 1.0.0\n"), true),
+            // Unknown counts as batching, the behaviour since v0.9.1.
+            (Some("not a version\n"), true),
+            (None, true),
+        ] {
+            assert_eq!(version_receives_batches(output), batches, "{output:?}");
+        }
+        assert!(importer_receives_batches(None), "this build batches");
+    }
+
+    #[test]
+    fn the_target_version_is_read_from_its_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("herdr-handoff-190-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("herdr-old");
+        std::fs::write(&old, "#!/bin/sh\necho herdr 0.8.2-ac-beta.146-higuain\n").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!importer_receives_batches(Some(&old)));
+        let missing = dir.join("no-such-herdr");
+        assert!(probe_version(&missing).is_none());
+        assert!(importer_receives_batches(Some(&missing)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
