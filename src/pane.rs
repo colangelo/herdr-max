@@ -4046,7 +4046,18 @@ impl PaneRuntime {
     /// Purge the pane's saved scrollback (tmux `clear-history` semantics),
     /// leaving the visible screen and running process untouched.
     pub fn clear_scrollback(&self) {
+        // Announced like any other terminal writer, so cached detection text
+        // is not reused across the purge.
+        let guard = match self.content_write_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        self.content_seq.fetch_add(1, Ordering::AcqRel);
         self.terminal.clear_scrollback();
+        self.content_seq.fetch_add(1, Ordering::Release);
+        drop(guard);
+        self.compression.wake();
+        mark_detection_content_changed(&self.detection_content_seq);
     }
 
     /// Set scrollback offset measured from the live bottom of the terminal.
@@ -4798,6 +4809,35 @@ impl PaneRuntime {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[tokio::test]
+    async fn clear_scrollback_invalidates_the_unidentified_text_cache() {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            12,
+            3,
+            100_000,
+            b"old1\r\nold2\r\nold3\r\nold4\r\nprompt",
+        );
+        let mut cache = DetectionTextCache::default();
+        let reads = Cell::new(0);
+        let refresh = |cache: &mut DetectionTextCache| {
+            cache.refresh(None, &runtime.content_seq, || {
+                reads.set(reads.get() + 1);
+                runtime.terminal.detection_text_for_cache()
+            })
+        };
+        refresh(&mut cache);
+        assert!(!refresh(&mut cache));
+        assert_eq!(reads.get(), 1);
+        runtime.clear_scrollback();
+        refresh(&mut cache);
+        assert_eq!(
+            reads.get(),
+            2,
+            "a scrollback purge must not reuse text cached before it"
+        );
+        assert_eq!(cache.text, runtime.detection_text());
+    }
 
     #[tokio::test]
     async fn unidentified_text_cache_tracks_runtime_mutations_not_viewport_scroll() {
