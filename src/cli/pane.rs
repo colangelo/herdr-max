@@ -1229,27 +1229,23 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
 }
 
 /// Parse `pane send-text`. `--chunk` and `--chunk-delay` are recognised
-/// anywhere after the pane id; `--` ends option parsing so text that starts
-/// with those words can still be sent. Every other word is text, joined with
-/// single spaces exactly as before.
+/// anywhere, before or after the pane id; `--` ends option parsing so text
+/// that starts with those words can still be sent. The first other word is the
+/// pane id and the rest is text, joined with single spaces exactly as before.
 fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String> {
-    let Some((raw_pane_id, rest)) = args.split_first() else {
-        return Err(PANE_SEND_TEXT_USAGE.into());
-    };
-
     let mut words: Vec<&str> = Vec::new();
     let mut chunk = None;
     let mut delay_ms = None;
     let mut index = 0;
-    while index < rest.len() {
-        let arg = rest[index].as_str();
+    while index < args.len() {
+        let arg = args[index].as_str();
         let (flag, attached) = match arg.split_once('=') {
             Some((flag, value)) => (flag, Some(value)),
             None => (arg, None),
         };
         match flag {
             "--" if attached.is_none() => {
-                words.extend(rest[index + 1..].iter().map(String::as_str));
+                words.extend(args[index + 1..].iter().map(String::as_str));
                 break;
             }
             "--chunk" | "--chunk-delay" => {
@@ -1257,7 +1253,7 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
                     Some(value) => value,
                     None => {
                         index += 1;
-                        rest.get(index)
+                        args.get(index)
                             .map(String::as_str)
                             .ok_or_else(|| format!("missing value for {flag}"))?
                     }
@@ -1282,7 +1278,10 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
         index += 1;
     }
 
-    if words.is_empty() {
+    let Some((raw_pane_id, text_words)) = words.split_first() else {
+        return Err(PANE_SEND_TEXT_USAGE.into());
+    };
+    if text_words.is_empty() {
         return Err(PANE_SEND_TEXT_USAGE.into());
     }
     if chunk.is_none() && delay_ms.is_some() {
@@ -1291,7 +1290,7 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
 
     Ok(PaneSendTextArgs {
         pane_id: super::normalize_pane_id(raw_pane_id),
-        text: words.join(" "),
+        text: text_words.join(" "),
         chunk: chunk.map(|max_bytes| ChunkPacing {
             max_bytes,
             delay: std::time::Duration::from_millis(delay_ms.unwrap_or(DEFAULT_CHUNK_DELAY_MS)),
@@ -1698,8 +1697,9 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    super::send_ok_request(Method::PaneReportAgentSession(
-        PaneReportAgentSessionParams {
+    let response = super::send_request(&Request {
+        id: "cli:request".into(),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
             pane_id,
             source,
             agent,
@@ -1708,8 +1708,34 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
             agent_session_path,
             session_start_source,
             resume_argv,
-        },
-    ))
+        }),
+    })?;
+    if response.get("error").is_some() {
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(1);
+    }
+    // Still success (a report that changes nothing is by design), but say so on
+    // stderr: hook stdout can be read as agent context, stderr cannot.
+    if let Some(notice) = session_report_notice(&response) {
+        eprintln!("{notice}");
+    }
+    Ok(0)
+}
+
+/// One-line explanation when the server answered a session report with
+/// `report_not_applied`; `None` for an applied report or an older server.
+fn session_report_notice(response: &serde_json::Value) -> Option<String> {
+    let result = response.get("result")?;
+    if result.get("type")?.as_str()? != "report_not_applied" {
+        return None;
+    }
+    let reason = result.get("reason").and_then(serde_json::Value::as_str);
+    Some(match reason {
+        Some("kept_existing_session") => "kept existing session".to_string(),
+        Some("stale_report") => "ignored stale report".to_string(),
+        Some(other) => format!("report not applied: {other}"),
+        None => "report not applied".to_string(),
+    })
 }
 
 fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
@@ -2141,6 +2167,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_pane_send_text_args_accepts_chunk_options_before_the_pane() {
+        for form in [
+            args(&["--chunk", "300", "p1", "hi", "there"]),
+            args(&["--chunk=300", "p1", "hi", "there"]),
+            args(&["--chunk-delay", "5", "--chunk", "300", "p1", "hi", "there"]),
+        ] {
+            let parsed = parse_pane_send_text_args(&form).unwrap();
+            assert_eq!(parsed.pane_id, "p1", "{form:?}");
+            assert_eq!(parsed.text, "hi there", "{form:?}");
+            assert_eq!(
+                parsed.chunk.map(|pacing| pacing.max_bytes),
+                Some(300),
+                "{form:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pane_send_text_args_double_dash_before_the_pane_ends_options() {
+        let parsed =
+            parse_pane_send_text_args(&args(&["--chunk", "4", "--", "p1", "--chunk"])).unwrap();
+        assert_eq!(parsed.pane_id, "p1");
+        assert_eq!(parsed.text, "--chunk");
+    }
+
+    #[test]
     fn parse_pane_send_text_args_defaults_chunk_delay() {
         let parsed = parse_pane_send_text_args(&args(&["p1", "x", "--chunk", "8"])).unwrap();
         assert_eq!(
@@ -2163,6 +2215,7 @@ mod tests {
         for (form, needle) in [
             (args(&["p1"]), "usage"),
             (args(&["p1", "--chunk", "300"]), "usage"),
+            (args(&["--chunk", "300", "p1"]), "usage"),
             (args(&["p1", "x", "--chunk"]), "missing value for --chunk"),
             (args(&["p1", "x", "--chunk", "0"]), "at least 1"),
             (
@@ -2178,6 +2231,39 @@ mod tests {
             let error = parse_pane_send_text_args(&form).unwrap_err();
             assert!(error.contains(needle), "{form:?}: {error}");
         }
+    }
+
+    #[test]
+    fn session_report_notice_names_a_report_that_changed_nothing() {
+        let kept = serde_json::json!({
+            "id": "cli:request",
+            "result": {"type": "report_not_applied", "reason": "kept_existing_session"}
+        });
+        assert_eq!(
+            session_report_notice(&kept).as_deref(),
+            Some("kept existing session")
+        );
+
+        let stale = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "stale_report"}
+        });
+        assert_eq!(
+            session_report_notice(&stale).as_deref(),
+            Some("ignored stale report")
+        );
+
+        let unknown = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "something_new"}
+        });
+        assert_eq!(
+            session_report_notice(&unknown).as_deref(),
+            Some("report not applied: something_new")
+        );
+
+        assert_eq!(
+            session_report_notice(&serde_json::json!({"result": {"type": "ok"}})),
+            None
+        );
     }
 
     #[test]

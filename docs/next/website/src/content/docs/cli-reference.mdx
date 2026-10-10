@@ -157,6 +157,8 @@ herdr todo clear [--done] [--pane ID|--current] [--json]
 
 Every pane carries its own todo list. Without `--pane` or `--current`, each verb acts on the calling pane's `HERDR_PANE_ID`, so an agent about to exit can record its next steps with `herdr todo add "hand back to review"` without knowing its own pane id. Run outside a Herdr pane without a target and the command fails instead of guessing; `todo list` also accepts `--all` to list every pane in the session.
 
+The todo text comes first and the pane is a flag: `herdr todo add "x" --pane w1:p2`. A pane id given first, as in `todo add w1:p2 "x"`, is refused with that form.
+
 `--priority` is `high`, `normal`, or `low` and defaults to `normal`. `--link <target>` points a todo at another pane by pane id (`w1:p2`); the link captures a label for the target when it is made — that pane's label, its agent name, or the id you passed — so it still reads sensibly once the target is gone. `edit --unlink` drops the link. A pane holds at most 50 todos of at most 500 characters each; writes past either limit are rejected with `todo_limit_reached` or `todo_text_too_long` rather than truncated.
 
 `todo list` prints one todo per line in display order — outstanding before done, then highest priority first, then creation order — marking outstanding todos with `*`, followed by the id, priority, and text, with ` → label` appended for a linked todo and ` (gone)` when its target pane no longer exists. A trailing line counts the outstanding todos when any remain. `--all` adds a pane column. Pass `--json` for the raw `todo.list` response, including each todo's `link_pane_id`, `link_alive`, `created_at_unix`, and `updated_at_unix`.
@@ -325,7 +327,7 @@ and `shift+tab`, function keys such as `f1`, and named punctuation such as
 aliases for `ctrl+c`.
 `esc` is the canonical spelling; `escape` is also accepted.
 
-`send-text` delivers the text as one raw write, without bracketed paste. Some TUIs, Claude Code among them, classify input by the size of the burst: a single write of about 1000 bytes or more is collapsed into a `[Pasted text #1]` placeholder, and a command such as `/compact` never expands it. `--chunk BYTES` splits the text into pieces of at most that many bytes, never cutting a UTF-8 character, and sends each as its own write with `--chunk-delay MS` (default 20) between them, so the pieces arrive as typed text. The command returns after the last piece is sent, so you can read the pane or press Enter right after. `--chunk 300` is a safe size for Claude Code; put `--` before text that itself starts with `--chunk`.
+`send-text` delivers the text as one raw write, without bracketed paste. Some TUIs, Claude Code among them, classify input by the size of the burst: a single write of about 1000 bytes or more is collapsed into a `[Pasted text #1]` placeholder, and a command such as `/compact` never expands it. `--chunk BYTES` splits the text into pieces of at most that many bytes, never cutting a UTF-8 character, and sends each as its own write with `--chunk-delay MS` (default 20) between them, so the pieces arrive as typed text. The command returns after the last piece is sent, so you can read the pane or press Enter right after. `--chunk 300` is a safe size for Claude Code; The options work before or after the pane id; put `--` before text that itself starts with `--chunk`.
 
 `pane run` honors live bracketed-paste mode and submits text plus Enter atomically. Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting.
 
@@ -357,13 +359,13 @@ herdr pane release-agent <pane_id> \
   [--seq N]
 ```
 
-`report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
+`report-agent-session` updates native session identity without reporting lifecycle state. A report that Herdr keeps from applying, such as a `startup` report that would replace the pane's current session, still exits 0; the command prints `kept existing session` (or `ignored stale report`) on stderr. `release-agent` ends that source's lifecycle authority when its agent process exits.
 
 Arguments after `--` are the command Herdr runs to resume this session after a server restart. The first argument must be a plain command name on `PATH`, and no argument may contain an apostrophe.
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.
 
-`agent get` (and `agent list --input-box`) also include `input_box: { "text": … }` for a Claude Code agent whose screen shows its input box: the draft typed there, without the `❯` marker. Faint text (Claude Code's grey reply suggestion, the argument hint of `/compact`) is not part of it, and a `[Pasted text #N]` placeholder is. The text is empty for an empty box, a multi-line draft keeps its lines, and the field is absent when no box is on screen or the agent is not Claude Code. `agent list` leaves it out unless `--input-box` is given, because it reads every Claude Code pane's screen. The `/compact` argument hint is matched by its exact grey (`38;2;153;153;153`), so a theme that draws it in another grey would show it as text; plain `--strip-dim` keeps that hint, which is not faint.
+`agent get` (and `agent list --input-box`) also include `input_box: { "text": … }` for a Claude Code agent whose screen shows its input box: the draft typed there, without the `❯` marker. Faint text (Claude Code's grey reply suggestion, the argument hint of `/compact`) is not part of it, and a `[Pasted text #N]` placeholder is. The text is empty for an empty box, a multi-line draft keeps its lines, and the field is absent when no box is on screen or the agent is not Claude Code. `agent list` leaves it out unless `--input-box` is given, because it reads every Claude Code pane's screen. `agent list` always prints JSON; `--json` is accepted and changes nothing. The `/compact` argument hint is matched by its exact grey (`38;2;153;153;153`), so a theme that draws it in another grey would show it as text; plain `--strip-dim` keeps that hint, which is not faint.
 
 Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
 
@@ -408,7 +410,7 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).
 
 ```bash
-herdr agent list [--input-box]
+herdr agent list [--input-box] [--json]
 herdr agent get <target>
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--strip-dim]
 herdr agent send-keys <target> <key> [key ...]

@@ -1650,6 +1650,7 @@ impl App {
             agent_label,
             params.seq.filter(|_| applied),
             applied.then_some(params.resume_argv).flatten(),
+            ResponseResult::Ok {},
         )
     }
 
@@ -1725,6 +1726,18 @@ impl App {
                 "agent session report not applied"
             );
         }
+        let answer = if applied {
+            ResponseResult::Ok {}
+        } else {
+            ResponseResult::ReportNotApplied {
+                reason: if report_is_newer {
+                    "kept_existing_session"
+                } else {
+                    "stale_report"
+                }
+                .into(),
+            }
+        };
         self.report_agent_resume(
             id,
             ws_idx,
@@ -1733,6 +1746,7 @@ impl App {
             agent_label,
             params.seq.filter(|_| applied),
             applied.then_some(params.resume_argv).flatten(),
+            answer,
         )
     }
 
@@ -1768,9 +1782,10 @@ impl App {
         agent_label: String,
         seq: Option<u64>,
         resume_argv: Option<Vec<String>>,
+        answer: ResponseResult,
     ) -> String {
         let Some(argv) = resume_argv else {
-            return encode_success(id, ResponseResult::Ok {});
+            return encode_success(id, answer);
         };
         let can_record = self
             .pane_terminal(ws_idx, pane_id)
@@ -1789,7 +1804,7 @@ impl App {
             seq,
             argv,
         });
-        encode_success(id, ResponseResult::Ok {})
+        encode_success(id, answer)
     }
 
     pub(super) fn handle_pane_report_metadata(

@@ -7808,6 +7808,55 @@ fn api_resume_argv_is_ignored_when_its_session_report_is_refused() {
     );
 }
 
+#[test]
+fn api_session_report_says_when_it_kept_the_existing_session() {
+    let (writer, _control_rx, _render_rx) = test_client_writer();
+    let (mut server, pane_id) = completion_guard_server(writer);
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    server.handle_internal_event_with_forwarding(AppEvent::AgentProcessDetected {
+        pane_id,
+        agent: crate::detect::Agent::Claude,
+        observed_at: Instant::now(),
+        replaced_process: false,
+    });
+    let mut report = |session: &str, start: Option<&str>| {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "session-report".into(),
+                method: api::schema::Method::PaneReportAgentSession(
+                    api::schema::PaneReportAgentSessionParams {
+                        pane_id: public_pane_id.clone(),
+                        source: "herdr:claude".into(),
+                        agent: "claude".into(),
+                        seq: None,
+                        agent_session_id: Some(session.into()),
+                        agent_session_path: None,
+                        session_start_source: start.map(str::to_string),
+                        resume_argv: None,
+                    },
+                ),
+            },
+            respond_to,
+            response_write_complete: None,
+        });
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()["result"].clone()
+    };
+
+    let first = report("session-a", Some("startup"));
+    assert_eq!(first["type"], "ok", "{first}");
+
+    let refused = report("session-b", Some("startup"));
+    assert_eq!(refused["type"], "report_not_applied", "{refused}");
+    assert_eq!(refused["reason"], "kept_existing_session", "{refused}");
+
+    let replaced = report("session-b", Some("clear"));
+    assert_eq!(replaced["type"], "ok", "{replaced}");
+}
+
 fn completion_guard_notifications(
     server: &mut HeadlessServer,
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,
