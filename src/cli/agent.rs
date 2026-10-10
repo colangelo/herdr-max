@@ -363,7 +363,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let pinned_terminal_id = pane_terminal_id(&pane_id)?;
     let mut retry_deadline = None;
     let mut previous_busy_response = None;
-    let mut response = loop {
+    let (mut response, start_sent_at) = loop {
         if let Some(previous_busy_response) = previous_busy_response.as_ref() {
             let retry_expired = retry_deadline.is_some_and(|deadline| Instant::now() >= deadline);
             if retry_expired
@@ -374,6 +374,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
         }
 
+        let sent_at = Instant::now();
         let response = super::send_request(&Request {
             id: "cli:agent:start".into(),
             method: Method::AgentStart(AgentStartParams {
@@ -385,7 +386,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }),
         })?;
         if response.get("error").is_none() {
-            break response;
+            break (response, sent_at);
         }
         if response["error"]["code"].as_str() != Some("agent_pane_busy")
             || !retryable_timeout
@@ -425,6 +426,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         name,
         &pane_id,
         timeout,
+        start_sent_at.checked_add(timeout),
         &expected_kind,
         expected_terminal_id,
     );
@@ -589,6 +591,7 @@ fn wait_for_named_agent(
     name: &str,
     fallback_pane_id: &str,
     timeout: Duration,
+    server_deadline: Option<Instant>,
     expected_kind: &str,
     expected_terminal_id: &str,
 ) -> std::io::Result<Result<serde_json::Value, serde_json::Value>> {
@@ -628,7 +631,13 @@ fn wait_for_named_agent(
                 format!("expected {expected_kind}, detected {actual}"),
             )))
         } else if agent["name"].as_str() != Some(name) {
-            Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            // The server releases a pending name at its own startup deadline,
+            // which starts when it handles `agent.start`, before this loop's.
+            if server_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Some(Err(agent_wait_timeout()))
+            } else {
+                Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            }
         } else {
             match agent["agent_status"].as_str() {
                 Some("blocked") => Some(Err(cli_agent_error(
