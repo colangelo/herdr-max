@@ -1210,7 +1210,7 @@ fn pane_send_text(args: &[String]) -> std::io::Result<i32> {
 
     // One request per piece, paced client-side: each piece reaches the pane as
     // its own write, and the command returns only after the last one is sent.
-    let pieces = split_utf8_chunks(&parsed.text, pacing.max_bytes);
+    let pieces = crate::ui::text::split_utf8_chunks(&parsed.text, pacing.max_bytes);
     let total = pieces.len();
     for (index, piece) in pieces.into_iter().enumerate() {
         if index > 0 {
@@ -1296,31 +1296,6 @@ fn parse_pane_send_text_args(args: &[String]) -> Result<PaneSendTextArgs, String
             delay: std::time::Duration::from_millis(delay_ms.unwrap_or(DEFAULT_CHUNK_DELAY_MS)),
         }),
     })
-}
-
-/// Split `text` into pieces of at most `max_bytes` bytes without cutting a
-/// UTF-8 character. A character wider than `max_bytes` becomes a piece of its
-/// own, so every piece is non-empty and valid UTF-8. Empty text yields one
-/// empty piece, matching an unchunked send.
-fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
-    let max_bytes = max_bytes.max(1);
-    let mut pieces = Vec::new();
-    let mut rest = text;
-    while rest.len() > max_bytes {
-        let mut end = max_bytes;
-        while !rest.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == 0 {
-            // The first character alone is wider than the limit.
-            end = rest.chars().next().map_or(rest.len(), char::len_utf8);
-        }
-        let (piece, tail) = rest.split_at(end);
-        pieces.push(piece);
-        rest = tail;
-    }
-    pieces.push(rest);
-    pieces
 }
 
 fn pane_send_keys(args: &[String]) -> std::io::Result<i32> {
@@ -2264,45 +2239,6 @@ mod tests {
             session_report_notice(&serde_json::json!({"result": {"type": "ok"}})),
             None
         );
-    }
-
-    #[test]
-    fn split_utf8_chunks_respects_byte_limit_and_round_trips() {
-        let text = "a".repeat(1000);
-        let pieces = split_utf8_chunks(&text, 300);
-        assert_eq!(
-            pieces.iter().map(|piece| piece.len()).collect::<Vec<_>>(),
-            vec![300, 300, 300, 100]
-        );
-        assert_eq!(pieces.concat(), text);
-    }
-
-    #[test]
-    fn split_utf8_chunks_never_cuts_a_multibyte_character() {
-        // Emoji are 4 bytes (one is a ZWJ sequence of several scalars), CJK 3,
-        // accented Latin 2; limits chosen to land mid-character repeatedly.
-        let text = "héllo 🦀 世界 👩‍💻 日本語テキスト ✓ ".repeat(40);
-        for max_bytes in [1, 2, 3, 4, 5, 7, 10, 64, 300] {
-            let pieces = split_utf8_chunks(&text, max_bytes);
-            assert_eq!(pieces.concat(), text, "limit {max_bytes}");
-            for piece in &pieces {
-                assert!(!piece.is_empty(), "limit {max_bytes}");
-                let single_char = piece.chars().count() == 1;
-                assert!(
-                    piece.len() <= max_bytes || single_char,
-                    "limit {max_bytes}: piece {piece:?} is {} bytes",
-                    piece.len()
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn split_utf8_chunks_keeps_short_and_empty_text_whole() {
-        assert_eq!(split_utf8_chunks("", 300), vec![""]);
-        assert_eq!(split_utf8_chunks("世界", 300), vec!["世界"]);
-        assert_eq!(split_utf8_chunks("世界", 6), vec!["世界"]);
-        assert_eq!(split_utf8_chunks("世界", 5), vec!["世", "界"]);
     }
 
     #[test]

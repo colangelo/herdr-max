@@ -343,8 +343,7 @@ impl App {
         // Raw writes, not a bracketed paste: the point is that the text
         // arrives as typed. Every piece but the last goes out now; the last
         // goes with Enter, which the pty actor delays after it.
-        let pieces =
-            super::super::api_helpers::split_utf8_chunks(&params.text, AGENT_SEND_PIECE_BYTES);
+        let pieces = crate::ui::text::split_utf8_chunks(&params.text, AGENT_SEND_PIECE_BYTES);
         let count = pieces.len();
         let Some((last, head)) = pieces.split_last() else {
             return respond(encode_error(
@@ -1555,22 +1554,6 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_owned()
-    }
-
-    #[test]
-    fn split_utf8_chunks_never_cuts_a_character_and_round_trips() {
-        let text = "héllo wörld ".repeat(50);
-        let pieces = crate::app::api_helpers::split_utf8_chunks(&text, 7);
-        assert!(pieces
-            .iter()
-            .all(|piece| !piece.is_empty() && piece.len() <= 7));
-        assert_eq!(pieces.concat(), text);
-        assert_eq!(
-            crate::app::api_helpers::split_utf8_chunks("日本語", 2),
-            ["日", "本", "語"],
-            "a character wider than the limit is a piece of its own"
-        );
-        assert_eq!(crate::app::api_helpers::split_utf8_chunks("", 300), [""]);
     }
 
     #[tokio::test]

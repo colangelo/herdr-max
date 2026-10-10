@@ -78,6 +78,31 @@ pub(crate) fn middle_elide(text: &str, max_width: usize) -> String {
     format!("{prefix}…{suffix}")
 }
 
+/// Split `text` into pieces of at most `max_bytes` bytes without cutting a
+/// UTF-8 character. A character wider than `max_bytes` becomes a piece of its
+/// own, so every piece is non-empty and valid UTF-8. Empty text yields one
+/// empty piece.
+pub(crate) fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<&str> {
+    let max_bytes = max_bytes.max(1);
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + max_bytes).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        pieces.push(&text[start..end]);
+        start = end;
+    }
+    if pieces.is_empty() {
+        pieces.push("");
+    }
+    pieces
+}
+
 // Restored fork items (v0.9.3 sync): re-home next to their kin later.
 pub(crate) fn relative_time_label(now_unix: u64, then_unix: u64) -> String {
     let seconds = now_unix.saturating_sub(then_unix);
@@ -112,5 +137,60 @@ mod tests {
         assert_eq!(truncate_start("界", 0), "");
         assert_eq!(truncate_start("界", 1), "…");
         assert_eq!(truncate_start("界", 2), "界");
+    }
+
+    #[test]
+    fn split_utf8_chunks_respects_byte_limit_and_round_trips() {
+        let text = "a".repeat(1000);
+        let pieces = split_utf8_chunks(&text, 300);
+        assert_eq!(
+            pieces.iter().map(|piece| piece.len()).collect::<Vec<_>>(),
+            vec![300, 300, 300, 100]
+        );
+        assert_eq!(pieces.concat(), text);
+    }
+
+    #[test]
+    fn split_utf8_chunks_never_cuts_a_multibyte_character() {
+        // Emoji are 4 bytes (one is a ZWJ sequence of several scalars), CJK 3,
+        // accented Latin 2; limits chosen to land mid-character repeatedly.
+        let text = "héllo 🦀 世界 👩‍💻 日本語テキスト ✓ ".repeat(40);
+        for max_bytes in [1, 2, 3, 4, 5, 7, 10, 64, 300] {
+            let pieces = split_utf8_chunks(&text, max_bytes);
+            assert_eq!(pieces.concat(), text, "limit {max_bytes}");
+            for piece in &pieces {
+                assert!(!piece.is_empty(), "limit {max_bytes}");
+                let single_char = piece.chars().count() == 1;
+                assert!(
+                    piece.len() <= max_bytes || single_char,
+                    "limit {max_bytes}: piece {piece:?} is {} bytes",
+                    piece.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn split_utf8_chunks_keeps_short_and_empty_text_whole() {
+        assert_eq!(split_utf8_chunks("", 300), vec![""]);
+        assert_eq!(split_utf8_chunks("世界", 300), vec!["世界"]);
+        assert_eq!(split_utf8_chunks("世界", 6), vec!["世界"]);
+        assert_eq!(split_utf8_chunks("世界", 5), vec!["世", "界"]);
+    }
+
+    #[test]
+    fn split_utf8_chunks_gives_a_wide_character_its_own_piece() {
+        let text = "héllo wörld ".repeat(50);
+        let pieces = split_utf8_chunks(&text, 7);
+        assert!(pieces
+            .iter()
+            .all(|piece| !piece.is_empty() && piece.len() <= 7));
+        assert_eq!(pieces.concat(), text);
+        assert_eq!(
+            split_utf8_chunks("日本語", 2),
+            ["日", "本", "語"],
+            "a character wider than the limit is a piece of its own, and the last one leaves no empty tail"
+        );
+        assert_eq!(split_utf8_chunks("", 300), [""]);
     }
 }
