@@ -137,8 +137,17 @@ fn setup_options(
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
+    // `status client` loads the config, so point it at this test's own
+    // directories rather than the developer's.
     let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["status", "client", "--json"])
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env_remove("HERDR_CONFIG_PATH")
+        .env_remove("HERDR_SESSION")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .output()
         .unwrap();
     assert!(status.status.success());

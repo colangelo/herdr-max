@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
+#[cfg(test)]
+mod hermetic_tests;
 mod io;
 mod keybinds;
 mod model;
@@ -10,6 +12,7 @@ mod theme;
 mod window_title;
 mod write;
 
+pub(crate) use self::io::{home_env, path_env};
 pub(crate) use self::model::HerdrToastConfig;
 
 pub use self::{
@@ -97,6 +100,9 @@ pub const DEFAULT_HEADLESS_COLS: u16 = 120;
 pub const DEFAULT_HEADLESS_ROWS: u16 = 40;
 
 #[cfg(test)]
+pub(crate) use self::io::is_unit_test_scratch;
+
+#[cfg(test)]
 pub(crate) fn app_dir_name() -> &'static str {
     io::app_dir_name()
 }
@@ -105,6 +111,82 @@ pub(crate) fn app_dir_name() -> &'static str {
 pub(crate) fn test_config_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// A herdr host of the test's own: a temp directory holding the API socket, the
+/// config dir and the state dir, with every override that could point elsewhere
+/// (`HERDR_CLIENT_SOCKET_PATH`, `HERDR_SESSION`, `HERDR_CONFIG_PATH`) cleared.
+///
+/// Unit tests already cannot reach the developer's real herdr (see
+/// [`is_unit_test_scratch`]); use this when the test needs to *put something* in
+/// the host, such as a socket or a link, or to assert on a path inside it. It
+/// holds [`test_config_env_lock`] and restores the environment on drop, so it is
+/// safe under `cargo test` as well as nextest.
+// Every user is a Unix test; on Windows it would be dead code.
+#[cfg(all(test, unix))]
+pub(crate) struct IsolatedHostEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    dir: std::path::PathBuf,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+#[cfg(all(test, unix))]
+impl IsolatedHostEnv {
+    pub(crate) fn new(name: &str) -> Self {
+        let lock = test_config_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Short on purpose: the socket below it must fit a Unix socket path.
+        let base = if cfg!(unix) {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let dir = base.join(format!("herdr-iso-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create isolated host directory");
+
+        let saved = [
+            crate::api::SOCKET_PATH_ENV_VAR,
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            crate::session::SESSION_ENV_VAR,
+            CONFIG_PATH_ENV_VAR,
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+        ]
+        .map(|var| (var, std::env::var_os(var)))
+        .to_vec();
+        std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, dir.join("herdr.sock"));
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        std::env::remove_var(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        crate::session::clear_explicit_session_for_test();
+        Self {
+            _lock: lock,
+            dir,
+            saved,
+        }
+    }
+
+    pub(crate) fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for IsolatedHostEnv {
+    fn drop(&mut self) {
+        for (var, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+        crate::session::clear_explicit_session_for_test();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl Config {

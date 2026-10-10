@@ -174,10 +174,10 @@ pub fn find_transcript(config_dir: &Path, session_id: &str) -> Option<PathBuf> {
 
 /// `CLAUDE_CONFIG_DIR`, else `~/.claude`, as Claude Code itself resolves it.
 fn claude_config_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
+    crate::config::path_env("CLAUDE_CONFIG_DIR")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+        .or_else(|| crate::config::home_env().map(|home| PathBuf::from(home).join(".claude")))
 }
 
 /// The resume command of a Claude session with no hook report, from its

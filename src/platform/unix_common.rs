@@ -345,7 +345,7 @@ pub(crate) fn end_cli_output() {
 
 pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
     super::RemoteSshConfigPaths {
-        user_config: std::env::var_os("HOME")
+        user_config: crate::config::home_env()
             .map(PathBuf::from)
             .map(|home| home.join(".ssh").join("config")),
         system_config: Some(PathBuf::from("/etc/ssh/ssh_config")),

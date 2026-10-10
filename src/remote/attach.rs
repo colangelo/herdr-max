@@ -3905,7 +3905,7 @@ mod tests {
         assert!(!contents.contains("ControlPath"));
         // ...and any user config is Included (quoted) BEFORE it so
         // first-value-wins keeps the user's own settings.
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::config::home_env() {
             let user_config = PathBuf::from(home).join(".ssh").join("config");
             if user_config.is_file() {
                 let include = format!(
