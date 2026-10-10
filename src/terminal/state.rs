@@ -2513,6 +2513,44 @@ impl TerminalState {
         self.set_agent_launch(Some(record));
     }
 
+    /// The saved session and launch flags a restore is resuming, taken when
+    /// the resume command is typed.
+    pub fn resume_identity(
+        &self,
+    ) -> (
+        Option<crate::agent_resume::PersistedAgentSession>,
+        Option<crate::agent_resume::AgentLaunchFlags>,
+    ) {
+        (
+            self.persisted_agent_session.clone(),
+            self.agent_launch.clone(),
+        )
+    }
+
+    /// Puts back what [`Self::resume_identity`] took when the typed resume
+    /// command died before its agent ran (fork issue 201): the session must
+    /// survive for the next restart, and the dead attempt is not a new launch.
+    /// Returns whether anything changed.
+    pub fn reinstate_resume_identity(
+        &mut self,
+        session: Option<crate::agent_resume::PersistedAgentSession>,
+        launch: Option<crate::agent_resume::AgentLaunchFlags>,
+    ) -> bool {
+        let mut changed = false;
+        if session.is_some() && self.persisted_agent_session != session {
+            self.persisted_agent_session = session;
+            changed = true;
+        }
+        if launch.is_some() && self.agent_launch != launch {
+            self.set_agent_launch(launch);
+            changed = true;
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
+    }
+
     fn set_agent_launch(&mut self, record: Option<crate::agent_resume::AgentLaunchFlags>) {
         if self.agent_launch != record {
             self.agent_launch = record;
@@ -7320,5 +7358,45 @@ mod tests {
         );
         assert_eq!(terminal.blocked_reason(), None);
         assert_eq!(terminal.blocked_since_unix_ms(), None);
+    }
+
+    /// Fork issue 201: a typed resume that died must not take the pane's
+    /// saved session or its launch flags with it.
+    #[test]
+    fn a_dead_resume_attempt_gets_its_session_and_launch_flags_back() {
+        let mut terminal = TerminalState::new(TerminalId::alloc(), "/repo".into());
+        let session = crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("t1").unwrap(),
+        };
+        let launch = crate::agent_resume::AgentLaunchFlags {
+            agent: "codex".into(),
+            flags: ["-s", "read-only"].map(String::from).to_vec(),
+            started_at_ms: None,
+        };
+        terminal.set_persisted_agent_session(session.clone());
+        terminal.restore_agent_launch(launch.clone());
+        let taken = terminal.resume_identity();
+
+        // The dead attempt: its exit forgot the session and its command line
+        // was recorded as a launch of its own.
+        terminal.persisted_agent_session = None;
+        terminal.restore_agent_launch(crate::agent_resume::AgentLaunchFlags {
+            agent: "codex".into(),
+            flags: ["-s", "read-only", "-C", "/repo"]
+                .map(String::from)
+                .to_vec(),
+            started_at_ms: Some(1),
+        });
+        let revision = terminal.revision;
+
+        assert!(terminal.reinstate_resume_identity(taken.0.clone(), taken.1.clone()));
+        assert_eq!(terminal.persisted_agent_session, Some(session));
+        assert_eq!(terminal.resume_identity().1, Some(launch));
+        assert!(terminal.revision > revision);
+        assert!(!terminal.reinstate_resume_identity(taken.0, taken.1));
+        // Nothing taken, nothing put back.
+        assert!(!terminal.reinstate_resume_identity(None, None));
     }
 }
