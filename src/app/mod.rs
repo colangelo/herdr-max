@@ -145,6 +145,11 @@ pub struct App {
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    /// Where the open popup is (tab and workspace names), for the refusal that
+    /// says "a popup is already open". The server sets it before it hands a
+    /// popup-opening request to the app; the app cannot see which client owns
+    /// the popup.
+    pub(crate) popup_location_hint: Option<String>,
     /// Restored agents being watched for a resume command that died at boot.
     pub(crate) resume_retries:
         HashMap<crate::terminal::TerminalId, agent_resume_retry::ResumeRetry>,
@@ -685,6 +690,7 @@ impl App {
             loaded_host_cursor: config.ui.host_cursor,
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
+            popup_location_hint: None,
             resume_retries: HashMap::new(),
             startup_per_agent_delay: Duration::from_millis(
                 config.session.startup_per_agent_delay_ms.into(),

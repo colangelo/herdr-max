@@ -79,6 +79,30 @@ impl HeadlessServer {
             .or_else(|| self.default_shell_target())
     }
 
+    /// Names the tab and workspace the open popup belongs to, for the refusal
+    /// that tells the user a popup is already open (possibly in another window).
+    pub(super) fn popup_location_label(&self) -> Option<String> {
+        let (workspace_index, tab_index) =
+            self.app.parse_tab_id(self.popup_owner_tab_id.as_deref()?)?;
+        let workspace = self.app.state.workspaces.get(workspace_index)?;
+        let tab = workspace.tab_display_name(tab_index)?;
+        let workspace_name =
+            workspace.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
+        Some(format!("tab \"{tab}\" of workspace \"{workspace_name}\""))
+    }
+
+    /// Tab that a popup opened through the public API belongs to: the tab the
+    /// foreground shell client is on, i.e. where the user is working. `None`
+    /// when no shell client is attached; the caller then keeps the server's
+    /// focused tab (see `reconcile_client_shell_locations`).
+    pub(super) fn api_popup_owner_tab_id(&self) -> Option<String> {
+        let client_id = self.foreground_client_id?;
+        self.clients
+            .get(&client_id)
+            .filter(|client| client.is_shell_client())?;
+        self.shell_tab_id_for_client(client_id)
+    }
+
     fn tab_id_for_target(&self, target: crate::ui::TabSurfaceTarget) -> Option<String> {
         self.app
             .public_tab_id(target.workspace_index, target.tab_index)
@@ -870,6 +894,11 @@ impl HeadlessServer {
         });
         let reconcile = Self::shell_locations_may_need_reconcile(&msg.request.method);
         let changed = self.handle_api_request_with_shutdown_check_inner(msg, false, false);
+        if !popup_before && self.app.state.popup_pane.is_some() {
+            // A popup opened through the API appears where the user is working,
+            // not on whichever tab was navigated last.
+            self.popup_owner_tab_id = self.api_popup_owner_tab_id();
+        }
         let proxied_result = forward_proxied_api_response(response_proxy);
         let proxied_request_succeeded = proxied_result.is_some();
         // Same-tab and zoomed moves succeed without moving or requesting focus.

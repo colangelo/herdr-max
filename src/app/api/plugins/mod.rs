@@ -499,7 +499,11 @@ impl App {
             );
         }
         if placement == PluginPanePlacement::Popup && self.state.popup_pane.is_some() {
-            return encode_error(id, "ui_busy", "a popup pane is already open");
+            return encode_error(
+                id,
+                "ui_busy",
+                self.popup_busy_message("a popup pane is already open"),
+            );
         }
         match placement {
             PluginPanePlacement::Overlay | PluginPanePlacement::Popup => {
