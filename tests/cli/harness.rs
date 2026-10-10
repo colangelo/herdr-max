@@ -94,6 +94,7 @@ pub(super) fn create_committed_repo(path: &Path) {
 
 pub(super) struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
+    tail: crate::support::PtyTail,
     pub(super) child: Box<dyn Child + Send + Sync>,
 }
 
@@ -112,6 +113,9 @@ impl Drop for SpawnedServerProcess {
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.tail.report("the spawned herdr");
+        }
         let pid = self.child.process_id();
         crate::support::stop_spawned_herdr(&mut *self.child);
 
@@ -346,7 +350,9 @@ pub(super) fn spawn_herdr_with_config(
 }
 
 /// Runs `cmd` with a pseudo-terminal as its stdio and keeps the master end
-/// for as long as the returned handle lives.
+/// for as long as the returned handle lives. The master is read continuously,
+/// so a process that prints a lot is never blocked on it; the end of its
+/// output is shown if the test fails.
 fn spawn_in_pty(cmd: CommandBuilder) -> SpawnedHerdr {
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -357,10 +363,12 @@ fn spawn_in_pty(cmd: CommandBuilder) -> SpawnedHerdr {
         })
         .unwrap();
 
+    let tail = crate::support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     SpawnedHerdr {
         _master: pair.master,
+        tail,
         child,
     }
 }
@@ -691,6 +699,26 @@ mod harness_env_tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn the_harness_keeps_only_the_end_of_a_terminals_output() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "seq 1 100000"]);
+        let spawned = spawn_in_pty(cmd);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !spawned.tail.text().trim_end().ends_with("100000") {
+            assert!(Instant::now() < deadline, "{:?}", spawned.tail.text());
+            thread::sleep(Duration::from_millis(20));
+        }
+        let text = spawned.tail.text();
+        assert!(
+            text.len() <= crate::support::PTY_TAIL_BYTES,
+            "{}",
+            text.len()
+        );
+        assert!(!text.contains("\n1\r\n"), "the start was dropped");
     }
 
     #[test]

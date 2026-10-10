@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,58 @@ pub const SERVER_MESSAGE_PANE_SURFACE_PATCH: u32 = 19;
 const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
+
+/// How much of a terminal's output a harness keeps for failure messages.
+pub const PTY_TAIL_BYTES: usize = 16 * 1024;
+
+/// Reads a pseudo-terminal master on its own thread for as long as the other
+/// end stays open, and keeps only the last [`PTY_TAIL_BYTES`] of what it
+/// printed. A master nobody reads fills up, and the process on the other end
+/// then blocks on its own output; this keeps it running and leaves the end of
+/// its output to show when a test fails.
+#[derive(Clone)]
+pub struct PtyTail {
+    tail: Arc<Mutex<VecDeque<u8>>>,
+}
+
+impl PtyTail {
+    pub fn drain(mut reader: Box<dyn Read + Send>) -> Self {
+        let tail = Arc::new(Mutex::new(VecDeque::with_capacity(PTY_TAIL_BYTES)));
+        let writer = Arc::clone(&tail);
+        thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut tail = writer.lock().unwrap_or_else(|p| p.into_inner());
+                        tail.extend(&buf[..n]);
+                        let excess = tail.len().saturating_sub(PTY_TAIL_BYTES);
+                        tail.drain(..excess);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Self { tail }
+    }
+
+    /// The most recent output, lossily decoded.
+    pub fn text(&self) -> String {
+        let tail = self.tail.lock().unwrap_or_else(|p| p.into_inner());
+        let bytes: Vec<u8> = tail.iter().copied().collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Prints the tail to stderr, for a test that is failing.
+    pub fn report(&self, what: &str) {
+        let text = self.text();
+        if !text.is_empty() {
+            eprintln!("--- last output of {what} ---\n{text}\n--- end of {what} output ---");
+        }
+    }
+}
 
 /// Names the test process that owns a spawned server. A server started with it
 /// set exits once that pid is gone, so a test killed early (a nextest timeout,
