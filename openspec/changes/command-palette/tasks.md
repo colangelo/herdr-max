@@ -44,7 +44,13 @@ after the #171 cutover, on the 0.9.3 client shell, once ac has answered the open
 - [x] 2.7 `herdr agent send` CLI
 - [ ] 2.8 ask `ac/infra` (agent-bell's owner) for `who --json`, a stable `send --json`, and the
       no-session sender path (design § "What agent-bell would need")
-- [ ] 2.9 `just check`; dogfood; close the issue only after a live send in each mode
+- [x] 2.9 `just check`; dogfood; close the issue only after a live send in each mode.
+      Live on the m4m server, beta 152 (2026-10-10), throwaway tab with a fresh shell pane and a haiku Claude
+      Code pane, both closed after: typed to an idle Claude (it answered), typed to a working Claude (queued,
+      answered after), `--interrupt` (Claude showed "Interrupted", then took the text), multi-line refused
+      (`multi_line_send`), a plain shell pane refused as `agent_not_found` (it is not an agent). The note send
+      failed on this machine with `note_command_missing`: agent-bell is not on the server's PATH, tracked in
+      https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/200. Typed sends are not affected.
 
 ## 3. Later
 
