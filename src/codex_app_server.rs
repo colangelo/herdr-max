@@ -86,6 +86,59 @@ impl CodexAppServer {
     }
 }
 
+/// Whether Codex arguments set the sandbox or the approval policy.
+///
+/// A resume on the shared daemon refuses every such override ("Permission
+/// overrides are not supported when resuming a remote task"), and without
+/// them the daemon's own default applies, which can be wider than the pane's
+/// (fork issue 201). A fresh launch on the daemon accepts them.
+pub(crate) fn has_permission_override(args: &[String]) -> bool {
+    const SETTINGS: [&str; 4] = [
+        "sandbox_mode",
+        "approval_policy",
+        "sandbox_workspace_write",
+        "sandbox_permissions",
+    ];
+    let is_permission_setting = |value: &str| {
+        let key = value.split('=').next().unwrap_or_default().trim();
+        SETTINGS
+            .iter()
+            .any(|setting| key == *setting || key.starts_with(&format!("{setting}.")))
+    };
+    let mut words = args.iter().map(String::as_str).peekable();
+    while let Some(word) = words.next() {
+        match word {
+            "-s"
+            | "--sandbox"
+            | "-a"
+            | "--ask-for-approval"
+            | "--full-auto"
+            | "--dangerously-bypass-approvals-and-sandbox"
+            | "--yolo" => return true,
+            "-c" | "--config" => {
+                if words
+                    .peek()
+                    .is_some_and(|value| is_permission_setting(value))
+                {
+                    return true;
+                }
+            }
+            _ => {
+                if word.starts_with("--sandbox=") || word.starts_with("--ask-for-approval=") {
+                    return true;
+                }
+                if word
+                    .strip_prefix("--config=")
+                    .is_some_and(is_permission_setting)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn expand_home(raw: &str) -> PathBuf {
     let home = crate::config::home_env().map(PathBuf::from);
     match (raw.strip_prefix("~/"), home) {

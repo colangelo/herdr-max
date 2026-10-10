@@ -52,6 +52,10 @@ pub(crate) struct ResumeRetry {
     retries: usize,
     polls: u8,
     check_at: Instant,
+    /// The saved session and launch flags being resumed, put back when the
+    /// command dies (fork issue 201).
+    session: Option<crate::agent_resume::PersistedAgentSession>,
+    launch: Option<crate::agent_resume::AgentLaunchFlags>,
 }
 
 impl ResumeRetry {
@@ -68,7 +72,22 @@ impl ResumeRetry {
             retries: 0,
             polls: 0,
             check_at: launched + RESUME_RETRY_WAITS[0],
+            session: None,
+            launch: None,
         }
+    }
+
+    /// Remembers what the restore resumes, so a failed command keeps it.
+    pub(crate) fn resuming(
+        mut self,
+        (session, launch): (
+            Option<crate::agent_resume::PersistedAgentSession>,
+            Option<crate::agent_resume::AgentLaunchFlags>,
+        ),
+    ) -> Self {
+        self.session = session;
+        self.launch = launch;
+        self
     }
 
     /// Decide what the look at `now` means and schedule the next one.
@@ -138,6 +157,7 @@ impl App {
             .map(|(id, _)| id.clone())
             .collect();
         let mut changed = false;
+        let mut save = false;
         for terminal_id in due {
             let Some(mut retry) = self.resume_retries.remove(&terminal_id) else {
                 continue;
@@ -152,7 +172,20 @@ impl App {
                 || terminal.managed_agent_kind().is_some()
                 || terminal.detected_agent.is_some();
             let at_prompt = super::agents::available_shell_name(runtime).is_some();
-            match retry.advance(now, agent_present, at_prompt) {
+            let decision = retry.advance(now, agent_present, at_prompt);
+            if matches!(decision, RetryDecision::Retry | RetryDecision::GiveUp) {
+                // The command died at the prompt: the pane's saved session is
+                // still the one to resume, not lost with the dead attempt.
+                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                    if terminal
+                        .reinstate_resume_identity(retry.session.clone(), retry.launch.clone())
+                    {
+                        changed = true;
+                        save = true;
+                    }
+                }
+            }
+            match decision {
                 RetryDecision::Done => {}
                 RetryDecision::Wait => {
                     self.resume_retries.insert(terminal_id, retry);
@@ -185,6 +218,9 @@ impl App {
                     changed = true;
                 }
             }
+        }
+        if save {
+            self.schedule_session_save();
         }
         changed
     }

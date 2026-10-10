@@ -358,6 +358,10 @@ impl App {
                     .flatten()
                     .map(|runtime| runtime.detection_text())
                     .unwrap_or_default(),
+                &self.codex_app_server,
+                &ws.tabs[tab_idx]
+                    .cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
+                    .unwrap_or_else(|| terminal.cwd.clone()),
             ),
             last_input_at_unix: crate::terminal::pane_last_input_at_ms(
                 terminal,
@@ -420,13 +424,26 @@ impl App {
 
 /// `footer` is the bottom of a Claude pane's buffer (fork issue 144): the
 /// model and effort it shows replace an older record's in the restore command.
+/// `restore_argv` is what a restore in `cwd` would type, built by the typing
+/// path's own function (fork issue 201).
 fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
     footer: String,
+    codex_app_server: &crate::codex_app_server::CodexAppServer,
+    cwd: &std::path::Path,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
-    let restore_argv = terminal
-        .restore_plan_preview()
-        .map(|plan| crate::agent_resume::argv_with_live_footer(&plan.agent, &plan.argv, &footer));
+    let restore_argv = terminal.restore_plan_preview().map(|plan| {
+        let plan = crate::agent_resume::AgentResumePlan {
+            argv: crate::agent_resume::argv_with_live_footer(&plan.agent, &plan.argv, &footer),
+            ..plan
+        };
+        super::agent_resume::typed_resume_argv(
+            &plan,
+            codex_app_server,
+            cwd,
+            terminal.agent_name.as_deref(),
+        )
+    });
     if let Some(authority) = terminal.hook_authority.as_ref() {
         if let Some(session_ref) = authority.session_ref.as_ref() {
             return Some(crate::api::schema::AgentSessionInfo {
@@ -449,4 +466,53 @@ fn terminal_agent_session_info(
             value: session.session_ref.value.clone(),
             restore_argv,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fork issue 201: `agent_session.restore_argv` is the command a restore
+    /// types, daemon arguments included, built by the typing path itself.
+    #[cfg(unix)]
+    #[test]
+    fn restore_argv_dry_run_is_what_a_codex_restore_types() {
+        let socket = std::env::temp_dir().join(format!("herdr-201-{}.sock", std::process::id()));
+        std::fs::write(&socket, b"").unwrap();
+        let on = crate::codex_app_server::CodexAppServer::from_config(
+            &crate::config::CodexAgentConfig {
+                app_server: true,
+                app_server_socket: socket.display().to_string(),
+                name_threads: false,
+            },
+        );
+        let cwd = std::path::Path::new("/repo");
+        for flags in [&["-m", "gpt-x"][..], &["-s", "read-only", "-m", "gpt-x"]] {
+            let mut terminal = crate::terminal::TerminalState::new(
+                crate::terminal::TerminalId::alloc(),
+                cwd.into(),
+            );
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("t1").unwrap(),
+            });
+            terminal.restore_agent_launch(crate::agent_resume::AgentLaunchFlags {
+                agent: "codex".into(),
+                flags: flags.iter().map(|flag| flag.to_string()).collect(),
+                started_at_ms: None,
+            });
+            let plan = terminal.restore_plan_preview().unwrap();
+            let typed = super::super::agent_resume::typed_resume_argv(&plan, &on, cwd, None);
+            let dry_run = terminal_agent_session_info(&terminal, String::new(), &on, cwd)
+                .and_then(|info| info.restore_argv);
+            assert_eq!(dry_run.as_ref(), Some(&typed), "{flags:?}");
+            assert_eq!(
+                typed.iter().any(|word| word == "--remote"),
+                !flags.contains(&"-s"),
+                "{typed:?}"
+            );
+        }
+        let _ = std::fs::remove_file(&socket);
+    }
 }

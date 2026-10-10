@@ -252,11 +252,7 @@ impl App {
             .terminals
             .get(&terminal_id)
             .and_then(|terminal| terminal.agent_name.clone());
-        let argv = with_session_name(
-            resume_argv(&plan, &self.codex_app_server, &cwd),
-            &plan.agent,
-            session_name.as_deref(),
-        );
+        let argv = typed_resume_argv(&plan, &self.codex_app_server, &cwd, session_name.as_deref());
         let codex_thread = (plan.agent == "codex")
             .then(|| codex_resume_thread_id(&plan.argv))
             .flatten();
@@ -341,6 +337,13 @@ impl App {
                 retry_command,
                 plan.agent.clone(),
                 Instant::now(),
+            )
+            .resuming(
+                self.state
+                    .terminals
+                    .get(&terminal_id)
+                    .map(|terminal| terminal.resume_identity())
+                    .unwrap_or_default(),
             ),
         );
         let mut agent_name = None;
@@ -430,6 +433,22 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// The command a restore types for `plan`. The typing path and the
+/// `agent_session.restore_argv` dry run both build it here, so the dry run is
+/// what restore types (fork issue 201).
+pub(super) fn typed_resume_argv(
+    plan: &crate::agent_resume::AgentResumePlan,
+    codex_app_server: &crate::codex_app_server::CodexAppServer,
+    cwd: &std::path::Path,
+    session_name: Option<&str>,
+) -> Vec<String> {
+    with_session_name(
+        resume_argv(plan, codex_app_server, cwd),
+        &plan.agent,
+        session_name,
+    )
+}
+
 /// The argv a deferred resume runs: the plan's, plus for Codex the
 /// shared-daemon arguments when enabled.
 ///
@@ -458,6 +477,12 @@ fn resume_argv_with(
         return argv;
     }
     argv = without_missing_remote(&argv, &socket_exists);
+    // The daemon refuses a resume that sets the sandbox or the approval
+    // policy, and dropping those would widen the pane's permissions to the
+    // daemon's default. Resume such a pane locally, with its own flags.
+    if crate::codex_app_server::has_permission_override(argv.get(1..).unwrap_or_default()) {
+        return without_remote_where(&argv, |_| true);
+    }
     let daemon_up = codex_app_server.socket().is_some_and(&socket_exists);
     if daemon_up {
         let extra = codex_app_server.launch_args(cwd, argv.get(1..).unwrap_or_default());
@@ -474,23 +499,28 @@ fn without_missing_remote(
     argv: &[String],
     socket_exists: &impl Fn(&std::path::Path) -> bool,
 ) -> Vec<String> {
-    let missing = |value: &str| {
+    without_remote_where(argv, |value| {
         value
             .strip_prefix("unix://")
             .is_some_and(|path| !socket_exists(std::path::Path::new(path)))
-    };
+    })
+}
+
+/// `argv` without each `--remote <value>`, in either spelling, whose value
+/// `drop` accepts.
+fn without_remote_where(argv: &[String], drop: impl Fn(&str) -> bool) -> Vec<String> {
     let mut kept = Vec::with_capacity(argv.len());
     let mut index = 0;
     while index < argv.len() {
         let word = &argv[index];
         if let Some(value) = word.strip_prefix("--remote=") {
-            if missing(value) {
+            if drop(value) {
                 index += 1;
                 continue;
             }
         } else if word == "--remote" {
             if let Some(value) = argv.get(index + 1) {
-                if missing(value) {
+                if drop(value) {
                     index += 2;
                     continue;
                 }
@@ -1380,5 +1410,101 @@ mod tests {
             Some("claude --resume 'session with '\\'' quote'")
         );
         assert_eq!(shell_command_from_argv(&[]), None);
+    }
+
+    /// Fork issue 201: the daemon refuses a resume that sets the sandbox or
+    /// the approval policy, and without them it would apply its own, wider,
+    /// default. Such a pane resumes locally with its flags.
+    #[cfg(unix)]
+    #[test]
+    fn codex_resume_with_permission_flags_stays_local_and_keeps_them() {
+        let on = crate::codex_app_server::CodexAppServer::from_config(
+            &crate::config::CodexAgentConfig {
+                app_server: true,
+                app_server_socket: "/run/codex.sock".into(),
+                name_threads: true,
+            },
+        );
+        let plan = |argv: &[&str]| crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: argv.iter().map(|word| word.to_string()).collect(),
+            dedupe_key: "k".into(),
+        };
+        let repo = std::path::Path::new("/repo");
+        let up = |_: &std::path::Path| true;
+        let resume = |argv: &[&str]| super::resume_argv_with(&plan(argv), &on, repo, up);
+
+        assert_eq!(
+            resume(&["codex", "resume", "t1", "-s", "read-only", "-m", "gpt-x"]),
+            ["codex", "resume", "t1", "-s", "read-only", "-m", "gpt-x"]
+        );
+        for flags in [
+            &["--sandbox", "workspace-write"][..],
+            &["--sandbox=read-only"],
+            &["-a", "never"],
+            &["--ask-for-approval=on-request"],
+            &["--full-auto"],
+            &["--dangerously-bypass-approvals-and-sandbox"],
+            &["-c", "sandbox_mode=\"read-only\""],
+            &["--config", "approval_policy=never"],
+            &["--config=sandbox_workspace_write.network_access=true"],
+        ] {
+            let mut argv = vec!["codex", "resume", "t1"];
+            argv.extend_from_slice(flags);
+            assert_eq!(resume(&argv), argv, "{flags:?}");
+        }
+        // A `--remote` the plan itself carries goes too, in either spelling.
+        assert_eq!(
+            resume(&[
+                "codex",
+                "resume",
+                "t1",
+                "--remote",
+                "unix:///run/codex.sock",
+                "-s",
+                "read-only"
+            ]),
+            ["codex", "resume", "t1", "-s", "read-only"]
+        );
+        assert_eq!(
+            resume(&["codex", "resume", "t1", "--remote=ws://h:1", "-a", "never"]),
+            ["codex", "resume", "t1", "-a", "never"]
+        );
+        // Other settings are not permission overrides: still the daemon.
+        assert_eq!(
+            resume(&["codex", "resume", "t1", "-c", "model_reasoning_effort=high"]),
+            [
+                "codex",
+                "resume",
+                "t1",
+                "-c",
+                "model_reasoning_effort=high",
+                "--remote",
+                "unix:///run/codex.sock",
+                "-C",
+                "/repo"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_resume_with_permission_flags_is_unchanged_without_the_daemon() {
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: ["codex", "resume", "t1", "-s", "read-only", "-m", "gpt-x"]
+                .map(String::from)
+                .to_vec(),
+            dedupe_key: "k".into(),
+        };
+        assert_eq!(
+            super::resume_argv_with(
+                &plan,
+                &Default::default(),
+                std::path::Path::new("/repo"),
+                |_| true
+            ),
+            plan.argv
+        );
     }
 }
