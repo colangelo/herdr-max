@@ -1667,6 +1667,26 @@ fn popup_close_request_round_trips() {
 }
 
 #[test]
+fn plugin_popup_close_request_round_trips() {
+    let request = Request {
+        id: "plugin-popup-close".into(),
+        method: Method::PluginPopupClose(PluginPopupCloseParams {
+            plugin_id: "gestore.asks".into(),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+
+    assert_eq!(json["method"], "plugin.popup.close");
+    assert_eq!(
+        json["params"],
+        serde_json::json!({ "plugin_id": "gestore.asks" })
+    );
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+}
+
+#[test]
 fn pane_link_resolve_round_trips() {
     let request: Request = serde_json::from_value(serde_json::json!({
         "id": "hover", "method": "pane.link.resolve",

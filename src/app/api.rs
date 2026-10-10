@@ -1505,6 +1505,9 @@ impl App {
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
             }
+            Method::PluginPopupClose(params) => {
+                return self.handle_plugin_popup_close(request.id, params);
+            }
             _ => {
                 return responses::encode_error(
                     request.id,

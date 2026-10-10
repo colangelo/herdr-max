@@ -2988,6 +2988,16 @@ impl HeadlessServer {
             self.app.state.view.terminal_area =
                 Rect::new(0, 0, self.effective_size.0, self.effective_size.1);
         }
+        if self.app.state.popup_pane.is_some()
+            && matches!(
+                &msg.request.method,
+                api::schema::Method::CommandInvoke(_) | api::schema::Method::PluginPaneOpen(_)
+            )
+        {
+            // Only these requests can open a popup; if one is already open the
+            // refusal names where it is.
+            self.app.popup_location_hint = self.popup_location_label();
+        }
         let mut response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
