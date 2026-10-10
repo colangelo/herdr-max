@@ -28,6 +28,21 @@ impl HeadlessServer {
     ) -> io::Result<()> {
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
+        // A target from before batched descriptors takes them in one message.
+        // Refuse a session too big for that now, before anything is paused.
+        let importer_batches =
+            crate::server::handoff::importer_receives_batches(import_exe.as_deref());
+        if !importer_batches {
+            let panes = self
+                .app
+                .state
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs.iter())
+                .map(|tab| tab.panes.len())
+                .sum();
+            crate::server::handoff::check_single_message_fits(panes)?;
+        }
         let socket_path = crate::server::handoff::handoff_socket_path();
         let token = format!(
             "{}-{}",
@@ -154,13 +169,14 @@ impl HeadlessServer {
             return Err(err);
         }
 
-        let mut stream = match crate::server::handoff::accept_and_validate_on(
+        let (mut stream, fd_transport) = match crate::server::handoff::accept_and_validate_on(
             listener,
             &socket_path,
             &token,
             &manifest,
+            importer_batches,
         ) {
-            Ok(stream) => stream,
+            Ok(validated) => validated,
             Err(err) => {
                 for fd in fds {
                     let _ = unsafe { libc::close(fd) };
@@ -171,7 +187,8 @@ impl HeadlessServer {
             }
         };
 
-        let send_result = crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds);
+        let send_result =
+            crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds, fd_transport);
         for fd in fds {
             let _ = unsafe { libc::close(fd) };
         }

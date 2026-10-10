@@ -10,7 +10,7 @@ mod opencode_config;
 mod registry;
 mod targets;
 mod types;
-mod version;
+pub(crate) mod version;
 
 pub(crate) use actions::{
     install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,
