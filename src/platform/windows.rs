@@ -494,7 +494,8 @@ use windows_sys::{
                 OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
                 TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
                 PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+                THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -2671,7 +2672,11 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
     }
 
     for &pid in pids {
-        let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
+        // TerminateProcess needs PROCESS_TERMINATE on the handle; with a
+        // query-only handle it fails with access denied and the process lives on.
+        let Some(process) =
+            ProcessHandle::open(pid, PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION)
+        else {
             continue;
         };
         unsafe {
