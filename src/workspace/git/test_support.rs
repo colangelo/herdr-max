@@ -97,17 +97,4 @@ pub(super) fn write_fake_tracked_repo(root: &Path) {
     .unwrap();
 }
 
-pub(super) fn run_git(cwd: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+pub(super) use crate::test_git::run_git;

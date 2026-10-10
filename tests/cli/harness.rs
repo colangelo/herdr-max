@@ -67,18 +67,43 @@ pub(super) fn path_missing_or_empty(path: &Path) -> bool {
     }
 }
 
+/// Runs `git -C <repo> <args>` against nothing but the repo: no system or
+/// global config, a fixed identity, no inherited repository selection. A
+/// failure reports the exit status, stdout and stderr.
 pub(super) fn run_git(repo: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .status()
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).args(args);
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    ] {
+        command.env_remove(var);
+    }
+    let output = command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Herdr Test")
+        .env("GIT_AUTHOR_EMAIL", "herdr@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Herdr Test")
+        .env("GIT_COMMITTER_EMAIL", "herdr@example.invalid")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .output()
         .unwrap();
     assert!(
-        status.success(),
-        "git command failed: git -C {} {}",
+        output.status.success(),
+        "git command failed: git -C {} {}\n{}\nstdout:\n{}\nstderr:\n{}",
         repo.display(),
-        args.join(" ")
+        args.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
 }
 
