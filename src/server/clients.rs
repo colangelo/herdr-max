@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseKind, ClientPaneInputEvent,
@@ -139,6 +140,9 @@ pub(crate) struct ClientConnection {
     pub(crate) cell_size: crate::kitty_graphics::HostCellSize,
     /// Monotonic activity stamp used to choose the fallback foreground client.
     pub(crate) last_activity: u64,
+    /// When this client last forwarded input (keys, paste, mouse, or a command it
+    /// issued), for `client.list`. Unlike `last_activity` it ignores resize and focus.
+    pub(crate) last_input_at: Option<Instant>,
     /// Render baseline for the negotiated client encoding.
     pub(crate) render_state: ClientRenderState,
     /// Image assets already included in the selected ClientShell scene.
@@ -229,6 +233,7 @@ impl ClientConnection {
             terminal_size,
             cell_size,
             last_activity,
+            last_input_at: None,
             render_state: ClientRenderState::new(render_encoding),
             shell_graphics_delivery: crate::kitty_graphics::surface::DeliveryCache::default(),
             direct_graphics: false,
@@ -259,6 +264,18 @@ impl ClientConnection {
             shell_uses_endpoint_keybindings: false,
             writer,
         }
+    }
+
+    /// Stamp one forwarded input event. Called once per event batch from the server's
+    /// event handler, never from render or per-pane paths.
+    pub(crate) fn record_input(&mut self, at: Instant) {
+        self.last_input_at = Some(at);
+    }
+
+    /// Time since this client last forwarded input; `None` if it never has.
+    pub(crate) fn last_input_age(&self, now: Instant) -> Option<Duration> {
+        self.last_input_at
+            .map(|at| now.saturating_duration_since(at))
     }
 
     pub(crate) fn request_repaint(&mut self) {

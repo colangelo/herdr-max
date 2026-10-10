@@ -48,7 +48,8 @@ pub(super) fn command() -> Command {
         .subcommand(session_command())
         .subcommand(integration_command())
         .subcommand(plugin_command())
-        .subcommand(popup_command());
+        .subcommand(popup_command())
+        .subcommand(client_command());
     configure_help(command, 0)
 }
 
@@ -1054,7 +1055,7 @@ fn plugin_command() -> Command {
                         .arg(option("entrypoint", "ID"))
                         .arg(
                             option("placement", "PLACEMENT")
-                                .value_parser(["overlay", "split", "tab", "zoomed"]),
+                                .value_parser(["overlay", "popup", "split", "tab", "zoomed"]),
                         )
                         .arg(option("workspace", "ID"))
                         .arg(option("target-pane", "PANE"))
@@ -1084,6 +1085,16 @@ fn popup_command() -> Command {
             Command::new("close")
                 .about("Close the open popup")
                 .arg(option("plugin", "ID").help("Close the popup only if this plugin opened it")),
+        )
+}
+
+fn client_command() -> Command {
+    Command::new("client")
+        .about("Inspect the clients attached to the server over the socket API")
+        .subcommand(
+            Command::new("list").about(
+                "List attached clients: foreground, focused tab, input idle time, window focus",
+            ),
         )
 }
 
@@ -1438,7 +1449,22 @@ mod tests {
         assert!(open
             .get_arguments()
             .any(|arg| arg.get_long() == Some("entrypoint")));
-        assert!(option_values(open, "placement").contains(&"zoomed".to_string()));
+        let placements = option_values(open, "placement");
+        assert!(placements.contains(&"zoomed".to_string()));
+        assert!(placements.contains(&"popup".to_string()));
+    }
+
+    #[test]
+    fn spec_includes_client_list() {
+        let cmd = super::command();
+        command_path(&cmd, &["client", "list"]);
+        assert!(cmd
+            .clone()
+            .try_get_matches_from(["herdr", "client", "list"])
+            .is_ok());
+        assert!(cmd
+            .try_get_matches_from(["herdr", "client", "list", "--all"])
+            .is_err());
     }
 
     #[test]

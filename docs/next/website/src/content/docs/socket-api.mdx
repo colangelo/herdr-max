@@ -100,7 +100,7 @@ Raw socket method names use dot notation:
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show`, `notification.list`, `notification.mark_seen`, `notification.clear` |
 | Todo | `todo.list`, `todo.add`, `todo.update`, `todo.remove`, `todo.clear` |
-| Client | `client.window_title.set`, `client.window_title.clear` |
+| Client | `client.list`, `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
@@ -538,6 +538,25 @@ Remove one todo, or clear a pane's list; `done_only` keeps the outstanding ones:
 
 Every call that changes a pane's list emits `todo.changed` for that pane; a
 clear that removed nothing changes nothing and emits nothing.
+
+### Clients
+
+`client.list` returns the client shells attached to the server, oldest connection
+first. A client attached over `--remote` appears the same as a local one; the
+server cannot tell them apart and does not need to.
+
+```json
+{"id":"req_clients","method":"client.list","params":{}}
+{"id":"req_clients","result":{"type":"client_list","clients":[{"client_id":"3","foreground":true,"workspace_id":"w1","tab_id":"w1:t1","last_input_age_ms":1840,"window_focused":true,"views_popup":false},{"client_id":"5","foreground":false,"workspace_id":"w1","tab_id":"w1:t2","last_input_age_ms":null,"window_focused":null,"views_popup":false}]}}
+```
+
+- `client_id` identifies the connection while it stays attached; it is not stable across reconnects.
+- `foreground` marks the client whose latest input is most recent, the one popups opened through the API land on.
+- `last_input_age_ms` counts from the last key, paste, mouse button, scroll or motion event the client forwarded, or the last command it issued. Focus changes, resizes and the server's own tick do not reset it. It is `null` for a client that has not sent any. Keys a client handles locally (an overlay it opens itself) are not forwarded, so they do not count.
+- `window_focused` is the terminal's own focus report, `null` when the terminal does not send one.
+- `views_popup` is true when the open popup is on this client's tab.
+
+The method reads the server's client table, so it also works for a client that is remote from the server's machine, where the operating system's idle time says nothing about the person.
 
 Set or clear the foreground client's outer terminal window title:
 

@@ -5737,6 +5737,22 @@
         {
           "properties": {
             "method": {
+              "const": "client.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "client_shell.surface.set",
               "type": "string"
             },
@@ -7996,6 +8012,63 @@
               "type": "string"
             }
           ]
+        },
+        "ClientInfo": {
+          "description": "One attached client shell as exposed by `client.list`.",
+          "properties": {
+            "client_id": {
+              "description": "Connection id; it is only valid while that client stays attached.",
+              "type": "string"
+            },
+            "foreground": {
+              "default": false,
+              "description": "Whether this is the client that API-opened popups target: the one with the latest input.",
+              "type": "boolean"
+            },
+            "last_input_age_ms": {
+              "default": null,
+              "description": "Milliseconds since this client last forwarded input; null when it never has.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "default": null,
+              "description": "Tab this client is showing.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "views_popup": {
+              "default": false,
+              "description": "Whether this client shows the open popup.",
+              "type": "boolean"
+            },
+            "window_focused": {
+              "default": null,
+              "description": "Whether the client's terminal window has focus; null when it does not report focus.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "default": null,
+              "description": "Workspace this client has focused.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "client_id"
+          ],
+          "type": "object"
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -11655,6 +11728,25 @@
                 "type",
                 "changed",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "clients": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ClientInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "client_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "clients"
               ],
               "type": "object"
             },
