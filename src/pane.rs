@@ -1645,14 +1645,14 @@ fn spawn_basic_detection_task(
                 &state_events,
                 pane_id,
                 agent,
-                &content,
+                content,
                 process_exited,
                 &mut last_background_count,
             )
             .await;
             let Some(screen_detection) = screen_detection else {
                 if seeded_hold {
-                    if !process_exited && should_hold_seeded_detection(true, &content) {
+                    if !process_exited && should_hold_seeded_detection(true, content) {
                         pending_idle.clear();
                         continue;
                     }
@@ -3805,7 +3805,7 @@ impl PaneRuntime {
                         &state_events,
                         pane_id,
                         agent,
-                        &content,
+                        content,
                         process_exited,
                         &mut last_background_count,
                     )
