@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.10.09.1"
+version = "2026.10.10.1"
 min_engine_version = 4
-updated_at = "2026-10-09T00:00:00Z"
+updated_at = "2026-10-10T00:00:00Z"
 aliases = ["claude-code"]
 # This fork's rules (ask_user_question_dialog, blocked_reason, named-session fix)
 # live only here: a downloaded claude manifest never replaces it.
@@ -90,10 +90,15 @@ priority = 981
 region = "after_last_horizontal_rule"
 visible_blocker = true
 blocked_reason = "question"
-contains = ["enter to select", "esc to cancel"]
+# Regexes, not contains: a narrow pane wraps the footer between words
+# ("Esc" / "to cancel"), so each gap may be one line break.
+regex = [
+  '(?i)enter(?:[ \t]+|\n[ \t]*)to(?:[ \t]+|\n[ \t]*)select',
+  '(?i)esc(?:[ \t]+|\n[ \t]*)to(?:[ \t]+|\n[ \t]*)cancel',
+]
 any = [
-  { contains = ["type something."] },
-  { contains = ["chat about this"] },
+  { regex = ['(?i)type(?:[ \t]+|\n[ \t]*)something\.'] },
+  { regex = ['(?i)chat(?:[ \t]+|\n[ \t]*)about(?:[ \t]+|\n[ \t]*)this'] },
 ]
 
 [[rules]]
