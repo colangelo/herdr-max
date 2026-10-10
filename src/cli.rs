@@ -25,6 +25,7 @@ macro_rules! println {
 mod agent;
 mod agent_message;
 mod api;
+mod client;
 mod completion;
 mod integration;
 mod machine;
@@ -141,6 +142,12 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             exit_code
         }
         "api" => api::run_api_command(&args[2..])?,
+        "client" => {
+            let Some(exit_code) = client::run_client_command(&args[2..])? else {
+                return Ok(CommandOutcome::NotCli);
+            };
+            exit_code
+        }
         "status" => status::run_status_command(&args[2..])?,
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,

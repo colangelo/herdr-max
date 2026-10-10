@@ -48,7 +48,8 @@ pub(super) fn command() -> Command {
         .subcommand(session_command())
         .subcommand(integration_command())
         .subcommand(plugin_command())
-        .subcommand(popup_command());
+        .subcommand(popup_command())
+        .subcommand(client_command());
     configure_help(command, 0)
 }
 
@@ -1087,6 +1088,16 @@ fn popup_command() -> Command {
         )
 }
 
+fn client_command() -> Command {
+    Command::new("client")
+        .about("Inspect the clients attached to the server over the socket API")
+        .subcommand(
+            Command::new("list").about(
+                "List attached clients: foreground, focused tab, input idle time, window focus",
+            ),
+        )
+}
+
 fn current_pane_args() -> [Arg; 2] {
     [option("pane", "ID"), flag("current")]
 }
@@ -1441,6 +1452,19 @@ mod tests {
         let placements = option_values(open, "placement");
         assert!(placements.contains(&"zoomed".to_string()));
         assert!(placements.contains(&"popup".to_string()));
+    }
+
+    #[test]
+    fn spec_includes_client_list() {
+        let cmd = super::command();
+        command_path(&cmd, &["client", "list"]);
+        assert!(cmd
+            .clone()
+            .try_get_matches_from(["herdr", "client", "list"])
+            .is_ok());
+        assert!(cmd
+            .try_get_matches_from(["herdr", "client", "list", "--all"])
+            .is_err());
     }
 
     #[test]
