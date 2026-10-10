@@ -1,6 +1,7 @@
 use super::*;
 
 mod application_scroll;
+mod client_list;
 mod event_fairness;
 mod hint_notifications;
 mod native_graphics;

@@ -261,6 +261,9 @@ pub enum ResponseResult {
         changed: bool,
         reason: ClientWindowTitleReason,
     },
+    ClientList {
+        clients: Vec<super::clients::ClientInfo>,
+    },
     IntegrationList {
         integrations: Vec<super::integrations::IntegrationInfo>,
     },

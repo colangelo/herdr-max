@@ -74,6 +74,7 @@ use crate::server::socket_paths::{
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
 mod bootstrap;
+mod client_list;
 mod client_views;
 mod endpoint_requests;
 mod lifecycle;
@@ -2167,6 +2168,7 @@ impl HeadlessServer {
                 if !self.client_clipboard_image_target_is_valid(client_id, &target) {
                     return false;
                 }
+                self.record_client_input(client_id);
                 match self.stage_client_clipboard_image(client_id, &extension, &data) {
                     Ok(staged) => {
                         let routed = self.paste_client_clipboard_image_path(
@@ -2386,12 +2388,16 @@ impl HeadlessServer {
                 client_id,
                 pane_id,
                 events,
-            } => self.route_synced_pane_input(client_id, pane_id, events),
+            } => {
+                self.record_client_input(client_id);
+                self.route_synced_pane_input(client_id, pane_id, events)
+            }
             ServerEvent::ClientShellPopupInput {
                 client_id,
                 terminal_id,
                 events,
             } => {
+                self.record_client_input(client_id);
                 if self.handoff_in_progress
                     || !self
                         .clients
@@ -2894,6 +2900,11 @@ impl HeadlessServer {
                 let response = self.handle_client_window_title_api(msg.request.id.clone(), None);
                 let _ = msg.respond_to.send(response);
                 return true;
+            }
+            api::schema::Method::ClientList(_) => {
+                let response = self.handle_client_list_api(msg.request.id.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
             }
             _ => {}
         }

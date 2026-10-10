@@ -147,6 +147,9 @@ impl HeadlessServer {
                 deferred_worktree.then(|| api_request_id.clone());
             client.shell_deferred_navigation_response = deferred_navigation.then(Vec::new);
         }
+        if !super::client_list::endpoint_method_is_passive(&request.method) {
+            self.record_client_input(client_id);
+        }
         let foreground_changed = self.promote_client_to_foreground(client_id);
         foreground_changed
             | self.handle_client_shell_api_request(
