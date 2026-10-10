@@ -586,6 +586,7 @@ fn worktree_membership(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_git::run_git;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::api::schema::{
@@ -604,21 +605,6 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
-    }
-
-    fn run_git(repo: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "git command failed: git -C {} {}",
-            repo.display(),
-            args.join(" ")
-        );
     }
 
     fn create_committed_repo(name: &str) -> PathBuf {

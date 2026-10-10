@@ -98,12 +98,17 @@ fn server_restores_while_git_metadata_is_blocked() {
             })
         });
         let healthy = base.join("healthy");
-        assert!(Command::new("git")
+        let init = Command::new("git")
             .args(["init", "--quiet", "--initial-branch=main"])
             .arg(&healthy)
-            .status()
-            .unwrap()
-            .success());
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "git init failed ({}): {}",
+            init.status,
+            String::from_utf8_lossy(&init.stderr)
+        );
         let healthy_membership = serde_json::json!({
             "key": healthy.join(".git"), "label": "healthy", "repo_root": healthy,
             "checkout_path": healthy, "is_linked_worktree": false

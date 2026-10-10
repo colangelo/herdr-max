@@ -1661,12 +1661,7 @@ mod tests {
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(path)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git init failed for {}", path.display());
+        crate::test_git::run_git(path, &["init", "-q"]);
     }
 
     fn app_with_overlay(
