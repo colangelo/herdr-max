@@ -87,11 +87,11 @@ impl CodexAppServer {
 }
 
 fn expand_home(raw: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::config::home_env().map(PathBuf::from);
     match (raw.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         _ if raw == "~" => {
-            std::env::var_os("HOME").map_or_else(|| PathBuf::from(raw), PathBuf::from)
+            crate::config::home_env().map_or_else(|| PathBuf::from(raw), PathBuf::from)
         }
         _ => PathBuf::from(raw),
     }
@@ -933,7 +933,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn home_is_expanded_in_the_socket_path() {
-        let home = std::env::var("HOME").expect("HOME");
+        let home = crate::config::home_env().expect("HOME");
         assert_eq!(
             expand_home("~/.codex/x.sock"),
             Path::new(&home).join(".codex/x.sock")

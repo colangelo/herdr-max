@@ -25,6 +25,17 @@ pub(crate) const GROK_CONFIG_DIR_ENV_VAR: &str = "GROK_CONFIG_DIR";
 pub(crate) const GROK_HOME_ENV_VAR: &str = "GROK_HOME";
 pub(crate) const HERMES_HOME_ENV_VAR: &str = "HERMES_HOME";
 
+/// A non-empty, path-valued environment variable.
+///
+/// A unit-test binary does not honor an absolute path outside the scratch area
+/// (see `crate::config::is_unit_test_scratch`): that is the developer's own
+/// `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and the like, and following it would
+/// read or rewrite the integrations installed on the machine running the tests.
+/// Relative values and `~` values stay, they cannot leave the (scratch) home.
+fn env_dir(name: &str) -> Option<std::ffi::OsString> {
+    crate::config::path_env(name).filter(|value| !value.is_empty())
+}
+
 pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
     if let Ok(executable) = crate::platform::launch_executable() {
@@ -40,15 +51,11 @@ pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn omp_extension_dir() -> io::Result<PathBuf> {
-    if let Some(value) =
-        std::env::var_os(PI_CODING_AGENT_DIR_ENV_VAR).filter(|value| !value.is_empty())
-    {
+    if let Some(value) = env_dir(PI_CODING_AGENT_DIR_ENV_VAR) {
         return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("extensions"));
     }
 
-    let config_dir = std::env::var_os(OMP_CONFIG_DIR_ENV_VAR)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| ".omp".into());
+    let config_dir = env_dir(OMP_CONFIG_DIR_ENV_VAR).unwrap_or_else(|| ".omp".into());
     Ok(home_dir()?
         .join(config_dir)
         .join("agent")
@@ -72,7 +79,7 @@ pub(crate) fn copilot_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn devin_dir() -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+    if let Some(value) = env_dir("XDG_CONFIG_HOME") {
         return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("devin"));
     }
 
@@ -92,7 +99,7 @@ pub(crate) fn config_dir_from_env_or_home(
     env_var: &str,
     home_relative_segments: &[&str],
 ) -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os(env_var).filter(|value| !value.is_empty()) {
+    if let Some(value) = env_dir(env_var) {
         return expand_tilde_path(PathBuf::from(value));
     }
 
@@ -128,7 +135,7 @@ pub(crate) fn opencode_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn opencode_state_dir() -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+    if let Some(value) = env_dir("XDG_STATE_HOME") {
         return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("opencode"));
     }
 
@@ -140,7 +147,7 @@ pub(crate) fn kilo_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn hermes_dir() -> io::Result<PathBuf> {
-    if let Some(value) = std::env::var_os(HERMES_HOME_ENV_VAR).filter(|value| !value.is_empty()) {
+    if let Some(value) = env_dir(HERMES_HOME_ENV_VAR) {
         return expand_tilde_path(PathBuf::from(value));
     }
 
@@ -197,8 +204,7 @@ pub(crate) fn antigravity_cli_dir() -> io::Result<PathBuf> {
 pub(crate) fn grok_dir() -> io::Result<PathBuf> {
     // GROK_CONFIG_DIR is a herdr-level override only (primarily a test
     // seam); the grok CLI does not honor it, so it stays first and explicit.
-    if let Some(value) = std::env::var_os(GROK_CONFIG_DIR_ENV_VAR).filter(|value| !value.is_empty())
-    {
+    if let Some(value) = env_dir(GROK_CONFIG_DIR_ENV_VAR) {
         return expand_tilde_path(PathBuf::from(value));
     }
     // The grok CLI honors GROK_HOME as its config home (config.toml,
@@ -207,7 +213,7 @@ pub(crate) fn grok_dir() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn home_dir() -> io::Result<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+    if let Some(home) = crate::config::home_env().filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home));
     }
 

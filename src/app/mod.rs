@@ -2832,7 +2832,7 @@ mod tests {
 
     #[test]
     fn new_terminal_cwd_follow_without_source_uses_home() {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        let Some(home) = crate::config::home_env().map(std::path::PathBuf::from) else {
             return;
         };
 
