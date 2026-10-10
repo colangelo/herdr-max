@@ -131,6 +131,8 @@ async fn host_shutdown_saves_layout_before_releasing_delay_lock() {
             .env("XDG_STATE_HOME", &base)
             .env("XDG_RUNTIME_DIR", &base)
             .env("HERDR_CONFIG_PATH", &config)
+            // The server ends with this test process even if the test is killed.
+            .env("HERDR_TEST_PARENT_PID", std::process::id().to_string())
             .env_remove("HERDR_SOCKET_PATH")
             .env("DBUS_SYSTEM_BUS_ADDRESS", address.trim())
             .env_remove("HERDR_CLIENT_SOCKET_PATH")
