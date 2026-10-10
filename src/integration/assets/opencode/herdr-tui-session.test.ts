@@ -56,7 +56,10 @@ beforeEach(() => {
   process.env.HERDR_PANE_ID = "test:p1";
 });
 
+const realNow = Date.now;
+
 afterEach(() => {
+  Date.now = realNow;
   for (const dispose of activeDisposers.splice(0)) {
     dispose();
   }
@@ -278,6 +281,20 @@ function v2Api() {
 }
 
 const flushReports = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+// A starved CI runner can pause the test for longer than the plugin's 100 ms
+// selection-retry window between two statements. Block the thread for that long.
+const stallRunner = () => Bun.sleepSync(150);
+
+// The plugin schedules its selection retries from Date.now(), and every event
+// calls syncSelection() first, so an event that arrives after the retry window
+// republishes the old state ahead of its own report. Freeze the wall clock
+// before setup() so no pause, real or injected, can open that window. Reset
+// by afterEach.
+const holdClock = () => {
+  const frozen = realNow();
+  Date.now = () => frozen;
+};
 const states = () => requests.filter((r) => requestParam(r, "state") !== undefined)
   .map((r) => requestParam(r, "state"));
 
@@ -550,12 +567,14 @@ test("V1 a delayed home settlement cannot overwrite the next selected session", 
 });
 
 test("V2 ignores events without data", async () => {
+  holdClock();
   const plugin = await loadPlugin();
   const tui = v2Api();
   const dispose = await plugin.setup(tui.api);
   activeDisposers.push(dispose);
   await flushReports();
   requests.length = 0;
+  stallRunner();
   expect(() => tui.emit("legacy.event")).not.toThrow();
   tui.emit("session.execution.started", { sessionID: "a" });
   await flushReports();
@@ -563,6 +582,7 @@ test("V2 ignores events without data", async () => {
 });
 
 test("V2 completes and interrupts without legacy idle events", async () => {
+  holdClock();
   for (const terminal of ["succeeded", "interrupted", "failed"]) {
     const plugin = await loadPlugin();
     const tui = v2Api();
@@ -570,6 +590,7 @@ test("V2 completes and interrupts without legacy idle events", async () => {
     activeDisposers.push(dispose);
     await flushReports();
     requests.length = 0;
+    stallRunner();
     tui.emit("session.execution.started", { sessionID: "a" });
     tui.emit(`session.execution.${terminal}`, { sessionID: "a" });
     await flushReports();
