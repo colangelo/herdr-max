@@ -34,6 +34,9 @@ fn unique_test_dir() -> PathBuf {
 
 struct SpawnedHerdr {
     _master: Option<Box<dyn MasterPty + Send>>,
+    /// Reads a server's terminal so its output never fills the pty buffer and
+    /// blocks it. A client is read by the test that attached it instead.
+    tail: Option<support::PtyTail>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -45,6 +48,9 @@ impl SpawnedHerdr {
 
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
+        if let (true, Some(tail)) = (thread::panicking(), &self.tail) {
+            tail.report("the spawned herdr server");
+        }
         let pid = self.child.process_id();
         support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
@@ -125,12 +131,14 @@ fn spawn_server_with_path(
         cmd.env("PATH", path);
     }
 
+    let tail = support::PtyTail::drain(pair.master.try_clone_reader().unwrap());
     let child = pair.slave.spawn_command(cmd).unwrap();
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
 
     SpawnedHerdr {
         _master: Some(pair.master),
+        tail: Some(tail),
         child,
     }
 }
@@ -169,6 +177,7 @@ fn spawn_client_process(
 
     SpawnedHerdr {
         _master: Some(pair.master),
+        tail: None,
         child,
     }
 }
