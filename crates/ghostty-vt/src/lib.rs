@@ -3869,6 +3869,163 @@ mod tests {
         assert!(newest.contains("10000"));
     }
 
+    /// This process's physical memory footprint in bytes, for tests that must
+    /// see memory actually given back to the OS. On macOS that is
+    /// `phys_footprint` (what Activity Monitor shows), not RSS: pages released
+    /// with `MADV_FREE_REUSABLE` leave the footprint at once but stay in RSS
+    /// until the kernel needs them.
+    #[cfg(target_os = "macos")]
+    fn process_memory_footprint_bytes() -> Option<u64> {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+        // SAFETY: proc_pid_rusage writes a rusage_info_v2 into the buffer for
+        // RUSAGE_INFO_V2, and the buffer is exactly that type.
+        let rc = unsafe {
+            libc::proc_pid_rusage(
+                std::process::id() as libc::c_int,
+                libc::RUSAGE_INFO_V2,
+                info.as_mut_ptr().cast(),
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        // SAFETY: the call succeeded, so the struct is initialised.
+        Some(unsafe { info.assume_init() }.ri_phys_footprint)
+    }
+
+    /// This process's private resident memory in bytes: `Private_Clean +
+    /// Private_Dirty` from `/proc/self/smaps_rollup`, which leaves out the
+    /// shared library pages that never change. `MADV_DONTNEED` drops released
+    /// pages from it at once. Falls back to RSS from `/proc/self/statm` on
+    /// kernels without `smaps_rollup`.
+    #[cfg(target_os = "linux")]
+    fn process_memory_footprint_bytes() -> Option<u64> {
+        if let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+            let mut total = 0u64;
+            let mut found = false;
+            for line in rollup.lines() {
+                let Some((key, rest)) = line.split_once(':') else {
+                    continue;
+                };
+                if key == "Private_Clean" || key == "Private_Dirty" {
+                    let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                    total += kib * 1024;
+                    found = true;
+                }
+            }
+            if found {
+                return Some(total);
+            }
+        }
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        // SAFETY: sysconf has no preconditions.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        u64::try_from(page_size)
+            .ok()
+            .map(|page_size| resident_pages * page_size)
+    }
+
+    /// Not measured on this platform: the test skips its footprint check.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn process_memory_footprint_bytes() -> Option<u64> {
+        None
+    }
+
+    /// Fails unless scrollback compression really runs: libghostty must not
+    /// report it unsupported, it must converge, and the process footprint must
+    /// give back a clear share of what the scrollback added. The upstream test
+    /// above returns early on `Unsupported` and never looks at memory, so a
+    /// libghostty update that silently turns compression off would pass it.
+    ///
+    /// The footprint is process-wide, so this needs a process to itself:
+    /// nextest runs each test in its own process, and under `cargo test`
+    /// another test's allocations would blur the numbers.
+    #[test]
+    fn compression_reduces_process_footprint() {
+        const LINES: usize = 50_000;
+        // At least half of what the scrollback added must come back. Measured
+        // on macOS (m4m), 50,000 lines added 33.6 MB of footprint and
+        // compression gave back 29.9 MB (89%). Half leaves wide headroom for
+        // allocator and OS variation, and the numbers are per-process, so
+        // other load on the machine does not move them; a run that frees
+        // nothing (compression off or doing nothing) gives back 0 and fails.
+        const MIN_FREED_FRACTION: u64 = 2;
+        // The scrollback must visibly grow the footprint, or the drop proves
+        // nothing (for example if the allocator committed memory lazily).
+        const MIN_ADDED_BYTES: u64 = 8 * 1024 * 1024;
+
+        let baseline = process_memory_footprint_bytes();
+        let mut terminal = Terminal::new(80, 24, 200_000_000).unwrap();
+        let initial_activity = terminal.compression_activity().unwrap();
+        // Varied text, as a real log looks, so the pages hold more than one
+        // repeated byte.
+        let words = [
+            "build",
+            "error",
+            "warning",
+            "compiling",
+            "finished",
+            "test",
+            "ok",
+        ];
+        for line in 1..=LINES {
+            let word = words[line % words.len()];
+            let pad = "=".repeat(line % 37);
+            terminal.write(format!("{line:06} {word} {pad} {}\r\n", line * 7919).as_bytes());
+        }
+        assert_ne!(terminal.compression_activity().unwrap(), initial_activity);
+        let filled = process_memory_footprint_bytes();
+
+        let mut complete = false;
+        for _ in 0..1_000_000 {
+            match terminal.compress_incremental().unwrap() {
+                TerminalCompressionResult::Unsupported => {
+                    panic!("libghostty reports scrollback compression unsupported on this target")
+                }
+                TerminalCompressionResult::Pending => {}
+                TerminalCompressionResult::Complete => {
+                    complete = true;
+                    break;
+                }
+            }
+        }
+        assert!(complete, "incremental compression did not converge");
+        let compressed = process_memory_footprint_bytes();
+
+        match (baseline, filled, compressed) {
+            (Some(baseline), Some(filled), Some(compressed)) => {
+                let added = filled.saturating_sub(baseline);
+                let freed = filled.saturating_sub(compressed);
+                eprintln!(
+                    "footprint: baseline {baseline} filled {filled} compressed {compressed} \
+                     added {added} freed {freed} bytes"
+                );
+                assert!(
+                    added >= MIN_ADDED_BYTES,
+                    "scrollback added only {added} bytes of footprint; the measurement is not \
+                     seeing it"
+                );
+                assert!(
+                    freed >= added / MIN_FREED_FRACTION,
+                    "compression freed {freed} bytes of the {added} the scrollback added"
+                );
+            }
+            _ => eprintln!(
+                "skipping the footprint check: process memory footprint is not measured on this \
+                 target; compression running and converging was still checked"
+            ),
+        }
+
+        let oldest = terminal.read_text_screen((0, 0), (79, 0), false).unwrap();
+        assert!(oldest.starts_with("000001 "));
+        let last_row = terminal.total_rows().unwrap() as u32 - 1;
+        let newest = terminal
+            .read_text_screen((0, last_row - 1), (79, last_row), false)
+            .unwrap();
+        assert!(newest.contains(&format!("{LINES:06}")));
+    }
+
     #[test]
     fn kitty_png_replacement_rejects_invalid_payload_without_placing_it() {
         use base64::Engine as _;
