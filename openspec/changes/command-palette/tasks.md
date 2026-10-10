@@ -28,8 +28,14 @@ after the #171 cutover, on the 0.9.3 client shell, once ac has answered the open
 - [x] 2.1 red tests for `agent.send`: piece splitting on character boundaries, Enter as its own key,
       `answer` presses the option key, `busy: interrupt` with a target that stays working sends
       nothing
-- [ ] 2.2 live check in a throwaway session (herdr-throwaway-proof recipe): a typed newline inside
-      the text in Claude Code (line break or submit?); decide multi-line support from it
+- [x] 2.2 live check in a throwaway session (debug build of c9a9b804, real Claude Code with haiku, cwd /tmp/t182,
+      2026-10-10): a raw LF inside typed text is a line break in Claude Code's box, not a submit; one Enter then
+      sends both lines as one message. Also proven live: `herdr agent message` typed one line into a working
+      session (it queued: "ctrl+enter to send now"); the bar's send flow (prefix+: then `send `, pick, text,
+      enter) showed the receipt "typed to claude in 1 piece, enter pressed"; alt+enter interrupted first
+      (Claude Code showed "Interrupted") and then typed the text. Decision: multi-line stays refused in v1
+      (`multi_line_send`, no new code): only Claude Code is proven, other agents may submit on LF, and the
+      refusal text is clear. Lifting it later is one change in `handle_deferred_agent_send` plus a per-agent check.
 - [x] 2.3 `agent.send` + `AgentSent` (no `AgentSendReceipt` event in v1); schema artifact and endpoint shape digest
 - [ ] 2.4 `agent.directory`: herdr agents of every attached server + `directory_command`, joined on
       the Claude session id, cached 10 s
