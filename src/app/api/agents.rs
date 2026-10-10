@@ -1637,7 +1637,20 @@ mod tests {
             panic!("expected a sent response");
         };
         assert!(interrupted);
-        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x1b"));
+        // Esc goes through the same key encoder as the send path, so the
+        // expected bytes are the platform's (win32-input-mode press and
+        // release on Windows, a bare 0x1b elsewhere).
+        let (reference, _reference_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 16,
+            );
+        let esc: Vec<u8> = crate::app::api_helpers::encode_api_keys(&reference, &["esc".into()])
+            .expect("esc is a known key")
+            .into_iter()
+            .flatten()
+            .collect();
+        let esc = Bytes::from(esc);
+        assert_eq!(rx.try_recv().unwrap(), esc);
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"now"));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
     }
