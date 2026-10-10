@@ -13,6 +13,7 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "agent.message",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -447,6 +448,12 @@ mod tests {
                 "{method} changed shape"
             );
         }
+        // Fork (herdr-max): `agent.message` is additive, advertised so the command
+        // bar can send a message to a session (fork issue 182).
+        assert_eq!(
+            actual.remove("agent.message").as_deref(),
+            Some("45849f796f0739ce5baeb3287ec246c7710368e7549836af38634c6b6a31cd91")
+        );
         let mut expected = expected;
         for method in [
             "pane.close",

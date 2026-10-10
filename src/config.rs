@@ -13,7 +13,7 @@ mod window_title;
 mod write;
 
 pub(crate) use self::io::{home_env, path_env};
-pub(crate) use self::model::HerdrToastConfig;
+pub(crate) use self::model::{HerdrToastConfig, PaletteBusyPolicy, PaletteSendMode};
 
 pub use self::{
     io::{

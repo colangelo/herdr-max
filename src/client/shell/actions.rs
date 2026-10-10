@@ -223,6 +223,10 @@ impl ClientShellState {
                     self.open_todo_board(outcome);
                     return;
                 }
+                if action == crate::input::KeybindAction::CommandPalette {
+                    self.open_palette(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::WorkspacePicker {
                     self.pending_workspace_highlight = None;
                     self.mobile_switcher_scroll = 0;
@@ -651,6 +655,8 @@ impl ClientShellState {
                             "todo save failed"
                         } else if matches!(pending.kind, PendingEndpointKind::PaneMove) {
                             "pane move failed"
+                        } else if matches!(pending.kind, PendingEndpointKind::AgentMessage) {
+                            "send failed"
                         } else {
                             "Action rejected"
                         },
@@ -662,7 +668,9 @@ impl ClientShellState {
                 let feedback = kind == ClientEndpointNoticeKind::Rejected
                     && matches!(
                         pending.kind,
-                        PendingEndpointKind::TodoSave { .. } | PendingEndpointKind::PaneMove
+                        PendingEndpointKind::TodoSave { .. }
+                            | PendingEndpointKind::PaneMove
+                            | PendingEndpointKind::AgentMessage
                     );
                 if feedback {
                     self.push_feedback_toast(title, body);
@@ -958,6 +966,11 @@ impl ClientShellState {
             PendingEndpointKind::PaneMove => {
                 let mut outcome = ClientShellInput::default();
                 self.handle_pane_move_result(&result, &mut outcome);
+                return (true, outcome.actions);
+            }
+            PendingEndpointKind::AgentMessage => {
+                let mut outcome = ClientShellInput::default();
+                self.handle_agent_send_result(&result, &mut outcome);
                 return (true, outcome.actions);
             }
             PendingEndpointKind::NotificationMutation => {

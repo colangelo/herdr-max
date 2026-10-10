@@ -77,6 +77,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) prompt_new_tab_name: bool,
     pub(super) prompt_new_workspace_name: bool,
     pub(super) confirm_close: bool,
+    pub(super) palette_send_default_mode: crate::config::PaletteSendMode,
+    pub(super) palette_send_busy: crate::config::PaletteBusyPolicy,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
@@ -162,6 +164,7 @@ pub(super) struct ShellHitMap {
     pub(super) todo_panel: Option<super::todo_panel::TodoPanelLayout>,
     pub(super) todo_edit: Option<super::todo_edit::TodoEditLayout>,
     pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,
+    pub(super) palette: Option<super::palette::PaletteLayout>,
     pub(super) todo_board_layout: Option<super::todo_board::TodoBoardLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -349,6 +352,7 @@ pub(super) enum ClientShellOverlayKind {
     TodoEdit,
     TodoBoard,
     MovePicker,
+    Palette,
 }
 
 #[derive(Debug)]
@@ -713,6 +717,7 @@ pub(super) enum ClientShellOverlay {
     TodoEdit(super::todo_edit::ClientTodoEditOverlay),
     TodoBoard(super::todo_board::ClientTodoBoardOverlay),
     MovePicker(super::move_picker::ClientMovePickerOverlay),
+    Palette(super::palette::ClientPaletteOverlay),
 }
 
 impl ClientShellOverlay {
@@ -736,6 +741,7 @@ impl ClientShellOverlay {
             Self::TodoEdit(_) => ClientShellOverlayKind::TodoEdit,
             Self::TodoBoard(_) => ClientShellOverlayKind::TodoBoard,
             Self::MovePicker(_) => ClientShellOverlayKind::MovePicker,
+            Self::Palette(_) => ClientShellOverlayKind::Palette,
         }
     }
 }
@@ -817,6 +823,8 @@ pub(super) enum PendingEndpointKind {
         follow: Option<String>,
     },
     PaneMove,
+    /// `agent.message` from the command bar.
+    AgentMessage,
     CopySearch {
         pane_id: String,
         origin: crate::api::schema::PaneTextPoint,

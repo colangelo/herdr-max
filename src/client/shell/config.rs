@@ -202,6 +202,8 @@ impl ClientShellConfig {
             prompt_new_tab_name: config.ui.prompt_new_tab_name,
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             confirm_close: config.ui.confirm_close,
+            palette_send_default_mode: config.palette.send.default_mode,
+            palette_send_busy: config.palette.send.busy,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
@@ -388,6 +390,11 @@ impl ClientShellConfig {
                         .map(|diagnostic| format!("{diagnostic}; kept current keybinds")),
                 ),
             }
+        }
+
+        if !invalid_section("palette") {
+            self.palette_send_default_mode = config.palette.send.default_mode;
+            self.palette_send_busy = config.palette.send.busy;
         }
 
         if !invalid_section("ui") {

@@ -500,6 +500,9 @@ impl ClientShellState {
         if self.insert_move_picker_text(text) {
             return true;
         }
+        if self.insert_palette_text(text) {
+            return true;
+        }
         if self.insert_todo_board_text(text) {
             return true;
         }
@@ -546,6 +549,7 @@ impl ClientShellState {
             Some(ClientShellOverlay::MovePicker(_)) => {
                 return self.route_move_picker_key(key, outcome)
             }
+            Some(ClientShellOverlay::Palette(_)) => return self.route_palette_key(key, outcome),
             _ => {}
         }
 

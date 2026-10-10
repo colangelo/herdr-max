@@ -650,6 +650,12 @@
           "description": "Open the session-wide todo board. Unbound by default."
         },
         {
+          "key": "keys.command_palette",
+          "type": "keybinding",
+          "default": "\"prefix+:\"",
+          "description": "Open the command bar: every Herdr command with its shortcut, typed to filter, enter to run."
+        },
+        {
           "key": "keys.display_panes",
           "type": "keybinding",
           "default": "\"prefix+i\"",
@@ -1771,6 +1777,50 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        }
+      ]
+    },
+    {
+      "id": "palette",
+      "title": "Command bar",
+      "keys": [
+        {
+          "key": "palette.send.default_mode",
+          "type": "enum",
+          "default": "\"typed\"",
+          "description": "How a message goes out when the command bar offers both ways: typed into the session as you, or sent as a note.",
+          "values": [
+            "typed",
+            "note"
+          ]
+        },
+        {
+          "key": "palette.send.busy",
+          "type": "enum",
+          "default": "\"queue\"",
+          "description": "What the command bar does when the target session is working: queue the message (alt+enter interrupts first), or ask which before sending.",
+          "values": [
+            "queue",
+            "ask"
+          ]
+        },
+        {
+          "key": "palette.send.cross_machine_typed",
+          "type": "boolean",
+          "default": "false",
+          "description": "Reserved. Typing as you into a session on another machine is not built yet, and this has no effect."
+        },
+        {
+          "key": "palette.send.note_command",
+          "type": "string",
+          "default": "\"agent-bell\"",
+          "description": "The command that delivers a note. It is run as `<command> send --to NAME --from herdr-palette TEXT`."
+        },
+        {
+          "key": "palette.send.directory_command",
+          "type": "string",
+          "default": "\"agent-bell who\"",
+          "description": "Reserved. The command that lists note targets; nothing reads it yet."
         }
       ]
     },

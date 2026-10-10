@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentInfo, AgentMessageMode, AgentMessageNote};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -112,6 +112,20 @@ pub enum ResponseResult {
     },
     AgentPrompted {
         agent: AgentInfo,
+    },
+    /// Answer to `agent.message`: how the text went out.
+    AgentMessaged {
+        agent: AgentInfo,
+        delivery: AgentMessageMode,
+        /// Typed: the number of writes the text went out in.
+        pieces: usize,
+        /// Typed: whether Enter was pressed after the text.
+        enter_sent: bool,
+        /// Whether the agent was interrupted first.
+        interrupted: bool,
+        /// A note: what the note command reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<AgentMessageNote>,
     },
     AgentList {
         agents: Vec<AgentInfo>,

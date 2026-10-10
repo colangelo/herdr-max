@@ -38,6 +38,7 @@ mod notification_center;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
+mod palette;
 mod pins;
 mod preferences;
 mod render;

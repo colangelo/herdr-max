@@ -675,6 +675,7 @@ pub struct Config {
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
     pub agents: AgentsConfig,
+    pub palette: PaletteConfig,
 }
 
 #[derive(Debug)]
@@ -741,6 +742,9 @@ pub struct KeysConfig {
     pub add_pane_todo: BindingConfig,
     /// Open the session-wide todo board. Unbound by default.
     pub open_todo_board: BindingConfig,
+    /// Open the command bar: every herdr command with its shortcut, and send a message to a
+    /// session. Default: "prefix+:".
+    pub command_palette: BindingConfig,
     /// Show every pane's number, address, name and size in characters, and the
     /// window size, until the next key or for 3 seconds. Default: "prefix+i".
     pub display_panes: BindingConfig,
@@ -925,6 +929,8 @@ pub(crate) struct KeysConfigOverlay {
     add_pane_todo: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open_todo_board: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_palette: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_panes: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1112,6 +1118,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_pane_todos);
         apply_field!(add_pane_todo);
         apply_field!(open_todo_board);
+        apply_field!(command_palette);
         apply_field!(display_panes);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
@@ -1239,6 +1246,7 @@ impl KeysConfig {
         copy_effective_action_field!(open_pane_todos, keybinds.open_pane_todos);
         copy_effective_action_field!(add_pane_todo, keybinds.add_pane_todo);
         copy_effective_action_field!(open_todo_board, keybinds.open_todo_board);
+        copy_effective_action_field!(command_palette, keybinds.command_palette);
         copy_effective_action_field!(display_panes, keybinds.display_panes);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
@@ -1703,6 +1711,61 @@ impl Default for RemoteConfig {
     }
 }
 
+/// The command bar (fork issue 182).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PaletteConfig {
+    pub send: PaletteSendConfig,
+}
+
+/// Sending a message to a session from the command bar.
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PaletteSendConfig {
+    /// How a message goes out when the bar offers both ways: typed as you, or as a note. Default: typed.
+    pub default_mode: PaletteSendMode,
+    /// What the bar does when the target is working: queue the message, or ask first. Default: queue.
+    pub busy: PaletteBusyPolicy,
+    /// Reserved: typing as you into a session on another machine is not built yet, and this has no effect. Default: false.
+    pub cross_machine_typed: bool,
+    /// The command that delivers a note; it is run as `<command> send --to NAME --from herdr-palette TEXT`. Default: agent-bell.
+    pub note_command: String,
+    /// Reserved: the command that lists note targets. Not read yet. Default: agent-bell who.
+    pub directory_command: String,
+}
+
+impl Default for PaletteSendConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: PaletteSendMode::default(),
+            busy: PaletteBusyPolicy::default(),
+            cross_machine_typed: false,
+            note_command: "agent-bell".to_owned(),
+            directory_command: "agent-bell who".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaletteSendMode {
+    /// Herdr types the message into the session, as if you were at its pane.
+    #[default]
+    Typed,
+    /// A peer message the session may act on; it approves nothing.
+    Note,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaletteBusyPolicy {
+    /// Type now; the session takes it at its next pause. `alt+enter` interrupts first.
+    #[default]
+    Queue,
+    /// Ask whether to queue or interrupt before sending to a working session.
+    Ask,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
@@ -1812,6 +1875,7 @@ impl Default for KeysConfig {
             open_pane_todos: BindingConfig::one("prefix+ctrl+t"),
             add_pane_todo: BindingConfig::empty(),
             open_todo_board: BindingConfig::empty(),
+            command_palette: BindingConfig::one("prefix+:"),
             display_panes: BindingConfig::one("prefix+i"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),

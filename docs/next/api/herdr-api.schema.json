@@ -1424,6 +1424,68 @@
           },
           "type": "object"
         },
+        "AgentMessageBusy": {
+          "description": "What `agent.message` does when the agent is working.",
+          "oneOf": [
+            {
+              "const": "queue",
+              "description": "Deliver now; the agent takes it at its next pause.",
+              "type": "string"
+            },
+            {
+              "const": "interrupt",
+              "description": "Interrupt the agent first (`esc` for a typed send, `--interrupt` for a note).",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentMessageMode": {
+          "description": "How `agent.message` delivers the text (fork issue 182).",
+          "oneOf": [
+            {
+              "const": "typed",
+              "description": "Herdr types the text into the agent's pane, as if the user were there.",
+              "type": "string"
+            },
+            {
+              "const": "note",
+              "description": "A peer message through the configured note command. It approves nothing.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentMessageParams": {
+          "description": "Send one line of text to an agent without switching to it (fork issue 182).",
+          "properties": {
+            "answer": {
+              "description": "For an agent that is blocked on a prompt: the key of the option to\npress (for example `1`) instead of typing text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "busy": {
+              "$ref": "#/schemas/request/$defs/AgentMessageBusy",
+              "default": "queue"
+            },
+            "mode": {
+              "$ref": "#/schemas/request/$defs/AgentMessageMode",
+              "default": "typed"
+            },
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "default": "",
+              "description": "One line, at most 4000 bytes. Empty only with `answer`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -6272,6 +6334,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.message",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentMessageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.wait",
               "type": "string"
             },
@@ -7771,6 +7849,39 @@
             "source",
             "source_kind",
             "local_override_shadowing_remote"
+          ],
+          "type": "object"
+        },
+        "AgentMessageMode": {
+          "description": "How `agent.message` delivers the text (fork issue 182).",
+          "oneOf": [
+            {
+              "const": "typed",
+              "description": "Herdr types the text into the agent's pane, as if the user were there.",
+              "type": "string"
+            },
+            {
+              "const": "note",
+              "description": "A peer message through the configured note command. It approves nothing.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentMessageNote": {
+          "description": "What the note command reported for a `note` send.",
+          "properties": {
+            "detail": {
+              "description": "The note command's own words, verbatim.",
+              "type": "string"
+            },
+            "state": {
+              "description": "`queued`, `held` or `injected`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "detail"
           ],
           "type": "object"
         },
@@ -10751,6 +10862,55 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Answer to `agent.message`: how the text went out.",
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "delivery": {
+                  "$ref": "#/schemas/success_response/$defs/AgentMessageMode"
+                },
+                "enter_sent": {
+                  "description": "Typed: whether Enter was pressed after the text.",
+                  "type": "boolean"
+                },
+                "interrupted": {
+                  "description": "Whether the agent was interrupted first.",
+                  "type": "boolean"
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentMessageNote"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "A note: what the note command reported."
+                },
+                "pieces": {
+                  "description": "Typed: the number of writes the text went out in.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "agent_messaged",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "delivery",
+                "pieces",
+                "enter_sent",
+                "interrupted"
               ],
               "type": "object"
             },

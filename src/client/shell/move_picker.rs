@@ -727,7 +727,7 @@ fn detail_text(picker: &ClientMovePickerOverlay) -> String {
     }
 }
 
-fn render_rule(b: &mut Buffer, x: u16, y: u16, width: u16, p: &Palette) {
+pub(super) fn render_rule(b: &mut Buffer, x: u16, y: u16, width: u16, p: &Palette) {
     put_text(
         b,
         x,
@@ -1001,7 +1001,7 @@ pub(super) fn render_search_row(
     })
 }
 
-fn render_scrollbar(b: &mut Buffer, list: Rect, start: usize, len: usize, p: &Palette) {
+pub(super) fn render_scrollbar(b: &mut Buffer, list: Rect, start: usize, len: usize, p: &Palette) {
     let visible = usize::from(list.height);
     if list.width <= 1 || visible == 0 || len <= visible {
         return;
