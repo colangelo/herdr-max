@@ -26,12 +26,24 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+/// Names the test process that owns a spawned server. A server started with it
+/// set exits once that pid is gone, so a test killed early (a nextest timeout,
+/// the runner's SIGTERM, SIGKILL) cannot leave it behind. Servers started by
+/// live handoff or client autodetect inherit it, so they end with the test too.
+pub const TEST_PARENT_PID_ENV: &str = "HERDR_TEST_PARENT_PID";
+
 pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_STARTUP_CWD");
     command.env_remove("HERDR_SESSION");
     command.env_remove("HERDR_PANE_ID");
     command.env_remove("HERDR_WORKSPACE_ID");
     command.env_remove("HERDR_TAB_ID");
+    command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
+}
+
+/// The same ownership for a server spawned with `std::process::Command`.
+pub fn bind_server_to_test_process(command: &mut std::process::Command) {
+    command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
 }
 
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
