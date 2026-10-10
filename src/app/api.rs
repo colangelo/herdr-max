@@ -2616,7 +2616,6 @@ mod tests {
         (app, pane_id, terminal_id)
     }
 
-    #[cfg(unix)]
     fn shutdown_test_runtimes(app: &mut App) {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
