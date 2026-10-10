@@ -47,7 +47,8 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(plugin_command());
+        .subcommand(plugin_command())
+        .subcommand(popup_command());
     configure_help(command, 0)
 }
 
@@ -1076,6 +1077,16 @@ fn plugin_command() -> Command {
         )
 }
 
+fn popup_command() -> Command {
+    Command::new("popup")
+        .about("Manage the session popup over the socket API")
+        .subcommand(
+            Command::new("close")
+                .about("Close the open popup")
+                .arg(option("plugin", "ID").help("Close the popup only if this plugin opened it")),
+        )
+}
+
 fn current_pane_args() -> [Arg; 2] {
     [option("pane", "ID"), flag("current")]
 }
@@ -1428,6 +1439,19 @@ mod tests {
             .get_arguments()
             .any(|arg| arg.get_long() == Some("entrypoint")));
         assert!(option_values(open, "placement").contains(&"zoomed".to_string()));
+    }
+
+    #[test]
+    fn spec_includes_popup_close_with_plugin_option() {
+        let cmd = super::command();
+        let close = command_path(&cmd, &["popup", "close"]);
+        assert!(has_option(close, "plugin"));
+        for valid in [
+            &["herdr", "popup", "close"][..],
+            &["herdr", "popup", "close", "--plugin", "gestore.asks"][..],
+        ] {
+            assert!(cmd.clone().try_get_matches_from(valid).is_ok());
+        }
     }
 
     #[test]

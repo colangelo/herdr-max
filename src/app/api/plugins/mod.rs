@@ -9,8 +9,8 @@ use crate::api::schema::{
     InstalledPluginInfo, PaneLinkActivateParams, PluginActionInfo, PluginActionInvokeParams,
     PluginActionListParams, PluginLinkParams, PluginListParams, PluginLogListParams,
     PluginManifestAction, PluginManifestLinkHandler, PluginPaneCloseParams, PluginPaneFocusParams,
-    PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginSetEnabledParams,
-    PluginUnlinkParams, ResponseResult,
+    PluginPaneInfo, PluginPaneOpenParams, PluginPanePlacement, PluginPopupCloseParams,
+    PluginSetEnabledParams, PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
 pub(super) use manifest::normalize_plugin_id;
@@ -593,6 +593,30 @@ impl App {
             return response;
         }
         encode_success(id, ResponseResult::PluginPaneClosed { pane_id })
+    }
+
+    /// Close the open popup only when `params.plugin_id` opened it. Anything
+    /// else (another plugin's popup, one opened from a keybinding) stays open.
+    pub(super) fn handle_plugin_popup_close(
+        &mut self,
+        id: String,
+        params: PluginPopupCloseParams,
+    ) -> String {
+        let Some(plugin_id) = normalize_plugin_id(&params.plugin_id) else {
+            return invalid_plugin_id(id);
+        };
+        let Some(popup) = self.state.popup_pane.as_ref() else {
+            return encode_error(id, "popup_not_open", "no popup is open");
+        };
+        if popup.plugin_id.as_deref() != Some(plugin_id.as_str()) {
+            return encode_error(
+                id,
+                "popup_not_owned",
+                format!("the open popup was not opened by plugin {plugin_id}; it was left open"),
+            );
+        }
+        self.close_popup_pane();
+        encode_success(id, ResponseResult::Ok {})
     }
 
     fn find_plugin_action(

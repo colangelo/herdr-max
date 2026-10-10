@@ -461,6 +461,14 @@ pub struct PluginPaneCloseParams {
     pub pane_id: String,
 }
 
+// Close the open popup only when this plugin opened it. A separate method from
+// `popup.close`: an old server would ignore an extra field there and close
+// whatever popup is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginPopupCloseParams {
+    pub plugin_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PluginPaneInfo {
     pub plugin_id: String,

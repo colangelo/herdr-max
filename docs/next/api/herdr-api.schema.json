@@ -4223,6 +4223,17 @@
           ],
           "type": "string"
         },
+        "PluginPopupCloseParams": {
+          "properties": {
+            "plugin_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "plugin_id"
+          ],
+          "type": "object"
+        },
         "PluginSetEnabledParams": {
           "properties": {
             "plugin_id": {
@@ -7363,6 +7374,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PluginPaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "plugin.popup.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PluginPopupCloseParams"
             }
           },
           "required": [

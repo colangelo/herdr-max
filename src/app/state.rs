@@ -20,6 +20,9 @@ pub(crate) struct PopupPaneState {
     pub terminal_id: crate::terminal::TerminalId,
     pub width: Option<crate::popup_size::PopupSize>,
     pub height: Option<crate::popup_size::PopupSize>,
+    /// Plugin that opened this popup through `plugin.pane.open`. `None` for a
+    /// popup opened from a keybinding.
+    pub plugin_id: Option<String>,
 }
 
 use crate::terminal_theme::{HostAppearance, TerminalTheme};

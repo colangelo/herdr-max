@@ -164,6 +164,7 @@ impl App {
             terminal_id,
             width: geometry.width,
             height: geometry.height,
+            plugin_id: None,
         });
         self.state.mode = Mode::Terminal;
         Ok(())
@@ -188,6 +189,7 @@ impl App {
             terminal_id: terminal_id.clone(),
             width: None,
             height: None,
+            plugin_id: None,
         });
         (pane_id, terminal_id)
     }
@@ -219,6 +221,7 @@ mod tests {
             terminal_id,
             width: None,
             height: None,
+            plugin_id: None,
         });
         app
     }
@@ -287,5 +290,65 @@ mod tests {
         let response = app.handle_api_request(close());
         let response: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(response.error.code, "popup_not_open");
+    }
+
+    fn plugin_popup_close(plugin_id: &str) -> crate::api::schema::Request {
+        crate::api::schema::Request {
+            id: "close-plugin-popup".into(),
+            method: crate::api::schema::Method::PluginPopupClose(
+                crate::api::schema::PluginPopupCloseParams {
+                    plugin_id: plugin_id.into(),
+                },
+            ),
+        }
+    }
+
+    fn error_code(response: &str) -> String {
+        serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
+            .unwrap_or_else(|err| panic!("expected error, got {response}: {err}"))
+            .error
+            .code
+    }
+
+    #[test]
+    fn plugin_popup_close_closes_only_the_popup_that_plugin_opened() {
+        let mut app = app_with_popup();
+        app.state.popup_pane.as_mut().unwrap().plugin_id = Some("example.desk".into());
+
+        let refused = app.handle_api_request(plugin_popup_close("example.other"));
+        assert_eq!(error_code(&refused), "popup_not_owned");
+        assert!(
+            app.state.popup_pane.is_some(),
+            "another plugin's popup stays open"
+        );
+
+        let closed = app.handle_api_request(plugin_popup_close("example.desk"));
+        let closed: crate::api::schema::SuccessResponse = serde_json::from_str(&closed).unwrap();
+        assert_eq!(closed.result, crate::api::schema::ResponseResult::Ok {});
+        assert!(app.state.popup_pane.is_none());
+
+        let none_open = app.handle_api_request(plugin_popup_close("example.desk"));
+        assert_eq!(error_code(&none_open), "popup_not_open");
+    }
+
+    #[test]
+    fn plugin_popup_close_leaves_a_keybinding_popup_open() {
+        let mut app = app_with_popup();
+        assert_eq!(app.state.popup_pane.as_ref().unwrap().plugin_id, None);
+
+        let refused = app.handle_api_request(plugin_popup_close("example.desk"));
+
+        assert_eq!(error_code(&refused), "popup_not_owned");
+        assert!(app.state.popup_pane.is_some());
+    }
+
+    #[test]
+    fn plugin_popup_close_rejects_an_invalid_plugin_id() {
+        let mut app = app_with_popup();
+
+        let refused = app.handle_api_request(plugin_popup_close("not a plugin id"));
+
+        assert_eq!(error_code(&refused), "invalid_plugin_id");
+        assert!(app.state.popup_pane.is_some());
     }
 }

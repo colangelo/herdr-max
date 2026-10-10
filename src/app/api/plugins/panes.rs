@@ -32,10 +32,12 @@ impl App {
         ) {
             return encode_error(id, "plugin_pane_open_failed", err.to_string());
         }
-        let Some(popup) = self.state.popup_pane.as_ref() else {
+        let Some(popup) = self.state.popup_pane.as_mut() else {
             return encode_error(id, "plugin_pane_open_failed", "plugin popup disappeared");
         };
-        if let Some(terminal) = self.state.terminals.get_mut(&popup.terminal_id) {
+        popup.plugin_id = Some(plugin.plugin_id.clone());
+        let terminal_id = popup.terminal_id.clone();
+        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.set_manual_label(pane.title);
         }
         encode_success(id, ResponseResult::Ok {})
