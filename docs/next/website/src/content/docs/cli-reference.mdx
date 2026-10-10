@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Herdr commands for sessions, workspaces, tabs, panes, popups, notifications, todos, agents, waits, integrations, and status.
+description: Herdr commands for sessions, workspaces, tabs, panes, popups, clients, notifications, todos, agents, waits, integrations, and status.
 ---
 
 Herdr’s CLI talks to the running server over the same local socket API used by integrations and agents.
@@ -556,6 +556,22 @@ opened it: another plugin's popup, or one you opened from a key, stays open and
 the command fails with `popup_not_owned`. `--plugin` uses the
 `plugin.popup.close` method, so against a server that does not have it the
 command fails instead of closing an unrelated popup.
+
+## Clients
+
+```bash
+herdr client list
+```
+
+`client list` prints the `client.list` response: one entry for each client shell
+attached to the server, whether it runs on this machine or reaches the server
+over `--remote`. Each entry has the connection `client_id`, whether it is the
+`foreground` client (the one popups opened through the API land on),
+its `workspace_id` and `tab_id`, `last_input_age_ms` (milliseconds since it last
+forwarded a key, paste or mouse event; `null` if it never has), `window_focused`
+(from terminal focus reporting; `null` when the terminal does not report it) and
+`views_popup`. See [`client.list`](/docs/socket-api/#clients) for the shape. Use it
+to tell whether someone is typing before opening a popup.
 
 ## Plugins
 
