@@ -14,6 +14,8 @@ const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
     "agent.message",
+    "agent.pin",
+    "agent.unpin",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -66,7 +68,9 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "workspace.focus",
     "workspace.move",
     "workspace.move_block",
+    "workspace.pin",
     "workspace.rename",
+    "workspace.unpin",
     "worktree.create",
     "worktree.list",
     "worktree.open",
@@ -454,6 +458,33 @@ mod tests {
             actual.remove("agent.message").as_deref(),
             Some("45849f796f0739ce5baeb3287ec246c7710368e7549836af38634c6b6a31cd91")
         );
+        // Fork (herdr-max): the pin methods are additive, advertised so the client
+        // shell's pin key, context menu and pin markers can pin and unpin agents
+        // and workspaces (fork issue 209).
+        for (method, digest) in [
+            (
+                "agent.pin",
+                "99d8dc8995050befb79b3fef74876dbfe3f480ae7e61bf3fa437b35140e18a45",
+            ),
+            (
+                "agent.unpin",
+                "de90c44ed6c2e0880e8a35619d8a4f7eda92db520c8bd07b0e96ce961a167bfb",
+            ),
+            (
+                "workspace.pin",
+                "1ae80549033183d3d149ad420d990c80a0c6d009b3a73df39f7fb2e10402d716",
+            ),
+            (
+                "workspace.unpin",
+                "a1763d190328eb1dc5baefed70f4f05eafadb23bd3fb762900e71a86683a87f3",
+            ),
+        ] {
+            assert_eq!(
+                actual.remove(method).as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
         let mut expected = expected;
         for method in [
             "pane.close",
@@ -509,6 +540,135 @@ mod tests {
                 "advertised endpoint method {method:?} is absent from the request schema"
             );
         }
+    }
+
+    /// Wire names of every `Method` the client shell source constructs or
+    /// matches, found by scanning `src/client` outside test code.
+    ///
+    /// The client refuses (`supports_endpoint_method`) and the server gate
+    /// rejects any method missing from `CLIENT_SHELL_METHODS`, so a method the
+    /// shell can push but the list omits fails silently in the TUI (issue 209:
+    /// pin and unpin). Scanning the source keeps this from drifting: a new
+    /// `Method::Foo` in the shell is picked up without editing a copied list.
+    fn client_shell_source_method_names() -> BTreeSet<String> {
+        fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read client source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    rust_files(&path, files);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && path.file_name().is_some_and(|name| name != "tests.rs")
+                {
+                    files.push(path);
+                }
+            }
+        }
+
+        fn normalize(name: &str) -> String {
+            name.chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .map(|c| c.to_ascii_lowercase())
+                .collect()
+        }
+
+        let schema = serde_json::to_value(schemars::schema_for!(crate::api::schema::Request))
+            .expect("request schema");
+        let mut wire_names = BTreeSet::new();
+        fn collect(value: &serde_json::Value, names: &mut BTreeSet<String>) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(name) = object
+                        .get("const")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| value.contains('.'))
+                    {
+                        names.insert(name.to_owned());
+                    }
+                    object.values().for_each(|value| collect(value, names));
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(|value| collect(value, names));
+                }
+                _ => {}
+            }
+        }
+        collect(&schema, &mut wire_names);
+        let mut by_variant = BTreeMap::new();
+        for name in &wire_names {
+            let previous = by_variant.insert(normalize(name), name.clone());
+            assert!(previous.is_none(), "ambiguous wire name {name}");
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/client");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        assert!(!files.is_empty(), "no client sources found under {root:?}");
+
+        let mut found = BTreeSet::new();
+        for file in files {
+            let source = std::fs::read_to_string(&file).expect("read client source");
+            let lines: Vec<&str> = source.lines().collect();
+            // Drop the trailing `#[cfg(test)] mod ...` block; the shell's
+            // production code never follows it.
+            let end = lines
+                .iter()
+                .enumerate()
+                .position(|(index, line)| {
+                    line.trim() == "#[cfg(test)]"
+                        && lines
+                            .get(index + 1)
+                            .is_some_and(|next| next.trim_start().starts_with("mod "))
+                })
+                .unwrap_or(lines.len());
+            for line in &lines[..end] {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let mut rest = *line;
+                while let Some(at) = rest.find("Method::") {
+                    let after = &rest[at + "Method::".len()..];
+                    let variant: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric())
+                        .collect();
+                    let attached = rest[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !variant.is_empty() && !attached {
+                        let wire = by_variant.get(&normalize(&variant)).unwrap_or_else(|| {
+                            panic!(
+                                "{}: Method::{variant} has no request schema entry",
+                                file.display()
+                            )
+                        });
+                        found.insert(wire.clone());
+                    }
+                    rest = after;
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_method_the_client_shell_sends_is_advertised() {
+        let sent = client_shell_source_method_names();
+        assert!(
+            sent.len() > 20 && sent.contains("pane.focus"),
+            "client method scan looks broken: {sent:?}"
+        );
+        let missing: Vec<&String> = sent
+            .iter()
+            .filter(|method| !CLIENT_SHELL_METHODS.contains(&method.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the client shell sends methods missing from CLIENT_SHELL_METHODS (the client and server gate refuse them): {missing:?}"
+        );
     }
 
     #[test]

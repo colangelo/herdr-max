@@ -332,6 +332,54 @@ mod tests {
             .is_empty());
     }
     #[test]
+    fn pin_and_unpin_pass_the_advertised_method_gate_for_agents_and_workspaces() {
+        for pinned in [false, true] {
+            let mut snapshot = super::super::tests::snapshot();
+            let pins = |id: &str| -> Option<std::collections::BTreeMap<String, u64>> {
+                Some(if pinned {
+                    [(id.to_owned(), 0)].into_iter().collect()
+                } else {
+                    Default::default()
+                })
+            };
+            snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+                workspace_pins: pins("ws_1"),
+                pane_pins: pins("w1:p1"),
+                ..Default::default()
+            });
+            let mut state =
+                ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+            state.set_snapshot(Box::new(snapshot));
+            // An unrestricted endpoint (methods: None) hides a missing advertisement.
+            state.set_endpoint_methods(Some(
+                crate::server::client_commands::supported_client_shell_method_names()
+                    .iter()
+                    .map(|method| (*method).to_owned())
+                    .collect(),
+            ));
+            let mut outcome = ClientShellInput::default();
+            state.toggle_workspace_pin("ws_1".into(), &mut outcome);
+            state.toggle_agent_pin("w1:p1".into(), &mut outcome);
+            let sent: Vec<&str> = outcome
+                .actions
+                .iter()
+                .filter_map(|action| match action {
+                    ClientShellAction::Endpoint { request, .. } => {
+                        Some(crate::api::api_method_name(&request.method))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let expected = if pinned {
+                vec!["workspace.unpin", "agent.unpin"]
+            } else {
+                vec!["workspace.pin", "agent.pin"]
+            };
+            assert_eq!(sent, expected, "pinned={pinned}");
+            assert!(state.visible_endpoint_notice.is_none(), "pinned={pinned}");
+        }
+    }
+    #[test]
     fn a_group_is_pinned_when_a_hidden_member_is_and_moves_whole() {
         let mut snapshot = super::super::tests::snapshot();
         let mut parent = snapshot.workspaces[0].clone();
