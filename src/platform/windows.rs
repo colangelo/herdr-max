@@ -4170,17 +4170,22 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn cmd");
+            // A shared CI runner can take many seconds to start a 32-bit cmd and
+            // run its `cd`. The loop leaves on the first match, so the generous
+            // deadline costs nothing when the machine is quick; the wait is
+            // reported so a failure says slow or wrong.
             let observe = |expected: &PathBuf| {
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let started = Instant::now();
+                let deadline = started + Duration::from_secs(30);
                 loop {
                     let observed = super::process_cwd(child.id());
                     if observed.as_ref() == Some(expected) || Instant::now() >= deadline {
-                        break observed;
+                        break (observed, started.elapsed());
                     }
                     thread::sleep(Duration::from_millis(20));
                 }
             };
-            let initial = observe(&cwd);
+            let (initial, initial_wait) = observe(&cwd);
             use std::io::Write;
             writeln!(
                 child.stdin.as_ref().unwrap(),
@@ -4188,20 +4193,27 @@ mod tests {
                 changed.display()
             )
             .expect("change cmd cwd");
-            let after_cd = observe(&changed);
+            let (after_cd, cd_wait) = observe(&changed);
             let pane_cwd = super::pane_process_cwd(child.id());
             let _ = child.kill();
             let _ = child.wait();
-            observations.push((shell, initial, after_cd, pane_cwd));
+            observations.push((shell, initial, initial_wait, after_cd, cd_wait, pane_cwd));
         }
         let _ = fs::remove_dir_all(&cwd);
-        for (shell, initial, after_cd, pane_cwd) in observations {
-            assert_eq!(initial, Some(cwd.clone()), "{} launch cwd", shell.display());
+        for (shell, initial, initial_wait, after_cd, cd_wait, pane_cwd) in observations {
+            assert_eq!(
+                initial,
+                Some(cwd.clone()),
+                "{} launch cwd (waited {} ms)",
+                shell.display(),
+                initial_wait.as_millis()
+            );
             assert_eq!(
                 after_cd,
                 Some(changed.clone()),
-                "{} live cd",
-                shell.display()
+                "{} live cd (waited {} ms)",
+                shell.display(),
+                cd_wait.as_millis()
             );
             assert_eq!(pane_cwd, Some(changed.clone()), "ordinary shell owns cwd");
         }
