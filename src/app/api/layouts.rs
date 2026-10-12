@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use ratatui::layout::Direction;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutBalanceParams, LayoutDescription,
-    LayoutExportParams, LayoutNode, LayoutPane, LayoutPreset, LayoutSetPresetParams,
-    LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
+    AppliedLayoutPreset, EventData, EventEnvelope, EventKind, LayoutApplyParams,
+    LayoutApplyPresetParams, LayoutBalanceParams, LayoutDescription, LayoutExportParams,
+    LayoutNode, LayoutPane, LayoutPreset, LayoutSetPresetParams, LayoutSetSplitRatioParams,
+    ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
 use crate::layout::{LayoutPreset as CoreLayoutPreset, Node, PaneId};
@@ -304,10 +305,33 @@ impl App {
             LayoutPreset::EvenVertical => CoreLayoutPreset::EvenVertical,
             LayoutPreset::Tiled => CoreLayoutPreset::Tiled,
         };
-        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&LayoutExportParams {
-            tab_id: params.tab_id,
-            pane_id: params.pane_id,
-        }) else {
+        self.apply_layout_preset(id, params.tab_id, params.pane_id, preset)
+    }
+
+    pub(super) fn handle_layout_apply_preset(
+        &mut self,
+        id: String,
+        params: LayoutApplyPresetParams,
+    ) -> String {
+        let preset = match params.preset {
+            AppliedLayoutPreset::EvenHorizontal => CoreLayoutPreset::EvenHorizontal,
+            AppliedLayoutPreset::EvenVertical => CoreLayoutPreset::EvenVertical,
+            AppliedLayoutPreset::Tiled => CoreLayoutPreset::Tiled,
+            AppliedLayoutPreset::MainVertical => CoreLayoutPreset::MainVertical,
+        };
+        self.apply_layout_preset(id, params.tab_id, params.pane_id, preset)
+    }
+
+    fn apply_layout_preset(
+        &mut self,
+        id: String,
+        tab_id: Option<String>,
+        pane_id: Option<String>,
+        preset: CoreLayoutPreset,
+    ) -> String {
+        let Some((ws_idx, tab_idx)) =
+            self.resolve_layout_export_target(&LayoutExportParams { tab_id, pane_id })
+        else {
             return encode_error(id, "layout_not_found", "layout target not found");
         };
 
@@ -894,6 +918,55 @@ mod tests {
         };
         assert_eq!(direction, SplitDirection::Right); // horizontal row
         assert!((ratio - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn layout_apply_preset_handles_public_request_and_preserves_focus() {
+        let mut app = app_with_workspace();
+        app.state.workspaces[0].test_split(Direction::Vertical);
+        app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let focused = app.state.workspaces[0].tabs[0].layout.focused();
+        let focus_id = app.public_pane_id(0, focused).unwrap();
+        let request = crate::api::schema::Request {
+            id: "main".into(),
+            method: crate::api::schema::Method::LayoutApplyPreset(
+                crate::api::schema::LayoutApplyPresetParams {
+                    tab_id: Some(app.public_tab_id(0, 0).unwrap()),
+                    pane_id: None,
+                    preset: crate::api::schema::AppliedLayoutPreset::MainVertical,
+                },
+            ),
+        };
+        let response = app.handle_api_request(request);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutPresetApplied { layout } = success.result else {
+            panic!("expected applied preset");
+        };
+        assert_eq!(layout.focused_pane_id, focus_id);
+        let LayoutNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } = layout.root
+        else {
+            panic!("root split");
+        };
+        assert_eq!(direction, SplitDirection::Right);
+        assert_eq!(ratio, 0.5);
+        assert!(
+            matches!(*first, LayoutNode::Pane { pane } if pane.pane_id.as_deref() == Some(&focus_id))
+        );
+        assert!(matches!(
+            *second,
+            LayoutNode::Split {
+                direction: SplitDirection::Down,
+                ratio: 0.5,
+                ..
+            }
+        ));
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), focused);
     }
 
     #[tokio::test]

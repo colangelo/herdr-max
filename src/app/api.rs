@@ -1398,6 +1398,9 @@ impl App {
             Method::LayoutBalance(params) => {
                 return self.handle_layout_balance(request.id, params);
             }
+            Method::LayoutApplyPreset(params) => {
+                return self.handle_layout_apply_preset(request.id, params);
+            }
             Method::LayoutSetPreset(params) => {
                 return self.handle_layout_set_preset(request.id, params);
             }

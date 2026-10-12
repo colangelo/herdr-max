@@ -20,6 +20,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "command.invoke",
     "integration.install",
     "integration.list",
+    "layout.apply_preset",
     "layout.balance",
     "layout.set_preset",
     "layout.set_split_ratio",
@@ -338,6 +339,10 @@ mod tests {
         assert_eq!(
             actual.remove("layout.set_preset").as_deref(),
             Some("7e72c1b5a208a26bc752064997eb5a27185b31ea16ceef11dc810f5e7a50fc30")
+        );
+        assert_eq!(
+            actual.remove("layout.apply_preset").as_deref(),
+            Some("10f428e7fb4e37db05f268f4b3f9e9f32e6431b3ffddc1d8b0361f4c0cff0ba2")
         );
         // Freeze additive methods separately without rewriting the published fixture.
         assert_eq!(
