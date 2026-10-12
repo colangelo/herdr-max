@@ -219,6 +219,17 @@ On **macOS**, the letters `e`, `i`, `n`, and `u` are **skipped**. Those are Opti
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
+### Layout cycling
+
+`keys.next_layout` defaults to `prefix+space`. It cycles `even-horizontal` → `even-vertical` → `tiled` → `main-vertical`; the last step is available when the connected server advertises `layout.apply_preset`. Older servers retain the original three steps. The applied layout name briefly appears in a feedback toast.
+
+```toml
+[keys]
+next_layout = "prefix+space"
+```
+
+`main-vertical` puts the focused pane in the left half and preserves focus. Up to four other panes stack on the right in their current layout traversal order. Five or more use two equal-width right columns, filled top-down, with the first taking the extra pane for odd counts.
+
 ## Custom command keybindings
 
 Custom commands use the same keybinding syntax.

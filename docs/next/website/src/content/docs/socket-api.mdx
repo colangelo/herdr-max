@@ -107,7 +107,7 @@ Raw socket method names use dot notation:
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
 | Popup | `popup.close`, `plugin.popup.close` |
-| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset` |
+| Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset`, `layout.apply_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.message`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
@@ -271,6 +271,14 @@ near-square grid). Unlike `layout.balance`, this restructures the tree. Omit
 
 ```json
 {"id":"req_preset","method":"layout.set_preset","params":{"tab_id":"w1:t1","preset":"tiled"}}
+```
+
+`layout.apply_preset` is an additive method with its own `LayoutApplyPresetParams` and `AppliedLayoutPreset` enum. It accepts `even_horizontal`, `even_vertical`, `tiled`, and `main_vertical`. It uses the same mutually exclusive optional `tab_id` / `pane_id` targets (neither selects the active tab) and returns `LayoutPresetApplied` with the resulting layout. The original `layout.set_preset` contract still accepts only its three original values.
+
+`main_vertical` places the focused pane in the left half without changing focus. Other panes keep their current layout traversal order. One through four others form an equal-height right stack. Five or more form two equal-width right columns: the first takes `ceil(n/2)` panes, the second the remainder, each filled top-down. One pane is a no-op; two panes split equally left/right. Compatible clients must check the advertised `layout.apply_preset` method before offering the new preset.
+
+```json
+{"id":"req_main","method":"layout.apply_preset","params":{"tab_id":"w1:t1","preset":"main_vertical"}}
 ```
 
 Process-launching methods accept an `env` object. Herdr applies those key/value

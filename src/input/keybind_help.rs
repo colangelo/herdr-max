@@ -394,6 +394,7 @@ pub(crate) fn command_table(
                     "balance panes",
                 ),
                 act(
+                    // Includes main-vertical when the server advertises layout.apply_preset.
                     KeybindAction::NextLayout,
                     binding_label(&keybinds.next_layout),
                     "cycle layout",

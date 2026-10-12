@@ -243,7 +243,7 @@ Workspace and tab creation, and pane splitting, leave focus unchanged by default
 herdr pane list [--workspace <workspace_id>]
 herdr pane current [--pane ID|--current]
 herdr pane get <pane_id>
-herdr pane layout [--pane ID|--current]
+herdr pane layout [--preset even-horizontal|even-vertical|tiled|main-vertical] [--pane ID|--current]
 herdr pane process-info [--pane ID|--current]
 herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
 herdr pane edges [--pane ID|--current]
@@ -263,6 +263,9 @@ herdr pane clear [<pane_id>|--pane ID|--current]
 herdr pane close <pane_id> [--force]
 herdr pane respawn <pane_id> [--force]
 ```
+
+Without `--preset`, `pane layout` reads the pane geometry. With it, the command rebuilds the target pane's tab. `--set` remains an alias for `--preset`; `even-h`, `even-v` and `main-v` abbreviate the corresponding names. For example, `herdr pane layout --preset main-vertical --current` places the tab's focused pane on the left half and stacks the other panes on the right in current pane order. Five or more other panes use two right columns, filled top-down with the first taking `ceil(n/2)` panes. Focus stays unchanged. The new preset uses `layout.apply_preset` and requires a server supporting that method; the three original presets keep using `layout.set_preset`.
+
 
 `pane close`, `tab close` and `workspace close` never put a question on anyone's
 screen. When the close would drop open todos, the command returns

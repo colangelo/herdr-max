@@ -947,7 +947,7 @@
           "key": "keys.next_layout",
           "type": "keybinding",
           "default": "\"prefix+space\"",
-          "description": "Cycle the tab through layout presets (even-h -> even-v -> tiled)."
+          "description": "Cycle the tab through layout presets (even-h -> even-v -> tiled -> main-vertical (when supported))."
         },
         {
           "key": "keys.zoom",

@@ -236,7 +236,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_pane_up = ""     # optional, e.g. "ctrl+shift+alt+up"
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
 # balance_panes = "prefix+="              # balance all panes in the current tab to equal sizes
-# next_layout = "prefix+space"            # cycle the tab through layout presets (even-h -> even-v -> tiled)
+# next_layout = "prefix+space"            # cycle the tab through layout presets (even-h -> even-v -> tiled -> main-vertical)
 # toggle_sidebar = "prefix+b"
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.

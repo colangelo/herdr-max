@@ -858,7 +858,7 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Balance all panes in the current tab to equal sizes. Default: "prefix+="
     pub balance_panes: BindingConfig,
-    /// Cycle the tab through layout presets (even-h -> even-v -> tiled). Default: "prefix+space"
+    /// Cycle the tab through layout presets (even-h -> even-v -> tiled -> main-vertical). Default: "prefix+space"
     pub next_layout: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
