@@ -752,6 +752,9 @@ pub(super) enum PendingEndpointKind {
         generation: u64,
     },
     Generic,
+    LayoutPreset {
+        name: &'static str,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
