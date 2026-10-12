@@ -1,10 +1,10 @@
 use crate::api::schema::{
-    EmptyParams, LayoutBalanceParams, LayoutSetPresetParams, Method, PaneCloseParams,
-    PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams, PaneRenameParams,
-    PaneResizeParams, PaneRespawnParams, PaneSplitParams, PaneSwapParams, PaneZoomParams, Request,
-    TabCloseParams, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
-    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
-    WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
+    EmptyParams, LayoutBalanceParams, Method, PaneCloseParams, PaneFocusDirectionParams,
+    PaneInputSetParams, PaneMoveParams, PaneRenameParams, PaneResizeParams, PaneRespawnParams,
+    PaneSplitParams, PaneSwapParams, PaneZoomParams, Request, TabCloseParams, TabCreateParams,
+    TabListParams, TabRenameParams, TabTarget, WorkspaceCloseParams, WorkspaceCreateParams,
+    WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams, WorktreeListParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 fn print_method_response(id: &'static str, method: Method) -> std::io::Result<i32> {
@@ -157,6 +157,6 @@ pub(super) fn pane_balance(params: LayoutBalanceParams) -> std::io::Result<i32> 
     print_method_response("cli:pane:balance", Method::LayoutBalance(params))
 }
 
-pub(super) fn pane_layout_set_preset(params: LayoutSetPresetParams) -> std::io::Result<i32> {
-    print_method_response("cli:pane:layout-set", Method::LayoutSetPreset(params))
+pub(super) fn pane_layout_preset(method: Method) -> std::io::Result<i32> {
+    print_method_response("cli:pane:layout-set", method)
 }

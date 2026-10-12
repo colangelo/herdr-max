@@ -1,9 +1,9 @@
 use crate::api::schema::{
-    LayoutBalanceParams, LayoutPreset, LayoutSetPresetParams, Method, OutputMatch,
-    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneFocusDirectionParams,
-    PaneInputSetParams, PaneLayoutParams, PaneListParams, PaneMoveDestination, PaneMoveParams,
-    PaneNeighborParams, PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    AppliedLayoutPreset, LayoutApplyPresetParams, LayoutBalanceParams, LayoutPreset,
+    LayoutSetPresetParams, Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
+    PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
+    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
@@ -145,20 +145,23 @@ fn parse_pane_current_args(
 }
 
 fn pane_layout(args: &[String]) -> std::io::Result<i32> {
-    // `--set <preset>` rebuilds the layout into a preset; without it this is the
+    // `--preset <preset>` (also `--set`) rebuilds the layout into a preset; without it this is the
     // read-only layout query. Remaining args select the target (--pane/--current).
-    let mut preset: Option<LayoutPreset> = None;
+    let mut preset: Option<AppliedLayoutPreset> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--set" => {
+            "--set" | "--preset" => {
                 let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --set (even-h|even-v|tiled)");
+                    eprintln!(
+                        "missing value for {} (even-horizontal|even-vertical|tiled|main-vertical)",
+                        args[index]
+                    );
                     return Ok(2);
                 };
                 let Some(parsed) = parse_layout_preset(value) else {
-                    eprintln!("unknown layout preset: {value} (even-h|even-v|tiled)");
+                    eprintln!("unknown layout preset: {value} (even-horizontal|even-vertical|tiled|main-vertical)");
                     return Ok(2);
                 };
                 preset = Some(parsed);
@@ -180,11 +183,7 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
     };
 
     match preset {
-        Some(preset) => super::runtime::pane_layout_set_preset(LayoutSetPresetParams {
-            tab_id: None,
-            pane_id,
-            preset,
-        }),
+        Some(preset) => super::runtime::pane_layout_preset(layout_preset_method(preset, pane_id)),
         None => super::print_response(&super::send_request(&Request {
             id: "cli:pane:layout".into(),
             method: Method::PaneLayout(PaneLayoutParams { pane_id }),
@@ -192,13 +191,34 @@ fn pane_layout(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
-fn parse_layout_preset(value: &str) -> Option<LayoutPreset> {
+fn parse_layout_preset(value: &str) -> Option<AppliedLayoutPreset> {
     match value {
-        "even-h" | "even-horizontal" => Some(LayoutPreset::EvenHorizontal),
-        "even-v" | "even-vertical" => Some(LayoutPreset::EvenVertical),
-        "tiled" => Some(LayoutPreset::Tiled),
+        "even-h" | "even-horizontal" => Some(AppliedLayoutPreset::EvenHorizontal),
+        "even-v" | "even-vertical" => Some(AppliedLayoutPreset::EvenVertical),
+        "tiled" => Some(AppliedLayoutPreset::Tiled),
+        "main-v" | "main-vertical" => Some(AppliedLayoutPreset::MainVertical),
         _ => None,
     }
+}
+
+fn layout_preset_method(preset: AppliedLayoutPreset, pane_id: Option<String>) -> Method {
+    let legacy = match preset {
+        AppliedLayoutPreset::EvenHorizontal => LayoutPreset::EvenHorizontal,
+        AppliedLayoutPreset::EvenVertical => LayoutPreset::EvenVertical,
+        AppliedLayoutPreset::Tiled => LayoutPreset::Tiled,
+        AppliedLayoutPreset::MainVertical => {
+            return Method::LayoutApplyPreset(LayoutApplyPresetParams {
+                tab_id: None,
+                pane_id,
+                preset,
+            })
+        }
+    };
+    Method::LayoutSetPreset(LayoutSetPresetParams {
+        tab_id: None,
+        pane_id,
+        preset: legacy,
+    })
 }
 
 fn pane_balance(args: &[String]) -> std::io::Result<i32> {
@@ -2069,7 +2089,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
     eprintln!("  herdr pane current [--pane ID|--current]");
     eprintln!("  herdr pane get <pane_id>");
-    eprintln!("  herdr pane layout [--set even-h|even-v|tiled] [--pane ID|--current]");
+    eprintln!("  herdr pane layout [--preset even-horizontal|even-vertical|tiled|main-vertical] [--pane ID|--current]");
     eprintln!("  herdr pane balance [--pane ID|--current]");
     eprintln!("  herdr pane process-info [--pane ID|--current]");
     eprintln!("  herdr pane neighbor --direction left|right|up|down [--pane ID|--current]");
@@ -2107,6 +2127,54 @@ fn print_pane_help() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn layout_preset_routes_main_through_additive_method_and_keeps_legacy() {
+        let pane = Some("w1:p2".to_owned());
+        assert!(
+            matches!(layout_preset_method(AppliedLayoutPreset::MainVertical, pane.clone()),
+            Method::LayoutApplyPreset(p) if p.pane_id == pane && p.tab_id.is_none() && p.preset == AppliedLayoutPreset::MainVertical)
+        );
+        for (preset, legacy) in [
+            (
+                AppliedLayoutPreset::EvenHorizontal,
+                LayoutPreset::EvenHorizontal,
+            ),
+            (
+                AppliedLayoutPreset::EvenVertical,
+                LayoutPreset::EvenVertical,
+            ),
+            (AppliedLayoutPreset::Tiled, LayoutPreset::Tiled),
+        ] {
+            assert!(matches!(layout_preset_method(preset, pane.clone()),
+                Method::LayoutSetPreset(p) if p.pane_id == pane && p.tab_id.is_none() && p.preset == legacy));
+        }
+    }
+
+    #[test]
+    fn layout_preset_parses_main_vertical_and_alias() {
+        use crate::api::schema::AppliedLayoutPreset;
+        assert_eq!(
+            parse_layout_preset("main-vertical"),
+            Some(AppliedLayoutPreset::MainVertical)
+        );
+        assert_eq!(
+            parse_layout_preset("main-v"),
+            Some(AppliedLayoutPreset::MainVertical)
+        );
+        assert_eq!(
+            parse_layout_preset("even-h"),
+            Some(AppliedLayoutPreset::EvenHorizontal)
+        );
+        assert_eq!(
+            parse_layout_preset("even-vertical"),
+            Some(AppliedLayoutPreset::EvenVertical)
+        );
+        assert_eq!(
+            parse_layout_preset("tiled"),
+            Some(AppliedLayoutPreset::Tiled)
+        );
+        assert_eq!(parse_layout_preset("unknown"), None);
+    }
     use super::*;
 
     fn args(values: &[&str]) -> Vec<String> {

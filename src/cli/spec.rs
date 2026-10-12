@@ -603,7 +603,9 @@ fn pane_command() -> Command {
         .subcommand(id_command("get", "pane_id", "Show a pane"))
         .subcommand(
             Command::new("layout")
-                .about("Show pane layout information")
+                .about("Show pane geometry or apply a layout preset")
+                .arg(option("preset", "PRESET").visible_alias("set")
+                    .value_parser(["even-horizontal", "even-h", "even-vertical", "even-v", "tiled", "main-vertical", "main-v"]))
                 .args(current_pane_args()),
         )
         .subcommand(
@@ -1206,6 +1208,24 @@ fn path_arg(name: &'static str, value_name: &'static str) -> Arg {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pane_layout_preset_options_are_discoverable_and_parseable() {
+        for option in ["--preset", "--set"] {
+            for preset in [
+                "even-horizontal",
+                "even-h",
+                "even-vertical",
+                "even-v",
+                "tiled",
+                "main-vertical",
+                "main-v",
+            ] {
+                assert!(super::command()
+                    .try_get_matches_from(["herdr", "pane", "layout", option, preset, "--current"])
+                    .is_ok());
+            }
+        }
+    }
     use clap::{Arg, Command};
 
     fn command_path<'a>(cmd: &'a Command, path: &[&str]) -> &'a Command {
