@@ -686,6 +686,14 @@ impl ClientShellState {
                 return (true, outcome.actions);
             }
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::LayoutPreset { name } => {
+                if matches!(
+                    result,
+                    Ok(crate::api::schema::ResponseResult::LayoutPresetApplied { .. })
+                ) {
+                    return (self.push_feedback_toast("layout applied", name), Vec::new());
+                }
+            }
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {

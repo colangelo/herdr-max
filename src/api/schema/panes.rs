@@ -221,6 +221,32 @@ pub struct LayoutSetPresetParams {
     pub preset: LayoutPreset,
 }
 
+/// Presets accepted by the additive `layout.apply_preset` method. The original
+/// `LayoutPreset` remains closed to preserve the published endpoint contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedLayoutPreset {
+    /// One equal-width row of panes.
+    EvenHorizontal,
+    /// One equal-height column of panes.
+    EvenVertical,
+    /// A near-square grid.
+    Tiled,
+    /// Focused pane in the left half; others in one or two right columns.
+    MainVertical,
+}
+
+/// Rebuild a tab into a preset, preserving focus. Select by `tab_id` or
+/// `pane_id` (mutually exclusive); neither selects the active tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutApplyPresetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    pub preset: AppliedLayoutPreset,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LayoutDescription {
     pub workspace_id: String,

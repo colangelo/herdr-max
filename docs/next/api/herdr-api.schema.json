@@ -1958,6 +1958,31 @@
           ],
           "type": "object"
         },
+        "AppliedLayoutPreset": {
+          "description": "Presets accepted by the additive `layout.apply_preset` method. The original\n`LayoutPreset` remains closed to preserve the published endpoint contract.",
+          "oneOf": [
+            {
+              "const": "even_horizontal",
+              "description": "One equal-width row of panes.",
+              "type": "string"
+            },
+            {
+              "const": "even_vertical",
+              "description": "One equal-height column of panes.",
+              "type": "string"
+            },
+            {
+              "const": "tiled",
+              "description": "A near-square grid.",
+              "type": "string"
+            },
+            {
+              "const": "main_vertical",
+              "description": "Focused pane in the left half; others in one or two right columns.",
+              "type": "string"
+            }
+          ]
+        },
         "ClientShellSurfaceSetParams": {
           "description": "Updates whether the requesting client shell receives and controls pane presentation.",
           "properties": {
@@ -2488,6 +2513,30 @@
           },
           "required": [
             "root"
+          ],
+          "type": "object"
+        },
+        "LayoutApplyPresetParams": {
+          "description": "Rebuild a tab into a preset, preserving focus. Select by `tab_id` or\n`pane_id` (mutually exclusive); neither selects the active tab.",
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "preset": {
+              "$ref": "#/schemas/request/$defs/AppliedLayoutPreset"
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "preset"
           ],
           "type": "object"
         },
@@ -6590,6 +6639,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/LayoutSetPresetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.apply_preset",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutApplyPresetParams"
             }
           },
           "required": [

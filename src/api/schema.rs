@@ -201,6 +201,8 @@ pub enum Method {
     LayoutBalance(LayoutBalanceParams),
     #[serde(rename = "layout.set_preset")]
     LayoutSetPreset(LayoutSetPresetParams),
+    #[serde(rename = "layout.apply_preset")]
+    LayoutApplyPreset(LayoutApplyPresetParams),
     #[serde(rename = "pane.neighbor")]
     PaneNeighbor(PaneNeighborParams),
     #[serde(rename = "pane.edges")]

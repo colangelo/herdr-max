@@ -80,14 +80,17 @@ pub enum LayoutPreset {
     EvenVertical,
     /// A near-square grid.
     Tiled,
+    /// Focused pane on the left; other panes stacked in one or two right columns.
+    MainVertical,
 }
 
 impl LayoutPreset {
     /// The cycle order used by a "next layout" action.
-    pub const NEXT_CYCLE: [LayoutPreset; 3] = [
+    pub const NEXT_CYCLE: [LayoutPreset; 4] = [
         LayoutPreset::EvenHorizontal,
         LayoutPreset::EvenVertical,
         LayoutPreset::Tiled,
+        LayoutPreset::MainVertical,
     ];
 }
 
@@ -393,17 +396,18 @@ impl TileLayout {
     }
 
     /// Rebuild the tree into a tmux-style layout preset, preserving pane ids
-    /// (in their current left-to-right order) and the focused pane. Unlike
+    /// and the focused pane. The original presets retain traversal order. Unlike
     /// [`balance`](Self::balance), this restructures the tree: `EvenHorizontal`
     /// becomes one equal-width row, `EvenVertical` one equal-height column, and
-    /// `Tiled` a near-square grid. No-op for a single pane. Returns whether a
-    /// preset was applied.
+    /// `Tiled` a near-square grid. `MainVertical` puts the focused pane in the
+    /// left half and the others, in current order, in one or two right columns.
+    /// No-op for a single pane. Returns whether a preset was applied.
     pub fn apply_preset(&mut self, preset: LayoutPreset) -> bool {
         let ids = self.pane_ids();
         if ids.len() < 2 {
             return false;
         }
-        self.root = build_preset(&ids, preset);
+        self.root = build_preset(&ids, preset, self.focus);
         // Focus is unchanged: the same pane ids are present, just re-arranged.
         true
     }
@@ -926,12 +930,52 @@ fn balance_node(node: &mut Node) {
     }
 }
 
-fn build_preset(ids: &[PaneId], preset: LayoutPreset) -> Node {
+fn build_preset(ids: &[PaneId], preset: LayoutPreset, focus: PaneId) -> Node {
     match preset {
         LayoutPreset::EvenHorizontal => build_even_chain(ids, Direction::Horizontal),
         LayoutPreset::EvenVertical => build_even_chain(ids, Direction::Vertical),
         LayoutPreset::Tiled => build_tiled(ids),
+        LayoutPreset::MainVertical => build_main_vertical(ids, focus),
     }
+}
+
+/// The main pane takes half the width. The remaining panes keep traversal
+/// order, stacked top-down in one column or, from five others, two columns.
+fn build_main_vertical(ids: &[PaneId], focus: PaneId) -> Node {
+    let others: Vec<_> = ids.iter().copied().filter(|id| *id != focus).collect();
+    let right = if others.len() <= 4 {
+        build_main_stack(&others)
+    } else {
+        let middle = others.len().div_ceil(2);
+        Node::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(build_main_stack(&others[..middle])),
+            second: Box::new(build_main_stack(&others[middle..])),
+        }
+    };
+    Node::Split {
+        direction: Direction::Horizontal,
+        ratio: 0.5,
+        first: Box::new(Node::Pane(focus)),
+        second: Box::new(right),
+    }
+}
+
+/// Equal-height stack without the legacy presets' 10% ratio floor, which
+/// would make columns of more than ten panes uneven.
+fn build_main_stack(ids: &[PaneId]) -> Node {
+    let (&last, remaining) = ids.split_last().expect("main stack has at least one pane");
+    let mut stack = Node::Pane(last);
+    for (index, &id) in remaining.iter().rev().enumerate() {
+        stack = Node::Split {
+            direction: Direction::Vertical,
+            ratio: 1.0 / (index + 2) as f32,
+            first: Box::new(Node::Pane(id)),
+            second: Box::new(stack),
+        };
+    }
+    stack
 }
 
 /// One equal-sized row/column: a right-leaning chain of `dir` splits whose
@@ -1478,10 +1522,168 @@ mod tests {
         }
     }
 
+    fn assert_main_vertical(count: u32, expected: &[Rect]) {
+        let ids: Vec<_> = (1..=count).map(pane).collect();
+        let focus = pane(2);
+        let mut layout =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(1));
+        layout.set_focus(focus);
+        let history = layout.prev_focus;
+        assert!(layout.apply_preset(LayoutPreset::MainVertical));
+        assert_eq!(layout.focused(), focus);
+        assert_eq!(layout.prev_focus, history);
+        let mut order = vec![focus];
+        order.extend(ids.into_iter().filter(|id| *id != focus));
+        assert_eq!(layout.pane_ids(), order);
+        let Node::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } = layout.root()
+        else {
+            panic!("main pane needs a root split");
+        };
+        assert_eq!(*direction, Direction::Horizontal);
+        assert_eq!(*ratio, 0.5);
+        assert!(matches!(first.as_ref(), Node::Pane(id) if *id == focus));
+        fn assert_stack(node: &Node, ids: &[PaneId]) {
+            if ids.len() == 1 {
+                assert!(matches!(node, Node::Pane(id) if *id == ids[0]));
+            } else {
+                let Node::Split {
+                    direction,
+                    ratio,
+                    first,
+                    second,
+                } = node
+                else {
+                    panic!("stack needs a vertical chain");
+                };
+                assert_eq!(*direction, Direction::Vertical);
+                assert!((*ratio - 1.0 / ids.len() as f32).abs() < f32::EPSILON);
+                assert_stack(first, &ids[..1]);
+                assert_stack(second, &ids[1..]);
+            }
+        }
+        let others = &order[1..];
+        if count <= 5 {
+            assert_stack(second, others);
+        } else {
+            let Node::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } = second.as_ref()
+            else {
+                panic!("five or more others need two columns");
+            };
+            assert_eq!(*direction, Direction::Horizontal);
+            assert_eq!(*ratio, 0.5);
+            let middle = others.len().div_ceil(2);
+            assert_stack(first, &others[..middle]);
+            assert_stack(second, &others[middle..]);
+        }
+        let panes = layout.panes(Rect::new(0, 0, 290, 54));
+        assert_eq!(
+            panes.iter().map(|info| info.rect).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(panes.iter().filter(|info| info.is_focused).count(), 1);
+        assert!(panes[0].is_focused);
+    }
+
+    #[test]
+    fn preset_main_vertical_two_panes() {
+        assert_main_vertical(2, &[Rect::new(0, 0, 145, 54), Rect::new(145, 0, 145, 54)]);
+    }
+    #[test]
+    fn preset_main_vertical_three_panes() {
+        assert_main_vertical(
+            3,
+            &[
+                Rect::new(0, 0, 145, 54),
+                Rect::new(145, 0, 145, 27),
+                Rect::new(145, 27, 145, 27),
+            ],
+        );
+    }
+    #[test]
+    fn preset_main_vertical_four_panes() {
+        assert_main_vertical(
+            4,
+            &[
+                Rect::new(0, 0, 145, 54),
+                Rect::new(145, 0, 145, 18),
+                Rect::new(145, 18, 145, 18),
+                Rect::new(145, 36, 145, 18),
+            ],
+        );
+    }
+    #[test]
+    fn preset_main_vertical_five_panes() {
+        assert_main_vertical(
+            5,
+            &[
+                Rect::new(0, 0, 145, 54),
+                Rect::new(145, 0, 145, 14),
+                Rect::new(145, 14, 145, 13),
+                Rect::new(145, 27, 145, 14),
+                Rect::new(145, 41, 145, 13),
+            ],
+        );
+    }
+    #[test]
+    fn preset_main_vertical_six_panes() {
+        assert_main_vertical(
+            6,
+            &[
+                Rect::new(0, 0, 145, 54),
+                Rect::new(145, 0, 73, 18),
+                Rect::new(145, 18, 73, 18),
+                Rect::new(145, 36, 73, 18),
+                Rect::new(218, 0, 72, 27),
+                Rect::new(218, 27, 72, 27),
+            ],
+        );
+    }
+    #[test]
+    fn preset_main_vertical_nine_panes() {
+        assert_main_vertical(
+            9,
+            &[
+                Rect::new(0, 0, 145, 54),
+                Rect::new(145, 0, 73, 14),
+                Rect::new(145, 14, 73, 13),
+                Rect::new(145, 27, 73, 14),
+                Rect::new(145, 41, 73, 13),
+                Rect::new(218, 0, 72, 14),
+                Rect::new(218, 14, 72, 13),
+                Rect::new(218, 27, 72, 14),
+                Rect::new(218, 41, 72, 13),
+            ],
+        );
+    }
+
+    #[test]
+    fn preset_main_vertical_large_columns_keep_equal_heights() {
+        let ids: Vec<_> = (1..=25).map(pane).collect();
+        let mut layout =
+            TileLayout::from_saved(build_even_chain(&ids, Direction::Horizontal), pane(2));
+        assert!(layout.apply_preset(LayoutPreset::MainVertical));
+        let panes = layout.panes(Rect::new(0, 0, 290, 120));
+        assert_eq!(panes[0].rect, Rect::new(0, 0, 145, 120));
+        for info in &panes[1..] {
+            assert_eq!(info.rect.height, 10);
+        }
+    }
+
     #[test]
     fn preset_single_pane_is_noop() {
         let (mut layout, _root) = TileLayout::new();
         assert!(!layout.apply_preset(LayoutPreset::Tiled));
+        assert!(!layout.apply_preset(LayoutPreset::MainVertical));
     }
 
     #[test]

@@ -46,6 +46,12 @@ A working agent takes a typed line at its next pause. `alt+enter` interrupts it 
 
 Sending as you to a session on another machine is not built yet: from a remote server's view a message goes as a note. `palette.send.cross_machine_typed` is reserved for it and has no effect. The same send is available from scripts as `herdr agent message` and the `agent.message` API method.
 
+## Layout presets
+
+`prefix+space` (`keys.next_layout`) cycles the current tab through `even-horizontal`, `even-vertical`, `tiled`, then `main-vertical`. The applied name briefly appears in the existing feedback toast. Servers without `layout.apply_preset` keep the original three-step cycle.
+
+`main-vertical` puts the pane focused when you apply it in the left half, without changing focus. The other panes keep their current layout traversal order: one through four stack equally on the right. Five or more fill two equal-width right columns, top-down, with the first column taking the extra pane when the count is odd. Three panes give a main pane and two stacked panes; six panes give a main pane and columns of three and two. Two panes split equally left/right; one pane stays unchanged.
+
 ## The rest, by task
 
 Panes:
@@ -63,7 +69,7 @@ Panes:
 | Swap panes | `prefix+shift+h/j/k/l` |
 | Resize mode | `prefix+r` |
 | Balance panes (even split per axis) | `prefix+=` |
-| Cycle layout preset (even-h → even-v → tiled) | `prefix+space` |
+| Cycle layout preset (even-h → even-v → tiled → main-vertical) | `prefix+space` |
 | Copy mode | `prefix+[` |
 | Copy mode, scrolled up a page / half page / line | `prefix+PageUp` / `prefix+ctrl+u` / `prefix+ctrl+k` |
 | Scroll back down a page / half page / line | `prefix+PageDown` / `prefix+ctrl+d` / `prefix+ctrl+j` |
