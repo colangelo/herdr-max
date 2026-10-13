@@ -4,6 +4,7 @@ mod agent_wait;
 mod agents;
 mod client;
 mod contracts;
+mod fork_contracts;
 mod harness;
 mod hooks;
 mod panes;

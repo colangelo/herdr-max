@@ -77,6 +77,11 @@ accounts for every one.
 - **Custom commands stay where they are** (agent message, send-text chunking, server status),
   wired into the group's dispatcher before the leaf lookup. Todo edit is a leaf; read --strip-dim
   is a serialized params field. Baseline f3fb2099 governs request shapes and supported commands.
+- **Read defaults:** retain serialized `strip_dim` when true; omit false with its existing
+  field-specific serde default, so upstream servers never see the inactive fork option.
+  The lead directed this compatibility encoding on 2026-10-13; no field name/type or
+  frozen endpoint shape changes. Keep upstream `tests/cli/contracts.rs` byte-identical and
+  put fork socket samples in `tests/cli/fork_contracts.rs`.
 - **Inventory sequencing:** commit the argv/request tests green on the baseline first; add the
   `Method::OPERATIONS` subset test after the merge compiles (that symbol does not exist before
   upstream 241b99cd). Lead approved these corrections in `.local/port/PROGRESS.md`, 2026-10-13.

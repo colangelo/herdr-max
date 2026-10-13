@@ -18,7 +18,7 @@ pub struct AgentReadParams {
     #[serde(default = "super::common::default_true")]
     pub strip_ansi: bool,
     /// Leave out faint (SGR 2) cells, for every source (fork issue 146).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strip_dim: bool,
 }
 

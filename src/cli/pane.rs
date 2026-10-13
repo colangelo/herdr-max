@@ -334,7 +334,7 @@ mod tests {
                 vec!["pane"],
                 "cli:pane:read",
                 "pane.read",
-                json!({"pane_id": "pane", "source": "recent", "format": "text", "strip_ansi": true, "strip_dim": false}),
+                json!({"pane_id": "pane", "source": "recent", "format": "text", "strip_ansi": true}),
             ),
             (
                 "rename",
