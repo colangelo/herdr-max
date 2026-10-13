@@ -57,6 +57,28 @@ pub(crate) fn client_shell_method_names() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
+    // Fork UI classifications measured from f3fb2099 request_changes_ui.
+    const FORK_UI_CHANGING_METHODS: &[&str] = &[
+        "agent.message",
+        "agent.pin",
+        "agent.unpin",
+        "layout.apply_preset",
+        "layout.balance",
+        "layout.set_preset",
+        "notification.clear",
+        "notification.mark_seen",
+        "pane.clear_scrollback",
+        "pane.report_hint",
+        "pane.respawn",
+        "pane.scroll_application",
+        "pane.sync",
+        "pane.sync_pair",
+        "plugin.popup.close",
+        "tab.sync",
+        "workspace.pin",
+        "workspace.unpin",
+    ];
+
     use std::collections::BTreeSet;
 
     use super::super::{Method, Request};
@@ -207,7 +229,7 @@ mod tests {
             "plugin.pane.close",
         ]
         .into_iter()
-        .chain(super::FORK_UI_CHANGING_METHODS.iter().copied())
+        .chain(FORK_UI_CHANGING_METHODS.iter().copied())
         .collect::<BTreeSet<_>>();
         let actual = Method::OPERATIONS
             .iter()
@@ -217,26 +239,3 @@ mod tests {
         assert_eq!(actual, expected);
     }
 }
-
-// Fork UI classifications measured from f3fb2099 request_changes_ui.
-#[cfg(test)]
-const FORK_UI_CHANGING_METHODS: &[&str] = &[
-    "agent.message",
-    "agent.pin",
-    "agent.unpin",
-    "layout.apply_preset",
-    "layout.balance",
-    "layout.set_preset",
-    "notification.clear",
-    "notification.mark_seen",
-    "pane.clear_scrollback",
-    "pane.report_hint",
-    "pane.respawn",
-    "pane.scroll_application",
-    "pane.sync",
-    "pane.sync_pair",
-    "plugin.popup.close",
-    "tab.sync",
-    "workspace.pin",
-    "workspace.unpin",
-];
