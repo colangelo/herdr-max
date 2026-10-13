@@ -3,9 +3,9 @@ use clap::Command;
 use crate::api::schema::tabs::{
     tab_id, TabCreateProjection, TabListProjection, TabRenameProjection,
 };
-use crate::api::schema::{Method, Request, TabCloseParams, TabTarget};
+use crate::api::schema::{Method, Request, TabCloseParams, TabSyncParams, TabTarget};
 
-use super::super::projection::{self, cli_projection, Field, Leaf, ParseError};
+use crate::cli::projection::{self, cli_projection, Field, Leaf, ParseError};
 
 cli_projection! {
     pub(crate) TabTargetProjection for TabTarget {
@@ -15,10 +15,17 @@ cli_projection! {
 
 cli_projection! { pub(crate) TabCloseProjection for TabCloseParams {
     tab_id => Field::new(String::new()).input(tab_id()),
-    force => Field::new(false),
+    force => Field::new(false).input(crate::cli::projection::boolean("force", true)),
 } }
 
-const LEAVES: [Leaf; 6] = [
+const LEAVES: [Leaf; 7] = [
+    Leaf {
+        name: "sync",
+        about: "Synchronize tab input",
+        id: "cli:tab:sync",
+        arguments: TabSyncProjection::arguments,
+        method: |matches| TabSyncProjection::from_matches(matches).map(Method::TabSync),
+    },
     Leaf {
         name: "list",
         about: "List tabs",
@@ -173,3 +180,11 @@ mod tests {
         command().debug_assert();
     }
 }
+
+cli_projection! { pub(crate) TabSyncProjection for TabSyncParams {
+    tab_id => Field::new(None::<String>)
+        .input(crate::cli::projection::optional_text("tab", "ID"))
+        .input(crate::cli::projection::Input::positional("tab_id", 0, |slot, value| { if value.starts_with("--") { return Err(ParseError::Usage(format!("unknown option: {value}"))); } *slot = Some(value.to_owned()); Ok(()) }).configure(|arg| arg.required(false)))
+        .input(crate::cli::projection::Input::flag("current", |slot, _| { *slot = None; Ok(()) })),
+    mode => crate::cli::pane::bindings::sync_mode(),
+} }

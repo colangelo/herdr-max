@@ -68,3 +68,40 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fork_sync_tests {
+    use super::*;
+    fn parse_tab_sync_args(
+        args: &[String],
+    ) -> Result<crate::api::schema::TabSyncParams, super::super::projection::ParseError> {
+        let request = bindings::request(&[&["sync".to_owned()][..], args].concat())?;
+        let crate::api::schema::Method::TabSync(params) = request.method else {
+            panic!("sync");
+        };
+        Ok(params)
+    }
+    use crate::api::schema::SyncMode;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn tab_sync_args_default_to_the_current_tab_toggle() {
+        let params = parse_tab_sync_args(&args(&[])).unwrap();
+        assert_eq!(params.tab_id, None);
+        assert_eq!(params.mode, SyncMode::Toggle);
+    }
+
+    #[test]
+    fn tab_sync_args_take_a_tab_and_a_mode() {
+        let params = parse_tab_sync_args(&args(&["w_1:2", "--on"])).unwrap();
+        assert_eq!(params.tab_id.as_deref(), Some("w_1:2"));
+        assert_eq!(params.mode, SyncMode::On);
+        let params = parse_tab_sync_args(&args(&["--tab", "w_1:2", "--off"])).unwrap();
+        assert_eq!(params.mode, SyncMode::Off);
+        assert!(parse_tab_sync_args(&args(&["--on", "--off"])).is_err());
+        assert!(parse_tab_sync_args(&args(&["--bogus"])).is_err());
+    }
+}
