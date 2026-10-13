@@ -8,7 +8,9 @@ use crate::api::schema::plugins::{
     PluginPaneFocusProjection, PluginPaneOpenProjection, PluginSetEnabledProjection,
     PluginUnlinkProjection,
 };
-use crate::api::schema::{Method, PluginInvocationContext, PluginPanePlacement, SplitDirection};
+use crate::api::schema::{
+    Method, PluginInvocationContext, PluginPanePlacement, PluginPopupCloseParams, SplitDirection,
+};
 use crate::cli::projection::{self, Input, ParseError};
 use crate::popup_size::PopupSize;
 
@@ -481,4 +483,35 @@ mod tests {
             matches!(parse(&["pane", "open", "--help"]), Err(ParseError::Clap(error)) if error.kind() == clap::error::ErrorKind::DisplayHelp)
         );
     }
+}
+
+projection::cli_projection! { pub(crate) PluginPopupCloseProjection for PluginPopupCloseParams {
+    plugin_id => projection::Field::new(String::new()).input(Input::value("plugin", "ID", |slot, value| {
+        *slot = value.to_owned(); Ok(())
+    }).once()),
+} }
+
+const POPUP_LEAVES: &[projection::Leaf] = &[projection::Leaf {
+    name: "close",
+    about: "Close the open popup",
+    id: "cli:popup:close",
+    arguments: PluginPopupCloseProjection::arguments,
+    method: |matches| {
+        if matches.value_source("plugin") == Some(clap::parser::ValueSource::CommandLine) {
+            PluginPopupCloseProjection::from_matches(matches).map(Method::PluginPopupClose)
+        } else {
+            Ok(Method::PopupClose(
+                crate::api::schema::EmptyParams::default(),
+            ))
+        }
+    },
+}];
+pub(crate) fn popup_command() -> Command {
+    Command::new("popup")
+        .about("Manage the session popup")
+        .subcommand_required(true)
+        .subcommands(POPUP_LEAVES.iter().map(projection::Leaf::command))
+}
+pub(crate) fn popup_request(args: &[String]) -> Result<crate::api::schema::Request, ParseError> {
+    projection::group_request(popup_command(), POPUP_LEAVES, args)
 }

@@ -22,12 +22,15 @@ macro_rules! println {
 pub(crate) mod agent;
 mod agent_message;
 mod api;
+mod client;
+mod client_bindings;
 mod completion;
 mod integration;
 mod machine;
 pub(crate) mod notification;
 pub(crate) mod pane;
 pub(crate) mod plugin;
+mod popup;
 pub(crate) mod projection;
 mod protocol_guard;
 mod server;
@@ -126,6 +129,13 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             exit_code
         }
         "api" => api::run_api_command(&args[2..])?,
+        "client" => {
+            let Some(exit_code) = client::run_client_command(&args[2..])? else {
+                return Ok(CommandOutcome::NotCli);
+            };
+            exit_code
+        }
+        "popup" => popup::run_popup_command(&args[2..])?,
         "status" => status::run_status_command(&args[2..])?,
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
@@ -153,6 +163,7 @@ fn api_group(name: &str) -> Option<clap::Command> {
     Some(match name {
         "workspace" => workspace_bindings::command(),
         "worktree" => worktree::command(),
+        "popup" => plugin::bindings::popup_command(),
         "tab" => tab::command(),
         "todo" => todo::bindings::command(),
         "notification" => notification::command(),

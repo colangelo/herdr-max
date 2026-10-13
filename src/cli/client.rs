@@ -1,5 +1,3 @@
-use crate::api::schema::{EmptyParams, Method, Request};
-
 /// `herdr client list` reads the server's client table. Anything else after
 /// `client` is the hidden client mode `main` starts, so it is not ours: `None`.
 pub(super) fn run_client_command(args: &[String]) -> std::io::Result<Option<i32>> {
@@ -10,14 +8,9 @@ pub(super) fn run_client_command(args: &[String]) -> std::io::Result<Option<i32>
 }
 
 fn client_list(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr client list");
-        return Ok(2);
-    }
-    super::print_response(&super::send_request(&Request {
-        id: "cli:client:list".into(),
-        method: Method::ClientList(EmptyParams::default()),
-    })?)
+    super::run_json_request(super::client_bindings::request(
+        &[&["list".to_owned()][..], args].concat(),
+    ))
 }
 
 #[cfg(test)]

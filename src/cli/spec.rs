@@ -47,7 +47,9 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(plugin_command());
+        .subcommand(plugin_command())
+        .subcommand(super::client_bindings::command())
+        .subcommand(super::plugin::bindings::popup_command());
     configure_help(command, 0)
 }
 
