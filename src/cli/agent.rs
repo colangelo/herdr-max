@@ -1020,6 +1020,25 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fork_inventory_startup_deadline_reports_timeout_after_name_release() {
+        let capture = crate::cli::fork_inventory_tests::Capture::begin();
+        capture.respond_with(serde_json::json!({"agent": {
+            "terminal_id": "terminal-1", "name": null, "agent": "claude"
+        }}));
+        let outcome = wait_for_named_agent(
+            "reviewer",
+            "w1:p2",
+            Duration::from_secs(10),
+            Some(Instant::now()),
+            "claude",
+            "terminal-1",
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(outcome, agent_wait_timeout());
+    }
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
     }

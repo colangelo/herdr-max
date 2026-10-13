@@ -25,7 +25,7 @@
 
 ## 1. Inventory test first (red before the merge is resolved)
 
-- [ ] 1.1 Write the inventory as a `#[cfg(test)]` unit test under `src/cli`
+- [x] 1.1 Write the inventory as a `#[cfg(test)]` unit test under `src/cli`
       (e.g. `src/cli/fork_inventory_tests.rs`), NOT under `tests/cli`: macOS `just check` never
       compiles `tests/cli` (its cfg excludes macOS), so only a unit test gives you red/green
       locally. For each row of the design's inventory table AND each fork fix to an upstream
@@ -35,8 +35,9 @@
       `tests/cli/contracts.rs` samples as the second net (task 5.2).
 - [ ] 1.2 Add a second test: the set of fork-only method names (the 27 in design.md) is a subset
       of `Method::OPERATIONS` names.
-- [ ] 1.3 Commit (`test(cli): freeze the fork's cli requests before the contract port`). It passes
-      on `f3fb2099`.
+- [x] 1.3 Commit (`test(cli): freeze the fork's cli requests before the contract port`). It passes
+      on `f3fb2099`. Lead approved adding task 1.2 after the merge compiles, because
+      `Method::OPERATIONS` is introduced by upstream 241b99cd.
 
 ## 2. Merge
 
@@ -52,23 +53,22 @@
 
 ## 3. Operations table
 
-- [ ] 3.1 Add one `define_operations!` row per fork method (27). For each, record changes_ui and
+- [ ] 3.1 Add one `define_operations!` row per fork method (25). For each, record changes_ui and
       client_shell with the source line that justifies it (old `CLIENT_SHELL_METHODS`, old
       UI-dirty list) in `.local/port/ops-table.md` for the PR body.
 - [ ] 3.2 `cargo check` (locked command above). Fix `Method` match arms the macro now requires.
 
 ## 4. CLI leaves, group by group (one commit per group)
 
-- [ ] 4.1 todo: new `src/cli/todo_bindings.rs` with leaves for add/list/done/undone/rm/clear;
-      `edit` stays custom. Wire into `src/cli.rs` and `spec.rs` like upstream's groups.
-- [ ] 4.2 notification: list/clear/center into `notification_bindings.rs` (check whether `center`
-      is a method call or a local action first).
+- [ ] 4.1 todo: new `src/cli/todo_bindings.rs` with leaves for add/list/done/undone/edit/rm/clear;
+      `edit` is a `todo.update` leaf, matching the baseline. Wire into `src/cli.rs` and `spec.rs` like upstream's groups.
+- [ ] 4.2 notification: list/clear into `notification_bindings.rs` (no baseline `center` CLI).
 - [ ] 4.3 client + popup: `client list`, `popup close [--plugin]`.
-- [ ] 4.4 pane: clear, respawn, sync (on/off/toggle/link/unlink), layout presets with every alias
+- [ ] 4.4 pane: clear, respawn, sync (on/off/toggle), layout presets with every alias
       (even-h, even-horizontal, even-v, even-vertical, main-v, main-vertical, tiled, balance),
       report-hint; `send-text --chunk/--chunk-delay` (options before or after the pane id, and
       the `--` cases, as the tests at f3fb2099 `src/cli/pane.rs:2185-2250` cover; port those
-      tests) and `read --strip-dim` as custom wrappers.
+      tests) as a custom wrapper; `read --strip-dim` stays a serialized projection field.
       Add each new leaf's sample to the pane bindings test (`cases.len() == LEAVES.len()`).
 - [ ] 4.5 tab: `tab sync` (--on/--off/--toggle/--tab/--current), `close --force`.
 - [ ] 4.6 agent: pin/unpin leaves; `agent message` stays custom on top of the new layer.

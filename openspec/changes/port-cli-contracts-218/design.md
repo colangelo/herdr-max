@@ -22,29 +22,29 @@ Trial merge of 241b99cd onto `f3fb2099` conflicts in: `src/api/mod.rs`, `src/api
 
 ## Inventory: what the fork adds (measured against upstream 212b710b)
 
-Fork-only API methods (27): `agent.message agent.pin agent.unpin client.list layout.apply_preset
+Fork-only API methods (25): `agent.message agent.pin agent.unpin client.list layout.apply_preset
 layout.balance layout.set_preset notification.clear notification.list notification.mark_seen
 pane.clear_scrollback pane.report_hint pane.respawn pane.scroll_application pane.sync
 pane.sync_pair plugin.popup.close tab.sync todo.add todo.clear todo.list todo.remove todo.update
-workspace.pin workspace.unpin`, plus the events `notification.posted` and `todo.changed` (events,
+workspace.pin workspace.unpin`. Separately, the events `notification.posted` and `todo.changed` (events,
 not methods: they stay in the event enums, not in `define_operations!`).
 
 Fork-only CLI (from `src/cli/spec.rs` and the hand parsers):
 
 | Group | Command / flag | Method | Port as |
 |---|---|---|---|
-| todo | `todo add/list/done/undone/edit/rm/clear` (`--pane --text --note --priority --link --unlink --done --all --json --yaml`) | `todo.*` | new `src/cli/todo_bindings.rs`; `edit` opens a local editor: custom command next to the leaves |
-| notification | `notification list/clear/center` (`--json`) | `notification.list/clear/mark_seen` | leaves in `notification_bindings.rs`; check `center` (opens the TUI panel?) before choosing leaf vs custom |
+| todo | `todo add/list/done/undone/edit/rm/clear` (`--pane --current --text --priority --link --unlink --done --all --json`) | `todo.*` | new `src/cli/todo_bindings.rs`; `edit` is a `todo.update` leaf (no local editor) |
+| notification | `notification list/clear` (`--json`) | `notification.list/clear/mark_seen` | leaves in `notification_bindings.rs`; `mark_seen` is API-only; no `center` CLI |
 | client | `client list` | `client.list` | new `client_bindings.rs` (or a leaf in an existing group if upstream has one) |
 | popup | `popup close [--plugin ID]` | `plugin.popup.close` | leaf in `src/cli/plugin/bindings.rs` |
 | pane | `pane clear` | `pane.clear_scrollback` | leaf (keep the name `clear`; upstream `pane.clear` is the screen clear, fork topic `clear-scrollback`) |
 | pane | `pane respawn [--force]` | `pane.respawn` | leaf |
-| pane | `pane sync` (`--on --off --toggle --link --unlink`) | `pane.sync`, `pane.sync_pair` | leaf per method, or custom if one subcommand picks between the two |
+| pane | `pane sync` (`--on --off --toggle --pane --current`) | `pane.sync`, `pane.sync_pair` | `pane.sync` leaf; `pane.sync_pair` is API-only (no link/unlink CLI) |
 | pane | `pane layout --preset even-h/even-v/main-v/tiled/main-vertical`, `balance` | `layout.apply_preset/set_preset/balance` | extend upstream's `layout` leaf or add leaves; keep every alias |
 | pane | `pane report-hint --kind permission/question ...` | `pane.report_hint` | leaf |
-| pane | `send-text --chunk N --chunk-delay MS` (`parse_pane_send_text_args`, f3fb2099 `src/cli/pane.rs:1255`; options accepted anywhere after the pane id AND before it, plus the `--` cases: tests `pane.rs:2185-2250`), `read --strip-dim` (`pane.rs:621`) | (client-side) | custom wrappers around upstream's `send-text` / `read` leaves: chunking and dim-stripping happen in the CLI, not on the wire; keep every argument order those tests cover |
+| pane | `send-text --chunk N --chunk-delay MS` (`parse_pane_send_text_args`, f3fb2099 `src/cli/pane.rs:1255`; options accepted anywhere after the pane id AND before it, plus the `--` cases: tests `pane.rs:2185-2250`), `read --strip-dim` (`pane.rs:621`) | `pane.send_text`, `pane.read` | custom wrapper around upstream's `send-text` leaf for client-side chunking; `strip_dim` remains a serialized `PaneReadParams` projection field; keep every argument order those tests cover |
 | tab | `tab sync` (`--on --off --toggle --tab --current`) | `tab.sync` | leaf in `tab_bindings.rs` |
-| agent | `agent message` (`--interrupt --input-box ...`), `agent read --strip-dim` (`agent.rs:962`) | `agent.message` (+ reads) | custom command (`src/cli/agent_message.rs` is multi-step); `--strip-dim` as on `pane read` |
+| agent | `agent message` (`--note --interrupt --answer ...`), `agent read --strip-dim` (`agent.rs:962`) | `agent.message` (+ reads) | custom command in `src/cli/agent_message.rs` (one request); `--strip-dim` is a serialized read projection field |
 | agent | `agent pin/unpin` | `agent.pin/unpin` | leaves in `src/cli/agent/bindings.rs` |
 | workspace | `workspace pin/unpin` | `workspace.pin/unpin` | leaves in `workspace_bindings.rs` |
 | workspace/tab/pane | `close --force` | `*.close` with `force` | add `force` to the close projections (fork topic `close-force`) |
@@ -74,8 +74,12 @@ accounts for every one.
   the PR body: method, changes_ui, client_shell, source line.
 - **No wire change.** Params structs stay; projections are added beside them. The frozen v1
   shapes test must pass unchanged; a failure means fix the fork side, never the fixture.
-- **Custom commands stay where they are** (todo edit, agent message, send-keys chunking, read
-  --strip-dim, server status), wired into the group's dispatcher before the leaf lookup.
+- **Custom commands stay where they are** (agent message, send-text chunking, server status),
+  wired into the group's dispatcher before the leaf lookup. Todo edit is a leaf; read --strip-dim
+  is a serialized params field. Baseline f3fb2099 governs request shapes and supported commands.
+- **Inventory sequencing:** commit the argv/request tests green on the baseline first; add the
+  `Method::OPERATIONS` subset test after the merge compiles (that symbol does not exist before
+  upstream 241b99cd). Lead approved these corrections in `.local/port/PROGRESS.md`, 2026-10-13.
 
 ## Risks
 

@@ -45,6 +45,9 @@ mod todo;
 mod workspace;
 mod worktree;
 
+#[cfg(test)]
+mod fork_inventory_tests;
+
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
     "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
@@ -809,6 +812,10 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
+    #[cfg(test)]
+    if let Some(response) = fork_inventory_tests::capture_request(request) {
+        return Ok(response);
+    }
     let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;
     client
