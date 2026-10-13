@@ -35,30 +35,30 @@ fn agent_projection_defaults_and_ordered_read_policy() {
     for (args, expected) in [
         (
             vec!["read", "opaque"],
-            serde_json::json!({"target":"opaque", "source":"recent", "format":"text", "strip_ansi":true}),
+            serde_json::json!({"target":"opaque", "source":"recent", "format":"text", "strip_ansi":true,"strip_dim":false}),
         ),
         (
             vec!["read", "opaque", "--format", "ansi"],
-            serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false}),
+            serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false,"strip_dim":false}),
         ),
         (
             vec!["read", "opaque", "--ansi", "--format", "text"],
-            serde_json::json!({"target":"opaque", "source":"recent", "format":"text", "strip_ansi":true}),
+            serde_json::json!({"target":"opaque", "source":"recent", "format":"text", "strip_ansi":true,"strip_dim":false}),
         ),
         (
             vec!["read", "opaque", "--format", "text", "--ansi"],
-            serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false}),
+            serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false,"strip_dim":false}),
         ),
         (
             vec!["read", "opaque", "--source=recent_unwrapped", "--lines=0"],
-            serde_json::json!({"target":"opaque", "source":"recent_unwrapped", "lines":0, "format":"text", "strip_ansi":true}),
+            serde_json::json!({"target":"opaque", "source":"recent_unwrapped", "lines":0, "format":"text", "strip_ansi":true,"strip_dim":false}),
         ),
     ] {
         assert_eq!(params(&args), expected, "{args:?}");
     }
     assert_eq!(
         params(&["read", "--format=ansi", "opaque"]),
-        serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false})
+        serde_json::json!({"target":"opaque", "source":"recent", "format":"ansi", "strip_ansi":false,"strip_dim":false})
     );
     assert_eq!(
         params(&["wait", "opaque"]),

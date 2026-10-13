@@ -21,6 +21,9 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     use super::projection::ParseError;
     use bindings::Operation;
 
+    if args.first().is_some_and(|arg| arg == "message") {
+        return super::agent_message::agent_message(&args[1..]);
+    }
     // `explain` and `wait` historically treat a bare `help` operand after the target as help.
     let help_args;
     let args = match args.first().map(String::as_str) {
@@ -50,7 +53,9 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         Err(ParseError::Io(error)) => return Err(error),
     };
     match operation {
-        Operation::List => agent_list(),
+        Operation::List(params) => agent_list(params),
+        Operation::Pin(params) => agent_pin(params, true),
+        Operation::Unpin(params) => agent_pin(params, false),
         Operation::Get(params) => agent_get(params),
         Operation::Focus(params) => agent_focus(params),
         Operation::Read(params) => agent_read(params),
@@ -168,6 +173,9 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     if let Some(reason) = explain["screen_detection_skip_reason"].as_str() {
         println!("screen_detection_skip_reason: {reason}");
     }
+    if let Some(reason) = explain["blocked_reason"].as_str() {
+        println!("blocked_reason: {reason}");
+    }
     if let Some(reason) = explain["skipped_update_reason"].as_str() {
         println!("skipped_update_reason: {reason}");
     }
@@ -269,7 +277,7 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
     let pinned_terminal_id = pane_terminal_id(&pane_id)?;
     let mut retry_deadline = None;
     let mut previous_busy_response = None;
-    let mut response = loop {
+    let (mut response, start_sent_at) = loop {
         if let Some(previous_busy_response) = previous_busy_response.as_ref() {
             let retry_expired = retry_deadline.is_some_and(|deadline| Instant::now() >= deadline);
             if retry_expired
@@ -280,6 +288,7 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
             }
         }
 
+        let sent_at = Instant::now();
         let response = super::send_request(&Request {
             id: "cli:agent:start".into(),
             method: Method::AgentStart(AgentStartParams {
@@ -291,7 +300,7 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
             }),
         })?;
         if response.get("error").is_none() {
-            break response;
+            break (response, sent_at);
         }
         if response["error"]["code"].as_str() != Some("agent_pane_busy")
             || !retryable_timeout
@@ -331,6 +340,7 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
         &name,
         &pane_id,
         timeout,
+        start_sent_at.checked_add(timeout),
         &expected_kind,
         expected_terminal_id,
     );
@@ -346,10 +356,26 @@ fn agent_start(params: AgentStartParams) -> std::io::Result<i32> {
     }
 }
 
-fn agent_list() -> std::io::Result<i32> {
+fn agent_list(params: crate::api::schema::AgentListParams) -> std::io::Result<i32> {
     super::print_response(&super::send_request(&Request {
         id: "cli:agent:list".into(),
-        method: Method::AgentList(crate::api::schema::AgentListParams::default()),
+        method: Method::AgentList(params),
+    })?)
+}
+
+fn agent_pin(params: AgentTarget, pin: bool) -> std::io::Result<i32> {
+    super::print_response(&super::send_request(&Request {
+        id: if pin {
+            "cli:agent:pin"
+        } else {
+            "cli:agent:unpin"
+        }
+        .into(),
+        method: if pin {
+            Method::AgentPin(params)
+        } else {
+            Method::AgentUnpin(params)
+        },
     })?)
 }
 
@@ -394,6 +420,7 @@ fn wait_for_named_agent(
     name: &str,
     fallback_pane_id: &str,
     timeout: Duration,
+    server_deadline: Option<Instant>,
     expected_kind: &str,
     expected_terminal_id: &str,
 ) -> std::io::Result<Result<serde_json::Value, serde_json::Value>> {
@@ -433,7 +460,11 @@ fn wait_for_named_agent(
                 format!("expected {expected_kind}, detected {actual}"),
             )))
         } else if agent["name"].as_str() != Some(name) {
-            Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            if server_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                Some(Err(agent_wait_timeout()))
+            } else {
+                Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            }
         } else {
             match agent["agent_status"].as_str() {
                 Some("blocked") => Some(Err(cli_agent_error(
@@ -614,4 +645,64 @@ fn agent_read(params: AgentReadParams) -> std::io::Result<i32> {
         method: Method::AgentRead(params),
     })?;
     super::print_read_response(&response, lines)
+}
+
+#[cfg(test)]
+mod fork_regression_tests {
+    use super::*;
+    #[test]
+    fn fork_inventory_startup_deadline_reports_timeout_after_name_release() {
+        let capture = crate::cli::fork_inventory_tests::Capture::begin();
+        capture.respond_with(serde_json::json!({"agent": {
+            "terminal_id": "terminal-1", "name": null, "agent": "claude"
+        }}));
+        let outcome = wait_for_named_agent(
+            "reviewer",
+            "w1:p2",
+            Duration::from_secs(10),
+            Some(Instant::now()),
+            "claude",
+            "terminal-1",
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(outcome, agent_wait_timeout());
+    }
+
+    fn parse_agent_list_args(args: &[String]) -> Result<bool, ()> {
+        let parsed = crate::cli::projection::parse(
+            command(),
+            &[&["list".to_owned()][..], args].concat(),
+            bindings::from_matches,
+        )
+        .map_err(|_| ())?;
+        let bindings::Operation::List(params) = parsed else {
+            return Err(());
+        };
+        Ok(params.input_box)
+    }
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn agent_list_args_accept_json_because_the_output_is_already_json() {
+        assert_eq!(parse_agent_list_args(&args(&[])), Ok(false));
+        assert_eq!(parse_agent_list_args(&args(&["--json"])), Ok(false));
+        assert_eq!(parse_agent_list_args(&args(&["--input-box"])), Ok(true));
+        assert_eq!(
+            parse_agent_list_args(&args(&["--input-box", "--json"])),
+            Ok(true)
+        );
+        assert_eq!(
+            parse_agent_list_args(&args(&["--json", "--input-box"])),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn agent_list_args_reject_unknown_options() {
+        assert!(parse_agent_list_args(&args(&["--yaml"])).is_err());
+        assert!(parse_agent_list_args(&args(&["--json", "extra"])).is_err());
+    }
 }

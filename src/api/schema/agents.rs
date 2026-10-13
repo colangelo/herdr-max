@@ -357,10 +357,10 @@ cli_projection! {
         source => Field::new(ReadSource::Recent).input(bindings::source()),
         lines => Field::new(None).input(bindings::lines()),
         format => Field::new(ReadFormat::Text)
-            .input(bindings::format()).input(bindings::ansi()),
+            .input(bindings::format()).input(bindings::ansi()).input(bindings::raw()),
         strip_ansi => Field::new(true),
 
-        strip_dim => Field::new(false),
+        strip_dim => Field::new(false).input(crate::cli::projection::boolean("strip-dim", true)),
     }
 }
 

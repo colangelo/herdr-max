@@ -5,8 +5,9 @@ use crate::api::schema::agents::{
     AgentSendKeysProjection, AgentStartProjection, AgentWaitProjection,
 };
 use crate::api::schema::{
-    AgentPromptParams, AgentReadParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams,
-    AgentStatus, AgentTarget, AgentWaitParams, ReadFormat, ReadSource, READ_FORMATS, READ_SOURCES,
+    AgentListParams, AgentPromptParams, AgentReadParams, AgentRenameParams, AgentSendKeysParams,
+    AgentStartParams, AgentStatus, AgentTarget, AgentWaitParams, ReadFormat, ReadSource,
+    READ_FORMATS, READ_SOURCES,
 };
 pub(crate) use crate::cli::projection::optional_text;
 use crate::cli::projection::{
@@ -225,7 +226,9 @@ cli_projection! {
 }
 
 pub(crate) enum Operation {
-    List,
+    List(AgentListParams),
+    Pin(AgentTarget),
+    Unpin(AgentTarget),
     Get(AgentTarget),
     Focus(AgentTarget),
     Read(AgentReadParams),
@@ -246,7 +249,10 @@ pub(crate) fn command() -> Command {
     Command::new("agent")
         .about("Control and inspect agent panes")
         .subcommand_required(true)
-        .subcommand(leaf("list", Vec::new(), "List agents"))
+        .subcommand(leaf("list", { let mut arguments = AgentListProjection::arguments(); arguments.push(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue)); arguments }, "List agents"))
+        .subcommand(leaf("pin", TargetProjection::arguments(), "Pin an agent"))
+        .subcommand(leaf("unpin", TargetProjection::arguments(), "Unpin an agent"))
+        .subcommand(message_command())
         .subcommand(leaf("get", TargetProjection::arguments(), "Show an agent"))
         .subcommand(leaf("focus", TargetProjection::arguments(), "Focus an agent"))
         .subcommand(leaf("read", AgentReadProjection::arguments(), "Read agent terminal output")
@@ -277,7 +283,9 @@ pub(crate) fn from_matches(matches: &ArgMatches) -> Result<Operation, ParseError
         return Err(ParseError::Usage("missing agent command".into()));
     };
     Ok(match name {
-        "list" => Operation::List,
+        "list" => Operation::List(AgentListProjection::from_matches(matches)?),
+        "pin" => Operation::Pin(TargetProjection::from_matches(matches)?),
+        "unpin" => Operation::Unpin(TargetProjection::from_matches(matches)?),
         "get" => Operation::Get(TargetProjection::from_matches(matches)?),
         "focus" => Operation::Focus(TargetProjection::from_matches(matches)?),
         "read" => {
@@ -308,4 +316,35 @@ mod choice_tests {
     fn agent_statuses_cover_every_api_value() {
         crate::cli::projection::assert_choices_cover_api_enum(super::STATUSES);
     }
+}
+
+cli_projection! { pub(crate) AgentListProjection for AgentListParams {
+    input_box => Field::new(false).input(crate::cli::projection::boolean("input-box", true)),
+} }
+fn message_command() -> Command {
+    Command::new("message")
+        .about("Send text or a note to an agent")
+        .arg(clap::Arg::new("target").required(true))
+        .arg(
+            clap::Arg::new("text")
+                .num_args(0..)
+                .allow_hyphen_values(true),
+        )
+        .arg(
+            clap::Arg::new("note")
+                .long("note")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("interrupt")
+                .long("interrupt")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(clap::Arg::new("answer").long("answer").value_name("KEY"))
+}
+pub(crate) fn raw() -> Input<ReadFormat> {
+    Input::flag("raw", |slot, _| {
+        *slot = ReadFormat::Ansi;
+        Ok(())
+    })
 }
