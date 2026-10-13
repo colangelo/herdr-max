@@ -125,7 +125,27 @@ impl Leaf {
     }
 }
 
-pub(crate) const LEAVES: [Leaf; 7] = [
+pub(crate) const LEAVES: [Leaf; 9] = [
+    Leaf {
+        name: "pin",
+        about: "Pin a workspace",
+        id: "cli:workspace:pin",
+        quiet: false,
+        arguments: WorkspaceTargetProjection::arguments,
+        method: |matches| {
+            WorkspaceTargetProjection::from_matches(matches).map(Method::WorkspacePin)
+        },
+    },
+    Leaf {
+        name: "unpin",
+        about: "Unpin a workspace",
+        id: "cli:workspace:unpin",
+        quiet: false,
+        arguments: WorkspaceTargetProjection::arguments,
+        method: |matches| {
+            WorkspaceTargetProjection::from_matches(matches).map(Method::WorkspaceUnpin)
+        },
+    },
     Leaf {
         name: "list",
         about: "List workspaces",

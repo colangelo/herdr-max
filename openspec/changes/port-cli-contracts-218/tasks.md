@@ -70,9 +70,9 @@
       the `--` cases, as the tests at f3fb2099 `src/cli/pane.rs:2185-2250` cover; port those
       tests) as a custom wrapper; `read --strip-dim` stays a serialized projection field.
       Add each new leaf's sample to the pane bindings test (`cases.len() == LEAVES.len()`).
-- [ ] 4.5 tab: `tab sync` (--on/--off/--toggle/--tab/--current), `close --force`.
-- [ ] 4.6 agent: pin/unpin leaves; `agent message` stays custom on top of the new layer.
-- [ ] 4.7 workspace: pin/unpin leaves, `close --force`.
+- [x] 4.5 tab: `tab sync` (--on/--off/--toggle/--tab/--current), `close --force`.
+- [x] 4.6 agent: pin/unpin leaves; `agent message` stays custom on top of the new layer.
+- [x] 4.7 workspace: pin/unpin leaves, `close --force`.
 - [ ] 4.9 Fork fixes to upstream's own commands: for EVERY commit in
       `git log --no-merges $(git merge-base f3fb2099 upstream/master)..f3fb2099 -- src/cli src/cli.rs src/api`
       (66 commits), one line in `.local/port/cli-audit.md`: `<sha> <subject>: ported in <file/leaf>`,
@@ -84,7 +84,7 @@
 
 ## 5. Verify
 
-- [ ] 5.1 The inventory tests from 1.1 and 1.2 pass unchanged.
+- [x] 5.1 The inventory tests from 1.1 and 1.2 pass unchanged.
 - [ ] 5.2 Upstream's `tests/cli/contracts.rs` passes, with fork samples added where it enumerates.
 - [ ] 5.3 `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`
       (locked), then the frozen v1 shapes test passes with no fixture edits.

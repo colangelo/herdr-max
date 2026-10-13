@@ -118,7 +118,7 @@ cli_projection! {
         close_group => Field::new(false)
             .input(bindings::boolean("group", true).hidden()),
 
-        force => Field::new(false),
+        force => Field::new(false).input(bindings::boolean("force", true)),
     }
 }
 
