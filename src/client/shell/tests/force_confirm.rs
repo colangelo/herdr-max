@@ -13,6 +13,24 @@ fn state() -> ClientShellState {
     state
 }
 
+/// The fixture plus a second tab, so pane_1 is not its workspace's last pane
+/// and a close goes straight to the server (no last-pane confirmation, #5173).
+fn with_second_tab(mut projected: ClientShellSnapshot) -> ClientShellSnapshot {
+    let mut tab = projected.tabs[0].clone();
+    tab.tab_id = "tab_2".into();
+    tab.number = 2;
+    tab.focused = false;
+    projected.tabs.push(tab);
+    projected
+}
+
+fn pane_state() -> ClientShellState {
+    let mut state = state();
+    state.set_snapshot(Box::new(with_second_tab(snapshot())));
+    state.compose(106, 24).unwrap();
+    state
+}
+
 fn bind(state: &mut ClientShellState, action: crate::input::KeybindAction) -> ClientShellInput {
     let mut outcome = ClientShellInput::default();
     state.record_binding(crate::input::KeybindMatch::Action(action), &mut outcome);
@@ -60,7 +78,7 @@ fn screen(state: &mut ClientShellState) -> String {
 
 #[test]
 fn a_pane_close_refused_for_todos_asks_and_forces_on_enter() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, method) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     assert!(matches!(method, Method::PaneClose(ref params) if !params.force));
 
@@ -83,12 +101,40 @@ fn a_pane_close_refused_for_todos_asks_and_forces_on_enter() {
     assert!(state.overlay.is_none());
 }
 
+/// Upstream's last-pane confirmation (#5173) comes first; the close it sends
+/// is still unforced, so a refusal for todos still asks again before forcing.
+#[test]
+fn a_last_pane_close_confirms_locally_then_asks_again_for_todos() {
+    let mut state = state();
+    let outcome = bind(&mut state, crate::input::KeybindAction::ClosePane);
+    assert!(outcome.actions.is_empty(), "{:?}", outcome.actions);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ConfirmClose(ref confirm)) if confirm.force.is_none()
+    ));
+
+    let (id, method) = only_method(&state.handle_input_bytes(b"\r"));
+    assert!(matches!(method, Method::PaneClose(ref params)
+        if params.pane_id == "pane_1" && !params.force));
+    refuse(
+        &mut state,
+        &id,
+        "this pane still has 1 open todo (pane_1: a); pass --force (force=true) to close it anyway",
+    );
+    assert_eq!(confirm_text(&state).0, "Close pane with unfinished todos?");
+
+    let (_, forced) = only_method(&state.handle_input_bytes(b"\r"));
+    assert!(matches!(forced, Method::PaneClose(ref params)
+        if params.pane_id == "pane_1" && params.force));
+    assert!(state.overlay.is_none());
+}
+
 #[test]
 fn the_confirmation_names_the_pane_like_its_border() {
-    let mut state = state();
+    let mut state = pane_state();
     let mut projected = snapshot();
     projected.panes[0].label = Some("api".into());
-    state.set_snapshot(Box::new(projected));
+    state.set_snapshot(Box::new(with_second_tab(projected)));
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
 
     refuse(
@@ -102,7 +148,7 @@ fn the_confirmation_names_the_pane_like_its_border() {
 
 #[test]
 fn cancelling_a_forced_close_sends_nothing() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     refuse(
         &mut state,
@@ -118,7 +164,7 @@ fn cancelling_a_forced_close_sends_nothing() {
 
 #[test]
 fn the_confirm_button_forces_the_close() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     refuse(
         &mut state,
@@ -251,7 +297,7 @@ fn a_confirmed_workspace_close_refused_for_todos_is_forced_without_asking_again(
 
 #[test]
 fn a_worktree_group_refusal_keeps_its_own_confirmation() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
 
     refuse(
@@ -265,7 +311,7 @@ fn a_worktree_group_refusal_keeps_its_own_confirmation() {
 
 #[test]
 fn a_forced_close_whose_target_left_is_not_sent() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     refuse(
         &mut state,
@@ -284,7 +330,7 @@ fn a_forced_close_whose_target_left_is_not_sent() {
 
 #[test]
 fn a_forced_close_from_another_boot_is_not_sent() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     refuse(
         &mut state,
@@ -306,7 +352,7 @@ fn a_forced_close_from_another_boot_is_not_sent() {
 
 #[test]
 fn a_forced_close_result_leaves_no_overlay() {
-    let mut state = state();
+    let mut state = pane_state();
     let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
     refuse(
         &mut state,
