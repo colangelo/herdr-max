@@ -42,7 +42,7 @@ deliberate difference from upstream's contract or names).
 | client-handoff | port | the client stays attached across a live handoff and re-execs onto a newer server build | `c0451a99` (fork f466236f, 91b9831a, 87690e3b, 7a3a6fba; issues 94, 165) |
 | agent-hints | carried | claude mod question hint raises blocked ahead of the screen, rings and toasts | `998ca4ee` (fork a9c099df) |
 | todos | carried + port | pane todos, board, editor; close/respawn refuse with open todos unless `force` | server carried; client panel, editor and board merged at `sync-merge/11` (board `896aeb60`) |
-| close-force | divergent | `pane.close`, `tab.close`, `workspace.close` take an optional `force`; their v1 method shapes are frozen as fork shapes in `advertised_client_shell_method_shapes_stay_at_the_v1_contract` | `9fa78ab2` |
+| close-force | divergent | `pane.close`, `tab.close`, `workspace.close` take an optional `force`; their v1 method shapes are frozen as fork shapes in `advertised_client_shell_method_shapes_stay_at_the_v1_contract`. Since `sync-merge/57` upstream's last-pane close confirmation (#5173) answers first and still sends `force: false`, so a refusal for todos asks again | `9fa78ab2`, `7b423546`, `f3fb2099` |
 | clear-scrollback | divergent | the fork's scrollback purge is `pane.clear_scrollback` (CLI `herdr pane clear`); upstream `pane.clear` clears the screen | `9fa78ab2` (fork a81f9743) |
 | update-manifest | divergent | updates read `distribution/latest.json` on the fork repo; the release flow also writes `website/latest.json` for 0.8.x-ac binaries | `c42f9068` |
 | claude-integration | carried | fork hook events (UserPromptSubmit, Stop, SubagentStop skip) in the claude hook; integration version 11 | `9fa78ab2` |
@@ -50,7 +50,7 @@ deliberate difference from upstream's contract or names).
 | claude-background-shell | superseded | a Claude pane whose only activity is a background shell used to read working; #172 dropped that rule (back to upstream 987b070f, #3468: such a pane reads idle) and shows the background work as the braille `background_mark` instead | `db30c77a`, replaced by `feat/background-work-mark` (#172) |
 | handoff-compat | divergent | handoff manifest keeps the fork layout (`agent_state` string + `hook_agent_state`) so 0.8.x-ac servers hand off into this build | `src/handoff_runtime.rs` |
 | wire-protocol | divergent | the wire `PROTOCOL_VERSION` stays upstream's 22, although the fork's 0.8.2-ac also said 22 with another format: a fresh cross-version attach is refused both ways by `ENDPOINT_PROTOCOL_GENERATION` (an old client only prints "server closed connection"), and live handoff re-execs old clients (proofs 2-5 on #171). Bump only with upstream | `sync-merge/14` |
-| input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries | `port/input`, merged through `bf8a056e` (`sync-merge/11`) |
+| input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries. All pane keys go through synced delivery, which carries upstream's echo-latency signal (#5149): panes whose child got keyboard input, synced peers included, are marked interactive | `port/input`, merged through `bf8a056e` (`sync-merge/11`); #5149 port in `7b423546` |
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels, notification/todo indicators (click opens their panels) | `port/chrome`, merged `3e4827ff`, clicks `7e363fa4`/`3ccbf1e3` (`sync-merge/11`) |
 | overlays | port | todo panel/editor/board, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays`, merged through `sync-merge/11` |
 | sync-frame-hold | port | upstream holds mid-sync surfaces; the fork adds the 200 ms cap so a stuck app cannot freeze a pane | fork 839473d8 (issue 126) |
@@ -59,6 +59,7 @@ deliberate difference from upstream's contract or names).
 | detached-split-size | superseded | split sizes while detached | upstream new_pane_size (fork b943d332) |
 | agent-restart-group | superseded | a restarted agent in another process group is a replacement | upstream AgentJobTracker::replaced_in_front (fork 9d6ba1f8, issue 112) |
 | droid-scrollback-strip | superseded | droid's ED3 scrollback-clear filter | upstream 309749ad (#4432) |
+| session-save-flush | superseded | the session file is flushed before the rename that replaces it | upstream 6b1f9f6c (#5152, with `platform::replace_file`); the fork's own flush dropped in `7b423546` |
 | overlay-kit | superseded | the fork's overlay kit (AnchoredPanelSpec, ButtonRow, ListCursor, TextField) | dropped by ac's decision; overlays use the client-shell idiom |
 
 Legacy fork commits before the v0.9.3 merge stay in history as they were; the classification of
