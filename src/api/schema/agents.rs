@@ -360,7 +360,7 @@ cli_projection! {
             .input(bindings::format()).input(bindings::ansi()).input(bindings::raw()),
         strip_ansi => Field::new(true),
 
-        strip_dim => Field::new(false).input(crate::cli::projection::boolean("strip-dim", true)),
+        strip_dim => Field::new(false).input(crate::cli::projection::boolean("strip-dim", true).help(crate::cli::fork_help::STRIP_DIM)),
     }
 }
 

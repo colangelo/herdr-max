@@ -17,14 +17,14 @@ const LEAVES: &[Leaf] = &[
     },
     Leaf {
         name: "list",
-        about: "List notifications",
+        about: "List the notification log",
         id: "cli:notification:list",
         arguments: json_option,
         method: |_| Ok(Method::NotificationList(EmptyParams::default())),
     },
     Leaf {
         name: "clear",
-        about: "Clear notifications",
+        about: "Clear the notification log",
         id: "cli:notification:clear",
         arguments: json_option,
         method: |_| Ok(Method::NotificationClear(EmptyParams::default())),
@@ -37,9 +37,12 @@ fn json_option() -> Vec<clap::Arg> {
 }
 pub(crate) fn command() -> Command {
     Command::new("notification")
-        .about("Manage Herdr notifications")
+        .about("Show and list Herdr notifications")
         .subcommand_required(true)
-        .subcommands(LEAVES.iter().map(Leaf::command))
+        .subcommands(crate::cli::fork_help::ordered(
+            LEAVES.iter().map(Leaf::command),
+            &[("list", "show", false), ("clear", "list", true)],
+        ))
 }
 
 pub(crate) fn request(args: &[String]) -> Result<Request, ParseError> {

@@ -19,6 +19,7 @@ fn text() -> Input<String> {
         *slot = value.to_owned();
         Ok(())
     })
+    .value_name("TEXT")
     .required()
 }
 fn id() -> Input<u64> {
@@ -28,6 +29,7 @@ fn id() -> Input<u64> {
             .map_err(|_| ParseError::Usage(format!("invalid todo id: {value}")))?;
         Ok(())
     })
+    .value_name("ID")
     .required()
 }
 fn priority() -> Input<Option<TodoPriority>> {
@@ -44,6 +46,11 @@ fn priority() -> Input<Option<TodoPriority>> {
         });
         Ok(())
     })
+    .configure(|arg| {
+        arg.value_parser(crate::cli::fork_help::Values(
+            crate::cli::fork_help::PRIORITIES,
+        ))
+    })
 }
 fn options(mut args: Vec<Arg>) -> Vec<Arg> {
     args.push(
@@ -59,7 +66,7 @@ cli_projection! { pub(crate) TodoAddProjection for TodoAddParams {
     pane_id => pane(),
     text => Field::new(String::new()).input(text()),
     priority => Field::new(None).input(priority()),
-    link_pane_id => Field::new(None).input(optional_text("link", "TARGET")),
+    link_pane_id => Field::new(None).input(optional_text("link", "TARGET").help("Link the todo to another pane")),
 } }
 
 cli_projection! { pub(crate) TodoListProjection for TodoListParams {
@@ -71,8 +78,8 @@ cli_projection! { pub(crate) TodoEditProjection for TodoUpdateParams {
     id => Field::new(0u64).input(id()),
     text => Field::new(None).input(optional_text("text", "TEXT")),
     priority => Field::new(None).input(priority()),
-    link_pane_id => Field::new(None).input(optional_text("link", "TARGET")),
-    clear_link => Field::new(false).input(boolean("unlink", true)),
+    link_pane_id => Field::new(None).input(optional_text("link", "TARGET").help("Link the todo to another pane")),
+    clear_link => Field::new(false).input(boolean("unlink", true).help("Drop the todo's pane link")),
     done => Field::new(None::<bool>),
 } }
 
@@ -83,7 +90,7 @@ cli_projection! { pub(crate) TodoRemoveProjection for TodoRemoveParams {
 
 cli_projection! { pub(crate) TodoClearProjection for TodoClearParams {
     pane_id => pane(),
-    done_only => Field::new(false).input(boolean("done", true)),
+    done_only => Field::new(false).input(boolean("done", true).help("Clear only the done todos")),
 } }
 
 cli_projection! { pub(crate) TodoDoneProjection for TodoUpdateParams {
@@ -109,7 +116,7 @@ cli_projection! { pub(crate) TodoUndoneProjection for TodoUpdateParams {
 const LEAVES: &[Leaf] = &[
     Leaf {
         name: "add",
-        about: "Add pane todos",
+        about: "Add a todo to a pane",
         id: "cli:todo:add",
         arguments: || options(TodoAddProjection::arguments()),
         method: |matches| TodoAddProjection::from_matches(matches).map(Method::TodoAdd),
@@ -120,42 +127,47 @@ const LEAVES: &[Leaf] = &[
         id: "cli:todo:list",
         arguments: || {
             let mut args = options(TodoListProjection::arguments());
-            args.push(Arg::new("all").long("all").action(ArgAction::SetTrue));
+            args.push(
+                Arg::new("all")
+                    .long("all")
+                    .action(ArgAction::SetTrue)
+                    .help("List todos from every pane"),
+            );
             args
         },
         method: |matches| TodoListProjection::from_matches(matches).map(Method::TodoList),
     },
     Leaf {
         name: "done",
-        about: "Done pane todos",
+        about: "Mark a todo done",
         id: "cli:todo:done",
         arguments: || options(TodoDoneProjection::arguments()),
         method: |matches| TodoDoneProjection::from_matches(matches).map(Method::TodoUpdate),
     },
     Leaf {
         name: "undone",
-        about: "Undone pane todos",
+        about: "Reopen a done todo",
         id: "cli:todo:undone",
         arguments: || options(TodoUndoneProjection::arguments()),
         method: |matches| TodoUndoneProjection::from_matches(matches).map(Method::TodoUpdate),
     },
     Leaf {
         name: "edit",
-        about: "Edit pane todos",
+        about: "Edit a todo",
         id: "cli:todo:edit",
         arguments: || options(TodoEditProjection::arguments()),
         method: |matches| TodoEditProjection::from_matches(matches).map(Method::TodoUpdate),
     },
     Leaf {
         name: "rm",
-        about: "Rm pane todos",
+        about: "Remove a todo",
         id: "cli:todo:rm",
         arguments: || options(TodoRemoveProjection::arguments()),
         method: |matches| TodoRemoveProjection::from_matches(matches).map(Method::TodoRemove),
     },
     Leaf {
         name: "clear",
-        about: "Clear pane todos",
+        about: "Clear a pane's todos",
         id: "cli:todo:clear",
         arguments: || options(TodoClearProjection::arguments()),
         method: |matches| TodoClearProjection::from_matches(matches).map(Method::TodoClear),
@@ -163,9 +175,31 @@ const LEAVES: &[Leaf] = &[
 ];
 pub(crate) fn command() -> Command {
     Command::new("todo")
-        .about("Manage per-pane todos")
+        .override_usage("herdr todo [COMMAND]")
+        .about("Manage per-pane todo lists")
         .subcommand_required(true)
-        .subcommands(LEAVES.iter().map(Leaf::command))
+        .subcommands(LEAVES.iter().map(|leaf| {
+            let mut command = leaf.command();
+            if leaf.name == "add" {
+                command = command.override_usage("herdr todo add <TEXT> [OPTIONS]");
+            }
+            if leaf.name == "edit" {
+                command = command.override_usage("herdr todo edit <ID> [OPTIONS]");
+            }
+            let order: &[&str] = match leaf.name {
+                "add" => &["pane", "current", "priority", "link", "json"],
+                "edit" => &[
+                    "text", "priority", "link", "unlink", "pane", "current", "json",
+                ],
+                "list" => &["pane", "current", "all", "json"],
+                "clear" => &["done", "pane", "current", "json"],
+                _ => &["pane", "current", "json"],
+            };
+            for (index, name) in order.iter().enumerate() {
+                command = command.mut_arg(*name, |arg| arg.display_order(index));
+            }
+            command
+        }))
 }
 
 pub(crate) struct Invocation {

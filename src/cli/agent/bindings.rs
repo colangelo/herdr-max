@@ -246,11 +246,11 @@ fn leaf(name: &'static str, arguments: Vec<clap::Arg>, about: &'static str) -> C
 }
 
 pub(crate) fn command() -> Command {
-    Command::new("agent")
+    let mut command = Command::new("agent")
         .about("Control and inspect agent panes")
         .subcommand_required(true)
         .subcommand(leaf("list", { let mut arguments = AgentListProjection::arguments(); arguments.push(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue)); arguments }, "List agents"))
-        .subcommand(leaf("pin", TargetProjection::arguments(), "Pin an agent"))
+        .subcommand(leaf("pin", TargetProjection::arguments(), "Pin an agent to the top of the agent panel"))
         .subcommand(leaf("unpin", TargetProjection::arguments(), "Unpin an agent"))
         .subcommand(message_command())
         .subcommand(leaf("get", TargetProjection::arguments(), "Show an agent"))
@@ -275,7 +275,24 @@ pub(crate) fn command() -> Command {
         .subcommand(leaf("attach", AttachProjection::arguments(), "Attach directly to an agent terminal")
             .override_usage("herdr agent attach <TARGET> [OPTIONS]"))
         .subcommand(leaf("explain", ExplainProjection::arguments(), "Explain agent detection state")
-            .group(ArgGroup::new("explain_source").args(["target", "file"]).required(true)))
+            .group(ArgGroup::new("explain_source").args(["target", "file"]).required(true)));
+    let commands = crate::cli::fork_help::ordered(
+        command.get_subcommands().cloned(),
+        &[
+            ("message", "send-keys", true),
+            ("pin", "focus", true),
+            ("unpin", "pin", true),
+        ],
+    );
+    for (index, child) in commands.iter().enumerate() {
+        command = command.mut_subcommand(child.get_name(), |child| child.display_order(index));
+    }
+    for name in ["pin", "unpin"] {
+        command = command.mut_subcommand(name, |command| {
+            command.mut_arg("target", |argument| argument.value_name("target"))
+        });
+    }
+    command
 }
 
 pub(crate) fn from_matches(matches: &ArgMatches) -> Result<Operation, ParseError> {
@@ -323,28 +340,34 @@ cli_projection! { pub(crate) AgentListProjection for AgentListParams {
 } }
 fn message_command() -> Command {
     Command::new("message")
-        .about("Send text or a note to an agent")
-        .arg(clap::Arg::new("target").required(true))
+        .about("Send one line of text to an agent, typed as you or as a note")
+        .override_usage("herdr agent message <TARGET> <TEXT> [OPTIONS]\n       herdr agent message <TARGET> --answer KEY")
+        .arg(clap::Arg::new("target").value_name("TARGET").required(true))
         .arg(
             clap::Arg::new("text")
+                .value_name("TEXT")
                 .num_args(0..)
                 .allow_hyphen_values(true),
         )
         .arg(
             clap::Arg::new("note")
                 .long("note")
+                .help("Send a peer message through the note command instead of typing the text")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
             clap::Arg::new("interrupt")
                 .long("interrupt")
+                .help("Interrupt a working agent first")
                 .action(clap::ArgAction::SetTrue),
         )
-        .arg(clap::Arg::new("answer").long("answer").value_name("KEY"))
+        .arg(clap::Arg::new("answer").long("answer").value_name("KEY").help("Press this option's key for an agent blocked on a prompt, instead of typing text"))
+        .after_help("Typed text goes in as typing, in pieces, then Enter, so it works with agents that collapse a large paste. A working agent takes it at its next pause unless --interrupt is given. Free text is refused for an agent that is blocked on a prompt; answer it with --answer. A note is delivered by palette.send.note_command (agent-bell by default) and approves nothing.")
 }
 pub(crate) fn raw() -> Input<ReadFormat> {
     Input::flag("raw", |slot, _| {
         *slot = ReadFormat::Ansi;
         Ok(())
     })
+    .hidden()
 }

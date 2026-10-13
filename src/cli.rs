@@ -25,6 +25,7 @@ mod api;
 mod client;
 mod client_bindings;
 mod completion;
+pub(crate) mod fork_help;
 mod integration;
 mod machine;
 pub(crate) mod notification;
@@ -45,6 +46,8 @@ mod workspace;
 pub(crate) mod workspace_bindings;
 pub(crate) mod worktree;
 
+#[cfg(test)]
+mod fork_help_tests;
 #[cfg(test)]
 mod fork_inventory_tests;
 

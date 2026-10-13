@@ -21,7 +21,7 @@ cli_projection! { pub(crate) TabCloseProjection for TabCloseParams {
 const LEAVES: [Leaf; 7] = [
     Leaf {
         name: "sync",
-        about: "Synchronize tab input",
+        about: "Type into every pane of a tab at once, or stop",
         id: "cli:tab:sync",
         arguments: TabSyncProjection::arguments,
         method: |matches| TabSyncProjection::from_matches(matches).map(Method::TabSync),
@@ -74,7 +74,10 @@ pub(crate) fn command() -> Command {
     Command::new("tab")
         .about("Manage tabs over the socket API")
         .subcommand_required(true)
-        .subcommands(LEAVES.iter().map(Leaf::command))
+        .subcommands(crate::cli::fork_help::ordered(
+            LEAVES.iter().map(Leaf::command),
+            &[("sync", "close", false)],
+        ))
 }
 
 pub(crate) fn request(args: &[String]) -> Result<Request, ParseError> {
@@ -184,7 +187,7 @@ mod tests {
 cli_projection! { pub(crate) TabSyncProjection for TabSyncParams {
     tab_id => Field::new(None::<String>)
         .input(crate::cli::projection::optional_text("tab", "ID"))
-        .input(crate::cli::projection::Input::positional("tab_id", 0, |slot, value| { if value.starts_with("--") { return Err(ParseError::Usage(format!("unknown option: {value}"))); } *slot = Some(value.to_owned()); Ok(()) }).configure(|arg| arg.required(false)))
+        .input(crate::cli::projection::Input::positional("tab_id", 0, |slot, value| { if value.starts_with("--") { return Err(ParseError::Usage(format!("unknown option: {value}"))); } *slot = Some(value.to_owned()); Ok(()) }).value_name("TAB_ID").configure(|arg| arg.required(false)))
         .input(crate::cli::projection::Input::flag("current", |slot, _| { *slot = None; Ok(()) })),
     mode => crate::cli::pane::bindings::sync_mode(),
 } }

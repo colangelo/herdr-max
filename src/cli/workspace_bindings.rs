@@ -128,7 +128,7 @@ impl Leaf {
 pub(crate) const LEAVES: [Leaf; 9] = [
     Leaf {
         name: "pin",
-        about: "Pin a workspace",
+        about: "Pin a workspace to the top of the list",
         id: "cli:workspace:pin",
         quiet: false,
         arguments: WorkspaceTargetProjection::arguments,
@@ -219,7 +219,10 @@ pub(crate) const LEAVES: [Leaf; 9] = [
 pub(crate) fn command() -> Command {
     Command::new("workspace")
         .about("Manage workspaces over the socket API")
-        .subcommands(LEAVES.iter().map(Leaf::command))
+        .subcommands(crate::cli::fork_help::ordered(
+            LEAVES.iter().map(Leaf::command),
+            &[("pin", "focus", true), ("unpin", "pin", true)],
+        ))
 }
 
 #[cfg(test)]

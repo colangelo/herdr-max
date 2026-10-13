@@ -495,7 +495,7 @@ mod tests {
 projection::cli_projection! { pub(crate) PluginPopupCloseProjection for PluginPopupCloseParams {
     plugin_id => projection::Field::new(String::new()).input(Input::value("plugin", "ID", |slot, value| {
         *slot = value.to_owned(); Ok(())
-    }).once()),
+    }).once().help("Close the popup only if this plugin opened it")),
 } }
 
 const POPUP_LEAVES: &[projection::Leaf] = &[projection::Leaf {
@@ -515,7 +515,8 @@ const POPUP_LEAVES: &[projection::Leaf] = &[projection::Leaf {
 }];
 pub(crate) fn popup_command() -> Command {
     Command::new("popup")
-        .about("Manage the session popup")
+        .about("Manage the session popup over the socket API")
+        .override_usage("herdr popup [COMMAND]")
         .subcommand_required(true)
         .subcommands(POPUP_LEAVES.iter().map(projection::Leaf::command))
 }
