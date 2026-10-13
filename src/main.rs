@@ -484,9 +484,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # How agent rows show background work (shells, monitors, agents, MCP tasks):
 # "frames" (default) is the pulse above for an agent held Working by it;
-# "braille" alternates the small dot (state_symbols.background, default "·")
-# with a braille cell of one dot per item, ⠁ to ⣿ (8 or more), on any idle or
-# done row too. Same speed as the spinner (status_spinner_ms). Reloads live.
+# "braille" shows a braille cell of one dot per item, middle dots first, ⠂ ⠆ ⠇ ⡇
+# ⡗ ⡷ ⡿ ⣿ (8 or more), on any idle or done row too, and blanks it for 4 of
+# every 16 spinner ticks (status_spinner_ms). With the spinner off it shows the
+# small dot (state_symbols.background). Reloads live.
 # background_mark = "frames"
 
 # Notification center position: "top-right" keeps the indicator in the tab
