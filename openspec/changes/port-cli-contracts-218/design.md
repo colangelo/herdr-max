@@ -42,9 +42,9 @@ Fork-only CLI (from `src/cli/spec.rs` and the hand parsers):
 | pane | `pane sync` (`--on --off --toggle --link --unlink`) | `pane.sync`, `pane.sync_pair` | leaf per method, or custom if one subcommand picks between the two |
 | pane | `pane layout --preset even-h/even-v/main-v/tiled/main-vertical`, `balance` | `layout.apply_preset/set_preset/balance` | extend upstream's `layout` leaf or add leaves; keep every alias |
 | pane | `pane report-hint --kind permission/question ...` | `pane.report_hint` | leaf |
-| pane | `send-keys --chunk N --chunk-delay MS`, `read --strip-dim` | (client-side) | custom wrappers around upstream's leaves: chunking and dim-stripping happen in the CLI, not on the wire |
+| pane | `send-text --chunk N --chunk-delay MS` (`parse_pane_send_text_args`, f3fb2099 `src/cli/pane.rs:1255`; options accepted anywhere after the pane id AND before it, plus the `--` cases: tests `pane.rs:2185-2250`), `read --strip-dim` (`pane.rs:621`) | (client-side) | custom wrappers around upstream's `send-text` / `read` leaves: chunking and dim-stripping happen in the CLI, not on the wire; keep every argument order those tests cover |
 | tab | `tab sync` (`--on --off --toggle --tab --current`) | `tab.sync` | leaf in `tab_bindings.rs` |
-| agent | `agent message` (`--interrupt --input-box --strip-dim ...`) | `agent.message` (+ reads) | custom command (`src/cli/agent_message.rs` is multi-step) |
+| agent | `agent message` (`--interrupt --input-box ...`), `agent read --strip-dim` (`agent.rs:962`) | `agent.message` (+ reads) | custom command (`src/cli/agent_message.rs` is multi-step); `--strip-dim` as on `pane read` |
 | agent | `agent pin/unpin` | `agent.pin/unpin` | leaves in `src/cli/agent/bindings.rs` |
 | workspace | `workspace pin/unpin` | `workspace.pin/unpin` | leaves in `workspace_bindings.rs` |
 | workspace/tab/pane | `close --force` | `*.close` with `force` | add `force` to the close projections (fork topic `close-force`) |
@@ -52,6 +52,15 @@ Fork-only CLI (from `src/cli/spec.rs` and the hand parsers):
 | any | `--remote-bridge`, `--group`, `--source`, `--seq`, `--ttl-ms`, `--answer`, `--agent` | per command | find each in `git diff 212b710b f3fb2099 -- src/cli` and port with its command |
 
 `pane.scroll_application` has no CLI (client shell only): table row only.
+
+**Fork fixes to upstream's own commands** are not in the table above (it lists fork-only
+commands) and are the easiest to lose when a conflicted file is taken from upstream. Measured
+examples: `fba7008e` agent start past its deadline reports `timeout` (`src/cli/agent.rs`),
+`c27f5838` `agent list --json` and the `server status` pointer, `10d47619` `pane
+report-agent-session` output (`src/cli/pane.rs`), `d091fb5f` `plugin pane open --placement popup`
+in help and completions (`spec.rs`), `d774bc63` the `todo add` form message. There are 66 fork
+commits on `src/cli`, `src/cli.rs` and `src/api` since the merge-base with upstream; task 4.9
+accounts for every one.
 
 ## Decisions
 
