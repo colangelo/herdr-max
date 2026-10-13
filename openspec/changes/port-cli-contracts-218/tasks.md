@@ -41,22 +41,22 @@
 
 ## 2. Merge
 
-- [ ] 2.1 `git -c merge.conflictStyle=diff3 -c rerere.enabled=false merge 241b99cd`.
-- [ ] 2.2 For every conflicted CLI/API file, take upstream's side (`git checkout --theirs`), except
+- [x] 2.1 `git -c merge.conflictStyle=diff3 -c rerere.enabled=false merge 241b99cd`.
+- [x] 2.2 For every conflicted CLI/API file, take upstream's side (`git checkout --theirs`), except
       keep the fork's params structs and fields in `src/api/schema/*.rs` (`force`, todo types,
       layout preset types, sync types, pin types): resolve those by hand, keep both.
-- [ ] 2.3 `src/server/client_commands.rs`: drop the hand list; the client-shell set now comes from
+- [x] 2.3 `src/server/client_commands.rs`: drop the hand list; the client-shell set now comes from
       `client_shell_method_names()`.
-- [ ] 2.4 Keep working inside the merge (sections 3 and 4) until it compiles, then commit it once
+- [x] 2.4 Keep working inside the merge (sections 3 and 4) until it compiles, then commit it once
       as `merge: upstream 241b99cd (weekly sync 2026-10-13 step 2)`; later fixes are their own
       commits.
 
 ## 3. Operations table
 
-- [ ] 3.1 Add one `define_operations!` row per fork method (25). For each, record changes_ui and
+- [x] 3.1 Add one `define_operations!` row per fork method (25). For each, record changes_ui and
       client_shell with the source line that justifies it (old `CLIENT_SHELL_METHODS`, old
       UI-dirty list) in `.local/port/ops-table.md` for the PR body.
-- [ ] 3.2 `cargo check` (locked command above). Fix `Method` match arms the macro now requires.
+- [x] 3.2 `cargo check` (locked command above). Fix `Method` match arms the macro now requires.
 
 ## 4. CLI leaves, group by group (one commit per group)
 

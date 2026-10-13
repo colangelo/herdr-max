@@ -3,10 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::api::client::{ApiClient, ApiClientError};
-use crate::api::schema::{
-    AgentStatus, ClientWindowTitleSetParams, EmptyParams, Method, PaneAgentState, ReadFormat,
-    ReadSource, Request, SplitDirection,
-};
+use crate::api::schema::{Method, Request};
 
 macro_rules! print {
     ($($arg:tt)*) => {{
@@ -22,28 +19,27 @@ macro_rules! println {
     }};
 }
 
-mod agent;
+pub(crate) mod agent;
 mod agent_message;
 mod api;
-mod client;
 mod completion;
 mod integration;
 mod machine;
-mod notification;
-mod pane;
-mod plugin;
-mod popup;
+pub(crate) mod notification;
+pub(crate) mod pane;
+pub(crate) mod plugin;
+pub(crate) mod projection;
 mod protocol_guard;
-mod runtime;
 mod server;
 mod server_not_running;
 mod spec;
 mod status;
-mod tab;
+pub(crate) mod tab;
 mod target;
-mod todo;
+mod title;
 mod workspace;
-mod worktree;
+pub(crate) mod workspace_bindings;
+pub(crate) mod worktree;
 
 #[cfg(test)]
 mod fork_inventory_tests;
@@ -90,42 +86,19 @@ pub enum CommandOutcome {
     NotCli,
 }
 
-pub(super) fn print_read_response(
-    response: &serde_json::Value,
-    requested_lines: Option<u32>,
-) -> std::io::Result<i32> {
+pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Result<i32> {
     if response.get("error").is_some() {
         eprintln!("{response}");
         return Ok(1);
     }
     if let Some(text) = response["result"]["read"]["text"].as_str() {
         print!("{text}");
-        if let Some(note) = short_read_note(
-            text,
-            response["result"]["read"]["truncated"].as_bool() == Some(true),
-            requested_lines,
-        ) {
-            eprintln!("{note}");
-        }
     }
     Ok(0)
 }
 
 pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
     target::maybe_run(args)
-}
-
-/// A read that came back shorter than asked and truncated stopped before the
-/// top of the history: say so on stderr, so a caller that asked for N lines
-/// does not take fewer for everything there is. stdout is left as it was.
-fn short_read_note(text: &str, truncated: bool, requested_lines: Option<u32>) -> Option<String> {
-    let requested = usize::try_from(requested_lines?).ok()?;
-    let returned = text.lines().count();
-    (truncated && returned < requested).then(|| {
-        format!(
-            "herdr: partial read: {returned} of {requested} requested lines; the rest of the history could not be read this time, so retry for more"
-        )
-    })
 }
 
 pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
@@ -137,6 +110,13 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         return Ok(CommandOutcome::Handled(0));
     }
 
+    if args.len() == 2 {
+        if let Some(group) = api_group(command) {
+            eprintln!("{}", projection::group_commands(&group));
+            return Ok(CommandOutcome::Handled(2));
+        }
+    }
+
     let exit_code = match command {
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
@@ -145,12 +125,6 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
             exit_code
         }
         "api" => api::run_api_command(&args[2..])?,
-        "client" => {
-            let Some(exit_code) = client::run_client_command(&args[2..])? else {
-                return Ok(CommandOutcome::NotCli);
-            };
-            exit_code
-        }
         "status" => status::run_status_command(&args[2..])?,
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
@@ -160,18 +134,30 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
-        "todo" => todo::run_todo_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
         "plugin" => plugin::run_plugin_command(&args[2..])?,
-        "popup" => popup::run_popup_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
         _ => return Ok(CommandOutcome::NotCli),
     };
 
     Ok(CommandOutcome::Handled(exit_code))
+}
+
+/// API-backed command groups, which list their commands when run without one.
+fn api_group(name: &str) -> Option<clap::Command> {
+    Some(match name {
+        "workspace" => workspace_bindings::command(),
+        "worktree" => worktree::command(),
+        "tab" => tab::command(),
+        "notification" => notification::command(),
+        "agent" => agent::command(),
+        "pane" => pane::command(),
+        "plugin" => plugin::command(),
+        _ => return None,
+    })
 }
 
 fn run_channel_command(args: &[String]) -> std::io::Result<i32> {
@@ -337,9 +323,7 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
-    let loaded = crate::config::Config::load();
-    let diagnostics = loaded.diagnostics;
-    let warnings = loaded.config.keybind_warnings();
+    let diagnostics = crate::config::Config::load().diagnostics;
     if diagnostics.is_empty() {
         println!("config: ok");
     } else {
@@ -347,11 +331,6 @@ fn config_check(args: &[String]) -> std::io::Result<i32> {
         for diagnostic in &diagnostics {
             println!("{diagnostic}");
         }
-    }
-    // Warnings describe a configuration that applies as written but is
-    // probably not what was meant; they do not fail the check.
-    for warning in &warnings {
-        println!("warning: {warning}");
     }
 
     Ok(i32::from(!diagnostics.is_empty()))
@@ -729,40 +708,7 @@ fn parse_terminal_dimension(raw: &str, flag: &str) -> std::io::Result<u16> {
 }
 
 fn terminal_title(args: &[String]) -> std::io::Result<i32> {
-    match args.first().map(|arg| arg.as_str()) {
-        Some("set") => {
-            if args.len() != 2 {
-                eprintln!("usage: herdr terminal title set <title>");
-                return Ok(2);
-            }
-            print_response(&send_request(&Request {
-                id: "cli:terminal:title:set".into(),
-                method: Method::ClientWindowTitleSet(ClientWindowTitleSetParams {
-                    title: args[1].clone(),
-                }),
-            })?)
-        }
-        Some("clear") => {
-            if args.len() != 1 {
-                eprintln!("usage: herdr terminal title clear");
-                return Ok(2);
-            }
-            print_response(&send_request(&Request {
-                id: "cli:terminal:title:clear".into(),
-                method: Method::ClientWindowTitleClear(EmptyParams::default()),
-            })?)
-        }
-        Some("help" | "--help" | "-h") => {
-            eprintln!("usage: herdr terminal title set <title>");
-            eprintln!("       herdr terminal title clear");
-            Ok(0)
-        }
-        _ => {
-            eprintln!("usage: herdr terminal title set <title>");
-            eprintln!("       herdr terminal title clear");
-            Ok(2)
-        }
-    }
+    title::run(args)
 }
 
 pub(super) fn parse_attach_target(args: &[String], usage: &str) -> Result<(String, bool), i32> {
@@ -795,6 +741,27 @@ pub(super) fn print_response(response: &serde_json::Value) -> std::io::Result<i3
 
     println!("{}", serde_json::to_string(response).unwrap());
     Ok(0)
+}
+
+/// Sends a parsed request and prints its JSON response; parse failures never connect.
+fn run_json_request(request: Result<Request, projection::ParseError>) -> std::io::Result<i32> {
+    let request = match request {
+        Ok(request) => request,
+        Err(projection::ParseError::Usage(message)) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+        Err(projection::ParseError::Io(error)) => return Err(error),
+        Err(projection::ParseError::Clap(error)) => return print_clap_error(&error),
+    };
+    print_response(&send_request(&request)?)
+}
+
+/// Prints a Clap diagnostic or help page and returns its exit code.
+pub(super) fn print_clap_error(error: &clap::Error) -> std::io::Result<i32> {
+    crate::platform::begin_cli_output();
+    error.print()?;
+    Ok(error.exit_code())
 }
 
 pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
@@ -910,84 +877,12 @@ pub(super) fn normalize_workspace_id(value: &str) -> String {
     value.to_string()
 }
 
-/// The sync mode a `--toggle` / `--on` / `--off` flag names (without dashes).
-pub(super) fn sync_mode(name: &str) -> crate::api::schema::SyncMode {
-    match name {
-        "on" => crate::api::schema::SyncMode::On,
-        "off" => crate::api::schema::SyncMode::Off,
-        _ => crate::api::schema::SyncMode::Toggle,
-    }
-}
-
 pub(super) fn normalize_tab_id(value: &str) -> String {
     value.to_string()
 }
 
-/// Splits `--force` out of a close command's arguments.
-pub(super) fn take_force_flag(args: &[String]) -> (Vec<&String>, bool) {
-    let force = args.iter().any(|arg| arg == "--force");
-    (args.iter().filter(|arg| *arg != "--force").collect(), force)
-}
-
 pub(super) fn normalize_pane_id(value: &str) -> String {
     value.to_string()
-}
-
-pub(super) fn parse_split_direction(value: &str) -> std::io::Result<SplitDirection> {
-    match value {
-        "right" => Ok(SplitDirection::Right),
-        "down" => Ok(SplitDirection::Down),
-        _ => Err(std::io::Error::other(format!(
-            "invalid split direction: {value}"
-        ))),
-    }
-}
-
-pub(super) fn parse_read_source(value: &str) -> std::io::Result<ReadSource> {
-    match value {
-        "visible" => Ok(ReadSource::Visible),
-        "recent" => Ok(ReadSource::Recent),
-        "recent-unwrapped" | "recent_unwrapped" => Ok(ReadSource::RecentUnwrapped),
-        "detection" => Ok(ReadSource::Detection),
-        _ => Err(std::io::Error::other(format!(
-            "invalid read source: {value}"
-        ))),
-    }
-}
-
-pub(super) fn parse_read_format(value: &str) -> std::io::Result<ReadFormat> {
-    match value {
-        "text" => Ok(ReadFormat::Text),
-        "ansi" => Ok(ReadFormat::Ansi),
-        _ => Err(std::io::Error::other(format!(
-            "invalid read format: {value}"
-        ))),
-    }
-}
-
-fn parse_agent_status(value: &str) -> std::io::Result<AgentStatus> {
-    match value {
-        "idle" => Ok(AgentStatus::Idle),
-        "working" => Ok(AgentStatus::Working),
-        "blocked" => Ok(AgentStatus::Blocked),
-        "done" => Ok(AgentStatus::Done),
-        "unknown" => Ok(AgentStatus::Unknown),
-        _ => Err(std::io::Error::other(format!(
-            "invalid agent status: {value} (expected idle, working, blocked, done, or unknown)"
-        ))),
-    }
-}
-
-pub(super) fn parse_pane_agent_state(value: &str) -> std::io::Result<PaneAgentState> {
-    match value {
-        "idle" => Ok(PaneAgentState::Idle),
-        "working" => Ok(PaneAgentState::Working),
-        "blocked" => Ok(PaneAgentState::Blocked),
-        "unknown" => Ok(PaneAgentState::Unknown),
-        _ => Err(std::io::Error::other(format!(
-            "invalid pane agent state: {value} (expected idle, working, blocked, or unknown)"
-        ))),
-    }
 }
 
 pub(super) fn parse_u32_flag(flag: &str, value: &str) -> std::io::Result<u32> {
@@ -1123,22 +1018,6 @@ fn _print_json<T: Serialize>(value: &T) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn close_commands_take_force_anywhere() {
-        let args = |parts: &[&str]| {
-            parts
-                .iter()
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-        };
-        let with = args(&["w1:p2", "--force"]);
-        assert_eq!(super::take_force_flag(&with), (vec![&with[0]], true));
-        let before = args(&["--force", "w1:p2"]);
-        assert_eq!(super::take_force_flag(&before), (vec![&before[1]], true));
-        let without = args(&["w1:p2"]);
-        assert_eq!(super::take_force_flag(&without), (vec![&without[0]], false));
-    }
-
-    #[test]
     fn parses_channel_set_argument() {
         assert_eq!(
             super::parse_channel_set_arg(&["preview".to_string()]),
@@ -1242,28 +1121,6 @@ mod tests {
             &client,
         );
         assert!(!super::server_not_running::was_reported(&mapped));
-    }
-
-    #[test]
-    fn short_truncated_read_is_reported_on_stderr_only_when_short() {
-        let text = "a\nb\nc\n";
-        let note = super::short_read_note(text, true, Some(400)).expect("short truncated read");
-        assert!(note.contains("3 of 400"), "{note}");
-        assert_eq!(
-            super::short_read_note(text, false, Some(400)),
-            None,
-            "complete history"
-        );
-        assert_eq!(
-            super::short_read_note(text, true, Some(3)),
-            None,
-            "got what was asked"
-        );
-        assert_eq!(
-            super::short_read_note(text, true, None),
-            None,
-            "no line count asked"
-        );
     }
 
     #[test]

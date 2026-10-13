@@ -1,3 +1,6 @@
+use crate::cli::agent::bindings;
+use crate::cli::projection::{cli_projection, Field};
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -346,4 +349,73 @@ pub struct AgentSessionInfo {
     /// belongs to an agent that no longer runs there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore_argv: Option<Vec<String>>,
+}
+
+cli_projection! {
+    pub(crate) AgentReadProjection for AgentReadParams {
+        target => Field::new(String::new()).input(bindings::target()),
+        source => Field::new(ReadSource::Recent).input(bindings::source()),
+        lines => Field::new(None).input(bindings::lines()),
+        format => Field::new(ReadFormat::Text)
+            .input(bindings::format()).input(bindings::ansi()),
+        strip_ansi => Field::new(true),
+
+        strip_dim => Field::new(false),
+    }
+}
+
+cli_projection! {
+    pub(crate) AgentSendKeysProjection for AgentSendKeysParams {
+        target => Field::new(String::new()).input(bindings::target()),
+        keys => Field::new(Vec::new()).input(bindings::keys()),
+        }
+}
+
+cli_projection! {
+    pub(crate) AgentWaitProjection for AgentWaitParams {
+        target => Field::new(String::new()).input(bindings::target()),
+        until => Field::new(Vec::new()).input(bindings::until()
+            .help("State to match; repeat for more than one state")),
+        timeout_ms => Field::new(None).input(bindings::timeout()
+            .help("Fail after this many milliseconds")),
+        }
+}
+
+cli_projection! {
+    pub(crate) AgentPromptWaitProjection for AgentPromptWaitOptions {
+        until => Field::new(Vec::new()).input(bindings::until()
+            .help("State to match after --wait; repeat for more than one state")),
+        timeout_ms => Field::new(None).input(bindings::timeout()
+            .help("Fail after this many milliseconds")),
+
+        submission_deadline => Field::new(None::<std::time::Instant>),
+        }
+}
+
+cli_projection! {
+    pub(crate) AgentRenameProjection for AgentRenameParams {
+        target => Field::new(String::new()).input(bindings::target()),
+        name => Field::new(None)
+            .input(bindings::rename_name()).input(bindings::clear_name()),
+        }
+}
+
+cli_projection! {
+    pub(crate) AgentStartProjection for AgentStartParams {
+        name => Field::new(String::new()).input(bindings::text_position("name", "NAME", 0)),
+        kind => Field::new(String::new()).input(bindings::kind()),
+        pane_id => Field::new(String::new()).input(bindings::pane()),
+        args => Field::new(Vec::new()).input(bindings::agent_args()),
+
+        timeout_ms => Field::new(None).input(bindings::timeout()
+            .help("Wait for interactive readiness (default: 30000; max: 300000)")),
+        }
+}
+
+cli_projection! {
+    pub(crate) AgentPromptProjection for AgentPromptParams {
+        target => Field::new(String::new()).input(bindings::target()),
+        text => Field::new(String::new()).input(bindings::text_position("text", "TEXT", 1).verbatim()),
+        wait => Field::new(None).input(bindings::wait_presence()),
+        }
 }

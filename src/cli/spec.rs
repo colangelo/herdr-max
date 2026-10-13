@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
+use clap::{Arg, ArgAction, Command, ValueHint};
 
 mod completion;
 mod machine;
@@ -41,15 +41,12 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
-        .subcommand(todo_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(plugin_command())
-        .subcommand(popup_command())
-        .subcommand(client_command());
+        .subcommand(plugin_command());
     configure_help(command, 0)
 }
 
@@ -162,6 +159,7 @@ fn channel_command() -> Command {
 fn server_command() -> Command {
     let command = Command::new("server")
         .about("Run or control the headless server")
+        .subcommand(super::server::live_handoff_command())
         .subcommand(Command::new("stop").about("Stop the running server"))
         .subcommand(Command::new("reload-config").about("Reload config in the running server"))
         .subcommand(
@@ -199,679 +197,27 @@ fn api_command() -> Command {
 }
 
 fn workspace_command() -> Command {
-    Command::new("workspace")
-        .about("Manage workspaces over the socket API")
-        .subcommand(Command::new("list").about("List workspaces"))
-        .subcommand(
-            Command::new("create")
-                .about("Create a workspace")
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(env_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(id_command("get", "workspace_id", "Show a workspace"))
-        .subcommand(id_command("focus", "workspace_id", "Focus a workspace"))
-        .subcommand(id_command(
-            "pin",
-            "workspace_id",
-            "Pin a workspace to the top of the list",
-        ))
-        .subcommand(id_command("unpin", "workspace_id", "Unpin a workspace"))
-        .subcommand(
-            Command::new("rename")
-                .about("Rename a workspace")
-                .arg(required("workspace_id", "WORKSPACE_ID"))
-                .arg(required("label", "LABEL").num_args(1..)),
-        )
-        .subcommand(
-            Command::new("report-metadata")
-                .about("Report display-only workspace metadata")
-                .arg(required("workspace_id", "WORKSPACE_ID"))
-                .arg(option("source", "ID").required(true))
-                .arg(repeatable_option("token", "NAME=VALUE"))
-                .arg(repeatable_option("clear-token", "NAME"))
-                .arg(option("seq", "N"))
-                .arg(option("ttl-ms", "N")),
-        )
-        .subcommand(
-            id_command("close", "workspace_id", "Close a workspace")
-                .arg(flag("group"))
-                .arg(flag("force")),
-        )
+    super::workspace_bindings::command()
 }
 
 fn worktree_command() -> Command {
-    Command::new("worktree")
-        .about("Manage Git worktree-backed workspaces")
-        .subcommand(
-            Command::new("list")
-                .about("List worktree workspaces")
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("create")
-                .about("Create and open a Git worktree")
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("branch", "NAME"))
-                .arg(option("base", "REF"))
-                .arg(path_option("path", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("open")
-                .about("Open an existing Git worktree")
-                .arg(option("workspace", "ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(path_option("path", "PATH"))
-                .arg(option("branch", "NAME"))
-                .arg(option("label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus"))
-                .arg(flag("trust-repository")),
-        )
-        .subcommand(
-            Command::new("remove")
-                .about("Remove a worktree checkout")
-                .arg(option("workspace", "ID"))
-                .arg(flag("force"))
-                .arg(flag("trust-repository")),
-        )
+    super::worktree::command()
 }
 
 fn tab_command() -> Command {
-    Command::new("tab")
-        .about("Manage tabs over the socket API")
-        .subcommand(
-            Command::new("list")
-                .about("List tabs")
-                .arg(option("workspace", "WORKSPACE_ID")),
-        )
-        .subcommand(
-            Command::new("create")
-                .about("Create a tab")
-                .arg(option("workspace", "WORKSPACE_ID"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(option("label", "TEXT"))
-                .arg(env_option())
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(id_command("get", "tab_id", "Show a tab"))
-        .subcommand(id_command("focus", "tab_id", "Focus a tab"))
-        .subcommand(
-            Command::new("rename")
-                .about("Rename a tab")
-                .arg(required("tab_id", "TAB_ID"))
-                .arg(required("label", "LABEL").num_args(1..)),
-        )
-        .subcommand(
-            Command::new("sync")
-                .about("Type into every pane of a tab at once, or stop")
-                .arg(Arg::new("tab_id").value_name("TAB_ID"))
-                .arg(option("tab", "ID"))
-                .arg(flag("current"))
-                .arg(flag("toggle"))
-                .arg(flag("on"))
-                .arg(flag("off")),
-        )
-        .subcommand(id_command("close", "tab_id", "Close a tab").arg(flag("force")))
+    super::tab::command()
 }
 
 fn notification_command() -> Command {
-    Command::new("notification")
-        .about("Show and list Herdr notifications")
-        .subcommand(
-            Command::new("list")
-                .about("List the notification log")
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("clear")
-                .about("Clear the notification log")
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("show")
-                .about("Show a notification")
-                .arg(required("title", "TITLE"))
-                .arg(option("body", "TEXT"))
-                .arg(option("position", "POSITION").value_parser([
-                    "top-left",
-                    "top-right",
-                    "bottom-left",
-                    "bottom-right",
-                    "center",
-                ]))
-                .arg(option("sound", "SOUND").value_parser(["none", "done", "request"])),
-        )
-}
-
-fn todo_command() -> Command {
-    Command::new("todo")
-        .about("Manage per-pane todo lists")
-        .subcommand(
-            Command::new("add")
-                .about("Add a todo to a pane")
-                .override_usage("herdr todo add <TEXT> [OPTIONS]")
-                .arg(required("text", "TEXT"))
-                .args(current_pane_args())
-                .arg(todo_priority_option())
-                .arg(option("link", "TARGET").help("Link the todo to another pane"))
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("list")
-                .about("List pane todos")
-                .args(current_pane_args())
-                .arg(flag("all").help("List todos from every pane"))
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("done")
-                .about("Mark a todo done")
-                .arg(required("id", "ID"))
-                .args(current_pane_args())
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("undone")
-                .about("Reopen a done todo")
-                .arg(required("id", "ID"))
-                .args(current_pane_args())
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("edit")
-                .about("Edit a todo")
-                .override_usage("herdr todo edit <ID> [OPTIONS]")
-                .arg(required("id", "ID"))
-                .arg(option("text", "TEXT"))
-                .arg(todo_priority_option())
-                .arg(option("link", "TARGET").help("Link the todo to another pane"))
-                .arg(flag("unlink").help("Drop the todo's pane link"))
-                .args(current_pane_args())
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("rm")
-                .about("Remove a todo")
-                .arg(required("id", "ID"))
-                .args(current_pane_args())
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("clear")
-                .about("Clear a pane's todos")
-                .arg(flag("done").help("Clear only the done todos"))
-                .args(current_pane_args())
-                .arg(json_flag()),
-        )
-        .after_help("Without --pane or --current, every verb acts on the calling pane.")
-}
-
-fn todo_priority_option() -> Arg {
-    option("priority", "PRIORITY").value_parser(["high", "normal", "low"])
+    super::notification::command()
 }
 
 fn agent_command() -> Command {
-    Command::new("agent")
-        .about("Control and inspect agent panes")
-        .subcommand(
-            Command::new("list").about("List agents").arg(
-                flag("input-box")
-                    .help("Include each Claude Code agent's input box draft (reads their screens)"),
-            ),
-        )
-        .subcommand(id_command("get", "target", "Show an agent"))
-        .subcommand(
-            Command::new("read")
-                .about("Read agent terminal output")
-                .override_usage("herdr agent read <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(read_source_option(true))
-                .arg(option("lines", "N"))
-                .arg(text_ansi_format_option())
-                .arg(flag("ansi"))
-                .arg(flag("strip-dim").help("Leave out faint (dim) text, such as a grey suggestion")),
-        )
-        .subcommand(
-            Command::new("send-keys")
-                .about("Send key presses to an agent")
-                .arg(required("target", "TARGET"))
-                .arg(required("key", "KEY").num_args(1..))
-                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
-        )
-        .subcommand(
-            Command::new("message")
-                .about("Send one line of text to an agent, typed as you or as a note")
-                .override_usage("herdr agent message <TARGET> <TEXT> [OPTIONS]\n       herdr agent message <TARGET> --answer KEY")
-                .arg(required("target", "TARGET"))
-                .arg(Arg::new("text").value_name("TEXT").num_args(0..).trailing_var_arg(true))
-                .arg(flag("note").help("Send a peer message through the note command instead of typing the text"))
-                .arg(flag("interrupt").help("Interrupt a working agent first"))
-                .arg(option("answer", "KEY").help("Press this option's key for an agent blocked on a prompt, instead of typing text"))
-                .after_help(
-                    "Typed text goes in as typing, in pieces, then Enter, so it works with agents that collapse a large paste. A working agent takes it at its next pause unless --interrupt is given. Free text is refused for an agent that is blocked on a prompt; answer it with --answer. A note is delivered by palette.send.note_command (agent-bell by default) and approves nothing.",
-                ),
-        )
-        .subcommand(
-            Command::new("prompt")
-                .about("Submit a prompt to an agent")
-                .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(required("text", "TEXT"))
-                .arg(
-                    flag("wait")
-                        .help("Wait for the first matching state observed after submission"),
-                )
-                .arg(
-                    option("until", "STATUS")
-                        .action(ArgAction::Append)
-                        .requires("wait")
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help("State to match after --wait; repeat for more than one state"),
-                )
-                .arg(
-                    option("timeout", "MS")
-                        .requires("wait")
-                        .help("Fail after this many milliseconds"),
-                )
-                .after_help(
-                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match.",
-                ),
-        )
-        .subcommand(
-            Command::new("rename")
-                .about("Rename an agent")
-                .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
-                .arg(required("target", "TARGET"))
-                .arg(Arg::new("name").value_name("NAME"))
-                .arg(flag("clear"))
-                .group(
-                    ArgGroup::new("rename")
-                        .args(["name", "clear"])
-                        .required(true),
-                ),
-        )
-        .subcommand(id_command("focus", "target", "Focus an agent"))
-        .subcommand(id_command(
-            "pin",
-            "target",
-            "Pin an agent to the top of the agent panel",
-        ))
-        .subcommand(id_command("unpin", "target", "Unpin an agent"))
-        .subcommand(
-            Command::new("wait")
-                .about("Wait until an agent reaches one of the requested states")
-                .override_usage("herdr agent wait <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(
-                    option("until", "STATUS")
-                        .action(ArgAction::Append)
-                        .value_parser(["idle", "working", "blocked", "done", "unknown"])
-                        .help("State to match; repeat for more than one state"),
-                )
-                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
-                .after_help(
-                    "Without --until, matches idle, done, or blocked. Use --until unknown explicitly when needed. Without --timeout, waits indefinitely.",
-                ),
-        )
-        .subcommand(
-            Command::new("attach")
-                .about("Attach directly to an agent terminal")
-                .override_usage("herdr agent attach <TARGET> [OPTIONS]")
-                .arg(required("target", "TARGET"))
-                .arg(flag("takeover")),
-        )
-        .subcommand(
-            Command::new("start")
-                .about("Start a supported interactive agent in an existing pane")
-                .override_usage(
-                    "herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
-                )
-                .arg(required("name", "NAME"))
-                .arg(
-                    option("kind", "KIND")
-                        .required(true)
-                        .value_parser(agent_kind_values())
-                        .help("Supported agent kind and canonical executable"),
-                )
-                .arg(
-                    option("pane", "ID")
-                        .required(true)
-                        .help("Existing pane at an interactive shell prompt"),
-                )
-                .arg(
-                    option("timeout", "MS")
-                        .help("Wait for interactive readiness (default: 30000; max: 300000)"),
-                )
-                .arg(
-                    Arg::new("agent_args")
-                        .value_name("AGENT_ARG")
-                        .num_args(0..)
-                        .last(true),
-                )
-                .after_help(
-                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: herdr agent prompt <TARGET> <TEXT> --wait",
-                ),
-        )
-        .subcommand(
-            Command::new("explain")
-                .about("Explain agent detection state")
-                .arg(Arg::new("target").value_name("TARGET"))
-                .arg(path_option("file", "PATH"))
-                .arg(option("agent", "LABEL"))
-                .arg(json_flag())
-                .arg(text_json_format_option())
-                .arg(
-                    Arg::new("verbose")
-                        .short('v')
-                        .long("verbose")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-}
-
-pub(super) fn agent_kind_values() -> Vec<&'static str> {
-    crate::detect::Agent::ALL
-        .into_iter()
-        .map(crate::detect::agent_label)
-        .collect()
+    super::agent::command()
 }
 
 fn pane_command() -> Command {
-    Command::new("pane")
-        .about("Control terminal panes")
-        .subcommand(
-            Command::new("list")
-                .about("List panes")
-                .arg(option("workspace", "WORKSPACE_ID")),
-        )
-        .subcommand(
-            Command::new("current")
-                .about("Show the current pane")
-                .args(current_pane_args()),
-        )
-        .subcommand(id_command("get", "pane_id", "Show a pane"))
-        .subcommand(
-            Command::new("layout")
-                .about("Show pane geometry or apply a layout preset")
-                .arg(option("preset", "PRESET").visible_alias("set")
-                    .value_parser(["even-horizontal", "even-h", "even-vertical", "even-v", "tiled", "main-vertical", "main-v"]))
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("process-info")
-                .about("Show pane process information")
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("neighbor")
-                .about("Find a pane neighbor")
-                .arg(required_direction_option())
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("edges")
-                .about("Show pane edge information")
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("focus")
-                .about("Focus a neighboring pane")
-                .arg(required_direction_option())
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("resize")
-                .about("Resize a pane split")
-                .arg(required_direction_option())
-                .arg(option("amount", "FLOAT"))
-                .args(current_pane_args()),
-        )
-        .subcommand(
-            Command::new("zoom")
-                .about("Toggle or set pane zoom")
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(flag("toggle"))
-                .arg(flag("on"))
-                .arg(flag("off")),
-        )
-        .subcommand(
-            Command::new("sync")
-                .about("Put a pane in or out of its tab's synced input")
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(flag("toggle"))
-                .arg(flag("on"))
-                .arg(flag("off")),
-        )
-        .subcommand(
-            Command::new("read")
-                .about("Read pane terminal output")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(read_source_option(true))
-                .arg(option("lines", "N"))
-                .arg(text_ansi_format_option())
-                .arg(flag("ansi"))
-                .arg(flag("raw"))
-                .arg(flag("strip-dim").help("Leave out faint (dim) text, such as a grey suggestion")),
-        )
-        .subcommand(
-            Command::new("rename")
-                .about("Rename a pane")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(Arg::new("label").value_name("LABEL").num_args(1..))
-                .arg(flag("clear")),
-        )
-        .subcommand(
-            Command::new("input")
-                .about("Set pane input routing")
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(
-                    option("right-click", "TARGET")
-                        .value_parser(["herdr", "pane"])
-                        .required(true),
-                ),
-        )
-        .subcommand(
-            Command::new("split")
-                .about("Split a pane")
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args())
-                .arg(split_direction_option())
-                .arg(option("ratio", "FLOAT"))
-                .arg(path_option("cwd", "PATH"))
-                .arg(env_option())
-                .arg(option("right-click", "TARGET").value_parser(["herdr", "pane"]))
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(
-            Command::new("swap")
-                .about("Swap panes")
-                .arg(direction_option())
-                .args(current_pane_args())
-                .arg(option("source-pane", "ID"))
-                .arg(option("target-pane", "ID")),
-        )
-        .subcommand(
-            Command::new("move")
-                .about("Move a pane")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(option("tab", "TAB_ID"))
-                .arg(option("split", "DIRECTION").value_parser(["right", "down"]))
-                .arg(option("target-pane", "ID"))
-                .arg(option("ratio", "FLOAT"))
-                .arg(flag("new-tab"))
-                .arg(option("workspace", "ID"))
-                .arg(flag("new-workspace"))
-                .arg(option("label", "TEXT"))
-                .arg(option("tab-label", "TEXT"))
-                .arg(flag("focus"))
-                .arg(flag("no-focus")),
-        )
-        .subcommand(
-            Command::new("clear")
-                .about("Clear a pane's saved scrollback")
-                .arg(Arg::new("pane_id").value_name("PANE_ID"))
-                .args(current_pane_args()),
-        )
-        .subcommand(id_command("close", "pane_id", "Close a pane").arg(flag("force")))
-        .subcommand(
-            id_command("respawn", "pane_id", "Restart a pane's process in place")
-                .arg(flag("force")),
-        )
-        .subcommand(
-            Command::new("send-text")
-                .about("Send literal text to a pane")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("text", "TEXT"))
-                .arg(option("chunk", "BYTES").help(
-                    "Send the text in pieces of at most BYTES bytes, never splitting a character",
-                ))
-                .arg(
-                    option("chunk-delay", "MS")
-                        .requires("chunk")
-                        .help("Pause between --chunk pieces in milliseconds [default: 20]"),
-                )
-                .after_help(
-                    "The text is sent as one raw write. A TUI such as Claude Code may treat a large single write (about 1000 bytes or more) as a paste and collapse it into a placeholder like [Pasted text #1]. Use --chunk 300 to send it as separate paced writes that arrive as typed text; the command returns after the last piece is sent. Use -- before text that starts with --chunk.\n\nnext: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
-                ),
-        )
-        .subcommand(
-            Command::new("send-keys")
-                .about("Send key presses to a pane")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("key", "KEY").num_args(1..))
-                .after_help("Use esc as the canonical Escape key name; escape is also accepted."),
-        )
-        .subcommand(
-            Command::new("wait-output")
-                .about("Wait for matching pane output")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(
-                    option("match", "TEXT")
-                        .conflicts_with("regex")
-                        .required_unless_present("regex")
-                        .help("Match a literal substring"),
-                )
-                .arg(
-                    option("regex", "PATTERN")
-                        .conflicts_with("match")
-                        .required_unless_present("match")
-                        .help("Match a Rust regular expression"),
-                )
-                .arg(read_source_option(false))
-                .arg(option("lines", "N").help("Restrict the searched snapshot to N lines"))
-                .arg(option("timeout", "MS").help("Fail after this many milliseconds"))
-                .arg(flag("raw").help("Keep ANSI escape sequences while matching"))
-                .group(
-                    ArgGroup::new("matcher")
-                        .args(["match", "regex"])
-                        .required(true),
-                )
-                .after_help(
-                    "The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely.",
-                ),
-        )
-        .subcommand(
-            Command::new("run")
-                .about("Run a command in a pane")
-                .arg(required("pane_id", "PANE_ID"))
-                .arg(required("command", "COMMAND").num_args(1..)),
-        )
-        .subcommand(report_agent_command())
-        .subcommand(report_agent_session_command())
-        .subcommand(release_agent_command())
-        .subcommand(report_metadata_command())
-        .subcommand(report_hint_command())
-}
-
-fn report_agent_command() -> Command {
-    Command::new("report-agent")
-        .about("Report pane agent lifecycle state")
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(pane_agent_state_option("state"))
-        .arg(option("message", "TEXT"))
-        .arg(option("seq", "N"))
-        .arg(option("agent-session-id", "ID"))
-        .arg(path_option("agent-session-path", "PATH"))
-        .arg(resume_argv_arg())
-}
-
-fn report_agent_session_command() -> Command {
-    Command::new("report-agent-session")
-        .about("Report pane agent session identity")
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("seq", "N"))
-        .arg(option("agent-session-id", "ID"))
-        .arg(path_option("agent-session-path", "PATH"))
-        .arg(option("session-start-source", "SOURCE"))
-        .arg(resume_argv_arg())
-}
-
-fn resume_argv_arg() -> Arg {
-    Arg::new("resume_argv")
-        .value_name("RESUME_ARG")
-        .num_args(0..)
-        .last(true)
-        .help("Command that resumes this session after a Herdr restart; starts with a plain command name")
-}
-
-fn release_agent_command() -> Command {
-    Command::new("release-agent")
-        .about("Release pane agent lifecycle authority")
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("seq", "N"))
-}
-
-fn report_hint_command() -> Command {
-    Command::new("report-hint")
-        .about("Report that an agent waits on a question or a permission, or that it stopped")
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL").required(true))
-        .arg(option("kind", "question|permission"))
-        .arg(option("id", "ID"))
-        .arg(option("ttl-ms", "N"))
-        .arg(flag("clear"))
-        .arg(option("seq", "N"))
-}
-
-fn report_metadata_command() -> Command {
-    Command::new("report-metadata")
-        .about("Report display-only pane metadata")
-        .arg(required("pane_id", "PANE_ID"))
-        .arg(option("source", "ID").required(true))
-        .arg(option("agent", "LABEL"))
-        .arg(option("applies-to-source", "ID"))
-        .arg(option("title", "TEXT"))
-        .arg(flag("clear-title"))
-        .arg(option("display-agent", "TEXT"))
-        .arg(flag("clear-display-agent"))
-        .arg(option("state-label", "STATUS=TEXT"))
-        .arg(flag("clear-state-labels"))
-        .arg(repeatable_option("token", "NAME=VALUE"))
-        .arg(repeatable_option("clear-token", "NAME"))
-        .arg(option("seq", "N"))
-        .arg(option("ttl-ms", "N"))
+    super::pane::command()
 }
 
 fn terminal_command() -> Command {
@@ -902,16 +248,7 @@ fn terminal_command() -> Command {
                         .arg(option("rows", "N")),
                 ),
         )
-        .subcommand(
-            Command::new("title")
-                .about("Manage the outer terminal title")
-                .subcommand(
-                    Command::new("set")
-                        .about("Set the outer terminal title")
-                        .arg(required("title", "TITLE")),
-                )
-                .subcommand(Command::new("clear").about("Clear the outer terminal title")),
-        )
+        .subcommand(super::title::command())
 }
 
 fn session_command() -> Command {
@@ -958,150 +295,7 @@ fn integration_command() -> Command {
 }
 
 fn plugin_command() -> Command {
-    Command::new("plugin")
-        .about("Install and run workflow plugins")
-        .subcommand(
-            Command::new("install")
-                .about("Install a plugin from GitHub")
-                .arg(required("source", "OWNER/REPO[/SUBDIR]"))
-                .arg(option("ref", "REF"))
-                .arg(
-                    Arg::new("yes")
-                        .short('y')
-                        .long("yes")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(
-            Command::new("uninstall")
-                .about("Uninstall a plugin")
-                .arg(required("plugin", "PLUGIN")),
-        )
-        .subcommand(
-            Command::new("update")
-                .about("Update GitHub-installed plugins")
-                .arg(Arg::new("plugins").value_name("PLUGIN").num_args(0..))
-                .arg(
-                    Arg::new("yes")
-                        .short('y')
-                        .long("yes")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
-        .subcommand(
-            Command::new("link")
-                .about("Link a local plugin")
-                .arg(path_arg("path", "PATH"))
-                .arg(flag("disabled"))
-                .arg(flag("enabled")),
-        )
-        .subcommand(
-            Command::new("unlink")
-                .about("Unlink a local plugin")
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("enable")
-                .about("Enable a plugin")
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("disable")
-                .about("Disable a plugin")
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("list")
-                .about("List installed plugins")
-                .arg(option("plugin", "ID"))
-                .arg(json_flag()),
-        )
-        .subcommand(
-            Command::new("config-dir")
-                .about("Print a plugin config directory")
-                .arg(required("plugin_id", "PLUGIN_ID")),
-        )
-        .subcommand(
-            Command::new("action")
-                .about("List or invoke plugin actions")
-                .subcommand(
-                    Command::new("list")
-                        .about("List plugin actions")
-                        .arg(option("plugin", "ID")),
-                )
-                .subcommand(
-                    Command::new("invoke")
-                        .about("Invoke a plugin action")
-                        .arg(required("action_id", "ACTION_ID"))
-                        .arg(option("plugin", "ID")),
-                ),
-        )
-        .subcommand(
-            Command::new("log")
-                .about("Inspect plugin command logs")
-                .visible_alias("logs")
-                .subcommand(
-                    Command::new("list")
-                        .about("List plugin command logs")
-                        .arg(option("plugin", "ID"))
-                        .arg(option("limit", "N")),
-                ),
-        )
-        .subcommand(
-            Command::new("pane")
-                .about("Manage plugin-owned panes")
-                .subcommand(
-                    Command::new("open")
-                        .about("Open a plugin pane")
-                        .arg(option("plugin", "ID"))
-                        .arg(option("entrypoint", "ID"))
-                        .arg(
-                            option("placement", "PLACEMENT")
-                                .value_parser(["overlay", "popup", "split", "tab", "zoomed"]),
-                        )
-                        .arg(option("workspace", "ID"))
-                        .arg(option("target-pane", "PANE"))
-                        .arg(split_direction_option())
-                        .arg(path_option("cwd", "PATH"))
-                        .arg(env_option())
-                        .arg(flag("focus"))
-                        .arg(flag("no-focus")),
-                )
-                .subcommand(
-                    Command::new("focus")
-                        .about("Focus a plugin pane")
-                        .arg(required("pane_id", "PANE_ID")),
-                )
-                .subcommand(
-                    Command::new("close")
-                        .about("Close a plugin pane")
-                        .arg(required("pane_id", "PANE_ID")),
-                ),
-        )
-}
-
-fn popup_command() -> Command {
-    Command::new("popup")
-        .about("Manage the session popup over the socket API")
-        .subcommand(
-            Command::new("close")
-                .about("Close the open popup")
-                .arg(option("plugin", "ID").help("Close the popup only if this plugin opened it")),
-        )
-}
-
-fn client_command() -> Command {
-    Command::new("client")
-        .about("Inspect the clients attached to the server over the socket API")
-        .subcommand(
-            Command::new("list").about(
-                "List attached clients: foreground, focused tab, input idle time, window focus",
-            ),
-        )
-}
-
-fn current_pane_args() -> [Arg; 2] {
-    [option("pane", "ID"), flag("current")]
+    super::plugin::command()
 }
 
 fn integration_target_arg() -> Arg {
@@ -1120,47 +314,6 @@ fn integration_target_values() -> Vec<&'static str> {
     values
 }
 
-fn id_command(name: &'static str, id: &'static str, about: &'static str) -> Command {
-    Command::new(name).about(about).arg(required(id, id))
-}
-
-fn direction_option() -> Arg {
-    option("direction", "DIRECTION").value_parser(["left", "right", "up", "down"])
-}
-
-fn required_direction_option() -> Arg {
-    direction_option().required(true)
-}
-
-fn split_direction_option() -> Arg {
-    option("direction", "DIRECTION").value_parser(["right", "down"])
-}
-
-fn pane_agent_state_option(name: &'static str) -> Arg {
-    option(name, "STATUS")
-        .required(true)
-        .value_parser(["idle", "working", "blocked", "unknown"])
-}
-
-fn read_source_option(include_detection: bool) -> Arg {
-    let values = if include_detection {
-        vec!["visible", "recent", "recent-unwrapped", "detection"]
-    } else {
-        vec!["visible", "recent", "recent-unwrapped"]
-    };
-    option("source", "SOURCE")
-        .value_parser(values)
-        .help("Terminal snapshot source (default: recent)")
-}
-
-fn text_ansi_format_option() -> Arg {
-    option("format", "FORMAT").value_parser(["text", "ansi"])
-}
-
-fn text_json_format_option() -> Arg {
-    option("format", "FORMAT").value_parser(["text", "json"])
-}
-
 fn json_flag() -> Arg {
     flag("json")
 }
@@ -1171,12 +324,6 @@ fn help_flag() -> Arg {
         .long("help")
         .action(ArgAction::SetTrue)
         .help("Show help")
-}
-
-fn env_option() -> Arg {
-    option("env", "KEY=VALUE")
-        .action(ArgAction::Append)
-        .help("Set an environment variable for the launched process")
 }
 
 fn flag(name: &'static str) -> Arg {
@@ -1190,10 +337,6 @@ fn option(name: &'static str, value_name: &'static str) -> Arg {
         .action(ArgAction::Set)
 }
 
-fn repeatable_option(name: &'static str, value_name: &'static str) -> Arg {
-    option(name, value_name).action(ArgAction::Append)
-}
-
 fn path_option(name: &'static str, value_name: &'static str) -> Arg {
     option(name, value_name).value_hint(ValueHint::AnyPath)
 }
@@ -1202,30 +345,8 @@ fn required(name: &'static str, value_name: &'static str) -> Arg {
     Arg::new(name).value_name(value_name).required(true)
 }
 
-fn path_arg(name: &'static str, value_name: &'static str) -> Arg {
-    required(name, value_name).value_hint(ValueHint::AnyPath)
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn pane_layout_preset_options_are_discoverable_and_parseable() {
-        for option in ["--preset", "--set"] {
-            for preset in [
-                "even-horizontal",
-                "even-h",
-                "even-vertical",
-                "even-v",
-                "tiled",
-                "main-vertical",
-                "main-v",
-            ] {
-                assert!(super::command()
-                    .try_get_matches_from(["herdr", "pane", "layout", option, preset, "--current"])
-                    .is_ok());
-            }
-        }
-    }
     use clap::{Arg, Command};
 
     fn command_path<'a>(cmd: &'a Command, path: &[&str]) -> &'a Command {
@@ -1392,7 +513,6 @@ mod tests {
             ),
             (&["pane", "release-agent"][..], &["source", "agent"][..]),
             (&["pane", "report-metadata"][..], &["source"][..]),
-            (&["pane", "report-hint"][..], &["source", "agent"][..]),
         ] {
             let cmd = command_path(&super::command(), path).clone();
             for option in options {
@@ -1451,12 +571,17 @@ mod tests {
     }
 
     #[test]
-    fn worktree_json_compatibility_flag_stays_out_of_public_spec() {
+    fn worktree_json_compatibility_flag_stays_out_of_public_help() {
         let cmd = super::command();
         for subcommand in ["list", "create", "open", "remove"] {
             let worktree_command = command_path(&cmd, &["worktree", subcommand]);
+            assert!(option_arg(worktree_command, "json").is_hide_set());
             assert!(
-                !has_option(worktree_command, "json"),
+                !worktree_command
+                    .clone()
+                    .render_long_help()
+                    .to_string()
+                    .contains("--json"),
                 "herdr worktree {subcommand} should not advertise --json"
             );
         }
@@ -1469,35 +594,7 @@ mod tests {
         assert!(open
             .get_arguments()
             .any(|arg| arg.get_long() == Some("entrypoint")));
-        let placements = option_values(open, "placement");
-        assert!(placements.contains(&"zoomed".to_string()));
-        assert!(placements.contains(&"popup".to_string()));
-    }
-
-    #[test]
-    fn spec_includes_client_list() {
-        let cmd = super::command();
-        command_path(&cmd, &["client", "list"]);
-        assert!(cmd
-            .clone()
-            .try_get_matches_from(["herdr", "client", "list"])
-            .is_ok());
-        assert!(cmd
-            .try_get_matches_from(["herdr", "client", "list", "--all"])
-            .is_err());
-    }
-
-    #[test]
-    fn spec_includes_popup_close_with_plugin_option() {
-        let cmd = super::command();
-        let close = command_path(&cmd, &["popup", "close"]);
-        assert!(has_option(close, "plugin"));
-        for valid in [
-            &["herdr", "popup", "close"][..],
-            &["herdr", "popup", "close", "--plugin", "gestore.asks"][..],
-        ] {
-            assert!(cmd.clone().try_get_matches_from(valid).is_ok());
-        }
+        assert!(option_values(open, "placement").contains(&"zoomed".to_string()));
     }
 
     #[test]
@@ -1620,12 +717,6 @@ mod tests {
                 "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"
             ),
             "pane send-text is missing its next-step hint: {pane_send_text}"
-        );
-        assert!(
-            pane_send_text.contains("--chunk <BYTES>")
-                && pane_send_text.contains("--chunk-delay <MS>")
-                && pane_send_text.contains("[Pasted text #1]"),
-            "pane send-text help must explain paste collapse and --chunk: {pane_send_text}"
         );
     }
 

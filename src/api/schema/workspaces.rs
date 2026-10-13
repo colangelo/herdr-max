@@ -1,3 +1,6 @@
+use crate::cli::projection::{cli_projection, Field};
+use crate::cli::workspace_bindings as bindings;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -92,4 +95,52 @@ pub struct WorkspaceWorktreeInfo {
     pub repo_root: String,
     pub checkout_path: String,
     pub is_linked_worktree: bool,
+}
+
+cli_projection! {
+    pub(crate) WorkspaceCreateProjection for WorkspaceCreateParams {
+        source_workspace_id => Field::new(None::<String>),
+        cwd => Field::new(None)
+            .input(bindings::optional_text("cwd", "PATH").path().order(0)),
+        focus => Field::new(false)
+            .input(bindings::boolean("focus", true).order(3))
+            .input(bindings::boolean("no-focus", false).order(4)),
+        label => Field::new(None)
+            .input(bindings::optional_text("label", "TEXT").order(1)),
+        env => Field::new(HashMap::new())
+            .input(bindings::environment().order(2)),
+        }
+}
+
+cli_projection! {
+    pub(crate) WorkspaceCloseProjection for WorkspaceCloseParams {
+        workspace_id => Field::new(String::new()).input(bindings::workspace_id()),
+        close_group => Field::new(false)
+            .input(bindings::boolean("group", true).hidden()),
+
+        force => Field::new(false),
+    }
+}
+
+cli_projection! {
+    pub(crate) WorkspaceRenameProjection for WorkspaceRenameParams {
+        workspace_id => Field::new(String::new())
+            .input(bindings::workspace_id().value_name("WORKSPACE_ID")),
+        label => Field::new(String::new()).input(bindings::label()),
+        }
+}
+
+cli_projection! {
+    pub(crate) WorkspaceMetadataProjection for WorkspaceReportMetadataParams {
+        workspace_id => Field::new(String::new())
+            .input(bindings::workspace_id().value_name("WORKSPACE_ID")),
+        source => Field::new(String::new()).input(bindings::source())
+            .validate(|source| bindings::validate_source(source)),
+        tokens => Field::new(HashMap::new())
+            .input(bindings::token()).input(bindings::clear_token())
+            .validate(bindings::validate_tokens),
+        seq => Field::new(None).input(bindings::seq()),
+
+        ttl_ms => Field::new(None).input(bindings::ttl_ms()),
+        }
 }
