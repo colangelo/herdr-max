@@ -85,13 +85,13 @@
 ## 5. Verify
 
 - [x] 5.1 The inventory tests from 1.1 and 1.2 pass unchanged.
-- [ ] 5.2 Upstream's `tests/cli/contracts.rs` passes, with fork samples added where it enumerates.
+- [x] 5.2 Upstream's `tests/cli/contracts.rs` passes, with fork samples added where it enumerates.
 - [x] 5.3 `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`
       (locked), then the frozen v1 shapes test passes with no fixture edits.
-- [ ] 5.4 Full `just check` (locked) + the Linux CLI suite compile (widen `tests/cli.rs`'s cfg to
+- [x] 5.4 Full `just check` (locked) + the Linux CLI suite compile (widen `tests/cli.rs`'s cfg to
       `#![cfg(unix)]`, `cargo check --locked --all-targets`, restore; `git diff tests/cli.rs` empty).
 - [x] 5.5 CLI docs: `docs/next/website/src/content/docs/cli-reference.mdx` still lists every fork
       command; regenerate if upstream generates it now.
-- [ ] 5.6 Hand the branch tip + `.local/port/ops-table.md` + `.local/port/cli-audit.md` + a one-line-per-group summary to
+- [x] 5.6 Hand the branch tip + `.local/port/ops-table.md` + `.local/port/cli-audit.md` + a one-line-per-group summary to
       herdr-sync. The lead runs the lead check, the live smoke test (each fork command once
       against a throwaway server), CI on all OS, and the merge to master.
