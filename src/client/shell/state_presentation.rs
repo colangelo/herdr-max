@@ -7,14 +7,15 @@ use crate::{
 };
 
 /// The braille cell for 1 to 8 background items, one more dot each; more than
-/// eight stay on the full cell.
-const BRAILLE: [&str; 8] = ["⠁", "⠃", "⠇", "⡇", "⡏", "⡟", "⡿", "⣿"];
+/// eight stay on the full cell. Each column fills from its middle dots (2 3,
+/// then 5 6) before its ends, so a small count sits in the centre of the cell.
+const BRAILLE: [&str; 8] = ["⠂", "⠆", "⠇", "⡇", "⡗", "⡷", "⡿", "⣿"];
 
 /// The braille mark's cycle in spinner ticks (the frames pulse's period), and
-/// the ticks at its end that show the small dot instead of the count: the
-/// count stays readable and still blinks once per cycle.
+/// the ticks at its end where the cell goes blank: the count stays readable
+/// and still blinks once per cycle.
 const BRAILLE_CYCLE_TICKS: u8 = 16;
-const BRAILLE_OFF_TICKS: u8 = 2;
+const BRAILLE_OFF_TICKS: u8 = 4;
 
 /// What the server says an agent row has running in the background.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -131,12 +132,15 @@ impl StatePresentation {
         let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
             .then_some(config.spinner_frame.wrapping_add(seq as u8));
         if self.braille(status, background) {
-            return if frame.is_some_and(|frame| {
-                frame % BRAILLE_CYCLE_TICKS < BRAILLE_CYCLE_TICKS - BRAILLE_OFF_TICKS
-            }) {
-                BRAILLE[usize::from(background.count.min(8)) - 1]
-            } else {
-                self.symbols.background.as_deref().unwrap_or("·")
+            // A still spinner keeps the small dot; a running one blinks the count.
+            return match frame {
+                None => self.symbols.background.as_deref().unwrap_or("·"),
+                Some(frame)
+                    if frame % BRAILLE_CYCLE_TICKS < BRAILLE_CYCLE_TICKS - BRAILLE_OFF_TICKS =>
+                {
+                    BRAILLE[usize::from(background.count.min(8)) - 1]
+                }
+                Some(_) => " ",
             };
         }
         if status != AgentStatus::Working {
@@ -281,17 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn braille_mark_shows_the_count_and_blinks_the_dot_at_the_cycle_end() {
-        // Ticks 0..14 of each 16: the braille cell. Ticks 14 and 15: the dot.
-        for frame in [0, 1, 8, 13, 16, 29] {
+    fn braille_mark_shows_the_count_and_blinks_blank_at_the_cycle_end() {
+        // Ticks 0..12 of each 16: the braille cell. Ticks 12 to 15: blank.
+        for frame in [0, 1, 8, 11, 16, 27] {
             assert_eq!(mark(AgentStatus::Idle, 3, frame), "⠇", "frame {frame}");
         }
-        for frame in [14, 15, 30, 31, 254, 255] {
-            assert_eq!(mark(AgentStatus::Idle, 3, frame), "·", "frame {frame}");
+        for frame in [12, 15, 28, 31, 252, 255] {
+            assert_eq!(mark(AgentStatus::Idle, 3, frame), " ", "frame {frame}");
         }
-        assert_eq!(mark(AgentStatus::Idle, 3, 8), "⠇");
-        assert_eq!(mark(AgentStatus::Done, 1, 8), "⠁");
+        assert_eq!(mark(AgentStatus::Done, 1, 8), "⠂");
+        assert_eq!(mark(AgentStatus::Idle, 2, 8), "⠆");
         assert_eq!(mark(AgentStatus::Idle, 4, 8), "⡇");
+        assert_eq!(mark(AgentStatus::Idle, 5, 8), "⡗");
+        assert_eq!(mark(AgentStatus::Idle, 6, 8), "⡷");
+        assert_eq!(mark(AgentStatus::Idle, 7, 8), "⡿");
         assert_eq!(mark(AgentStatus::Idle, 8, 8), "⣿");
         assert_eq!(mark(AgentStatus::Idle, 200, 8), "⣿");
     }

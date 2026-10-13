@@ -163,8 +163,8 @@ pub enum BackgroundMarkConfig {
     /// between the two `[ui.state_symbols]` background frames.
     #[default]
     Frames,
-    /// A braille cell whose dots count the background items (1 to 8, `⣿` for
-    /// more), blinking to the small dot for 2 of every 16 spinner ticks. Shown on
+    /// A braille cell whose dots count the background items (1 to 8, middle
+    /// dots first, `⣿` for more), blank for 4 of every 16 spinner ticks. Shown on
     /// idle and done rows too, since background work does not change status.
     Braille,
 }
