@@ -62,7 +62,7 @@
 
 - [x] 4.1 todo: new `src/cli/todo_bindings.rs` with leaves for add/list/done/undone/edit/rm/clear;
       `edit` is a `todo.update` leaf, matching the baseline. Wire into `src/cli.rs` and `spec.rs` like upstream's groups.
-- [ ] 4.2 notification: list/clear into `notification_bindings.rs` (no baseline `center` CLI).
+- [x] 4.2 notification: list/clear into `notification_bindings.rs` (no baseline `center` CLI).
 - [ ] 4.3 client + popup: `client list`, `popup close [--plugin]`.
 - [ ] 4.4 pane: clear, respawn, sync (on/off/toggle), layout presets with every alias
       (even-h, even-horizontal, even-v, even-vertical, main-v, main-vertical, tiled, balance),

@@ -167,11 +167,12 @@ mod notification_cli {
     use crate::cli::projection::{Field, Input, ParseError};
     use crate::config::ToastHerdrPosition;
 
-    const POSITIONS: [(&str, ToastHerdrPosition); 4] = [
+    const POSITIONS: [(&str, ToastHerdrPosition); 5] = [
         ("top-left", ToastHerdrPosition::TopLeft),
         ("top-right", ToastHerdrPosition::TopRight),
         ("bottom-left", ToastHerdrPosition::BottomLeft),
         ("bottom-right", ToastHerdrPosition::BottomRight),
+        ("center", ToastHerdrPosition::Center),
     ];
     const SOUNDS: [(&str, NotificationShowSound); 3] = [
         ("none", NotificationShowSound::None),

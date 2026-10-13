@@ -1,18 +1,45 @@
 use clap::Command;
 
 use crate::api::schema::common::NotificationShowProjection;
-use crate::api::schema::{Method, Request};
+use crate::api::schema::{EmptyParams, Method, Request};
 
-use super::super::projection::{self, ParseError};
+use super::super::projection::{self, Leaf, ParseError};
 
+const LEAVES: &[Leaf] = &[
+    Leaf {
+        name: "show",
+        about: "Show a notification",
+        id: "cli:notification:show",
+        arguments: NotificationShowProjection::arguments,
+        method: |matches| {
+            NotificationShowProjection::from_matches(matches).map(Method::NotificationShow)
+        },
+    },
+    Leaf {
+        name: "list",
+        about: "List notifications",
+        id: "cli:notification:list",
+        arguments: json_option,
+        method: |_| Ok(Method::NotificationList(EmptyParams::default())),
+    },
+    Leaf {
+        name: "clear",
+        about: "Clear notifications",
+        id: "cli:notification:clear",
+        arguments: json_option,
+        method: |_| Ok(Method::NotificationClear(EmptyParams::default())),
+    },
+];
+fn json_option() -> Vec<clap::Arg> {
+    vec![clap::Arg::new("json")
+        .long("json")
+        .action(clap::ArgAction::SetTrue)]
+}
 pub(crate) fn command() -> Command {
     Command::new("notification")
-        .about("Show Herdr notifications")
+        .about("Manage Herdr notifications")
         .subcommand_required(true)
-        .subcommand(
-            projection::command("show", NotificationShowProjection::arguments())
-                .about("Show a notification"),
-        )
+        .subcommands(LEAVES.iter().map(Leaf::command))
 }
 
 pub(crate) fn request(args: &[String]) -> Result<Request, ParseError> {
@@ -26,15 +53,7 @@ pub(crate) fn request(args: &[String]) -> Result<Request, ParseError> {
         }
         _ => args,
     };
-    projection::parse(command().bin_name("herdr notification"), args, |matches| {
-        let matches = matches
-            .subcommand_matches("show")
-            .ok_or_else(|| ParseError::Usage("missing notification show command".into()))?;
-        Ok(Request {
-            id: "cli:notification:show".into(),
-            method: Method::NotificationShow(NotificationShowProjection::from_matches(matches)?),
-        })
-    })
+    projection::group_request(command(), LEAVES, args)
 }
 
 #[cfg(test)]
