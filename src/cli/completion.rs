@@ -145,6 +145,9 @@ fn print_completion_help() {
 
 #[cfg(test)]
 mod tests {
+    // Fork #208 intentionally advertises these upstream-hidden placement values.
+    const FORK_VISIBLE_PLACEMENTS: &[&str] = &["popup"];
+
     fn script(shell: clap_complete::Shell, source: &clap::Command) -> String {
         let mut command = super::completion_command(source);
         let mut output = Vec::new();
@@ -167,6 +170,18 @@ mod tests {
             .and_then(|pane| pane.find_subcommand("open"))
             .expect("plugin pane open");
         let worktree = family("worktree");
+        let projected = super::completion_command(open);
+        let placement = projected
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("placement"))
+            .expect("placement metadata");
+        for visible in FORK_VISIBLE_PLACEMENTS {
+            assert!(placement
+                .get_value_parser()
+                .possible_values()
+                .expect("placement values")
+                .any(|value| value.get_name() == *visible && !value.is_hide_set()));
+        }
         for shell in super::SUPPORTED_SHELLS {
             let shell = super::parse_shell(shell).expect("supported shell");
             let full = script(shell, &root);
@@ -186,8 +201,24 @@ mod tests {
             for hidden in ["width", "height"] {
                 assert!(!advertises(&plugin, hidden), "{shell}: hidden {hidden}");
             }
-            for hidden in ["popup", "fullscreen"] {
+            for hidden in ["popup", "fullscreen"]
+                .into_iter()
+                .filter(|value| !FORK_VISIBLE_PLACEMENTS.contains(value))
+            {
                 assert!(!plugin.contains(hidden), "{shell}: hidden {hidden}");
+            }
+            // clap_complete 4.6.11 Elvish/PowerShell emit option names, not enum values.
+            // The projected placement metadata above is checked for every shell.
+            if matches!(
+                shell,
+                clap_complete::Shell::Bash | clap_complete::Shell::Fish | clap_complete::Shell::Zsh
+            ) {
+                for visible in FORK_VISIBLE_PLACEMENTS {
+                    assert!(
+                        plugin.contains(visible),
+                        "{shell}: public placement value {visible}"
+                    );
+                }
             }
             assert!(
                 advertises(&plugin, "placement"),
