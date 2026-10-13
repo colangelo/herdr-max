@@ -20,10 +20,13 @@ impl HeadlessServer {
         runtime.filter(|runtime| runtime.has_input_identity(&recipient.input_identity))
     }
 
+    /// Panes whose child got keyboard input are pushed to `typed_panes`, so
+    /// the caller can mark them interactive (echo-latency fast path).
     pub(super) fn deliver_captured_input(
         &self,
         recipients: &[SyncInputRecipient],
         event: &ClientPaneInputEvent,
+        typed_panes: &mut Vec<crate::layout::PaneId>,
     ) -> bool {
         let mut changed = false;
         for recipient in recipients {
@@ -49,11 +52,15 @@ impl HeadlessServer {
                     }
                 }
                 SyncInputDisposition::Typed => {
-                    if let Err(err) = super::super::pane_input::apply_client_typed_input_events(
+                    match super::super::pane_input::apply_client_typed_input_events(
                         runtime,
                         std::slice::from_ref(event),
                     ) {
-                        warn!(terminal_id = %recipient.terminal_id, err = %err, "synchronized client input failed");
+                        Ok(true) => typed_panes.push(recipient.pane_id),
+                        Ok(false) => {}
+                        Err(err) => {
+                            warn!(terminal_id = %recipient.terminal_id, err = %err, "synchronized client input failed");
+                        }
                     }
                 }
             }
@@ -124,6 +131,7 @@ impl HeadlessServer {
                     pane_id,
                 )?;
                 Some(SyncInputRecipient {
+                    pane_id,
                     terminal_id,
                     input_identity: runtime.input_identity(),
                     disposition: host_page.map_or(SyncInputDisposition::Typed, |up| {
@@ -157,6 +165,7 @@ impl HeadlessServer {
         });
         let mut changed = false;
         let mut claimed_geometry = false;
+        let mut typed_panes = Vec::new();
         for mut event in events {
             let continuation = self
                 .clients
@@ -180,7 +189,8 @@ impl HeadlessServer {
                         changed |= self.claim_shell_tab_geometry(client_id, false);
                         claimed_geometry = true;
                     }
-                    changed |= self.deliver_captured_input(&recipients, &continuation);
+                    changed |=
+                        self.deliver_captured_input(&recipients, &continuation, &mut typed_panes);
                 }
                 continue;
             }
@@ -189,7 +199,11 @@ impl HeadlessServer {
                 .get_mut(&client_id)
                 .and_then(|client| client.sync_input_leases.retire_before_press(&event));
             if let Some(retired) = retired {
-                changed |= self.deliver_captured_input(&retired.recipients, &retired.release);
+                changed |= self.deliver_captured_input(
+                    &retired.recipients,
+                    &retired.release,
+                    &mut typed_panes,
+                );
             }
             if !active
                 || matches!(
@@ -253,7 +267,11 @@ impl HeadlessServer {
             if let Some(client) = self.clients.get_mut(&client_id) {
                 let _ = client.sync_input_leases.press(recipients.clone(), &event);
             }
-            changed |= self.deliver_captured_input(&recipients, &event);
+            changed |= self.deliver_captured_input(&recipients, &event, &mut typed_panes);
+        }
+        let now = Instant::now();
+        for pane_id in typed_panes {
+            self.note_interactive_input(pane_id, now);
         }
         changed
     }

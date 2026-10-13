@@ -28,7 +28,7 @@ use super::{
         configure_key_encoder, ghostty_key_event_from_terminal_key,
         ghostty_mouse_encoder_for_terminal, ghostty_mouse_event_from_button_kind,
         ghostty_mouse_event_from_motion_kind, ghostty_mouse_event_from_wheel_kind,
-        ghostty_mouse_position_for_terminal, legacy_shell_key, legacy_super_chord,
+        legacy_shell_key, legacy_super_chord,
     },
     kitty_keyboard::KittyKeyboardTracker,
     osc::{
@@ -2164,8 +2164,8 @@ impl GhosttyPaneTerminal {
                     column: core.terminal.cols().ok()? / 2,
                     row: core.terminal.rows().ok()? / 2,
                 };
-                let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
-                let (x, y) = ghostty_mouse_position_for_terminal(position)?;
+                let (mut encoder, (x, y)) =
+                    ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
                 let mut event =
                     ghostty_mouse_event_from_wheel_kind(kind, 0, 0, KeyModifiers::empty())?;
                 event.set_position(x, y);
@@ -2285,8 +2285,7 @@ impl GhosttyPaneTerminal {
         if require_any_motion && !core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()? {
             return None;
         }
-        let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
-        let (x, y) = ghostty_mouse_position_for_terminal(position)?;
+        let (mut encoder, (x, y)) = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
         event.set_position(x, y);
         encoder
             .encode(&event)
@@ -6024,7 +6023,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_mouse_sgr_pixels_preserves_exact_and_downgrades_cell_input() {
+    fn ghostty_mouse_sgr_pixels_preserves_exact_and_scales_cell_input() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.resize(80, 24, 10, 20).unwrap();
@@ -6043,7 +6042,7 @@ mod tests {
         );
 
         assert_eq!(exact.as_deref(), Some(&b"\x1b[<35;48;139M"[..]));
-        assert_eq!(fallback.as_deref(), Some(&b"\x1b[<35;5;7M"[..]));
+        assert_eq!(fallback.as_deref(), Some(&b"\x1b[<35;45;130M"[..]));
     }
 
     #[test]

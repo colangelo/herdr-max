@@ -233,7 +233,7 @@ A tab is another terminal layout inside a workspace. Without `--workspace`, `tab
 
 `tab sync` turns input sync on or off for a tab (the tab on screen without an id). While it is on, what you type into one pane also goes to every other member of the group, each in its own keyboard mode; yellow (`#FFD60A`) borders and a `SYNC` chip mark the group and panes outside it get a gray border. `tab sync --on` makes every pane a member (and a pane created later joins); "Sync input" in the menu of another pane starts a group of just the focused pane and that one. `pane sync --on` adds a member, `--off` removes one, and both fail with `sync_not_active` while the tab is not syncing. Taking out the last member leaves sync mode on for about three seconds (`SYNC ending…`), then it ends; adding a member in that time cancels it. Sync is never saved: it is off after a restart or a live handoff. `.result.tab.sync` and `.result.pane.synced` report the state.
 
-With `ui.confirm_close` enabled, the TUI asks for confirmation before closing a workspace's last tab from a keybinding or the tab menu. Ordinary CLI/API tab closes remain immediate.
+With `ui.confirm_close` enabled, the TUI asks for confirmation before closing a workspace's last tab or its only pane from a keybinding or the tab/pane menu. Ordinary pane closes and CLI/API closes remain immediate.
 
 Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
 

@@ -350,7 +350,10 @@ mod tests {
             24,
             0,
             0,
-            false,
+            crate::client::handshake::HandshakePixelCapabilities {
+                exact_geometry: false,
+                sgr_mouse: false,
+            },
             Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
             false,
             false,

@@ -174,6 +174,16 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if action == crate::input::KeybindAction::ClosePane {
+                    if let Some(pane_id) = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_pane_id.clone())
+                    {
+                        self.request_pane_close(pane_id, outcome);
+                    }
+                    return;
+                }
                 if action == crate::input::KeybindAction::CloseTab {
                     if let Some(tab_id) = self
                         .snapshot
@@ -1056,9 +1066,9 @@ impl ClientShellState {
         action: crate::input::KeybindAction,
     ) -> Option<crate::api::schema::Method> {
         use crate::api::schema::{
-            Method, PaneCloseParams, PaneDirection, PaneFocusDirectionParams, PaneResizeParams,
-            PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams,
-            SplitDirection, TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
+            Method, PaneDirection, PaneFocusDirectionParams, PaneResizeParams, PaneSplitParams,
+            PaneSwapParams, PaneTarget, PaneZoomMode, PaneZoomParams, SplitDirection,
+            TabCreateParams, TabMoveParams, TabTarget, WorkspaceTarget,
         };
         use crate::input::KeybindAction;
 
@@ -1256,10 +1266,6 @@ impl ClientShellState {
                     env: Default::default(),
                 }))
             }
-            KeybindAction::ClosePane => Some(Method::PaneClose(PaneCloseParams {
-                pane_id: focused_pane.clone()?,
-                force: false,
-            })),
             KeybindAction::RespawnPane => {
                 Some(Method::PaneRespawn(crate::api::schema::PaneRespawnParams {
                     pane_id: focused_pane.clone()?,

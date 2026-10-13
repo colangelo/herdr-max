@@ -135,6 +135,7 @@ impl HeadlessServer {
             params.expected_version,
             self.api_window_title.clone(),
             Some(export_size),
+            self.host_shutdown_intent.get(),
         );
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),

@@ -64,8 +64,9 @@ use crate::server::notifications::{
     should_forward_toast_to_clients, toast_message_from_state_change, toast_notify_kind,
 };
 use crate::server::pane_input::{
-    apply_client_pane_input_events, apply_client_popup_input_events, apply_terminal_attach_input,
-    apply_terminal_attach_scroll, terminal_attach_mouse_position,
+    apply_client_pane_input_events, apply_client_popup_input_events,
+    apply_client_terminal_input_events, apply_terminal_attach_input, apply_terminal_attach_scroll,
+    terminal_attach_mouse_position,
 };
 use crate::server::shutdown::{ServerStop, ShutdownReason};
 use crate::server::socket_paths::{
@@ -185,6 +186,9 @@ struct HandoffDetectionSweep {
     next_at: Instant,
 }
 
+// Split shell redraws need several early updates; sustained output still coalesces.
+const INTERACTIVE_RENDER_BUDGET: u8 = 16;
+const INTERACTIVE_RENDER_WINDOW: Duration = Duration::from_millis(32);
 // ---------------------------------------------------------------------------
 // Headless server
 // ---------------------------------------------------------------------------
@@ -217,6 +221,8 @@ pub struct HeadlessServer {
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
     native_graphics: native_graphics::NativeGraphics,
+    interactive_input_deadlines: HashMap<crate::layout::PaneId, Instant>,
+    interactive_render_budget: Option<(Instant, u8)>,
     #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving session-wide host presentation and side effects.
@@ -267,6 +273,8 @@ pub struct HeadlessServer {
     should_quit: Arc<AtomicBool>,
     server_stop: ServerStop,
     host_shutdown_requested: Arc<AtomicBool>,
+    /// An announced, still cancellable host shutdown; carried across live handoff.
+    host_shutdown_intent: crate::platform::HostShutdownIntentCell,
     #[cfg(test)]
     host_shutdown_probe: fn() -> bool,
     /// Channel for receiving server events from client connection threads.
@@ -374,6 +382,8 @@ impl HeadlessServer {
             client_socket_identity,
             clients: HashMap::new(),
             native_graphics: Default::default(),
+            interactive_input_deadlines: HashMap::new(),
+            interactive_render_budget: None,
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -400,6 +410,7 @@ impl HeadlessServer {
             effective_size: no_client_size,
             shutting_down: false,
             host_shutdown_requested: Arc::new(AtomicBool::new(false)),
+            host_shutdown_intent: Default::default(),
             #[cfg(test)]
             host_shutdown_probe: crate::platform::host_shutdown_in_progress,
             handoff_in_progress: false,
@@ -433,6 +444,7 @@ impl HeadlessServer {
         let quit_notify = self.server_event_tx.clone();
         let _host_shutdown = crate::platform::HostShutdownMonitor::start(
             self.host_shutdown_requested.clone(),
+            self.host_shutdown_intent.clone(),
             move || {
                 let _ = quit_notify.try_send(ServerEvent::QuitSignal);
             },
@@ -557,14 +569,13 @@ impl HeadlessServer {
             // bounded classification cadence without delaying presentation work
             // that joins the same coalesced request.
             let render_cadence_due = self.app.can_render_now(now);
-            if needs_render
-                && (render_cadence_due
-                    || (self.app.can_present_now(now)
-                        && self.has_pending_presentation_work(
-                            needs_full_render,
-                            needs_graphics_render,
-                        )))
-            {
+            let presentation_due = self.app.can_present_now(now)
+                && self.has_pending_presentation_work(needs_full_render, needs_graphics_render);
+            let interactive_due = needs_render
+                && !render_cadence_due
+                && !presentation_due
+                && self.can_render_interactive(now);
+            if needs_render && (render_cadence_due || presentation_due || interactive_due) {
                 crate::render_prof::event("render.attempt");
                 let render_request = self.app.render_dirty.take();
                 let pty_dirty = !render_request.pty_sources.is_empty();
@@ -611,6 +622,9 @@ impl HeadlessServer {
                     self.render_and_stream();
                 }
                 self.app.record_render_attempt(now, !hidden_only);
+                if interactive_due {
+                    self.record_interactive_render(now);
+                }
                 needs_render = false;
                 needs_full_render = false;
                 needs_graphics_render = false;
@@ -997,8 +1011,10 @@ impl HeadlessServer {
             let held_inputs = removed.drain_shell_held_inputs();
             self.release_client_shell_inputs(client_id, held_inputs);
             let held_sync = removed.sync_input_leases.drain().collect::<Vec<_>>();
+            // Releases only: nothing here counts as typing.
+            let mut typed_panes = Vec::new();
             for held in held_sync {
-                self.deliver_captured_input(&held.recipients, &held.release);
+                self.deliver_captured_input(&held.recipients, &held.release, &mut typed_panes);
             }
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
             if let ClientConnectionMode::TerminalAttach { terminal_id } = removed.mode {
@@ -2410,12 +2426,12 @@ impl HeadlessServer {
                     client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
                 });
                 let mut events = events;
-                let Some(popup_terminal_id) = self
+                let Some((popup_terminal_id, popup_pane_id)) = self
                     .app
                     .state
                     .popup_pane
                     .as_ref()
-                    .map(|popup| popup.terminal_id.clone())
+                    .map(|popup| (popup.terminal_id.clone(), popup.pane_id))
                 else {
                     return false;
                 };
@@ -2466,10 +2482,21 @@ impl HeadlessServer {
                     return foreground_changed | geometry_changed;
                 };
                 let scroll_before = runtime.scroll_metrics();
-                if let Err(err) = apply_client_popup_input_events(runtime, &events) {
+                let mut keyboard_forwarded = false;
+                let input_result = apply_client_terminal_input_events(
+                    runtime,
+                    &events,
+                    false,
+                    &mut keyboard_forwarded,
+                );
+                let scroll_changed = runtime.scroll_metrics() != scroll_before;
+                if keyboard_forwarded {
+                    self.note_interactive_input(popup_pane_id, Instant::now());
+                }
+                if let Err(err) = input_result {
                     warn!(client_id, terminal_id, err = %err, "targeted client popup input failed");
                 }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
+                foreground_changed | geometry_changed || scroll_changed
             }
             ServerEvent::ClientShellEndpointRequestError {
                 client_id,

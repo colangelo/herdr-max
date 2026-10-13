@@ -226,6 +226,10 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             // Carried across before any client attaches, so the first title sent is
             // the override rather than the configured one it replaced.
             server.api_window_title = received.manifest.api_window_title.take();
+            // A restart announced before the handoff still commits after it.
+            server
+                .host_shutdown_intent
+                .set(received.manifest.host_shutdown_intent);
             // Keep panes at the size they had rather than shrinking them to the
             // headless default on the first frame, until a client reattaches.
             server.handoff_client_size = received.manifest.client_size;

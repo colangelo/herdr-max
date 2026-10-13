@@ -204,22 +204,26 @@ pub(super) fn apply_terminal_attach_input(
 pub(crate) fn test_apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     apply_client_pane_input_events(runtime, events)
 }
 
 pub(super) fn apply_client_pane_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
-    apply_client_terminal_input_events(runtime, events, true)
+) -> Result<bool, String> {
+    let mut keyboard_forwarded = false;
+    apply_client_terminal_input_events(runtime, events, true, &mut keyboard_forwarded)?;
+    Ok(keyboard_forwarded)
 }
 
 pub(super) fn apply_client_popup_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
-    apply_client_terminal_input_events(runtime, events, false)
+) -> Result<bool, String> {
+    let mut keyboard_forwarded = false;
+    apply_client_terminal_input_events(runtime, events, false, &mut keyboard_forwarded)?;
+    Ok(keyboard_forwarded)
 }
 
 /// Typed sync has already classified host Page keys at the origin. Peers
@@ -227,14 +231,17 @@ pub(super) fn apply_client_popup_input_events(
 pub(super) fn apply_client_typed_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
-) -> Result<(), String> {
-    apply_client_terminal_input_events(runtime, events, false)
+) -> Result<bool, String> {
+    let mut keyboard_forwarded = false;
+    apply_client_terminal_input_events(runtime, events, false, &mut keyboard_forwarded)?;
+    Ok(keyboard_forwarded)
 }
 
-fn apply_client_terminal_input_events(
+pub(super) fn apply_client_terminal_input_events(
     runtime: &crate::terminal::TerminalRuntime,
     events: &[ClientPaneInputEvent],
     host_page_keys: bool,
+    keyboard_forwarded: &mut bool,
 ) -> Result<(), String> {
     for event in events {
         if let ClientPaneInputEvent::Mouse {
@@ -333,6 +340,7 @@ fn apply_client_terminal_input_events(
                     runtime
                         .try_send_bytes(Bytes::from(bytes))
                         .map_err(|err| format!("targeted pane key input failed: {err}"))?;
+                    *keyboard_forwarded |= key_event.kind != KeyEventKind::Release;
                 }
             }
             crate::raw_input::RawInputEvent::Text(text) => {
@@ -340,6 +348,7 @@ fn apply_client_terminal_input_events(
                 runtime
                     .try_send_bytes(Bytes::copy_from_slice(text.as_str().as_bytes()))
                     .map_err(|err| format!("targeted pane text input failed: {err}"))?;
+                *keyboard_forwarded |= !text.as_str().is_empty();
             }
             crate::raw_input::RawInputEvent::Paste(text) => {
                 runtime.scroll_reset();

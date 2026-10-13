@@ -8,6 +8,7 @@ use crate::terminal::{TerminalId, TerminalRuntimeInputIdentity};
 
 #[derive(Clone, Debug)]
 pub(crate) struct SyncInputRecipient {
+    pub(crate) pane_id: crate::layout::PaneId,
     pub(crate) terminal_id: TerminalId,
     pub(crate) input_identity: TerminalRuntimeInputIdentity,
     pub(crate) disposition: SyncInputDisposition,
