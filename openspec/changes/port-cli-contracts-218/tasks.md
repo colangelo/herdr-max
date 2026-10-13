@@ -33,7 +33,7 @@
       (`{"method": ..., "params": ...}`) or the expected custom-command parse result, taken from
       today's fork parsers at `f3fb2099` by calling them directly. Keep upstream's Linux
       `tests/cli/contracts.rs` samples as the second net (task 5.2).
-- [ ] 1.2 Add a second test: the set of fork-only method names (the 27 in design.md) is a subset
+- [x] 1.2 Add a second test: the set of fork-only method names (the 27 in design.md) is a subset
       of `Method::OPERATIONS` names.
 - [x] 1.3 Commit (`test(cli): freeze the fork's cli requests before the contract port`). It passes
       on `f3fb2099`. Lead approved adding task 1.2 after the merge compiles, because
@@ -60,7 +60,7 @@
 
 ## 4. CLI leaves, group by group (one commit per group)
 
-- [ ] 4.1 todo: new `src/cli/todo_bindings.rs` with leaves for add/list/done/undone/edit/rm/clear;
+- [x] 4.1 todo: new `src/cli/todo_bindings.rs` with leaves for add/list/done/undone/edit/rm/clear;
       `edit` is a `todo.update` leaf, matching the baseline. Wire into `src/cli.rs` and `spec.rs` like upstream's groups.
 - [ ] 4.2 notification: list/clear into `notification_bindings.rs` (no baseline `center` CLI).
 - [ ] 4.3 client + popup: `client list`, `popup close [--plugin]`.

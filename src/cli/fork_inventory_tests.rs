@@ -73,3 +73,42 @@ fn fork_cli_requests_stay_at_the_pre_port_baseline() {
         assert_eq!(json!(requests), case["requests"], "{argv:?}");
     }
 }
+
+#[test]
+fn fork_methods_are_in_the_operations_table() {
+    use crate::api::schema::Method;
+    for name in [
+        "agent.message",
+        "agent.pin",
+        "agent.unpin",
+        "client.list",
+        "layout.apply_preset",
+        "layout.balance",
+        "layout.set_preset",
+        "notification.clear",
+        "notification.list",
+        "notification.mark_seen",
+        "pane.clear_scrollback",
+        "pane.report_hint",
+        "pane.respawn",
+        "pane.scroll_application",
+        "pane.sync",
+        "pane.sync_pair",
+        "plugin.popup.close",
+        "tab.sync",
+        "todo.add",
+        "todo.clear",
+        "todo.list",
+        "todo.remove",
+        "todo.update",
+        "workspace.pin",
+        "workspace.unpin",
+    ] {
+        assert!(
+            Method::OPERATIONS
+                .iter()
+                .any(|operation| operation.name == name),
+            "{name}"
+        );
+    }
+}
