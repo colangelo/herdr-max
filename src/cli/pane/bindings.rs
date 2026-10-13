@@ -408,15 +408,15 @@ pub(super) struct Leaf {
 impl Leaf {
     pub(super) fn command(&self) -> Command {
         let command = projection::command(self.name, (self.arguments)()).about(self.about);
-        match self.name {
+        let command = match self.name {
             "input" => command.group(clap::ArgGroup::new("selector").args(["pane_id", "pane", "current"]).required(true)),
             "move" => command.group(clap::ArgGroup::new("destination").args(["tab", "new-tab", "new-workspace"]).required(true)),
-            "send-text" => command.arg(clap::Arg::new("chunk").long("chunk").value_name("BYTES"))
-                .arg(clap::Arg::new("chunk-delay").long("chunk-delay").value_name("MS")).after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
+            "send-text" => command.after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
             "send-keys" => command.after_help("Use esc as the canonical Escape key name; escape is also accepted."),
             "wait-output" => command.after_help("The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely."),
             _ => command,
-        }
+        };
+        crate::cli::fork_help::pane_leaf(command)
     }
 
     pub(super) fn request(&self, args: &[String]) -> Result<Request, ParseError> {
@@ -461,7 +461,7 @@ macro_rules! leaf {
 pub(super) const LEAVES: &[Leaf] = &[
     leaf!(
         "clear",
-        "Clear pane scrollback",
+        "Clear a pane's saved scrollback",
         "cli:request",
         Quiet,
         PaneClearScrollbackProjection,
@@ -469,7 +469,7 @@ pub(super) const LEAVES: &[Leaf] = &[
     ),
     leaf!(
         "respawn",
-        "Respawn a pane process",
+        "Restart a pane's process in place",
         "cli:pane:respawn",
         Json,
         PaneRespawnProjection,
@@ -477,7 +477,7 @@ pub(super) const LEAVES: &[Leaf] = &[
     ),
     Leaf {
         name: "sync",
-        about: "Synchronize pane input",
+        about: "Put a pane in or out of its tab's synced input",
         id: "cli:pane:sync",
         output: Output::Json,
         arguments: PaneSyncProjection::arguments,
@@ -506,7 +506,7 @@ pub(super) const LEAVES: &[Leaf] = &[
     },
     Leaf {
         name: "report-hint",
-        about: "Report a permission or question hint",
+        about: "Report that an agent waits on a question or a permission, or that it stopped",
         id: "cli:request",
         output: Output::Quiet,
         arguments: PaneReportHintProjection::arguments,
@@ -840,7 +840,16 @@ pub(super) const LEAVES: &[Leaf] = &[
 pub(super) fn command() -> Command {
     Command::new("pane")
         .about("Control terminal panes")
-        .subcommands(LEAVES.iter().map(Leaf::command))
+        .subcommands(crate::cli::fork_help::ordered(
+            LEAVES.iter().map(Leaf::command),
+            &[
+                ("sync", "zoom", true),
+                ("clear", "close", false),
+                ("respawn", "close", true),
+                ("report-hint", "report-metadata", true),
+                ("balance", "layout", true),
+            ],
+        ))
 }
 
 #[cfg(test)]
@@ -859,6 +868,13 @@ mod choice_tests {
 pub(crate) fn sync_mode() -> Field<SyncMode> {
     Field::new(SyncMode::Toggle)
         .input(
+            Input::flag("toggle", |slot, _| {
+                *slot = SyncMode::Toggle;
+                Ok(())
+            })
+            .configure(|arg| arg.conflicts_with_all(["on", "off"])),
+        )
+        .input(
             Input::flag("on", |slot, _| {
                 *slot = SyncMode::On;
                 Ok(())
@@ -871,13 +887,6 @@ pub(crate) fn sync_mode() -> Field<SyncMode> {
                 Ok(())
             })
             .configure(|arg| arg.conflicts_with_all(["on", "toggle"])),
-        )
-        .input(
-            Input::flag("toggle", |slot, _| {
-                *slot = SyncMode::Toggle;
-                Ok(())
-            })
-            .configure(|arg| arg.conflicts_with_all(["on", "off"])),
         )
 }
 fn validate_sync_mode(matches: &ArgMatches) -> Result<(), ParseError> {
@@ -925,7 +934,7 @@ cli_projection! { pub(crate) PaneClearScrollbackProjection for PaneTarget {
     pane_id => clear_target(),
 } }
 cli_projection! { pub(crate) PaneRespawnProjection for PaneRespawnParams {
-    pane_id => Field::new(String::new()).input(pane_id()),
+    pane_id => Field::new(String::new()).input(pane_id().value_name("pane_id")),
     force => Field::new(false).input(boolean("force", true)),
 } }
 cli_projection! { pub(crate) PaneSyncProjection for PaneSyncParams {
@@ -938,16 +947,16 @@ cli_projection! { pub(crate) LayoutBalanceProjection for LayoutBalanceParams {
 cli_projection! { pub(crate) LayoutApplyPresetProjection for LayoutApplyPresetParams {
     tab_id => Field::new(None::<String>), pane_id => target(false),
     preset => Field::new(AppliedLayoutPreset::Tiled).input(Input::value("preset", "PRESET", |slot, value| { *slot = layout_preset(value)?; Ok(()) })
-        .configure(|arg| arg.alias("set").value_parser(["even-h", "even-horizontal", "even-v", "even-vertical", "main-v", "main-vertical", "tiled"]))),
+        .configure(|arg| arg.visible_alias("set").display_order(0).value_parser(["even-horizontal", "even-h", "even-vertical", "even-v", "tiled", "main-vertical", "main-v"]))),
 } }
 cli_projection! { pub(crate) PaneReportHintProjection for PaneReportHintParams {
     pane_id => Field::new(String::new()).input(pane_id()),
     source => Field::new(String::new()).input(source()),
     agent => Field::new(String::new()).input(text("agent", "LABEL").required()),
-    kind => Field::new(None::<AgentHintKind>).input(Input::value("kind", "KIND", |slot, value| {
+    kind => Field::new(None::<AgentHintKind>).input(Input::value("kind", "question|permission", |slot, value| {
         *slot = Some(match value { "question" => AgentHintKind::Question, "permission" => AgentHintKind::Permission,
             _ => return Err(ParseError::Usage(format!("unknown hint kind: {value}"))), }); Ok(())
-    }).configure(|arg| arg.conflicts_with("clear"))),
+    }).configure(|arg| arg.conflicts_with("clear").hide_possible_values(true).value_parser(crate::cli::fork_help::Values(crate::cli::fork_help::HINT_KINDS)))),
     id => Field::new(None).input(optional_text("id", "ID")),
     ttl_ms => Field::new(None).input(number("ttl-ms", "N")),
     clear => Field::new(false).input(boolean("clear", true)),

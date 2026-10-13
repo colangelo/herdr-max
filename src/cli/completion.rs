@@ -144,6 +144,11 @@ fn print_completion_help() {
 }
 
 #[cfg(test)]
+pub(super) fn fork_command_for_test(source: &clap::Command) -> clap::Command {
+    completion_command(source)
+}
+
+#[cfg(test)]
 mod tests {
     // Fork #208 intentionally advertises these upstream-hidden placement values.
     const FORK_VISIBLE_PLACEMENTS: &[&str] = &["popup"];
