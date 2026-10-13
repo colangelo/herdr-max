@@ -4,9 +4,10 @@ use clap::{ArgMatches, Command};
 
 use crate::api::schema::panes::*;
 use crate::api::schema::{
-    Method, OutputMatch, PaneAgentState, PaneCloseParams, PaneDirection, PaneTarget,
-    PaneWaitForOutputParams, ReadFormat, ReadSource, Request, SplitDirection, READ_FORMATS,
-    READ_SOURCES,
+    AgentHintKind, AppliedLayoutPreset, LayoutApplyPresetParams, LayoutBalanceParams, LayoutPreset,
+    LayoutSetPresetParams, Method, OutputMatch, PaneAgentState, PaneCloseParams, PaneDirection,
+    PaneReportHintParams, PaneRespawnParams, PaneSyncParams, PaneTarget, PaneWaitForOutputParams,
+    ReadFormat, ReadSource, Request, SplitDirection, SyncMode, READ_FORMATS, READ_SOURCES,
 };
 pub(crate) use crate::cli::projection::parse_choice;
 use crate::cli::projection::{choices, choices_where, Choice};
@@ -381,7 +382,7 @@ cli_projection! { pub(crate) PaneWaitProjection for PaneWaitForOutputParams {
 
 cli_projection! { pub(crate) PaneCloseProjection for PaneCloseParams {
     pane_id => Field::new(String::new()).input(pane_id()),
-    force => Field::new(false),
+    force => Field::new(false).input(boolean("force", true)),
 } }
 
 cli_projection! { pub(crate) PaneTargetProjection for PaneTarget {
@@ -410,7 +411,8 @@ impl Leaf {
         match self.name {
             "input" => command.group(clap::ArgGroup::new("selector").args(["pane_id", "pane", "current"]).required(true)),
             "move" => command.group(clap::ArgGroup::new("destination").args(["tab", "new-tab", "new-workspace"]).required(true)),
-            "send-text" => command.after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
+            "send-text" => command.arg(clap::Arg::new("chunk").long("chunk").value_name("BYTES"))
+                .arg(clap::Arg::new("chunk-delay").long("chunk-delay").value_name("MS")).after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
             "send-keys" => command.after_help("Use esc as the canonical Escape key name; escape is also accepted."),
             "wait-output" => command.after_help("The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely."),
             _ => command,
@@ -458,6 +460,73 @@ macro_rules! leaf {
 
 pub(super) const LEAVES: &[Leaf] = &[
     leaf!(
+        "clear",
+        "Clear pane scrollback",
+        "cli:request",
+        Quiet,
+        PaneClearScrollbackProjection,
+        PaneClearScrollback
+    ),
+    leaf!(
+        "respawn",
+        "Respawn a pane process",
+        "cli:pane:respawn",
+        Json,
+        PaneRespawnProjection,
+        PaneRespawn
+    ),
+    Leaf {
+        name: "sync",
+        about: "Synchronize pane input",
+        id: "cli:pane:sync",
+        output: Output::Json,
+        arguments: PaneSyncProjection::arguments,
+        method: |matches| {
+            validate_sync_mode(matches)?;
+            PaneSyncProjection::from_matches(matches).map(Method::PaneSync)
+        },
+    },
+    Leaf {
+        name: "balance",
+        about: "Balance the pane layout",
+        id: "cli:pane:balance",
+        output: Output::Json,
+        arguments: LayoutBalanceProjection::arguments,
+        method: |matches| {
+            let mut params = LayoutBalanceProjection::from_matches(matches)?;
+            params.pane_id = super::caller_target(
+                matches,
+                params.pane_id,
+                crate::cli::target::caller_pane_id().as_deref(),
+                false,
+                false,
+            )?;
+            Ok(Method::LayoutBalance(params))
+        },
+    },
+    Leaf {
+        name: "report-hint",
+        about: "Report a permission or question hint",
+        id: "cli:request",
+        output: Output::Quiet,
+        arguments: PaneReportHintProjection::arguments,
+        method: |matches| {
+            let params = PaneReportHintProjection::from_matches(matches)?;
+            if params.source.trim().is_empty() {
+                return Err(ParseError::Usage("missing required --source".into()));
+            }
+            if params.agent.trim().is_empty() {
+                return Err(ParseError::Usage("missing required --agent".into()));
+            }
+            if !params.clear && params.kind.is_none() {
+                return Err(ParseError::Usage(
+                    "give --kind, or --clear to end the hint".into(),
+                ));
+            }
+            Ok(Method::PaneReportHint(params))
+        },
+    },
+    leaf!(
         "list",
         "List panes",
         "cli:pane:list",
@@ -496,7 +565,15 @@ pub(super) const LEAVES: &[Leaf] = &[
         about: "Show pane layout information",
         id: "cli:pane:layout",
         output: Output::Json,
-        arguments: PaneLayoutProjection::arguments,
+        arguments: || {
+            let mut arguments = PaneLayoutProjection::arguments();
+            arguments.extend(
+                LayoutApplyPresetProjection::arguments()
+                    .into_iter()
+                    .filter(|arg| arg.get_id().as_str() == "preset"),
+            );
+            arguments
+        },
         method: |matches| {
             let mut params = PaneLayoutProjection::from_matches(matches)?;
             params.pane_id = super::caller_target(
@@ -506,7 +583,30 @@ pub(super) const LEAVES: &[Leaf] = &[
                 false,
                 false,
             )?;
-            Ok(Method::PaneLayout(params))
+            let Some(preset) = matches.get_one::<String>("preset") else {
+                return Ok(Method::PaneLayout(params));
+            };
+            let _ = preset;
+            let preset = LayoutApplyPresetProjection::from_matches(matches)?.preset;
+            match preset {
+                AppliedLayoutPreset::MainVertical => {
+                    Ok(Method::LayoutApplyPreset(LayoutApplyPresetParams {
+                        tab_id: None,
+                        pane_id: params.pane_id,
+                        preset,
+                    }))
+                }
+                _ => Ok(Method::LayoutSetPreset(LayoutSetPresetParams {
+                    tab_id: None,
+                    pane_id: params.pane_id,
+                    preset: match preset {
+                        AppliedLayoutPreset::EvenHorizontal => LayoutPreset::EvenHorizontal,
+                        AppliedLayoutPreset::EvenVertical => LayoutPreset::EvenVertical,
+                        AppliedLayoutPreset::Tiled => LayoutPreset::Tiled,
+                        AppliedLayoutPreset::MainVertical => unreachable!("handled above"),
+                    },
+                })),
+            }
         },
     },
     Leaf {
@@ -755,3 +855,101 @@ mod choice_tests {
         assert_choices_cover_api_enum(super::STATES);
     }
 }
+
+pub(crate) fn sync_mode() -> Field<SyncMode> {
+    Field::new(SyncMode::Toggle)
+        .input(
+            Input::flag("on", |slot, _| {
+                *slot = SyncMode::On;
+                Ok(())
+            })
+            .configure(|arg| arg.conflicts_with_all(["off", "toggle"])),
+        )
+        .input(
+            Input::flag("off", |slot, _| {
+                *slot = SyncMode::Off;
+                Ok(())
+            })
+            .configure(|arg| arg.conflicts_with_all(["on", "toggle"])),
+        )
+        .input(
+            Input::flag("toggle", |slot, _| {
+                *slot = SyncMode::Toggle;
+                Ok(())
+            })
+            .configure(|arg| arg.conflicts_with_all(["on", "off"])),
+        )
+}
+fn validate_sync_mode(matches: &ArgMatches) -> Result<(), ParseError> {
+    for name in ["on", "off", "toggle"] {
+        if matches
+            .indices_of(name)
+            .is_some_and(|indices| indices.len() > 1)
+        {
+            return Err(ParseError::Usage(
+                "provide only one of --toggle, --on, or --off".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+fn clear_target() -> Field<String> {
+    Field::new(crate::cli::target::caller_pane_id().unwrap_or_default())
+        .input(pane_id().configure(|arg| arg.required(false)))
+        .input(text("pane", "ID"))
+        .input(Input::flag("current", |slot, _| {
+            *slot = crate::cli::target::caller_pane_id().unwrap_or_default();
+            Ok(())
+        }))
+        .validate(|value| {
+            if value.is_empty() {
+                Err(ParseError::Usage(
+                    "no pane specified: pass <pane_id>, or use --current inside a herdr pane"
+                        .into(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+}
+fn layout_preset(value: &str) -> Result<AppliedLayoutPreset, ParseError> {
+    match value {
+        "even-h" | "even-horizontal" => Ok(AppliedLayoutPreset::EvenHorizontal),
+        "even-v" | "even-vertical" => Ok(AppliedLayoutPreset::EvenVertical),
+        "main-v" | "main-vertical" => Ok(AppliedLayoutPreset::MainVertical),
+        "tiled" => Ok(AppliedLayoutPreset::Tiled),
+        _ => Err(ParseError::Usage(format!("unknown layout preset: {value}"))),
+    }
+}
+cli_projection! { pub(crate) PaneClearScrollbackProjection for PaneTarget {
+    pane_id => clear_target(),
+} }
+cli_projection! { pub(crate) PaneRespawnProjection for PaneRespawnParams {
+    pane_id => Field::new(String::new()).input(pane_id()),
+    force => Field::new(false).input(boolean("force", true)),
+} }
+cli_projection! { pub(crate) PaneSyncProjection for PaneSyncParams {
+    pane_id => target(true),
+    mode => sync_mode(),
+} }
+cli_projection! { pub(crate) LayoutBalanceProjection for LayoutBalanceParams {
+    tab_id => Field::new(None::<String>), pane_id => target(false),
+} }
+cli_projection! { pub(crate) LayoutApplyPresetProjection for LayoutApplyPresetParams {
+    tab_id => Field::new(None::<String>), pane_id => target(false),
+    preset => Field::new(AppliedLayoutPreset::Tiled).input(Input::value("preset", "PRESET", |slot, value| { *slot = layout_preset(value)?; Ok(()) })
+        .configure(|arg| arg.alias("set").value_parser(["even-h", "even-horizontal", "even-v", "even-vertical", "main-v", "main-vertical", "tiled"]))),
+} }
+cli_projection! { pub(crate) PaneReportHintProjection for PaneReportHintParams {
+    pane_id => Field::new(String::new()).input(pane_id()),
+    source => Field::new(String::new()).input(source()),
+    agent => Field::new(String::new()).input(text("agent", "LABEL").required()),
+    kind => Field::new(None::<AgentHintKind>).input(Input::value("kind", "KIND", |slot, value| {
+        *slot = Some(match value { "question" => AgentHintKind::Question, "permission" => AgentHintKind::Permission,
+            _ => return Err(ParseError::Usage(format!("unknown hint kind: {value}"))), }); Ok(())
+    }).configure(|arg| arg.conflicts_with("clear"))),
+    id => Field::new(None).input(optional_text("id", "ID")),
+    ttl_ms => Field::new(None).input(number("ttl-ms", "N")),
+    clear => Field::new(false).input(boolean("clear", true)),
+    seq => Field::new(None).input(number("seq", "N")),
+} }

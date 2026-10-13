@@ -608,9 +608,10 @@ fn agent_send_keys(params: AgentSendKeysParams) -> std::io::Result<i32> {
 }
 
 fn agent_read(params: AgentReadParams) -> std::io::Result<i32> {
+    let lines = params.lines;
     let response = super::send_request(&Request {
         id: "cli:agent:read".into(),
         method: Method::AgentRead(params),
     })?;
-    super::print_read_response(&response)
+    super::print_read_response(&response, lines)
 }

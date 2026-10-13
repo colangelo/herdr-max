@@ -1015,7 +1015,7 @@ cli_projection! {
 
         intent => Field::new(super::common::ReadIntent::Interactive),
 
-        strip_dim => Field::new(false),
+        strip_dim => Field::new(false).input(binding::boolean("strip-dim", true)),
     }
 }
 

@@ -90,13 +90,23 @@ pub enum CommandOutcome {
     NotCli,
 }
 
-pub(super) fn print_read_response(response: &serde_json::Value) -> std::io::Result<i32> {
+pub(super) fn print_read_response(
+    response: &serde_json::Value,
+    requested_lines: Option<u32>,
+) -> std::io::Result<i32> {
     if response.get("error").is_some() {
         eprintln!("{response}");
         return Ok(1);
     }
     if let Some(text) = response["result"]["read"]["text"].as_str() {
         print!("{text}");
+        if let Some(note) = short_read_note(
+            text,
+            response["result"]["read"]["truncated"].as_bool() == Some(true),
+            requested_lines,
+        ) {
+            eprintln!("{note}");
+        }
     }
     Ok(0)
 }
@@ -1159,6 +1169,41 @@ mod tests {
                 "--timeout",
                 "5000",
             ]
+        );
+    }
+}
+
+fn short_read_note(text: &str, truncated: bool, requested_lines: Option<u32>) -> Option<String> {
+    let requested = usize::try_from(requested_lines?).ok()?;
+    let returned = text.lines().count();
+    (truncated && returned < requested).then(|| {
+        format!(
+            "herdr: partial read: {returned} of {requested} requested lines; the rest of the history could not be read this time, so retry for more"
+        )
+    })
+}
+
+#[cfg(test)]
+mod fork_regression_tests {
+    #[test]
+    fn short_truncated_read_is_reported_on_stderr_only_when_short() {
+        let text = "a\nb\nc\n";
+        let note = super::short_read_note(text, true, Some(400)).expect("short truncated read");
+        assert!(note.contains("3 of 400"), "{note}");
+        assert_eq!(
+            super::short_read_note(text, false, Some(400)),
+            None,
+            "complete history"
+        );
+        assert_eq!(
+            super::short_read_note(text, true, Some(3)),
+            None,
+            "got what was asked"
+        );
+        assert_eq!(
+            super::short_read_note(text, true, None),
+            None,
+            "no line count asked"
         );
     }
 }

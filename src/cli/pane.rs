@@ -1,4 +1,5 @@
 pub(crate) mod bindings;
+mod chunking;
 
 use clap::ArgMatches;
 
@@ -21,6 +22,19 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         println!();
         return Ok(0);
     }
+    if name == "send-text" {
+        if matches!(args.get(1).map(String::as_str), Some("--help" | "-h")) && args.len() == 2 {
+            if let Some(leaf) = bindings::LEAVES
+                .iter()
+                .find(|leaf| leaf.name == "send-text")
+            {
+                leaf.command().print_help()?;
+                println!();
+            }
+            return Ok(0);
+        }
+        return chunking::pane_send_text(&args[1..]);
+    }
     let Some(leaf) = bindings::LEAVES.iter().find(|leaf| leaf.name == name) else {
         if let Err(error) = command().no_binary_name(true).try_get_matches_from(args) {
             return super::print_clap_error(&error);
@@ -36,13 +50,23 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         }
         Err(ParseError::Clap(error)) => return super::print_clap_error(&error),
     };
-    if matches!(leaf.output, bindings::Output::Quiet) {
+    if matches!(leaf.output, bindings::Output::Quiet) && name != "report-agent-session" {
         return super::send_ok_request(request.method);
     }
+    let lines = match &request.method {
+        Method::PaneRead(params) => params.lines,
+        _ => None,
+    };
+    let report_session = matches!(request.method, Method::PaneReportAgentSession(_));
     let response = super::send_request(&request)?;
+    if report_session {
+        if let Some(notice) = session_report_notice(&response) {
+            eprintln!("{notice}");
+        }
+    }
     match leaf.output {
         bindings::Output::Json => super::print_response(&response),
-        bindings::Output::Read => super::print_read_response(&response),
+        bindings::Output::Read => super::print_read_response(&response, lines),
         bindings::Output::Quiet => {
             if response.get("error").is_some() {
                 super::print_response(&response)
@@ -310,7 +334,7 @@ mod tests {
                 vec!["pane"],
                 "cli:pane:read",
                 "pane.read",
-                json!({"pane_id": "pane", "source": "recent", "format": "text", "strip_ansi": true}),
+                json!({"pane_id": "pane", "source": "recent", "format": "text", "strip_ansi": true, "strip_dim": false}),
             ),
             (
                 "rename",
@@ -411,6 +435,43 @@ mod tests {
                 "cli:request",
                 "pane.report_metadata",
                 json!({"pane_id": "pane", "source": "hook", "clear_title": true, "clear_display_agent": false, "clear_state_labels": false}),
+            ),
+            (
+                "clear",
+                vec!["pane"],
+                "cli:request",
+                "pane.clear_scrollback",
+                json!({"pane_id":"pane"}),
+            ),
+            (
+                "respawn",
+                vec!["pane", "--force"],
+                "cli:pane:respawn",
+                "pane.respawn",
+                json!({"pane_id":"pane","force":true}),
+            ),
+            (
+                "sync",
+                vec!["pane", "--on"],
+                "cli:pane:sync",
+                "pane.sync",
+                json!({"pane_id":"pane","mode":"on"}),
+            ),
+            (
+                "balance",
+                vec!["--pane", "pane"],
+                "cli:pane:balance",
+                "layout.balance",
+                json!({"pane_id":"pane"}),
+            ),
+            (
+                "report-hint",
+                vec![
+                    "pane", "--source", "hook", "--agent", "claude", "--kind", "question",
+                ],
+                "cli:request",
+                "pane.report_hint",
+                json!({"pane_id":"pane","source":"hook","agent":"claude","kind":"question","clear":false}),
             ),
         ];
         assert_eq!(cases.len(), bindings::LEAVES.len());
@@ -1025,5 +1086,56 @@ mod tests {
         ] {
             assert_eq!(run_pane_command(&args(&[name])).unwrap(), 2);
         }
+    }
+}
+
+fn session_report_notice(response: &serde_json::Value) -> Option<String> {
+    let result = response.get("result")?;
+    if result.get("type")?.as_str()? != "report_not_applied" {
+        return None;
+    }
+    let reason = result.get("reason").and_then(serde_json::Value::as_str);
+    Some(match reason {
+        Some("kept_existing_session") => "kept existing session".to_string(),
+        Some("stale_report") => "ignored stale report".to_string(),
+        Some(other) => format!("report not applied: {other}"),
+        None => "report not applied".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod fork_regression_tests {
+    use super::*;
+    #[test]
+    fn session_report_notice_names_a_report_that_changed_nothing() {
+        let kept = serde_json::json!({
+            "id": "cli:request",
+            "result": {"type": "report_not_applied", "reason": "kept_existing_session"}
+        });
+        assert_eq!(
+            session_report_notice(&kept).as_deref(),
+            Some("kept existing session")
+        );
+
+        let stale = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "stale_report"}
+        });
+        assert_eq!(
+            session_report_notice(&stale).as_deref(),
+            Some("ignored stale report")
+        );
+
+        let unknown = serde_json::json!({
+            "result": {"type": "report_not_applied", "reason": "something_new"}
+        });
+        assert_eq!(
+            session_report_notice(&unknown).as_deref(),
+            Some("report not applied: something_new")
+        );
+
+        assert_eq!(
+            session_report_notice(&serde_json::json!({"result": {"type": "ok"}})),
+            None
+        );
     }
 }
