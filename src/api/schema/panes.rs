@@ -1,3 +1,6 @@
+use crate::cli::pane::bindings as binding;
+use crate::cli::projection::{cli_projection, Field, Input};
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -462,7 +465,7 @@ pub struct PaneReadParams {
     #[serde(default = "super::default_true")]
     pub strip_ansi: bool,
     /// Leave out faint (SGR 2) cells, for every source (fork issue 146).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub strip_dim: bool,
     #[serde(skip)]
     #[schemars(skip)]
@@ -872,4 +875,206 @@ pub struct PaneLinkRegion {
     pub row: u16,
     pub start_col: u16,
     pub end_col: u16,
+}
+
+cli_projection! {
+    pub(crate) PaneSplitProjection for PaneSplitParams {
+        workspace_id => Field::new(None::<String>),
+        target_pane_id => binding::target(true),
+        direction => Field::new(SplitDirection::Right).input(binding::split_direction()),
+        ratio => Field::new(None).input(binding::finite("ratio")),
+        cwd => Field::new(None).input(binding::optional_text("cwd", "PATH").path()),
+        focus => Field::new(false).input(binding::boolean("focus", true)).input(binding::boolean("no-focus", false)),
+        right_click => Field::new(PaneRightClickTarget::Herdr).input(binding::right_click()),
+        env => Field::new(HashMap::new()).input(binding::environment()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneInputProjection for PaneInputSetParams {
+        pane_id => binding::input_target(),
+        right_click => Field::new(PaneRightClickTarget::Herdr).input(binding::right_click().required()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneSwapProjection for PaneSwapParams {
+        pane_id => binding::target(false),
+        direction => Field::new(None).input(binding::optional_direction().configure(|arg| arg.conflicts_with_all(["source-pane", "target-pane"]))),
+        source_pane_id => Field::new(None).input(binding::optional_text("source-pane", "ID").configure(|arg| arg.requires("target-pane"))),
+        target_pane_id => Field::new(None).input(binding::optional_text("target-pane", "ID").configure(|arg| arg.requires("source-pane"))),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneMoveProjection for PaneMoveParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        destination => binding::destination(),
+        focus => Field::new(true).input(binding::boolean("focus", true)).input(binding::boolean("no-focus", false)),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneZoomProjection for PaneZoomParams {
+        pane_id => binding::target(true),
+        mode => Field::new(PaneZoomMode::Toggle)
+            .input(Input::flag("toggle", |slot, _| { *slot = PaneZoomMode::Toggle; Ok(()) }).configure(|arg| arg.conflicts_with_all(["on", "off"])))
+            .input(Input::flag("on", |slot, _| { *slot = PaneZoomMode::On; Ok(()) }).configure(|arg| arg.conflicts_with("off")))
+            .input(Input::flag("off", |slot, _| { *slot = PaneZoomMode::Off; Ok(()) })),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneLayoutProjection for PaneLayoutParams {
+        pane_id => binding::target(false),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneProcessInfoProjection for PaneProcessInfoParams {
+        pane_id => binding::target(false),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneNeighborProjection for PaneNeighborParams {
+        pane_id => binding::target(false),
+        direction => Field::new(PaneDirection::Left).input(binding::direction()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneEdgesProjection for PaneEdgesParams {
+        pane_id => binding::target(false),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneFocusProjection for PaneFocusDirectionParams {
+        pane_id => binding::target(false),
+        direction => Field::new(PaneDirection::Left).input(binding::direction()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneResizeProjection for PaneResizeParams {
+        pane_id => binding::target(false),
+        direction => Field::new(PaneDirection::Left).input(binding::direction()),
+        amount => Field::new(None).input(binding::finite("amount")),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneListProjection for PaneListParams {
+        workspace_id => Field::new(None).input(Input::value("workspace", "WORKSPACE_ID", |slot, value| { *slot = Some(crate::cli::normalize_workspace_id(value)); Ok(()) })),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneCurrentProjection for PaneCurrentParams {
+        caller_pane_id => binding::target(false),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneRenameProjection for PaneRenameParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        label => binding::label(),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneSendTextProjection for PaneSendTextParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        text => Field::new(String::new()).input(binding::joined("text", "TEXT")),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneSendKeysProjection for PaneSendKeysParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        keys => Field::new(Vec::new()).input(binding::keys()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneRunProjection for PaneSendInputParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        text => Field::new(String::new()).input(binding::joined("command", "COMMAND")),
+        keys => Field::new(vec![String::from("Enter")]),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneReadProjection for PaneReadParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        source => Field::new(ReadSource::Recent).input(binding::read_source(true)),
+        lines => Field::new(None).input(binding::lines()),
+        format => binding::read_format(),
+        strip_ansi => Field::new(true).input(binding::boolean("raw", false)),
+
+        intent => Field::new(super::common::ReadIntent::Interactive),
+
+        strip_dim => Field::new(false).input(binding::boolean("strip-dim", true)),
+    }
+}
+
+cli_projection! {
+    pub(crate) PaneReportAgentProjection for PaneReportAgentParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        source => Field::new(String::new()).input(binding::source()),
+        agent => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        state => Field::new(PaneAgentState::Unknown).input(binding::state()),
+        message => Field::new(None).input(binding::optional_text("message", "TEXT")),
+        seq => Field::new(None).input(binding::number("seq", "N")),
+        agent_session_id => Field::new(None).input(binding::optional_text("agent-session-id", "ID")),
+        agent_session_path => Field::new(None).input(binding::optional_text("agent-session-path", "PATH").path()),
+
+
+        resume_argv => Field::new(None).input(binding::resume()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneReportSessionProjection for PaneReportAgentSessionParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        source => Field::new(String::new()).input(binding::source()),
+        agent => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        seq => Field::new(None).input(binding::number("seq", "N")),
+        agent_session_id => Field::new(None).input(binding::optional_text("agent-session-id", "ID")),
+        agent_session_path => Field::new(None).input(binding::optional_text("agent-session-path", "PATH").path()),
+        session_start_source => Field::new(None).input(binding::optional_text("session-start-source", "SOURCE")),
+
+
+        resume_argv => Field::new(None).input(binding::resume()),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneMetadataProjection for PaneReportMetadataParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        source => Field::new(String::new()).input(binding::source()),
+        agent => Field::new(None).input(binding::optional_text("agent", "LABEL")),
+        applies_to_source => Field::new(None).input(binding::optional_text("applies-to-source", "ID")),
+        title => Field::new(None).input(binding::optional_text("title", "TEXT").configure(|arg| arg.conflicts_with("clear-title"))),
+        display_agent => Field::new(None).input(binding::optional_text("display-agent", "TEXT").configure(|arg| arg.conflicts_with("clear-display-agent"))),
+        state_labels => Field::new(HashMap::new()).input(binding::state_label().configure(|arg| arg.conflicts_with("clear-state-labels"))),
+
+        tokens => Field::new(HashMap::new()).input(binding::token()).input(binding::clear_token()),
+        clear_title => Field::new(false).input(binding::boolean("clear-title", true)),
+        clear_display_agent => Field::new(false).input(binding::boolean("clear-display-agent", true)),
+        clear_state_labels => Field::new(false).input(binding::boolean("clear-state-labels", true)),
+        seq => Field::new(None).input(binding::number("seq", "N")),
+
+        ttl_ms => Field::new(None).input(binding::number("ttl-ms", "N")),
+        }
+}
+
+cli_projection! {
+    pub(crate) PaneReleaseProjection for PaneReleaseAgentParams {
+        pane_id => Field::new(String::new()).input(binding::pane_id()),
+        source => Field::new(String::new()).input(binding::source()),
+        agent => Field::new(String::new()).input(binding::text("agent", "LABEL").required()),
+        seq => Field::new(None).input(binding::number("seq", "N")),
+        }
 }

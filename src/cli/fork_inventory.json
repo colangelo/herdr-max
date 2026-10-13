@@ -1,0 +1,1572 @@
+[
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "add",
+      "review the port",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.add",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "review the port"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "add",
+      "high priority",
+      "--pane",
+      "w1:p2",
+      "--priority",
+      "high",
+      "--link",
+      "w1:p3"
+    ],
+    "requests": [
+      {
+        "method": "todo.add",
+        "params": {
+          "link_pane_id": "w1:p3",
+          "pane_id": "w1:p2",
+          "priority": "high",
+          "text": "high priority"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "list",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.list",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "list",
+      "--all",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.list",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "done",
+      "7",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.update",
+        "params": {
+          "done": true,
+          "id": 7,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "undone",
+      "7",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.update",
+        "params": {
+          "done": false,
+          "id": 7,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "edit",
+      "7",
+      "--pane",
+      "w1:p2",
+      "--text",
+      "updated text",
+      "--priority",
+      "low",
+      "--link",
+      "w1:p3",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.update",
+        "params": {
+          "id": 7,
+          "link_pane_id": "w1:p3",
+          "pane_id": "w1:p2",
+          "priority": "low",
+          "text": "updated text"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "edit",
+      "7",
+      "--pane",
+      "w1:p2",
+      "--unlink",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.update",
+        "params": {
+          "clear_link": true,
+          "id": 7,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "rm",
+      "7",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.remove",
+        "params": {
+          "id": 7,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "clear",
+      "--pane",
+      "w1:p2",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.clear",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "todo",
+      "clear",
+      "--pane",
+      "w1:p2",
+      "--done",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "todo.clear",
+        "params": {
+          "done_only": true,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "notification",
+      "list"
+    ],
+    "requests": [
+      {
+        "method": "notification.list",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "notification",
+      "list",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "notification.list",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "notification",
+      "clear"
+    ],
+    "requests": [
+      {
+        "method": "notification.clear",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "notification",
+      "clear",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "notification.clear",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "client",
+      "list"
+    ],
+    "requests": [
+      {
+        "method": "client.list",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "popup",
+      "close"
+    ],
+    "requests": [
+      {
+        "method": "popup.close",
+        "params": {}
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "popup",
+      "close",
+      "--plugin",
+      "gestore.asks"
+    ],
+    "requests": [
+      {
+        "method": "plugin.popup.close",
+        "params": {
+          "plugin_id": "gestore.asks"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "popup",
+      "close",
+      "--plugin=gestore.asks"
+    ],
+    "requests": [
+      {
+        "method": "plugin.popup.close",
+        "params": {
+          "plugin_id": "gestore.asks"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "clear",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.clear_scrollback",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "clear",
+      "--pane",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.clear_scrollback",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "respawn",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.respawn",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "respawn",
+      "w1:p2",
+      "--force"
+    ],
+    "requests": [
+      {
+        "method": "pane.respawn",
+        "params": {
+          "force": true,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "close",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.close",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "close",
+      "--force",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.close",
+        "params": {
+          "force": true,
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "sync",
+      "w1:p2",
+      "--on"
+    ],
+    "requests": [
+      {
+        "method": "pane.sync",
+        "params": {
+          "mode": "on",
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "sync",
+      "--pane",
+      "w1:p2",
+      "--off"
+    ],
+    "requests": [
+      {
+        "method": "pane.sync",
+        "params": {
+          "mode": "off",
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "sync",
+      "w1:p2",
+      "--toggle"
+    ],
+    "requests": [
+      {
+        "method": "pane.sync",
+        "params": {
+          "mode": "toggle",
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "sync",
+      "--current",
+      "--on"
+    ],
+    "requests": [
+      {
+        "method": "pane.sync",
+        "params": {
+          "mode": "on"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "pane.layout",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "even-h"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "even_horizontal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "even-horizontal"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "even_horizontal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "even-v"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "even_vertical"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "even-vertical"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "even_vertical"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "tiled"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "tiled"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "main-v"
+    ],
+    "requests": [
+      {
+        "method": "layout.apply_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "main_vertical"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--preset",
+      "main-vertical"
+    ],
+    "requests": [
+      {
+        "method": "layout.apply_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "main_vertical"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "layout",
+      "--pane",
+      "w1:p2",
+      "--set",
+      "even-h"
+    ],
+    "requests": [
+      {
+        "method": "layout.set_preset",
+        "params": {
+          "pane_id": "w1:p2",
+          "preset": "even_horizontal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "balance",
+      "--pane",
+      "w1:p2"
+    ],
+    "requests": [
+      {
+        "method": "layout.balance",
+        "params": {
+          "pane_id": "w1:p2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "report-hint",
+      "w1:p2",
+      "--source",
+      "mod",
+      "--agent",
+      "claude",
+      "--kind",
+      "permission",
+      "--id",
+      "ask-1",
+      "--seq",
+      "3",
+      "--ttl-ms",
+      "20000"
+    ],
+    "requests": [
+      {
+        "method": "pane.report_hint",
+        "params": {
+          "agent": "claude",
+          "clear": false,
+          "id": "ask-1",
+          "kind": "permission",
+          "pane_id": "w1:p2",
+          "seq": 3,
+          "source": "mod",
+          "ttl_ms": 20000
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "report-hint",
+      "w1:p2",
+      "--source",
+      "mod",
+      "--agent",
+      "claude",
+      "--kind",
+      "question"
+    ],
+    "requests": [
+      {
+        "method": "pane.report_hint",
+        "params": {
+          "agent": "claude",
+          "clear": false,
+          "kind": "question",
+          "pane_id": "w1:p2",
+          "source": "mod"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "report-hint",
+      "w1:p2",
+      "--source",
+      "mod",
+      "--agent",
+      "claude",
+      "--clear",
+      "--seq",
+      "4"
+    ],
+    "requests": [
+      {
+        "method": "pane.report_hint",
+        "params": {
+          "agent": "claude",
+          "clear": true,
+          "pane_id": "w1:p2",
+          "seq": 4,
+          "source": "mod"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "w1:p2",
+      "hello",
+      "world"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "hello world"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "--chunk",
+      "3",
+      "--chunk-delay",
+      "0",
+      "w1:p2",
+      "abcdef"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "abc"
+        }
+      },
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "def"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "w1:p2",
+      "--chunk",
+      "3",
+      "--chunk-delay",
+      "0",
+      "abcdef"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "abc"
+        }
+      },
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "def"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "w1:p2",
+      "abcdef",
+      "--chunk=3",
+      "--chunk-delay=0"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "abc"
+        }
+      },
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "def"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "--chunk=3",
+      "w1:p2",
+      "--chunk-delay=0",
+      "abcdef"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "abc"
+        }
+      },
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "def"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "w1:p2",
+      "--",
+      "--chunk",
+      "literal"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "--chunk literal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "send-text",
+      "--",
+      "w1:p2",
+      "--chunk",
+      "literal"
+    ],
+    "requests": [
+      {
+        "method": "pane.send_text",
+        "params": {
+          "pane_id": "w1:p2",
+          "text": "--chunk literal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "read",
+      "w1:p2",
+      "--strip-dim"
+    ],
+    "requests": [
+      {
+        "method": "pane.read",
+        "params": {
+          "format": "text",
+          "pane_id": "w1:p2",
+          "source": "recent",
+          "strip_ansi": true,
+          "strip_dim": true
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "read",
+      "w1:p2",
+      "--source",
+      "detection",
+      "--format",
+      "ansi",
+      "--lines",
+      "8",
+      "--strip-dim"
+    ],
+    "requests": [
+      {
+        "method": "pane.read",
+        "params": {
+          "format": "ansi",
+          "lines": 8,
+          "pane_id": "w1:p2",
+          "source": "detection",
+          "strip_ansi": true,
+          "strip_dim": true
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "report-agent-session",
+      "w1:p2",
+      "--source",
+      "mod",
+      "--agent",
+      "claude",
+      "--seq",
+      "3",
+      "--agent-session-id",
+      "session-1",
+      "--agent-session-path",
+      "/tmp/session.jsonl",
+      "--session-start-source",
+      "hook",
+      "--",
+      "claude",
+      "--resume",
+      "session-1"
+    ],
+    "requests": [
+      {
+        "method": "pane.report_agent_session",
+        "params": {
+          "agent": "claude",
+          "agent_session_id": "session-1",
+          "agent_session_path": "/tmp/session.jsonl",
+          "pane_id": "w1:p2",
+          "resume_argv": [
+            "claude",
+            "--resume",
+            "session-1"
+          ],
+          "seq": 3,
+          "session_start_source": "hook",
+          "source": "mod"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "pane",
+      "report-metadata",
+      "w1:p2",
+      "--source",
+      "mod",
+      "--token",
+      "phase=review",
+      "--clear-token",
+      "old",
+      "--seq",
+      "4",
+      "--ttl-ms",
+      "20000"
+    ],
+    "requests": [
+      {
+        "method": "pane.report_metadata",
+        "params": {
+          "clear_display_agent": false,
+          "clear_state_labels": false,
+          "clear_title": false,
+          "pane_id": "w1:p2",
+          "seq": 4,
+          "source": "mod",
+          "tokens": {
+            "old": null,
+            "phase": "review"
+          },
+          "ttl_ms": 20000
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "sync",
+      "w1:t2",
+      "--on"
+    ],
+    "requests": [
+      {
+        "method": "tab.sync",
+        "params": {
+          "mode": "on",
+          "tab_id": "w1:t2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "sync",
+      "--tab",
+      "w1:t2",
+      "--off"
+    ],
+    "requests": [
+      {
+        "method": "tab.sync",
+        "params": {
+          "mode": "off",
+          "tab_id": "w1:t2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "sync",
+      "--tab",
+      "w1:t2",
+      "--toggle"
+    ],
+    "requests": [
+      {
+        "method": "tab.sync",
+        "params": {
+          "mode": "toggle",
+          "tab_id": "w1:t2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "sync",
+      "--current",
+      "--on"
+    ],
+    "requests": [
+      {
+        "method": "tab.sync",
+        "params": {
+          "mode": "on"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "close",
+      "w1:t2"
+    ],
+    "requests": [
+      {
+        "method": "tab.close",
+        "params": {
+          "tab_id": "w1:t2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "tab",
+      "close",
+      "w1:t2",
+      "--force"
+    ],
+    "requests": [
+      {
+        "method": "tab.close",
+        "params": {
+          "force": true,
+          "tab_id": "w1:t2"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "list",
+      "--json"
+    ],
+    "requests": [
+      {
+        "method": "agent.list",
+        "params": {
+          "input_box": false
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "list",
+      "--json",
+      "--input-box"
+    ],
+    "requests": [
+      {
+        "method": "agent.list",
+        "params": {
+          "input_box": true
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "pin",
+      "reviewer"
+    ],
+    "requests": [
+      {
+        "method": "agent.pin",
+        "params": {
+          "target": "reviewer"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "unpin",
+      "reviewer"
+    ],
+    "requests": [
+      {
+        "method": "agent.unpin",
+        "params": {
+          "target": "reviewer"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "read",
+      "reviewer",
+      "--strip-dim"
+    ],
+    "requests": [
+      {
+        "method": "agent.read",
+        "params": {
+          "format": "text",
+          "source": "recent",
+          "strip_ansi": true,
+          "strip_dim": true,
+          "target": "reviewer"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "read",
+      "reviewer",
+      "--source",
+      "detection",
+      "--format",
+      "ansi",
+      "--lines",
+      "8",
+      "--strip-dim"
+    ],
+    "requests": [
+      {
+        "method": "agent.read",
+        "params": {
+          "format": "ansi",
+          "lines": 8,
+          "source": "detection",
+          "strip_ansi": false,
+          "strip_dim": true,
+          "target": "reviewer"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "message",
+      "reviewer",
+      "hello",
+      "world"
+    ],
+    "requests": [
+      {
+        "method": "agent.message",
+        "params": {
+          "busy": "queue",
+          "mode": "typed",
+          "target": "reviewer",
+          "text": "hello world"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "message",
+      "--note",
+      "--interrupt",
+      "reviewer",
+      "hello"
+    ],
+    "requests": [
+      {
+        "method": "agent.message",
+        "params": {
+          "busy": "interrupt",
+          "mode": "note",
+          "target": "reviewer",
+          "text": "hello"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "message",
+      "reviewer",
+      "--answer",
+      "1"
+    ],
+    "requests": [
+      {
+        "method": "agent.message",
+        "params": {
+          "answer": "1",
+          "busy": "queue",
+          "mode": "typed",
+          "target": "reviewer",
+          "text": ""
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "message",
+      "reviewer",
+      "--answer=2"
+    ],
+    "requests": [
+      {
+        "method": "agent.message",
+        "params": {
+          "answer": "2",
+          "busy": "queue",
+          "mode": "typed",
+          "target": "reviewer",
+          "text": ""
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "agent",
+      "message",
+      "reviewer",
+      "--",
+      "--note",
+      "is",
+      "literal"
+    ],
+    "requests": [
+      {
+        "method": "agent.message",
+        "params": {
+          "busy": "queue",
+          "mode": "typed",
+          "target": "reviewer",
+          "text": "--note is literal"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "pin",
+      "w1"
+    ],
+    "requests": [
+      {
+        "method": "workspace.pin",
+        "params": {
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "unpin",
+      "w1"
+    ],
+    "requests": [
+      {
+        "method": "workspace.unpin",
+        "params": {
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "close",
+      "w1"
+    ],
+    "requests": [
+      {
+        "method": "workspace.close",
+        "params": {
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "close",
+      "w1",
+      "--force"
+    ],
+    "requests": [
+      {
+        "method": "workspace.close",
+        "params": {
+          "force": true,
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "close",
+      "w1",
+      "--group",
+      "--force"
+    ],
+    "requests": [
+      {
+        "method": "workspace.close",
+        "params": {
+          "close_group": true,
+          "force": true,
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "workspace",
+      "report-metadata",
+      "w1",
+      "--source",
+      "mod",
+      "--token",
+      "phase=review",
+      "--clear-token",
+      "old",
+      "--seq",
+      "4",
+      "--ttl-ms",
+      "20000"
+    ],
+    "requests": [
+      {
+        "method": "workspace.report_metadata",
+        "params": {
+          "seq": 4,
+          "source": "mod",
+          "tokens": {
+            "old": null,
+            "phase": "review"
+          },
+          "ttl_ms": 20000,
+          "workspace_id": "w1"
+        }
+      }
+    ]
+  },
+  {
+    "argv": [
+      "herdr",
+      "notification",
+      "show",
+      "port check",
+      "--body",
+      "fork contract",
+      "--position",
+      "center",
+      "--sound",
+      "request"
+    ],
+    "requests": [
+      {
+        "method": "notification.show",
+        "params": {
+          "body": "fork contract",
+          "position": "center",
+          "sound": "request",
+          "title": "port check"
+        }
+      }
+    ]
+  }
+]

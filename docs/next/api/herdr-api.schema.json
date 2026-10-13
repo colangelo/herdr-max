@@ -1552,7 +1552,6 @@
               "type": "boolean"
             },
             "strip_dim": {
-              "default": false,
               "description": "Leave out faint (SGR 2) cells, for every source (fork issue 146).",
               "type": "boolean"
             },
@@ -3253,7 +3252,6 @@
               "type": "boolean"
             },
             "strip_dim": {
-              "default": false,
               "description": "Leave out faint (SGR 2) cells, for every source (fork issue 146).",
               "type": "boolean"
             }
