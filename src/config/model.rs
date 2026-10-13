@@ -164,7 +164,7 @@ pub enum BackgroundMarkConfig {
     #[default]
     Frames,
     /// A braille cell whose dots count the background items (1 to 8, `⣿` for
-    /// more), alternating with the small dot on the spinner tick. Shown on
+    /// more), blinking to the small dot for 2 of every 16 spinner ticks. Shown on
     /// idle and done rows too, since background work does not change status.
     Braille,
 }

@@ -10,6 +10,12 @@ use crate::{
 /// eight stay on the full cell.
 const BRAILLE: [&str; 8] = ["⠁", "⠃", "⠇", "⡇", "⡏", "⡟", "⡿", "⣿"];
 
+/// The braille mark's cycle in spinner ticks (the frames pulse's period), and
+/// the ticks at its end that show the small dot instead of the count: the
+/// count stays readable and still blinks once per cycle.
+const BRAILLE_CYCLE_TICKS: u8 = 16;
+const BRAILLE_OFF_TICKS: u8 = 2;
+
 /// What the server says an agent row has running in the background.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Background {
@@ -125,8 +131,9 @@ impl StatePresentation {
         let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
             .then_some(config.spinner_frame.wrapping_add(seq as u8));
         if self.braille(status, background) {
-            // The same phase as the frames pulse: one swap per eight ticks.
-            return if frame.is_some_and(|frame| (frame / 8) % 2 == 1) {
+            return if frame.is_some_and(|frame| {
+                frame % BRAILLE_CYCLE_TICKS < BRAILLE_CYCLE_TICKS - BRAILLE_OFF_TICKS
+            }) {
                 BRAILLE[usize::from(background.count.min(8)) - 1]
             } else {
                 self.symbols.background.as_deref().unwrap_or("·")
@@ -274,9 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn braille_mark_alternates_the_dot_and_the_count_for_an_idle_row() {
-        // Phase A (frame / 8 even): the small dot. Phase B: the braille cell.
-        assert_eq!(mark(AgentStatus::Idle, 3, 0), "·");
+    fn braille_mark_shows_the_count_and_blinks_the_dot_at_the_cycle_end() {
+        // Ticks 0..14 of each 16: the braille cell. Ticks 14 and 15: the dot.
+        for frame in [0, 1, 8, 13, 16, 29] {
+            assert_eq!(mark(AgentStatus::Idle, 3, frame), "⠇", "frame {frame}");
+        }
+        for frame in [14, 15, 30, 31, 254, 255] {
+            assert_eq!(mark(AgentStatus::Idle, 3, frame), "·", "frame {frame}");
+        }
         assert_eq!(mark(AgentStatus::Idle, 3, 8), "⠇");
         assert_eq!(mark(AgentStatus::Done, 1, 8), "⠁");
         assert_eq!(mark(AgentStatus::Idle, 4, 8), "⡇");
