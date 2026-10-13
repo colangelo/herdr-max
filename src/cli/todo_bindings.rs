@@ -197,17 +197,12 @@ fn last(matches: &ArgMatches, name: &str) -> Option<usize> {
 }
 
 pub(crate) fn invocation(args: &[String], caller: Option<&str>) -> Result<Invocation, ParseError> {
-    if let Some(flag @ ("--pane" | "--priority" | "--link" | "--text")) =
-        args.last().map(String::as_str)
-    {
-        return Err(ParseError::Usage(format!("missing value for {flag}")));
-    }
     if let [verb, pane, text, ..] = args {
         if verb == "add" && looks_like_pane_id(pane) && !text.starts_with('-') {
             return Err(ParseError::Usage(format!("{pane} looks like a pane id, but todo add takes the text first: herdr todo add \"{text}\" --pane {pane}")));
         }
     }
-    projection::parse(command().bin_name("herdr todo"), args, |matches| {
+    let parsed = projection::parse(command().bin_name("herdr todo"), args, |matches| {
         let (name, matches) = matches
             .subcommand()
             .ok_or_else(|| ParseError::Usage("missing todo command".into()))?;
@@ -264,13 +259,36 @@ pub(crate) fn invocation(args: &[String], caller: Option<&str>) -> Result<Invoca
             },
             json: matches.get_flag("json"),
         })
-    })
+    });
+    match parsed {
+        Err(ParseError::Clap(error)) if error.kind() == clap::error::ErrorKind::InvalidValue => {
+            if let Some(flag @ ("--pane" | "--priority" | "--link" | "--text")) =
+                args.last().map(String::as_str)
+            {
+                Err(ParseError::Usage(format!("missing value for {flag}")))
+            } else {
+                Err(ParseError::Clap(error))
+            }
+        }
+        result => result,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn todo_edit_keeps_option_words_used_as_text_values() {
+        for text in ["--priority", "--pane", "--text", "--link"] {
+            let args = ["edit", "7", "--text", text].map(str::to_owned);
+            let parsed = invocation(&args, Some("w1:p2")).unwrap();
+            let Method::TodoUpdate(params) = parsed.request.method else {
+                panic!("edit");
+            };
+            assert_eq!(params.text.as_deref(), Some(text));
+        }
+    }
     // Test adapters invoke the new projection path; assertions below are the baseline tests.
     #[derive(Debug, PartialEq, Eq)]
     enum TodoArgError {

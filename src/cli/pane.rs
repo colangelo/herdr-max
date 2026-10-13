@@ -436,44 +436,9 @@ mod tests {
                 "pane.report_metadata",
                 json!({"pane_id": "pane", "source": "hook", "clear_title": true, "clear_display_agent": false, "clear_state_labels": false}),
             ),
-            (
-                "clear",
-                vec!["pane"],
-                "cli:request",
-                "pane.clear_scrollback",
-                json!({"pane_id":"pane"}),
-            ),
-            (
-                "respawn",
-                vec!["pane", "--force"],
-                "cli:pane:respawn",
-                "pane.respawn",
-                json!({"pane_id":"pane","force":true}),
-            ),
-            (
-                "sync",
-                vec!["pane", "--on"],
-                "cli:pane:sync",
-                "pane.sync",
-                json!({"pane_id":"pane","mode":"on"}),
-            ),
-            (
-                "balance",
-                vec!["--pane", "pane"],
-                "cli:pane:balance",
-                "layout.balance",
-                json!({"pane_id":"pane"}),
-            ),
-            (
-                "report-hint",
-                vec![
-                    "pane", "--source", "hook", "--agent", "claude", "--kind", "question",
-                ],
-                "cli:request",
-                "pane.report_hint",
-                json!({"pane_id":"pane","source":"hook","agent":"claude","kind":"question","clear":false}),
-            ),
-        ];
+        ].into_iter().chain(super::FORK_PANE_REQUEST_CASES.iter().map(|(name, argv, id, method, params)| {
+            (*name, argv.to_vec(), *id, *method, serde_json::from_str(params).unwrap())
+        })).collect::<Vec<_>>();
         assert_eq!(cases.len(), bindings::LEAVES.len());
         for (name, values, id, method, params) in cases {
             assert_eq!(
@@ -1139,3 +1104,45 @@ mod fork_regression_tests {
         );
     }
 }
+
+// Fork-owned samples stay separate from the upstream literal matrix.
+#[cfg(test)]
+const FORK_PANE_REQUEST_CASES: &[(&str, &[&str], &str, &str, &str)] = &[
+    (
+        "clear",
+        &["pane"],
+        "cli:request",
+        "pane.clear_scrollback",
+        r#"{"pane_id":"pane"}"#,
+    ),
+    (
+        "respawn",
+        &["pane", "--force"],
+        "cli:pane:respawn",
+        "pane.respawn",
+        r#"{"pane_id":"pane","force":true}"#,
+    ),
+    (
+        "sync",
+        &["pane", "--on"],
+        "cli:pane:sync",
+        "pane.sync",
+        r#"{"pane_id":"pane","mode":"on"}"#,
+    ),
+    (
+        "balance",
+        &["--pane", "pane"],
+        "cli:pane:balance",
+        "layout.balance",
+        r#"{"pane_id":"pane"}"#,
+    ),
+    (
+        "report-hint",
+        &[
+            "pane", "--source", "hook", "--agent", "claude", "--kind", "question",
+        ],
+        "cli:request",
+        "pane.report_hint",
+        r#"{"pane_id":"pane","source":"hook","agent":"claude","kind":"question","clear":false}"#,
+    ),
+];

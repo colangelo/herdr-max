@@ -73,12 +73,12 @@
 - [x] 4.5 tab: `tab sync` (--on/--off/--toggle/--tab/--current), `close --force`.
 - [x] 4.6 agent: pin/unpin leaves; `agent message` stays custom on top of the new layer.
 - [x] 4.7 workspace: pin/unpin leaves, `close --force`.
-- [ ] 4.9 Fork fixes to upstream's own commands: for EVERY commit in
+- [x] 4.9 Fork fixes to upstream's own commands: for EVERY commit in
       `git log --no-merges $(git merge-base f3fb2099 upstream/master)..f3fb2099 -- src/cli src/cli.rs src/api`
       (66 commits), one line in `.local/port/cli-audit.md`: `<sha> <subject>: ported in <file/leaf>`,
       or `covered by <test>`, or `dropped: <reason>`. Known ones to check first: `fba7008e`,
       `c27f5838`, `10d47619`, `d091fb5f`, `d774bc63`. This list goes into the PR body and on #218.
-- [ ] 4.8 Every remaining flag from `git diff 212b710b f3fb2099 -- src/cli | grep '^+' | grep -o '"--[a-z-]*"'`
+- [x] 4.8 Every remaining flag from `git diff 212b710b f3fb2099 -- src/cli | grep '^+' | grep -o '"--[a-z-]*"'`
       is either ported (name the leaf) or listed as intentionally dropped with a reason (none
       expected).
 
@@ -86,11 +86,11 @@
 
 - [x] 5.1 The inventory tests from 1.1 and 1.2 pass unchanged.
 - [ ] 5.2 Upstream's `tests/cli/contracts.rs` passes, with fork samples added where it enumerates.
-- [ ] 5.3 `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`
+- [x] 5.3 `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`
       (locked), then the frozen v1 shapes test passes with no fixture edits.
 - [ ] 5.4 Full `just check` (locked) + the Linux CLI suite compile (widen `tests/cli.rs`'s cfg to
       `#![cfg(unix)]`, `cargo check --locked --all-targets`, restore; `git diff tests/cli.rs` empty).
-- [ ] 5.5 CLI docs: `docs/next/website/src/content/docs/cli-reference.mdx` still lists every fork
+- [x] 5.5 CLI docs: `docs/next/website/src/content/docs/cli-reference.mdx` still lists every fork
       command; regenerate if upstream generates it now.
 - [ ] 5.6 Hand the branch tip + `.local/port/ops-table.md` + `.local/port/cli-audit.md` + a one-line-per-group summary to
       herdr-sync. The lead runs the lead check, the live smoke test (each fork command once

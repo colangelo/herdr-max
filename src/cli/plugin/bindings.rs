@@ -69,6 +69,9 @@ pub(crate) fn limit() -> Input<Option<usize>> {
     })
 }
 
+// Fork #208 explicitly makes popup discoverable in help and completions.
+const FORK_VISIBLE_PLACEMENTS: &[&str] = &["popup"];
+
 const PLACEMENTS: [(&str, PluginPanePlacement, bool); 6] = [
     ("overlay", PluginPanePlacement::Overlay, false),
     ("popup", PluginPanePlacement::Popup, true),
@@ -96,9 +99,9 @@ pub(crate) fn placement() -> Input<Option<PluginPanePlacement>> {
     })
     .configure(|arg| {
         arg.value_parser(clap::builder::PossibleValuesParser::new(
-            PLACEMENTS
-                .iter()
-                .map(|(name, _, hidden)| PossibleValue::new(*name).hide(*hidden)),
+            PLACEMENTS.iter().map(|(name, _, hidden)| {
+                PossibleValue::new(*name).hide(*hidden && !FORK_VISIBLE_PLACEMENTS.contains(name))
+            }),
         ))
     })
 }
@@ -450,9 +453,13 @@ mod tests {
             .unwrap()
             .render_long_help()
             .to_string();
-        for hidden in ["--width", "--height", "popup", "fullscreen"] {
+        for hidden in ["--width", "--height", "popup", "fullscreen"]
+            .into_iter()
+            .filter(|value| !FORK_VISIBLE_PLACEMENTS.contains(value))
+        {
             assert!(!help.contains(hidden), "{help}");
         }
+        assert!(help.contains("popup"), "{help}");
         for placement in ["popup", "fullscreen"] {
             assert!(matches!(
                 parse(&[
