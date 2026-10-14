@@ -43,9 +43,13 @@ endpoint contract" decides what may change on the wire.
 - **Heavy work goes through the lead's runner, under the shared lock.** The machine is
   shared by many sessions. No bare `cargo`, `just check`, `just test` or builds in your own
   shell. The runner is `port-notes/tools/port-runner.sh` on branch
-  `research/post-v0.9.3-port-notes` (copy under `/tmp/herdr-sync/`). It takes
+  `research/post-v0.9.3-port-notes`. The lead runs it from `/tmp/herdr-sync/` and keeps a
+  backup of its tools in `~/.local/state/herdr-sync/tools` and its "already ran" keys in
+  `~/.local/state/herdr-sync/ran`: macOS deletes old `/tmp` files after about 3 days, and lost
+  keys made it re-run 124 old lines on 2026-10-14. It takes
   `NEEDS-RUN: <command>` lines from `.local/port/PROGRESS.md` of a worktree, runs only an
-  allowlist (`just check|test|lint|test-one <name>`, `cargo nextest run|test|check|clippy`),
+  allowlist (`just check|test|lint|test-one <name>`, `cargo nextest run|test|check|clippy`;
+  no `cargo fmt`, no double quotes), runs each line text once (a rerun adds ` #<digits>`),
   and writes `.local/port/runs/NNN.out` plus a line in `.local/port/runs/RESULTS.md`.
   What it runs, which you can also run by hand from the worktree:
 
