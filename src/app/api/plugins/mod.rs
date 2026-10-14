@@ -1003,6 +1003,11 @@ action = "open"
     /// `pump` advances any event loop the command depends on.
     fn read_capture_when_ready(path: &std::path::Path, mut pump: impl FnMut()) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Fork: a cold powershell.exe on a loaded Windows CI runner can take more
+        // than 5 s to write its first file
+        // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/224).
+        #[cfg(windows)]
+        let deadline = deadline + std::time::Duration::from_secs(25);
         loop {
             pump();
             if let Ok(contents) = std::fs::read_to_string(path) {
