@@ -23,9 +23,9 @@ fn copy_ctrl(state: &mut ClientShellState, ch: char) -> ClientShellInput {
 }
 
 #[test]
-fn copy_mode_ctrl_g_jumps_to_the_bottom_like_capital_g() {
+fn copy_mode_ctrl_n_jumps_to_the_bottom_like_capital_g() {
     let mut state = viewport_copy_state(10);
-    let outcome = copy_ctrl(&mut state, 'g');
+    let outcome = copy_ctrl(&mut state, 'n');
     let copy = state.copy_mode.as_ref().unwrap();
     assert_eq!(state.mode, ClientShellMode::Copy);
     assert_eq!(copy.offset_from_bottom, 0);
@@ -36,6 +36,16 @@ fn copy_mode_ctrl_g_jumps_to_the_bottom_like_capital_g() {
         [ClientShellAction::Endpoint { request, .. }]
         if matches!(&request.method, crate::api::schema::Method::PaneScroll(params)
             if params.offset_from_bottom == 0)));
+}
+
+#[test]
+fn copy_mode_ctrl_g_no_longer_jumps_to_the_bottom() {
+    let mut state = viewport_copy_state(10);
+    let outcome = copy_ctrl(&mut state, 'g');
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    assert_eq!(state.copy_mode.as_ref().unwrap().offset_from_bottom, 10);
+    assert!(outcome.requests.is_empty());
+    assert!(outcome.actions.is_empty());
 }
 
 #[test]

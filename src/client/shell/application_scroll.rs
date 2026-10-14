@@ -344,7 +344,7 @@ impl ClientShellState {
                     Intent::Home
                 })
             }
-            KeyCode::Char('g') if ctrl => Some(if self.claude_application_scroll() {
+            KeyCode::Char('n' | 'N') if ctrl => Some(if self.claude_application_scroll() {
                 Intent::CtrlEnd
             } else {
                 Intent::End
