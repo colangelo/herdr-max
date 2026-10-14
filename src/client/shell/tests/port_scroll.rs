@@ -84,7 +84,7 @@ fn scroll_top_and_bottom_follow_effective_agent_precedence() {
             (KeyCode::Home, KeyModifiers::empty(), true),
             (KeyCode::Char('G'), KeyModifiers::SHIFT, false),
             (KeyCode::Char('g'), KeyModifiers::SHIFT, false),
-            (KeyCode::Char('g'), KeyModifiers::CONTROL, false),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL, false),
             (KeyCode::End, KeyModifiers::empty(), false),
         ] {
             let outcome = key(&mut state, code, modifiers);
@@ -145,6 +145,11 @@ fn scroll_line_keys_are_wheel_intents_and_unrelated_input_is_swallowed() {
         RawInputEvent::Key(crate::input::TerminalKey::new(
             KeyCode::Char('x'),
             KeyModifiers::empty(),
+        )),
+        // Ctrl-G was the bottom chord before Ctrl-N took its place.
+        RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
         )),
     ]);
     assert!(unrelated.requests.is_empty());
@@ -325,16 +330,18 @@ fn scroll_held_keys_stay_suppressed_after_boot_or_connection_reset() {
 
 #[test]
 fn legacy_remapped_entry_keeps_fresh_mode_command_semantics() {
-    let config: Config =
-        toml::from_str("[keys]\ncopy_mode_half_page_up = \"prefix+ctrl+g\"\n").unwrap();
+    let config: Config = toml::from_str(
+        "[keys]\ncopy_mode_half_page_up = \"prefix+ctrl+n\"\nopen_notification_center = \"\"\n",
+    )
+    .unwrap();
     let mut state = state(None, None);
     state.config.keybinds = config.live_keybinds_with_diagnostics().unwrap().0;
     key(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
-    let first = key(&mut state, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    let first = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
     assert_eq!(scroll_request(&first.actions).1, Intent::PageUp);
     finish(&mut state, &first.actions);
     // Legacy terminals cannot distinguish a held repeat from a fresh press.
-    // A new Press retains the fork's SCROLL chord, rather than stealing Ctrl-G.
-    let fresh = key(&mut state, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    // A new Press retains the fork's SCROLL chord, rather than stealing Ctrl-N.
+    let fresh = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
     assert_eq!(scroll_request(&fresh.actions).1, Intent::End);
 }

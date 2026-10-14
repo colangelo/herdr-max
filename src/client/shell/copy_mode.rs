@@ -261,7 +261,7 @@ impl ClientShellState {
                 self.scroll_copy_viewport_line(1, outcome);
                 return;
             }
-            (KeyCode::Char('g'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            (KeyCode::Char('n'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_copy_history(false, outcome);
                 return;
             }
