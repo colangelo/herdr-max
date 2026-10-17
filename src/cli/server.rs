@@ -332,6 +332,14 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
 pub(super) fn live_handoff_command() -> clap::Command {
     projection::command("live-handoff", ServerLiveHandoffProjection::arguments())
         .about("Hand off live panes to a new local server")
+        .arg(
+            // Fork: declared so --help lists it; `server_live_handoff` reads it
+            // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/231).
+            clap::Arg::new("user_context")
+                .long("user-context")
+                .action(clap::ArgAction::SetTrue)
+                .help("On macOS, move the new server to the per-user context, which survives a logout"),
+        )
         .hide(true)
 }
 
@@ -564,5 +572,16 @@ mod tests {
         );
         assert_eq!(params.expected_protocol, Some(9));
         assert_eq!(params.expected_version.as_deref(), Some("0.6.2"));
+    }
+
+    #[test]
+    fn live_handoff_help_lists_the_user_context_flag_and_the_request_omits_it() {
+        let help = live_handoff_command().render_long_help().to_string();
+        assert!(help.contains("--user-context"), "{help}");
+        let args = vec![USER_CONTEXT_FLAG.to_string()];
+        assert_eq!(
+            serde_json::to_value(parse_live_handoff_params(&args).unwrap()).unwrap(),
+            serde_json::json!({})
+        );
     }
 }
