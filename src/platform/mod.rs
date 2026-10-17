@@ -139,6 +139,11 @@ pub(crate) fn local_stream_peer_description(_stream: &crate::ipc::LocalStream) -
     None
 }
 
+#[cfg(not(unix))]
+pub(crate) fn local_stream_peer_pid(_stream: &crate::ipc::LocalStream) -> Option<u32> {
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
@@ -294,8 +299,48 @@ pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std:
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<bool> {
+pub(crate) fn prepare_server_process(
+    _handoff_import: bool,
+    _handoff_user_context: bool,
+) -> std::io::Result<bool> {
     Ok(false)
+}
+
+/// Which macOS bootstrap a process runs under (fork issue 228).
+// Only macOS reads a bootstrap, so elsewhere `Session` and `Unknown` are never built.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MacosServiceContext {
+    /// The per-user bootstrap: outlives any login session, so it survives a logout.
+    User,
+    /// A login session's bootstrap (a GUI login or an ssh session): it dies with it.
+    Session,
+    /// The bootstrap could not be read, as when its session is already gone.
+    Unknown,
+}
+
+impl MacosServiceContext {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Session => "session",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// What a process reaches of macOS's services through its bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MacosServices {
+    pub(crate) context: MacosServiceContext,
+    /// Whether the libinfo service behind user, host and process lookups
+    /// answers. False once the process's login session is gone.
+    pub(crate) reachable: bool,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn macos_services() -> Option<MacosServices> {
+    None
 }
 
 /// Best-effort short host name of the machine running this process, e.g.
@@ -473,7 +518,8 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, RemoteBridgeWake,
+    local_stream_peer_description, local_stream_peer_pid, spawn_server_signal_monitor,
+    RemoteBridgeWake,
 };
 
 mod client_state;

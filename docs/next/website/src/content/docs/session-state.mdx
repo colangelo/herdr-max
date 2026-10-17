@@ -136,3 +136,29 @@ herdr --remote workbox --handoff
 Plain `herdr update` installs the new client and keeps endpoint-generation-1 servers running. Plain `herdr --remote workbox` also keeps a compatible remote server running across version differences. A stop is required only for the one-time upgrade from a pre-generation-1 server; use `--handoff` when you explicitly want to replace a supported running server without losing its pane processes.
 
 `herdr update --handoff` only applies to installs managed by Herdr's own updater. Homebrew, mise, and Nix installs are updated through their package managers, so `herdr update` is disabled there and cannot perform live handoff.
+
+## macOS: after a logout
+
+On macOS, a server that Herdr starts in the background (the usual `herdr` launch) runs in your account's per-user context, which survives logging out. A server started another way, or carried forward by live handoffs from such a server, can run in a login session's context instead. When that login ends, for example after a crash logs you out, every pane the server starts can no longer resolve host names, read the keychain, or use `launchctl`.
+
+`herdr status server` shows which context the server runs in:
+
+- `macos_services: user context, reachable`: survives a logout.
+- `session context`: tied to a login session, so it breaks at the next logout.
+- `unreachable`: it already broke. Every attached window then shows a warning line.
+
+To recover, run this in a terminal that still works, such as Terminal.app:
+
+```bash
+herdr server restart
+```
+
+It asks first, because every pane's running process ends. Workspaces, tabs, panes, todos and agent sessions come back as after any restart, and open windows reattach on their own. Pass `--yes` to skip the question. It refuses to run in a terminal that has lost its session too, because a server started from there would be just as broken.
+
+A live handoff keeps the old server's context. To move a server from a session context to the per-user one without ending its panes, hand it off with `--user-context` before the next logout:
+
+```bash
+herdr server live-handoff --user-context
+```
+
+Panes that already lost their session stay broken after a handoff. Only a restart replaces them.

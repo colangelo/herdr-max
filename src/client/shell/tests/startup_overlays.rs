@@ -552,6 +552,42 @@ fn startup_config_diagnostics_are_client_rendered_and_persist_until_replaced() {
 }
 
 #[test]
+fn a_server_that_lost_its_macos_session_shows_a_standing_warning() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut lost = snapshot();
+    lost.config_diagnostic = Some("endpoint config warning".into());
+    lost.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+        macos_services_lost: Some(true),
+        ..Default::default()
+    });
+    state.set_snapshot(Box::new(lost));
+    state.set_pane_surface(surface());
+    let notice = crate::client::shell::config::MACOS_SERVICES_LOST_NOTICE;
+    assert_eq!(
+        state.config_diagnostic.as_deref(),
+        Some(format!("{notice}\nendpoint config warning").as_str())
+    );
+
+    let frame = state.compose(200, 20).expect("warning frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("server lost its macOS session"), "{text}");
+    assert!(text.contains("herdr server restart"), "{text}");
+
+    // The warning goes as soon as the server reaches macOS again.
+    state.set_snapshot(Box::new(snapshot()));
+    assert_eq!(state.config_diagnostic, None);
+}
+
+#[test]
 fn config_diagnostic_offsets_only_the_pane_rows_it_overlaps() {
     let mut config = ClientShellConfig::from_config(&Config::default());
     config.toast_delay_seconds = 0;

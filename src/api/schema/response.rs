@@ -15,7 +15,7 @@ use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
     PluginPaneInfo,
 };
-use super::server::ServerCapabilities;
+use super::server::{MacosServicesInfo, ServerCapabilities};
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
@@ -56,6 +56,10 @@ pub enum ResponseResult {
         /// the OS lookup fails or on an older server.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exe: Option<String>,
+        /// What the server reaches of macOS services. Absent off macOS and on
+        /// an older server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        macos_services: Option<MacosServicesInfo>,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,

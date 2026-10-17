@@ -680,9 +680,91 @@ pub(crate) fn log_import_result(panes: usize) {
     info!(panes, "handoff import ready");
 }
 
+/// The one-shot file through which a live handoff's caller asks the new server
+/// to move to the per-user macOS context. It sits beside the handoff socket, and
+/// the importer (the new build) reads it, so the request works even when the old
+/// server is a build that knows nothing about it
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/226).
+#[cfg(unix)]
+const USER_CONTEXT_REQUEST_FILE: &str = "herdr-handoff-user-context";
+/// A request older than this belongs to a handoff that never started.
+#[cfg(unix)]
+const USER_CONTEXT_REQUEST_MAX_AGE: Duration = Duration::from_secs(120);
+
+#[cfg(unix)]
+pub(crate) fn user_context_request_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(USER_CONTEXT_REQUEST_FILE)
+}
+
+/// Leaves the request for the next handoff import in `data_dir`.
+#[cfg(unix)]
+pub(crate) fn request_user_context(data_dir: &Path) -> io::Result<PathBuf> {
+    let path = user_context_request_path(data_dir);
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(&path, b"user\n")?;
+    Ok(path)
+}
+
+/// Consumes a fresh request left beside `socket_path`. Called by the importer
+/// before logging starts, so it stays silent.
+#[cfg(unix)]
+pub(crate) fn take_user_context_request(socket_path: &Path) -> bool {
+    let Some(dir) = socket_path.parent() else {
+        return false;
+    };
+    let path = user_context_request_path(dir);
+    let fresh = std::fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age <= USER_CONTEXT_REQUEST_MAX_AGE);
+    // A stale request is removed too, so it cannot apply to a later handoff.
+    let removed = std::fs::remove_file(&path).is_ok();
+    fresh && removed
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn request_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-user-context-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_user_context_request_is_taken_once_by_the_next_import() {
+        let dir = request_dir("once");
+        let socket = dir.join("herdr-handoff-123.sock");
+        assert!(!take_user_context_request(&socket), "no request yet");
+        request_user_context(&dir).unwrap();
+        assert!(take_user_context_request(&socket));
+        assert!(!take_user_context_request(&socket), "consumed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_user_context_request_is_discarded() {
+        let dir = request_dir("stale");
+        let path = request_user_context(&dir).unwrap();
+        let old = std::time::SystemTime::now() - USER_CONTEXT_REQUEST_MAX_AGE * 2;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(!take_user_context_request(
+            &dir.join("herdr-handoff-1.sock")
+        ));
+        assert!(
+            !path.exists(),
+            "a stale request must not wait for a later handoff"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {

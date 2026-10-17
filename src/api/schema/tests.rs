@@ -943,6 +943,10 @@ fn success_response_round_trips() {
             }),
             hostname: Some("mbm5".into()),
             exe: Some("/opt/homebrew/Cellar/herdr-beta/0.1.2/bin/herdr-beta".into()),
+            macos_services: Some(MacosServicesInfo {
+                context: "user".into(),
+                reachable: true,
+            }),
         },
     };
 

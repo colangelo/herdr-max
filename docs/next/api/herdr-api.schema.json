@@ -7476,6 +7476,22 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "server.stop_for_restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -9185,6 +9201,24 @@
             }
           ]
         },
+        "MacosServicesInfo": {
+          "description": "What the server reaches of macOS services through its Mach bootstrap.",
+          "properties": {
+            "context": {
+              "description": "`user` (the per-user bootstrap, which survives a logout), `session` (a\nlogin session's, which dies with it), or `unknown`.",
+              "type": "string"
+            },
+            "reachable": {
+              "description": "Whether macOS user, host and process lookups answer.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "context",
+            "reachable"
+          ],
+          "type": "object"
+        },
         "NotificationInfo": {
           "description": "One entry of the server-owned notification log as exposed over the API.",
           "properties": {
@@ -10715,6 +10749,17 @@
                     "string",
                     "null"
                   ]
+                },
+                "macos_services": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/MacosServicesInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "What the server reaches of macOS services. Absent off macOS and on\nan older server."
                 },
                 "protocol": {
                   "format": "uint32",

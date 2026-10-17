@@ -138,6 +138,7 @@ fn test_headless_server_from_app(mut app: crate::app::App) -> HeadlessServer {
         handoff_client_size: None,
         effective_size: no_client_size,
         shutting_down: false,
+        client_shutdown_reason: "server is shutting down",
         host_shutdown_requested: Arc::new(AtomicBool::new(false)),
         host_shutdown_intent: Default::default(),
         host_shutdown_probe: crate::platform::host_shutdown_in_progress,
@@ -179,6 +180,45 @@ fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {
     match read_server_message(bytes) {
         ServerMessage::ServerShutdown { reason } => reason,
         other => panic!("expected shutdown, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_restart_stop_tells_clients_to_follow_and_a_plain_stop_does_not() {
+    for (reason, expected) in [
+        (
+            ShutdownReason::ApiRestart { caller: None },
+            crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON,
+        ),
+        (
+            ShutdownReason::ApiStop { caller: None },
+            "server is shutting down",
+        ),
+    ] {
+        let mut server = test_headless_server();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            writer,
+        });
+        server.server_stop.request(reason);
+        server.initiate_shutdown();
+
+        let shutdown = control_rx
+            .try_iter()
+            .map(read_server_message)
+            .find_map(|message| match message {
+                ServerMessage::ServerShutdown { reason } => Some(reason),
+                _ => None,
+            })
+            .expect("shutdown message");
+        assert_eq!(shutdown.as_deref(), Some(expected));
+        shutdown_test_runtimes(&mut server);
     }
 }
 

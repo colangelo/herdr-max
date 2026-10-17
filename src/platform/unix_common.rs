@@ -316,6 +316,14 @@ pub(crate) fn spawn_server_signal_monitor(
     }
 }
 
+/// The process on the other end of a local socket.
+pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<u32> {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+
+    let crate::ipc::LocalStream::UdSocket(socket) = stream;
+    super::socket_peer_pid(socket.as_fd().as_raw_fd())
+}
+
 /// Describes the process on the other end of a local socket, for logs.
 pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
     use std::os::fd::{AsFd as _, AsRawFd as _};
