@@ -359,6 +359,7 @@ mod tests {
             false,
             true,
             true,
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .map(|_| ())
         .expect_err("a handing-off server refuses");
