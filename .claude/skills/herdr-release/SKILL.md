@@ -99,8 +99,9 @@ session in place.
   Maintainer check across versions:
   `git show <tag>:src/server/handoff.rs | grep HANDOFF_VERSION` (both 0.7.1-ac
   and 0.7.3 are `1`).
-- **≤ 64 panes** with live PTYs (`MAX_FDS_PER_HANDOFF`); more aborts the handoff
-  safely.
+- **No pane limit** since v0.9.1: pane descriptors go over in batches of 64
+  (`FDS_PER_MESSAGE` in `src/server/handoff.rs`). Only an older RUNNING server
+  still enforces 64 panes on its first handoff.
 - **Protocol may differ** (e.g. 15→17) as long as you do **not** pass
   `--expected-protocol` (that guard, when set, requires an exact match).
 - **Safety net:** the handoff is a two-phase commit — any failure *before*
