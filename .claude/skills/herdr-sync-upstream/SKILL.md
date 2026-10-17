@@ -314,10 +314,13 @@ Mechanics: skills `herdr-release` (Beta channel, live handoff) and `herdr-dogfoo
 
 - **New upstream bot workflows.** Upstream's maintainer automation needs their secrets and
   fails on the fork. Compare `command gh workflow list --repo colangelo/herdr-max --all`
-  against the disabled set (Approve Contributor, Approve Merged Contributor, Issue Gate,
-  Close pending-release issues, PR Gate, Preview, **Website**) and
-  `command gh workflow disable <name>` any new one. Keep CI, Nix, Release, Build artifacts
-  (manual).
+  against the disabled set (measured 2026-10-17: Close pending-release issues, PR Gate,
+  Preview, Windows ARM64 installer, Trigger Website Deploy; earlier lists also named Approve
+  Contributor, Approve Merged Contributor, Issue Gate and Website) and
+  `command gh workflow disable <name>` any new one. Keep CI, Nix, Release, Beta, Distribution
+  contract, Build artifacts (manual). Also look for one that fails on every master push:
+  Trigger Website Deploy did from 2026-10-09 to 2026-10-17 (it needs upstream's
+  `HERDR_WEBSITE_DEPLOY_HOOK`) before anyone noticed.
 - **CI on the pushed master** is green: `command gh run list --repo colangelo/herdr-max --branch master --limit 3`.
 - **Update manifest**: `just latest-json-check` (through the runner). New fork binaries read
   `distribution/latest.json`; 0.8.x-ac binaries read the `website/latest.json` copy. Until
