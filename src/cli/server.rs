@@ -130,7 +130,12 @@ fn server_restart(args: &[String]) -> std::io::Result<i32> {
         &crate::server::socket_paths::client_socket_path(),
         std::time::Duration::from_secs(30),
     )?;
-    eprintln!("herdr server restarted (pid {pid})");
+    // On macOS launchd starts the server, so there is no child pid to name.
+    if pid == 0 {
+        eprintln!("herdr server restarted");
+    } else {
+        eprintln!("herdr server restarted (pid {pid})");
+    }
     report_server_macos_context(false);
     Ok(0)
 }

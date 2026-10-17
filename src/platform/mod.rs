@@ -6,6 +6,59 @@
 #[cfg(unix)]
 pub(crate) mod ssh_agent;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Native adapters construct only the event classifications their OS can report.
+#[allow(dead_code)]
+pub(crate) enum HostPowerEvent {
+    Suspend,
+    AutomaticResume,
+    InteractiveResume,
+    UnclassifiedResume,
+}
+
+pub(crate) struct HostPowerMonitor {
+    events: tokio::sync::mpsc::UnboundedReceiver<HostPowerEvent>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HostPowerMonitor {
+    pub(crate) fn start(enabled: bool) -> Self {
+        let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+        let task = if enabled {
+            monitor_host_power(sender)
+        } else {
+            None
+        };
+        Self { events, task }
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<HostPowerEvent> {
+        self.events.try_recv().ok()
+    }
+
+    pub(crate) async fn recv(&mut self) -> HostPowerEvent {
+        match self.events.recv().await {
+            Some(event) => event,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+impl Drop for HostPowerMonitor {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn monitor_host_power(
+    _sender: tokio::sync::mpsc::UnboundedSender<HostPowerEvent>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
+}
+
 pub(crate) struct HostShutdownMonitor {
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -268,6 +321,33 @@ pub(crate) fn terminal_erase_byte() -> Option<u8> {
     None
 }
 
+/// Error kind marker for a terminal that momentarily has no usable grid.
+///
+/// A window drag can sample a zero-sized grid before the terminal settles, so
+/// this is distinct from a real terminal failure. Startup still rejects it; the
+/// resize watcher treats it as a transient sample instead of a dead terminal.
+#[derive(Debug)]
+pub(crate) struct ZeroSizedGridError;
+
+impl std::fmt::Display for ZeroSizedGridError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("terminal reported a zero-sized grid")
+    }
+}
+
+impl std::error::Error for ZeroSizedGridError {}
+
+pub(crate) fn zero_sized_terminal_grid_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, ZeroSizedGridError)
+}
+
+/// Whether an error only means the terminal has no usable size yet, so a
+/// resizing terminal should keep its last known geometry instead of detaching.
+pub(crate) fn is_transient_terminal_grid_error(err: &std::io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<ZeroSizedGridError>())
+}
+
 pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     #[cfg(unix)]
     let (cols, rows) = unix_common::read_terminal_grid_size()?;
@@ -277,10 +357,7 @@ pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     let (cols, rows) = fallback::read_terminal_grid_size()?;
 
     if cols == 0 || rows == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "terminal reported a zero-sized grid",
-        ));
+        return Err(zero_sized_terminal_grid_error());
     }
     Ok((cols, rows))
 }
@@ -288,14 +365,47 @@ pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
 #[cfg(unix)]
 pub(crate) mod daemon_reaper;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {
+    spawn_reaped_daemon(command)
+}
+
+/// Spawns the daemon as a detached child of this process.
+#[cfg(not(windows))]
+fn spawn_reaped_daemon(command: &mut std::process::Command) -> std::io::Result<u32> {
     let pid = command.spawn().map(|child| child.id())?;
     // The server is detached but still our child: reap it when it exits, or a
     // client that outlives a live handoff keeps it as a zombie (issue 179).
     #[cfg(unix)]
     daemon_reaper::reap_when_it_exits(pid);
     Ok(pid)
+}
+
+/// Starts the daemon through launchd, so quitting the terminal app that
+/// started it does not take the server down (herdr#4920). Over SSH, or when
+/// launchd cannot carry the command exactly, it spawns a detached child.
+/// Returns the child's pid, or 0 when launchd started it.
+#[cfg(target_os = "macos")]
+pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {
+    match macos::spawn_launchd_job(command) {
+        Ok(_label) => Ok(0),
+        Err(err) => {
+            tracing::info!(%err, "starting the server directly instead of through launchd");
+            spawn_reaped_daemon(command)
+        }
+    }
+}
+
+/// First step of a server process; see `launch_server_daemon_command`.
+/// Returns a warning to log once logging is initialized.
+#[cfg(target_os = "macos")]
+pub(crate) fn leave_launcher_job() -> Option<String> {
+    macos::leave_launchd_job()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn leave_launcher_job() -> Option<String> {
+    None
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -518,7 +628,7 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, local_stream_peer_pid, spawn_server_signal_monitor,
+    local_stream_peer_description, local_stream_peer_pid, spawn_server_signal_monitor, ChildPipe,
     RemoteBridgeWake,
 };
 
@@ -823,11 +933,12 @@ mod tests {
     /// A server the client started stays the client's child (it only setsid()s), and after a live
     /// handoff the old server exits while the client lives on, so an unreaped child is a zombie until
     /// the client exits. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/179
+    /// On macOS this is the fallback when launchd cannot start the server (over SSH, for one).
     #[test]
     fn a_launched_server_daemon_is_reaped_when_it_exits() {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "exit 0"]);
-        let pid = launch_server_daemon_command(&mut command).expect("launch the stand-in daemon");
+        let pid = spawn_reaped_daemon(&mut command).expect("launch the stand-in daemon");
 
         // kill(pid, 0) succeeds for a zombie and fails with ESRCH once it is reaped.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

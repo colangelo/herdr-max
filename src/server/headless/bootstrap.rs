@@ -2,6 +2,7 @@ use super::*;
 
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
+    let launcher_warning = crate::platform::leave_launcher_job();
     crate::platform::ignore_server_hangup();
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
@@ -15,6 +16,9 @@ pub fn run_server() -> io::Result<()> {
     let process_context =
         crate::platform::prepare_server_process(handoff_import, handoff_user_context);
     init_logging();
+    if let Some(warning) = launcher_warning {
+        warn!("{warning}");
+    }
     // Test-owned servers (HERDR_TEST_PARENT_PID) end with the test that spawned them.
     #[cfg(unix)]
     crate::server::test_parent_watchdog::spawn_from_env();

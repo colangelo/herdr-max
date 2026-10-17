@@ -308,6 +308,7 @@ fn run_client_with_mode(
                 loop_config.mouse_capture_active,
                 true,
                 !is_remote_client_process(),
+                &AtomicBool::new(false),
             )
             .map_err(io::Error::other)?;
             if federated
@@ -703,6 +704,9 @@ async fn run_client_loop(
 
     // Main event loop.
     let mut client_timer = timer::ClientLoopTimer::new();
+    let mut power_monitor = crate::platform::HostPowerMonitor::start(
+        state.shell.is_some() && !is_remote_client && state.attach_escape.is_none(),
+    );
     #[cfg(windows)]
     let mut stdin_open = true;
     while !should_quit.load(Ordering::Acquire) {
@@ -768,6 +772,7 @@ async fn run_client_loop(
                                 present_handoff_unavailable(
                                     &mut state,
                                     "Local is unavailable; reconnecting".into(),
+                                    None,
                                 );
                             }
                         }
@@ -795,9 +800,20 @@ async fn run_client_loop(
                 }
             }
         }
+        let now = std::time::Instant::now();
+        while let Some(event) = power_monitor.try_recv() {
+            if supervisors.host_power_event(event, now) {
+                write_stream.resume_health(now);
+            }
+        }
+        if let Some(shell) = state.shell.as_mut() {
+            for endpoint_id in shell.take_machine_retries() {
+                supervisors.retry_now(&endpoint_id, now);
+            }
+        }
         if let Some(shell) = state.shell.as_ref() {
             supervisors.spawn_due(
-                std::time::Instant::now(),
+                now,
                 endpoint::EndpointConnectOptions {
                     cols: state.reported_size.0,
                     rows: state.reported_size.1,
@@ -825,6 +841,7 @@ async fn run_client_loop(
             event
         } else {
             tokio::select! {
+                ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = stdin_rx.recv(), if stdin_open => match ev {
                     Some(event) => event,
@@ -843,6 +860,7 @@ async fn run_client_loop(
         } else {
             tokio::select! {
                 biased;
+                ev = power_monitor.recv() => ClientLoopEvent::HostPower(ev),
                 _ = tokio::time::sleep_until(timer_deadline.into()) => ClientLoopEvent::Timer,
                 ev = supervisor_rx.recv() => ev.map(ClientLoopEvent::EndpointSupervisor).unwrap_or(ClientLoopEvent::Timer),
                 ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
@@ -854,6 +872,11 @@ async fn run_client_loop(
         }
 
         match event {
+            ClientLoopEvent::HostPower(event) => {
+                if supervisors.host_power_event(event, now) {
+                    write_stream.resume_health(now);
+                }
+            }
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
@@ -906,6 +929,17 @@ async fn run_client_loop(
                         }
                     }
                     let events = crate::raw_input::parse_framed_input(&data);
+                    if events.iter().any(|event| {
+                        matches!(
+                            event,
+                            crate::raw_input::RawInputEvent::Key(_)
+                                | crate::raw_input::RawInputEvent::Text(_)
+                                | crate::raw_input::RawInputEvent::Paste(_)
+                                | crate::raw_input::RawInputEvent::Mouse(_)
+                        )
+                    }) {
+                        supervisors.user_activity(now);
+                    }
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
                         refresh_host_mouse_capture(
                             state.mouse_capture_active,
@@ -1109,6 +1143,7 @@ async fn run_client_loop(
             #[cfg(unix)]
             ClientLoopEvent::PixelMouse(data, geometry) => {
                 if state.shell.is_some() {
+                    supervisors.user_activity(now);
                     let (outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let outcome = shell.handle_pixel_mouse(&data, geometry);
@@ -1369,20 +1404,7 @@ async fn run_client_loop(
                     if status == endpoint::ClientEndpointStatus::Attention {
                         warn!(endpoint = %endpoint_id.storage_key(), generation, error = %message, "endpoint needs attention");
                     }
-                    let unavailable = state.shell.as_mut().and_then(|shell| {
-                        shell.set_endpoint_status(&endpoint_id, status);
-                        shell.set_machine_diagnostic(&endpoint_id, message.clone());
-                        (status == endpoint::ClientEndpointStatus::Attention
-                            && shell.endpoint_is_active(&endpoint_id))
-                        .then(|| format!("{}: {message}", shell.endpoint_label(&endpoint_id)))
-                    });
-                    if let Some(message) = unavailable {
-                        present_handoff_unavailable(&mut state, message);
-                    } else if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                        shell.compose(state.reported_size.0, state.reported_size.1)
-                    }) {
-                        state.present_frame(frame);
-                    }
+                    present_endpoint_connection_failure(&mut state, &endpoint_id, status, message);
                 }
                 endpoint::EndpointSupervisorEvent::Connected {
                     endpoint_id,
@@ -1478,6 +1500,7 @@ async fn run_client_loop(
                     continue;
                 }
                 write_stream.received(&endpoint_id, generation, now);
+                supervisors.received(&endpoint_id, generation);
                 // Retirements belong to the exact live connection, even after deactivation.
                 // They must not be dropped with frozen/inactive presentation effects.
                 if matches!(
@@ -2238,6 +2261,7 @@ async fn run_client_loop(
                             }
                         }
                         write_stream.mark_ready(&endpoint_id, generation);
+                        supervisors.mark_ready(&endpoint_id, generation, now);
                         if endpoint_id.is_local() {
                             if let Some(event) =
                                 take_ready_local_activation(&mut state, &write_stream)

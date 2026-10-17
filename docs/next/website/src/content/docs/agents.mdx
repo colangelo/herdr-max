@@ -77,7 +77,11 @@ Blocked detection is deliberately strict for screen-manifest agents. Herdr only 
 
 A blocked pane also carries a reason, which the socket API reports as `blocked_reason` next to `blocked_since` (see [Socket API](/docs/socket-api/)). A manifest rule names it with an optional `blocked_reason` key: `question`, `permission`, `form`, or `other`. The key is valid only on a `state = "blocked"` rule and needs manifest engine 4 or newer; a blocked rule without it, and a blocked state reported by a hook, reads as `other`. The bundled Claude manifest reports an AskUserQuestion dialog as `question`, tool and command approvals as `permission`, and other selection or MCP input forms as `form`.
 
-This means unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. The misclassification affects only the visible status and waits. It should not make Herdr send input or take destructive action.
+Unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. Detection itself does not send input, but automation that trusts a mistaken idle state can type into an approval dialog. Inspect unexpected prompts before sending more input; idle status is not authorization to approve an action.
+
+Antigravity and Grok count as idle once they return to their prompt, even if background tasks, monitors, or subagents are still running. `agent wait` and `agent prompt --wait` observe the agent's state, not completion of those jobs.
+
+Suspending an agent with Ctrl+Z preserves its name, session reference, and hook authority while the exact process remains alive behind the shell or another non-agent command. Returning with `fg` keeps that identity. This does not cover another recognized agent taking over the foreground. A retained identity does not mean the agent can receive input while suspended; inspect the pane before prompting it.
 
 ## Detection manifests
 
