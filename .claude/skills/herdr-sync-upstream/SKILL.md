@@ -257,14 +257,15 @@ Then push the branch and let CI judge on the full matrix (Linux, macOS, Windows)
 git push internal sync/<date>
 git push origin sync/<date>        # CI runs on GitHub
 command gh pr create --repo colangelo/herdr-max --draft --base master --head sync/<date> \
-  --title "weekly upstream sync <date>" --body "refs https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/<n>"
+  --title "chore: weekly upstream sync <date>" --body "refs https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/<n>"
 command gh pr checks --repo colangelo/herdr-max --watch
 ```
 
 If `gh` or the push to `origin` says the token is invalid, ask mac-m4 to log in again
 (`gh auth login` on m4m); the Gitea steps keep working meanwhile. Do not look for another
 path or another token. The draft PR is for CI only; nobody reviews
-or merges it on GitHub.
+or merges it on GitHub. CI checks the PR title as a conventional commit, and a re-run keeps the
+old title, so give it the `chore:` type when you open it.
 
 Windows lint is skipped on macOS by design; the Windows CI job is where upstream's
 Windows-only files (`windows_recent_fallback.rs` and similar) get compiled.
