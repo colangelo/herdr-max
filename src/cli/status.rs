@@ -75,6 +75,7 @@ enum ServerRuntimeStatus {
         version: Option<String>,
         protocol: Option<u32>,
         capabilities: Option<crate::api::schema::ServerCapabilities>,
+        macos_services: Option<crate::api::schema::MacosServicesInfo>,
     },
     NotRunning,
 }
@@ -152,6 +153,7 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
             version,
             protocol,
             capabilities,
+            macos_services,
         } => {
             println!("{indent}status: running");
             println!("{indent}version: {}", option_label(version.as_deref()));
@@ -165,6 +167,9 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
                 compatibility_label(*protocol)
             );
             println!("{indent}socket: {}", super::target::socket_label());
+            if let Some(services) = macos_services {
+                println!("{indent}macos_services: {}", macos_services_label(services));
+            }
         }
         ServerRuntimeStatus::NotRunning => {
             println!("{indent}status: not running");
@@ -179,6 +184,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
             version: status.version,
             protocol: status.protocol,
             capabilities: status.capabilities,
+            macos_services: status.macos_services,
         }),
         Err(err) if super::target::is_remote() => Err(super::target::remote_error(
             super::api_client_error_to_io(err),
@@ -188,6 +194,20 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
         }
         Err(err) => Err(super::api_client_error_to_io(err)),
     }
+}
+
+/// `user context, reachable` reads as healthy; a `session` context dies with
+/// its login, and `unreachable` means it already has (fork issue 228).
+pub(super) fn macos_services_label(services: &crate::api::schema::MacosServicesInfo) -> String {
+    format!(
+        "{} context, {}",
+        services.context,
+        if services.reachable {
+            "reachable"
+        } else {
+            "unreachable: run `herdr server restart` from Terminal.app"
+        }
+    )
 }
 
 fn option_label(value: Option<&str>) -> &str {
@@ -271,6 +291,8 @@ struct ServerStatusJson {
     session: Option<String>,
     restart_needed: Option<bool>,
     server_binary_stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macos_services: Option<crate::api::schema::MacosServicesInfo>,
 }
 
 #[derive(Serialize)]
@@ -313,6 +335,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             version,
             protocol,
             capabilities,
+            macos_services,
         } => ServerStatusJson {
             status: "running",
             running: true,
@@ -338,6 +361,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             session: crate::session::active_name(),
             restart_needed: restart_needed_bool(server),
             server_binary_stale: server_binary_stale_bool(server),
+            macos_services: macos_services.clone(),
         },
         ServerRuntimeStatus::NotRunning => ServerStatusJson {
             status: "not_running",
@@ -351,6 +375,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             session: crate::session::active_name(),
             restart_needed: Some(false),
             server_binary_stale: Some(false),
+            macos_services: None,
         },
     };
     if let Some((_, session)) = super::target::remote_identity() {
@@ -426,6 +451,7 @@ mod tests {
                 health_check: true,
                 ssh_agent_registration: false,
             }),
+            macos_services: None,
         }
     }
 

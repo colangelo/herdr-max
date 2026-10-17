@@ -11,6 +11,8 @@ pub struct RuntimeStatus {
     pub capabilities: Option<crate::api::schema::ServerCapabilities>,
     /// The binary the server runs, when it reports it.
     pub exe: Option<String>,
+    /// What the server reaches of macOS services, when it reports it.
+    pub macos_services: Option<crate::api::schema::MacosServicesInfo>,
 }
 
 pub fn read_runtime_status_at(
@@ -51,12 +53,14 @@ pub fn read_runtime_status_at(
             protocol,
             capabilities,
             exe,
+            macos_services,
             ..
         } => Ok(Some(RuntimeStatus {
             version: Some(version),
             protocol: Some(protocol),
             capabilities,
             exe,
+            macos_services,
         })),
         result => Err(io::Error::other(format!(
             "server status request returned unexpected result: {result:?}"

@@ -164,6 +164,11 @@ fn server_command() -> Command {
         .about("Run or control the headless server")
         .subcommand(super::server::live_handoff_command())
         .subcommand(Command::new("stop").about("Stop the running server"))
+        .subcommand(
+            Command::new("restart")
+                .about("Stop the server and start a fresh one from this terminal; windows reattach")
+                .arg(flag("yes").short('y').help("Restart without asking")),
+        )
         .subcommand(Command::new("reload-config").about("Reload config in the running server"))
         .subcommand(
             Command::new("agent-manifests")

@@ -3063,6 +3063,7 @@ mod tests {
                 ssh_agent_registration: false,
             }),
             exe: None,
+            macos_services: None,
         };
         let missing_baseline = crate::api::RuntimeStatus {
             capabilities: None,
@@ -3139,6 +3140,7 @@ mod tests {
                     ssh_agent_registration: false,
                 }),
                 exe: None,
+                macos_services: None,
             },
         };
 
@@ -3324,6 +3326,7 @@ mod tests {
             protocol: Some(2),
             capabilities: None,
             exe: None,
+            macos_services: None,
         };
         let release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
@@ -3400,6 +3403,7 @@ mod tests {
                     ssh_agent_registration: false,
                 }),
                 exe: None,
+                macos_services: None,
             },
         };
         let decisions = confirm_running_server_update_action(

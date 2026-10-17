@@ -30,6 +30,10 @@ pub struct ClientShellResourceFacts {
     pub workspace_sort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_label: Option<String>,
+    /// Present (true) while the server cannot reach macOS services through its
+    /// Mach bootstrap, as after a logout took its login session (fork issue 228).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_services_lost: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +109,8 @@ impl ClientShellResourceFacts {
             notifications: get("notifications").and_then(|v| serde_json::from_value(v).ok()),
             workspace_sort: get("workspace_sort").and_then(|v| serde_json::from_value(v).ok()),
             host_label: get("host_label").and_then(|v| serde_json::from_value(v).ok()),
+            macos_services_lost: get("macos_services_lost")
+                .and_then(|v| serde_json::from_value(v).ok()),
         })
     }
 }

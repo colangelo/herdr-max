@@ -395,6 +395,7 @@ fn resource_facts(
                 .get_or_init(crate::platform::short_hostname)
                 .clone()
         },
+        macos_services_lost: app.macos_services_lost().then_some(true),
     }
 }
 
@@ -751,6 +752,29 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a_server_that_lost_macos_services_tells_its_clients() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.macos_services = Some(crate::platform::MacosServices {
+            context: crate::platform::MacosServiceContext::Unknown,
+            reachable: false,
+        });
+
+        let (shell, _) = snapshot_with_completions(&app, "boot", 1, None, None);
+        let facts = shell.resource_facts.expect("optional facts");
+        assert_eq!(facts.macos_services_lost, Some(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn snapshot_metadata_skips_scroll_reads_and_preserves_public_session_data() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(
@@ -820,6 +844,10 @@ mod tests {
             .resource_facts
             .as_ref()
             .expect("supported optional facts");
+        assert_eq!(
+            facts.macos_services_lost, None,
+            "a healthy server says nothing"
+        );
         assert!(facts.workspace_pins.as_ref().unwrap().is_empty());
         assert!(facts.pane_pins.as_ref().unwrap().is_empty());
         for pane in &shell.panes {

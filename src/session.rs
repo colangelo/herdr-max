@@ -260,6 +260,44 @@ pub(crate) fn stop_active_server() -> Result<(), String> {
     )
 }
 
+/// How `herdr server restart` stopped the server
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartStop {
+    /// Attached windows wait for the server the caller starts next, and reattach.
+    Followed,
+    /// An older server without `server.stop_for_restart`: its windows exit.
+    Plain,
+}
+
+pub(crate) fn stop_active_server_for_restart() -> Result<RestartStop, String> {
+    let socket_path = active_api_socket_path();
+    let client_socket_path = crate::server::socket_paths::client_socket_path();
+    restart_stop_outcome(
+        stop_socket_with_method(
+            socket_path.clone(),
+            vec![socket_path, client_socket_path],
+            STOP_WAIT_TIMEOUT,
+            "server",
+            "server.stop_for_restart",
+            true,
+        ),
+        stop_active_server,
+    )
+}
+
+/// An older server answers `unknown_method`: stop it the plain way instead.
+fn restart_stop_outcome(
+    followed: Result<(), String>,
+    plain_stop: impl FnOnce() -> Result<(), String>,
+) -> Result<RestartStop, String> {
+    match followed {
+        Ok(()) => Ok(RestartStop::Followed),
+        Err(err) if err.contains("\"unknown_method\"") => plain_stop().map(|()| RestartStop::Plain),
+        Err(err) => Err(err),
+    }
+}
+
 fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
     let socket_path = api_socket_path_for(name);
     let client_socket_path = client_socket_path_for(name);
@@ -279,10 +317,28 @@ fn stop_socket_with_timeout(
     timeout: Duration,
     label: &str,
 ) -> Result<(), String> {
+    stop_socket_with_method(
+        socket_path,
+        stopped_socket_paths,
+        timeout,
+        label,
+        "server.stop",
+        false,
+    )
+}
+
+fn stop_socket_with_method(
+    socket_path: PathBuf,
+    stopped_socket_paths: Vec<PathBuf>,
+    timeout: Duration,
+    label: &str,
+    method: &str,
+    wait_for_exit: bool,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let request = serde_json::json!({
         "id": "cli:session:stop",
-        "method": "server.stop",
+        "method": method,
         "params": {}
     });
     let stream = crate::ipc::connect_local_stream(&socket_path).map_err(|err| {
@@ -291,6 +347,8 @@ fn stop_socket_with_timeout(
             socket_path.display()
         )
     })?;
+    let server_pid =
+        crate::platform::local_stream_peer_pid(&stream).filter(|pid| *pid != std::process::id());
     let stop_response = send_stop_request(stream, &request, deadline)?;
     if let Some(response) = stop_response {
         if let Some(error) = response.get("error") {
@@ -308,6 +366,19 @@ fn stop_socket_with_timeout(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    // The server saves its session after closing its sockets. A server started
+    // before that save ends would restore the previous one (fork issue 227).
+    if let Some(pid) = server_pid.filter(|_| wait_for_exit) {
+        while crate::platform::process_exists(pid) {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "{label} (pid {pid}) did not exit within {}ms; its final session save may not be done",
+                    timeout.as_millis()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     Ok(())
 }
@@ -601,6 +672,27 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    #[test]
+    fn restart_falls_back_to_a_plain_stop_only_for_an_older_server() {
+        assert_eq!(
+            restart_stop_outcome(Ok(()), || panic!("no fallback")),
+            Ok(RestartStop::Followed)
+        );
+        let unknown = serde_json::json!({
+            "code": "unknown_method",
+            "message": "unknown method: server.stop_for_restart"
+        })
+        .to_string();
+        assert_eq!(
+            restart_stop_outcome(Err(unknown), || Ok(())),
+            Ok(RestartStop::Plain)
+        );
+        assert_eq!(
+            restart_stop_outcome(Err("server did not stop".into()), || panic!("no fallback")),
+            Err("server did not stop".into())
+        );
     }
 
     #[test]

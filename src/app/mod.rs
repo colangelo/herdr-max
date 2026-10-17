@@ -140,6 +140,10 @@ pub struct App {
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
+    /// When the server next checks it still reaches macOS services (fork issue 228).
+    pub(crate) next_macos_services_check: Option<Instant>,
+    /// The latest such check; `None` off macOS or before the first one.
+    pub(crate) macos_services: Option<crate::platform::MacosServices>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
     pub(crate) loaded_host_cursor: crate::config::HostCursorModeConfig,
@@ -685,6 +689,10 @@ impl App {
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            // Only a real server (one that saves its session) watches its macOS
+            // bootstrap; test apps never run the check.
+            next_macos_services_check: policy.persist_session.then(Instant::now),
+            macos_services: None,
             update_version_check_enabled: config.update.version_check,
             update_manifest_check_enabled: config.update.manifest_check,
             loaded_host_cursor: config.ui.host_cursor,

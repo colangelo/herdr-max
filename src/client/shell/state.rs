@@ -1575,9 +1575,10 @@ impl ClientShellState {
             }
             ClientShellKeybindingSource::RemoteLocal => false,
         };
+        let endpoint_diagnostic = super::config::endpoint_diagnostic(&snapshot);
         self.config_diagnostic = super::config::merged_config_diagnostic(
             self.local_config_diagnostic.as_deref(),
-            snapshot.config_diagnostic.as_deref(),
+            endpoint_diagnostic.as_deref(),
         );
         let boot_changed = endpoint_boot_changed
             || self

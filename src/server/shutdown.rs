@@ -9,7 +9,13 @@ use crate::platform::ServerQuitSignal;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShutdownReason {
     Signal(ServerQuitSignal),
-    ApiStop { caller: Option<String> },
+    ApiStop {
+        caller: Option<String>,
+    },
+    /// A `server.stop_for_restart`: clients follow to the next server.
+    ApiRestart {
+        caller: Option<String>,
+    },
     HostShutdown,
     Unknown,
 }
@@ -22,6 +28,10 @@ impl std::fmt::Display for ShutdownReason {
                 caller: Some(caller),
             } => write!(f, "server.stop request from {caller}"),
             Self::ApiStop { caller: None } => f.write_str("server.stop request"),
+            Self::ApiRestart {
+                caller: Some(caller),
+            } => write!(f, "server.stop_for_restart request from {caller}"),
+            Self::ApiRestart { caller: None } => f.write_str("server.stop_for_restart request"),
             Self::HostShutdown => f.write_str("host shutdown"),
             Self::Unknown => f.write_str("unknown"),
         }

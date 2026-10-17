@@ -38,6 +38,26 @@ pub struct ServerSshAgentRegisterParams {
     pub socket_path: String,
 }
 
+/// What the server reaches of macOS services through its Mach bootstrap.
+// Fork: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/228
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MacosServicesInfo {
+    /// `user` (the per-user bootstrap, which survives a logout), `session` (a
+    /// login session's, which dies with it), or `unknown`.
+    pub context: String,
+    /// Whether macOS user, host and process lookups answer.
+    pub reachable: bool,
+}
+
+impl From<crate::platform::MacosServices> for MacosServicesInfo {
+    fn from(services: crate::platform::MacosServices) -> Self {
+        Self {
+            context: services.context.as_str().to_owned(),
+            reachable: services.reachable,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerCapabilities {
     pub live_handoff: bool,

@@ -14,6 +14,7 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
 
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
+        "restart" => server_restart(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
         "status" => {
@@ -62,6 +63,110 @@ fn server_stop(args: &[String]) -> std::io::Result<i32> {
             eprintln!("{err}");
             Ok(1)
         }
+    }
+}
+
+/// Stops the server so its windows wait, starts a fresh one from this terminal,
+/// and the windows reattach. A fresh daemon adopts the per-user macOS context,
+/// so this also recovers a server whose login session a logout took
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
+fn server_restart(args: &[String]) -> std::io::Result<i32> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+
+    let mut assume_yes = false;
+    for arg in args {
+        match arg.as_str() {
+            "--yes" | "-y" => assume_yes = true,
+            _ => {
+                eprintln!("usage: herdr server restart [--yes]");
+                return Ok(2);
+            }
+        }
+    }
+    if super::target::is_remote() {
+        eprintln!(
+            "herdr server restart starts the new server from this terminal, so it only runs on the server's own machine"
+        );
+        return Ok(2);
+    }
+    if crate::platform::macos_services().is_some_and(|services| !services.reachable) {
+        eprintln!(
+            "this terminal has lost its macOS session too, so a server started from it would be just as broken; run herdr server restart from a terminal that works, such as Terminal.app"
+        );
+        return Ok(1);
+    }
+
+    if crate::server::autodetect::is_server_listening()? {
+        if !assume_yes {
+            if !std::io::stdin().is_terminal() {
+                eprintln!("herdr server restart ends every pane's process; pass --yes to confirm");
+                return Ok(2);
+            }
+            eprint!(
+                "Restart the herdr server? Every pane's running process ends. Workspaces, tabs, panes and todos come back, agents resume their sessions, and open windows reattach. [y/N] "
+            );
+            std::io::stderr().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().lock().read_line(&mut answer)?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") {
+                eprintln!("not restarted");
+                return Ok(1);
+            }
+        }
+        match crate::session::stop_active_server_for_restart() {
+            Ok(crate::session::RestartStop::Followed) => {}
+            Ok(crate::session::RestartStop::Plain) => eprintln!(
+                "the server was an older build: its windows closed; run herdr in them again"
+            ),
+            Err(err) => {
+                eprintln!("{err}");
+                return Ok(1);
+            }
+        }
+    }
+
+    let pid = crate::server::autodetect::spawn_server_daemon()?;
+    crate::server::autodetect::wait_for_server_socket(
+        &crate::server::socket_paths::client_socket_path(),
+        std::time::Duration::from_secs(30),
+    )?;
+    eprintln!("herdr server restarted (pid {pid})");
+    report_server_macos_context(false);
+    Ok(0)
+}
+
+/// Prints which macOS context the server now runs in, after a restart or a
+/// `--user-context` handoff. The new server binds its sockets just after the
+/// old one closes them, so this waits for it briefly.
+fn report_server_macos_context(expect_user: bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        let status = super::target::api_client()
+            .ok()
+            .and_then(|client| super::target::server_status(&client).ok());
+        match status {
+            Some(status) => break status,
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            None => {
+                eprintln!("warning: the new server did not answer within 10 s");
+                return;
+            }
+        }
+    };
+    // Off macOS, and on an older server, there is nothing to report.
+    let Some(services) = status.macos_services else {
+        return;
+    };
+    eprintln!(
+        "server macos_services: {}",
+        super::status::macos_services_label(&services)
+    );
+    if expect_user && services.context != crate::platform::MacosServiceContext::User.as_str() {
+        eprintln!(
+            "warning: the new server did not move to the per-user context; see the server log"
+        );
     }
 }
 
@@ -225,8 +330,20 @@ pub(super) fn live_handoff_command() -> clap::Command {
         .hide(true)
 }
 
+/// Fork: asks the new server to adopt the per-user macOS context, which
+/// survives a logout. A CLI flag, not an API parameter: the importer reads it,
+/// so it works whatever build the old server is
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/226).
+const USER_CONTEXT_FLAG: &str = "--user-context";
+
 fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_live_handoff_params(args) {
+    let user_context = args.iter().any(|arg| arg == USER_CONTEXT_FLAG);
+    let args = args
+        .iter()
+        .filter(|arg| *arg != USER_CONTEXT_FLAG)
+        .cloned()
+        .collect::<Vec<_>>();
+    let params = match parse_live_handoff_params(&args) {
         Ok(params) => params,
         Err(ParseError::Clap(error)) => return super::print_clap_error(&error),
         Err(ParseError::Usage(message)) => {
@@ -236,12 +353,28 @@ fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
         Err(ParseError::Io(error)) => return Err(error),
     };
 
+    if user_context && super::target::is_remote() {
+        eprintln!("{USER_CONTEXT_FLAG} only applies to a server on this machine");
+        return Ok(2);
+    }
+    #[cfg(unix)]
+    let user_context_request = user_context
+        .then(|| crate::server::handoff::request_user_context(&crate::session::data_dir()))
+        .transpose()?;
+
     // Live handoff is itself a protocol-mismatch recovery path, so it must
     // reach the running server without the normal CLI compatibility guard.
     let response = super::send_request_unchecked(&Request {
         id: "cli:server:live-handoff".into(),
         method: Method::ServerLiveHandoff(params),
-    })?;
+    });
+    // The importer consumed the request at its start; a handoff that never
+    // started must not leave it for a later one.
+    #[cfg(unix)]
+    if let Some(path) = user_context_request {
+        let _ = std::fs::remove_file(path);
+    }
+    let response = response?;
     if response.get("error").is_some() {
         let rendered = serde_json::to_string(&response).unwrap_or_else(|err| {
             format!(
@@ -258,6 +391,9 @@ fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
             .join("herdr-server.log")
             .display()
     );
+    if user_context {
+        report_server_macos_context(true);
+    }
     Ok(0)
 }
 
@@ -275,7 +411,10 @@ fn print_server_help() {
     #[cfg(windows)]
     eprintln!("  herdr server --allow-unelevated-clients  allow ordinary same-account clients to control an elevated server");
     eprintln!("  herdr server stop           stop the running server via the API socket");
-    eprintln!("  herdr server live-handoff   hand off live panes to a new local server");
+    eprintln!("  herdr server restart [--yes]  stop the server and start a fresh one from this terminal; windows reattach, agents resume");
+    eprintln!(
+        "  herdr server live-handoff [--user-context]  hand off live panes to a new local server"
+    );
     eprintln!("  herdr server reload-config  reload config.toml in the running server");
     eprintln!("  herdr server agent-manifests [--json]  show agent detection manifest status");
     eprintln!("  herdr server update-agent-manifests [--json]  fetch and reload agent detection manifests");

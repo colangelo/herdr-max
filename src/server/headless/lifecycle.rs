@@ -327,10 +327,16 @@ impl HeadlessServer {
         };
         info!(%reason, "server shutdown initiated");
         self.shutting_down = true;
+        // A restart's clients wait for the next server and attach to it, the way
+        // they follow a live handoff; every app client since fork issue 94 does
+        // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
+        if matches!(reason, ShutdownReason::ApiRestart { .. }) {
+            self.client_shutdown_reason = crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON;
+        }
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
         let shutdown_msg = ServerMessage::ServerShutdown {
-            reason: Some("server is shutting down".to_owned()),
+            reason: Some(self.client_shutdown_reason.to_owned()),
         };
         self.send_to_all_clients(shutdown_msg);
 
@@ -353,7 +359,7 @@ impl HeadlessServer {
         // Send ServerShutdown to all remaining clients.
         if !self.clients.is_empty() {
             let shutdown_msg = ServerMessage::ServerShutdown {
-                reason: Some("server is shutting down".to_owned()),
+                reason: Some(self.client_shutdown_reason.to_owned()),
             };
             self.send_to_all_clients(shutdown_msg);
 

@@ -264,6 +264,9 @@ pub struct HeadlessServer {
     effective_size: (u16, u16),
     /// Flag set when shutdown is initiated.
     shutting_down: bool,
+    /// The reason clients see when the server stops: a restart sends the live
+    /// handoff reason so they follow to the next server (fork issue 227).
+    client_shutdown_reason: &'static str,
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
     /// In-progress post-handoff detection sweep over imported panes.
@@ -409,6 +412,7 @@ impl HeadlessServer {
             handoff_client_size: None,
             effective_size: no_client_size,
             shutting_down: false,
+            client_shutdown_reason: "server is shutting down",
             host_shutdown_requested: Arc::new(AtomicBool::new(false)),
             host_shutdown_intent: Default::default(),
             #[cfg(test)]
@@ -2940,7 +2944,9 @@ impl HeadlessServer {
         let skip_default_workspace = skip_default_workspace_for_request
             || matches!(
                 &msg.request.method,
-                api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
+                api::schema::Method::ServerStop(_)
+                    | api::schema::Method::ServerStopForRestart(_)
+                    | api::schema::Method::ServerLiveHandoff(_)
             );
         changed |= self.drain_all_internal_events_with_forwarding();
         if self.host_shutdown_requested() {
@@ -3321,6 +3327,14 @@ impl HeadlessServer {
             .is_some_and(|deadline| now >= deadline)
         {
             self.app.run_agent_manifest_update_check();
+        }
+
+        if self
+            .app
+            .next_macos_services_check
+            .is_some_and(|deadline| now >= deadline)
+        {
+            changed |= self.app.run_macos_services_check(now);
         }
 
         if self

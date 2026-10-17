@@ -487,9 +487,12 @@ fn handle_connection_with_stop(
         }
         method_body => {
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
-            let stop_caller = matches!(method_body, Method::ServerStop(_))
-                .then(|| crate::platform::local_stream_peer_description(&stream))
-                .flatten();
+            let stop_caller = matches!(
+                method_body,
+                Method::ServerStop(_) | Method::ServerStopForRestart(_)
+            )
+            .then(|| crate::platform::local_stream_peer_description(&stream))
+            .flatten();
             let response = handle_request(
                 Request {
                     id: request_id.clone(),
@@ -567,6 +570,7 @@ fn handle_request(
                 exe: std::env::current_exe()
                     .ok()
                     .map(|path| path.display().to_string()),
+                macos_services: crate::platform::macos_services().map(Into::into),
             },
         })
         .unwrap_or_else(|_| {
@@ -583,11 +587,22 @@ fn handle_request(
         );
     }
 
-    if matches!(&request.method, Method::ServerStop(_)) {
+    if matches!(
+        &request.method,
+        Method::ServerStop(_) | Method::ServerStopForRestart(_)
+    ) {
         if let Some(server_stop) = server_stop {
-            server_stop.request(ShutdownReason::ApiStop {
-                caller: stop_caller,
-            });
+            server_stop.request(
+                if matches!(&request.method, Method::ServerStopForRestart(_)) {
+                    ShutdownReason::ApiRestart {
+                        caller: stop_caller,
+                    }
+                } else {
+                    ShutdownReason::ApiStop {
+                        caller: stop_caller,
+                    }
+                },
+            );
             return serde_json::to_string(&SuccessResponse {
                 id: request.id,
                 result: ResponseResult::Ok {},
@@ -1415,6 +1430,56 @@ mod tests {
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed.id, "req_1");
         assert!(matches!(parsed.result, ResponseResult::Pong { .. }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ping_reports_the_servers_macos_services() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let response = handle_request(
+            Request {
+                id: "req_1".into(),
+                method: Method::Ping(crate::api::schema::PingParams::default()),
+            },
+            &tx,
+            None,
+            None,
+            None,
+            None,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::Pong { macos_services, .. } = parsed.result else {
+            panic!("expected pong");
+        };
+        let services = macos_services.expect("macOS servers report their services");
+        assert!(services.reachable, "a test process reaches libinfo");
+        assert!(["user", "session"].contains(&services.context.as_str()));
+    }
+
+    #[test]
+    fn stop_for_restart_is_a_stop_whose_clients_follow() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = ServerStop::default();
+        let response = handle_request(
+            Request {
+                id: "restart".into(),
+                method: Method::ServerStopForRestart(crate::api::schema::EmptyParams::default()),
+            },
+            &tx,
+            None,
+            Some(&stop),
+            Some("pid 42 (herdr)".into()),
+            None,
+        );
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(
+            stop.take_reason(),
+            Some(ShutdownReason::ApiRestart {
+                caller: Some("pid 42 (herdr)".into())
+            })
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

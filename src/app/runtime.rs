@@ -1,11 +1,11 @@
-use std::time::Instant;
-
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{
     background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
 };
+
+/// How often a server checks it still reaches macOS services (fork issue 228).
+const MACOS_SERVICES_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 fn retain_detached_process_after_wait(
     pid: u32,
     result: std::io::Result<Option<std::process::ExitStatus>>,
@@ -121,6 +121,40 @@ impl App {
         }
     }
 
+    /// Checks that the server still reaches macOS services through its Mach
+    /// bootstrap. A logout can take the bootstrap of a server that runs in the
+    /// login session's context with it, and every pane it starts after that
+    /// fails DNS, keychain and launchctl calls
+    /// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/228).
+    /// Returns whether the result changed.
+    pub(crate) fn run_macos_services_check(&mut self, now: Instant) -> bool {
+        let services = crate::platform::macos_services();
+        // One bootstrap lookup a minute; nothing to watch off macOS.
+        self.next_macos_services_check = services.map(|_| now + MACOS_SERVICES_CHECK_INTERVAL);
+        if services == self.macos_services {
+            return false;
+        }
+        match services {
+            Some(services) if !services.reachable => tracing::warn!(
+                context = services.context.as_str(),
+                "server can no longer reach macOS services; run `herdr server restart` from a working terminal"
+            ),
+            Some(services) => tracing::info!(
+                context = services.context.as_str(),
+                "server reaches macOS services"
+            ),
+            None => {}
+        }
+        self.macos_services = services;
+        true
+    }
+
+    /// Whether the server has lost its macOS services, for clients to warn about.
+    pub(crate) fn macos_services_lost(&self) -> bool {
+        self.macos_services
+            .is_some_and(|services| !services.reachable)
+    }
+
     pub(crate) fn run_agent_manifest_update_check(&mut self) {
         if !background_update_check_enabled(
             self.policy.background_updates,
@@ -167,6 +201,7 @@ impl App {
             self.restored_worktree_validation_retry_at,
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
+            self.next_macos_services_check,
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,
             self.session_save_deadline,

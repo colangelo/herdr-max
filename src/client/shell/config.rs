@@ -15,15 +15,33 @@ pub(super) fn merged_config_diagnostic(
     }
 }
 
+/// Shown while the endpoint's server cannot reach macOS services, as after a
+/// logout took its login session (fork issue 228).
+pub(super) const MACOS_SERVICES_LOST_NOTICE: &str = "server lost its macOS session: DNS, keychain and launchctl fail in its panes; run `herdr server restart` from Terminal.app";
+
+/// The endpoint's warning line: a server that lost its macOS session, then its
+/// config diagnostic.
+pub(super) fn endpoint_diagnostic(
+    snapshot: &crate::protocol::ClientShellSnapshot,
+) -> Option<String> {
+    let lost = snapshot
+        .resource_facts
+        .as_ref()
+        .and_then(|facts| facts.macos_services_lost)
+        .unwrap_or(false);
+    match (lost, snapshot.config_diagnostic.as_deref()) {
+        (true, Some(config)) => Some(format!("{MACOS_SERVICES_LOST_NOTICE}\n{config}")),
+        (true, None) => Some(MACOS_SERVICES_LOST_NOTICE.to_owned()),
+        (false, config) => config.map(str::to_owned),
+    }
+}
+
 impl ClientShellState {
     pub(super) fn set_local_config_diagnostic(&mut self, diagnostic: Option<String>) {
         self.local_config_diagnostic = diagnostic;
-        self.config_diagnostic = merged_config_diagnostic(
-            self.local_config_diagnostic.as_deref(),
-            self.snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.config_diagnostic.as_deref()),
-        );
+        let endpoint = self.snapshot.as_deref().and_then(endpoint_diagnostic);
+        self.config_diagnostic =
+            merged_config_diagnostic(self.local_config_diagnostic.as_deref(), endpoint.as_deref());
     }
 
     pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
