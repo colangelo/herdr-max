@@ -307,6 +307,8 @@ pub(crate) fn prepare_server_process(
 }
 
 /// Which macOS bootstrap a process runs under (fork issue 228).
+// Only macOS reads a bootstrap, so elsewhere `Session` and `Unknown` are never built.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MacosServiceContext {
     /// The per-user bootstrap: outlives any login session, so it survives a logout.
