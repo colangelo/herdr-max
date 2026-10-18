@@ -18,6 +18,12 @@ pub(super) struct ClientApplicationScroll {
     keys: HashSet<crate::input::InputLeaseKey<u8>>,
     queued: VecDeque<(Intent, u16)>,
     in_flight: Option<String>,
+    /// The last scroll sent was a jump to the bottom. herdr cannot see the
+    /// app's own scroll position, so this is its only sign the app is there.
+    at_bottom: bool,
+    /// A ctrl+n at the bottom asked to leave while that jump was still on its
+    /// way; leave once it lands.
+    leave_when_sent: bool,
 }
 
 impl ClientShellState {
@@ -259,6 +265,8 @@ impl ClientShellState {
                 pane_id,
                 queued: VecDeque::new(),
                 in_flight: None,
+                at_bottom: false,
+                leave_when_sent: false,
             });
             self.copy_mode = None;
             self.selection = None;
@@ -321,6 +329,21 @@ impl ClientShellState {
             return;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Fork: a ctrl+n after a jump to the bottom leaves the mode, so ctrl+n
+        // twice goes to the bottom and out
+        // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/232).
+        if ctrl && matches!(key.code, KeyCode::Char('n' | 'N')) {
+            if let Some(scroll) = self.application_scroll.as_mut() {
+                if scroll.at_bottom {
+                    if scroll.in_flight.is_none() && scroll.queued.is_empty() {
+                        self.leave_application_scroll(outcome);
+                    } else {
+                        scroll.leave_when_sent = true;
+                    }
+                    return;
+                }
+            }
+        }
         let code = if ctrl {
             key.code
         } else {
@@ -367,6 +390,8 @@ impl ClientShellState {
         let Some(scroll) = self.application_scroll.as_mut() else {
             return;
         };
+        scroll.at_bottom = matches!(intent, Intent::End | Intent::CtrlEnd);
+        scroll.leave_when_sent = false;
         if let Some((last_intent, count)) = scroll.queued.back_mut() {
             if *last_intent == intent && *count < 64 {
                 *count += 1;
@@ -433,6 +458,11 @@ impl ClientShellState {
         scroll.in_flight = None;
         if success {
             self.dispatch_application_scroll(outcome);
+            if self.application_scroll.as_ref().is_some_and(|scroll| {
+                scroll.leave_when_sent && scroll.in_flight.is_none() && scroll.queued.is_empty()
+            }) {
+                self.leave_application_scroll(outcome);
+            }
         } else {
             self.leave_application_scroll(outcome);
         }

@@ -79,12 +79,14 @@ fn scroll_top_and_bottom_follow_effective_agent_precedence() {
         let first = enter(&mut state);
         assert_eq!(scroll_request(&first.actions).1, Intent::PageUp);
         assert!(finish(&mut state, &first.actions).is_empty());
+        // ctrl+n comes right after a jump to the top: after one to the bottom
+        // it leaves the mode instead.
         for (code, modifiers, top) in [
             (KeyCode::Char('g'), KeyModifiers::empty(), true),
             (KeyCode::Home, KeyModifiers::empty(), true),
+            (KeyCode::Char('n'), KeyModifiers::CONTROL, false),
             (KeyCode::Char('G'), KeyModifiers::SHIFT, false),
             (KeyCode::Char('g'), KeyModifiers::SHIFT, false),
-            (KeyCode::Char('n'), KeyModifiers::CONTROL, false),
             (KeyCode::End, KeyModifiers::empty(), false),
         ] {
             let outcome = key(&mut state, code, modifiers);
@@ -99,6 +101,64 @@ fn scroll_top_and_bottom_follow_effective_agent_precedence() {
             assert!(finish(&mut state, &outcome.actions).is_empty());
         }
     }
+}
+
+#[test]
+fn scroll_second_ctrl_n_at_the_bottom_leaves_the_mode() {
+    let mut state = state(None, None);
+    let first = enter(&mut state);
+    finish(&mut state, &first.actions);
+    let bottom = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert_eq!(scroll_request(&bottom.actions).1, Intent::End);
+    finish(&mut state, &bottom.actions);
+    assert_eq!(state.mode, ClientShellMode::Scroll);
+    let out = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert!(out.actions.is_empty(), "no second jump");
+    assert!(out.requests.is_empty(), "never typed into the app");
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.application_scroll.is_none());
+}
+
+#[test]
+fn scroll_ctrl_n_after_capital_g_leaves_and_after_a_line_up_jumps_again() {
+    for line_up in [false, true] {
+        let mut state = state(None, None);
+        let first = enter(&mut state);
+        finish(&mut state, &first.actions);
+        let bottom = key(&mut state, KeyCode::Char('G'), KeyModifiers::SHIFT);
+        finish(&mut state, &bottom.actions);
+        if line_up {
+            let up = key(&mut state, KeyCode::Char('k'), KeyModifiers::empty());
+            assert_eq!(scroll_request(&up.actions).1, Intent::WheelUp);
+            finish(&mut state, &up.actions);
+        }
+        let ctrl_n = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        if line_up {
+            assert_eq!(scroll_request(&ctrl_n.actions).1, Intent::End);
+            finish(&mut state, &ctrl_n.actions);
+            assert_eq!(state.mode, ClientShellMode::Scroll);
+        } else {
+            assert!(ctrl_n.actions.is_empty());
+            assert_eq!(state.mode, ClientShellMode::Terminal);
+        }
+    }
+}
+
+#[test]
+fn scroll_quick_double_ctrl_n_leaves_only_after_the_jump_lands() {
+    let mut state = state(None, None);
+    let first = enter(&mut state);
+    finish(&mut state, &first.actions);
+    let bottom = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert_eq!(scroll_request(&bottom.actions).1, Intent::End);
+    // The second press comes before the jump is answered: nothing is
+    // cancelled and the mode stays until it lands.
+    let early = key(&mut state, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert!(early.actions.is_empty(), "the jump is not cancelled");
+    assert_eq!(state.mode, ClientShellMode::Scroll);
+    assert!(finish(&mut state, &bottom.actions).is_empty());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.application_scroll.is_none());
 }
 
 #[test]

@@ -39,6 +39,31 @@ fn copy_mode_ctrl_n_jumps_to_the_bottom_like_capital_g() {
 }
 
 #[test]
+fn copy_mode_second_ctrl_n_at_the_bottom_leaves_at_the_bottom() {
+    // Entered 10 lines up: the second ctrl+n leaves at the live bottom, not
+    // back where copy mode began, as q would.
+    let mut state = viewport_copy_state(10);
+    copy_ctrl(&mut state, 'n');
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    let outcome = copy_ctrl(&mut state, 'n');
+    assert!(state.copy_mode.is_none());
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(outcome.requests.is_empty());
+    assert_eq!(state.pane_scroll_targets.get("pane_1"), Some(&0));
+}
+
+#[test]
+fn copy_mode_ctrl_n_above_the_last_line_only_moves_the_cursor() {
+    let mut state = viewport_copy_state(0);
+    state.copy_mode.as_mut().unwrap().cursor.row = 20;
+    copy_ctrl(&mut state, 'n');
+    assert_eq!(state.mode, ClientShellMode::Copy);
+    assert_eq!(state.copy_mode.as_ref().unwrap().cursor.row, 21);
+    copy_ctrl(&mut state, 'n');
+    assert!(state.copy_mode.is_none());
+}
+
+#[test]
 fn copy_mode_ctrl_g_no_longer_jumps_to_the_bottom() {
     let mut state = viewport_copy_state(10);
     let outcome = copy_ctrl(&mut state, 'g');

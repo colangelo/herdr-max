@@ -23,6 +23,14 @@ pub(super) fn copy_scroll_action(
     }
 }
 
+/// The cursor row `G` moves to: the last line of the live screen.
+fn copy_bottom_row(max_offset_from_bottom: usize, height: u16) -> u32 {
+    max_offset_from_bottom
+        .saturating_add(height as usize)
+        .saturating_sub(1)
+        .min(u32::MAX as usize) as u32
+}
+
 impl ClientShellState {
     pub(super) fn enter_scrolled_copy_mode(
         &mut self,
@@ -262,7 +270,18 @@ impl ClientShellState {
                 return;
             }
             (KeyCode::Char('n'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_copy_history(false, outcome);
+                // Fork: ctrl+n already at the bottom leaves copy mode, so
+                // ctrl+n twice goes to the bottom and out
+                // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/232).
+                if self.copy_mode_at_bottom() {
+                    // Out at the bottom, not back where copy mode began.
+                    if let Some(copy_mode) = self.copy_mode.as_mut() {
+                        copy_mode.entry_offset_from_bottom = 0;
+                    }
+                    self.exit_copy_mode(false, outcome);
+                } else {
+                    self.move_copy_history(false, outcome);
+                }
                 return;
             }
             _ => {}
@@ -683,11 +702,8 @@ impl ClientShellState {
                 copy_mode.cursor.row = 0;
                 copy_mode.offset_from_bottom = copy_mode.max_offset_from_bottom;
             } else {
-                copy_mode.cursor.row = copy_mode
-                    .max_offset_from_bottom
-                    .saturating_add(hit.inner_rect.height as usize)
-                    .saturating_sub(1)
-                    .min(u32::MAX as usize) as u32;
+                copy_mode.cursor.row =
+                    copy_bottom_row(copy_mode.max_offset_from_bottom, hit.inner_rect.height);
                 copy_mode.offset_from_bottom = 0;
             }
             (copy_mode.pane_id.clone(), copy_mode.offset_from_bottom)
@@ -697,6 +713,19 @@ impl ClientShellState {
         self.push_pane_scroll_offset(pane_id, offset_from_bottom, outcome);
         self.sync_copy_selection();
         outcome.repaint = true;
+    }
+
+    /// Whether `G` would not move: the viewport at the live bottom and the
+    /// cursor on the last line.
+    fn copy_mode_at_bottom(&self) -> bool {
+        let Some(hit) = self.copy_hit() else {
+            return false;
+        };
+        self.copy_mode.as_ref().is_some_and(|copy_mode| {
+            copy_mode.offset_from_bottom == 0
+                && copy_mode.cursor.row
+                    == copy_bottom_row(copy_mode.max_offset_from_bottom, hit.inner_rect.height)
+        })
     }
 
     fn set_copy_cursor_col(&mut self, col: u16) {
