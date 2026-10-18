@@ -143,6 +143,26 @@ fn ping_socket(socket_path: &Path) -> String {
     response.trim().to_string()
 }
 
+/// Waits for the server's main loop, which installs the SIGTERM handler as it
+/// starts. `ping` cannot prove that: the API thread answers it before then
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/234).
+fn wait_for_main_loop(socket_path: &Path) {
+    let mut stream = UnixStream::connect(socket_path).expect("should connect to API socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    writeln!(
+        stream,
+        r#"{{"id":"ready","method":"workspace.list","params":{{}}}}"#
+    )
+    .unwrap();
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .expect("the main loop should answer workspace.list");
+    assert!(response.contains(r#""result""#), "{response}");
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -577,6 +597,7 @@ fn server_survives_hangup_and_logs_why_it_stops() {
 
     let mut spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket);
+    wait_for_main_loop(&api_socket);
     let pid = spawned.child.process_id().expect("server pid") as libc::pid_t;
 
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
