@@ -128,7 +128,9 @@ impl StatePresentation {
         seq: u64,
         config: &ClientShellConfig,
     ) -> &str {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        // The classic braille snake one row down, on the cell's bottom three
+        // rows (dots 2 3 7 and 5 6 8), so it sits low like the braille mark.
+        const FRAMES: [&str; 10] = ["⠖", "⠲", "⢲", "⢰", "⣰", "⣠", "⣄", "⣆", "⡆", "⡖"];
         let background: Background = background.into();
         let frame = (config.status_spinner == crate::config::StatusSpinnerConfig::On)
             .then_some(config.spinner_frame.wrapping_add(seq as u8));
@@ -234,14 +236,24 @@ mod tests {
             config
                 .state_presentation
                 .agent_icon(AgentStatus::Working, false, 0, &config),
-            "⠋"
+            "⠖"
         );
         assert_eq!(
             config
                 .state_presentation
                 .agent_icon(AgentStatus::Working, false, 1, &config),
-            "⠙"
+            "⠲"
         );
+        // The snake runs on the bottom three rows: no frame lights the top
+        // row's dots 1 and 4.
+        for seq in 0..10 {
+            let frame =
+                config
+                    .state_presentation
+                    .agent_icon(AgentStatus::Working, false, seq, &config);
+            let dots = frame.chars().next().map_or(0, |c| u32::from(c) - 0x2800);
+            assert_eq!(dots & 0x09, 0, "frame {seq} is {frame}");
+        }
         assert_eq!(
             config
                 .state_presentation
@@ -337,7 +349,7 @@ mod tests {
             config.state_icon(AgentStatus::Blocked)
         );
         // Working because of the agent's own turn keeps the spinner.
-        assert_eq!(mark(AgentStatus::Working, 3, 0), "⠋");
+        assert_eq!(mark(AgentStatus::Working, 3, 0), "⠖");
     }
 
     #[test]
