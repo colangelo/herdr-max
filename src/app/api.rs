@@ -736,6 +736,103 @@ impl App {
         true
     }
 
+    /// The command that would resume this pane's agent, or `None` when it has
+    /// no agent session herdr can resume. The same plan `agent_session.
+    /// restore_argv` previews, with the model and effort a Claude pane's footer
+    /// shows now, so `pane respawn --resume` types what `pane get` shows.
+    pub(crate) fn pane_agent_resume_plan(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::agent_resume::AgentResumePlan> {
+        let (_, pane_state) = self.find_pane(pane_id)?;
+        let terminal_id = &pane_state.attached_terminal_id;
+        let plan = self
+            .state
+            .terminals
+            .get(terminal_id)?
+            .restore_plan_preview()?;
+        let footer = (plan.agent == "claude")
+            .then(|| self.terminal_runtimes.get(terminal_id))
+            .flatten()
+            .map(|runtime| runtime.detection_text())
+            .unwrap_or_default();
+        Some(crate::agent_resume::AgentResumePlan {
+            argv: crate::agent_resume::argv_with_live_footer(&plan.agent, &plan.argv, &footer),
+            ..plan
+        })
+    }
+
+    /// Restart a pane's process onto this server and resume its agent the way
+    /// a restore does: a fresh shell in the pane's directory types the agent's
+    /// resume command, with its session, name and launch flags. Keeps
+    /// the pane id, terminal id, label, todos and the agent's records.
+    /// Returns the agent's label, or `None` (nothing changed) when the pane has
+    /// no agent session herdr can resume
+    /// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
+    pub(crate) fn respawn_pane_agent(&mut self, pane_id: crate::layout::PaneId) -> Option<String> {
+        let plan = self.pane_agent_resume_plan(pane_id)?;
+        let (ws_idx, pane_state) = self.find_pane(pane_id)?;
+        let terminal_id = pane_state.attached_terminal_id.clone();
+        if !self.state.terminals.contains_key(&terminal_id) {
+            return None;
+        }
+        // The directory the agent runs in now, as a session save records it.
+        let cwd = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.cwd_for_persistence())
+            .or_else(|| {
+                self.state
+                    .terminals
+                    .get(&terminal_id)
+                    .map(|t| t.cwd.clone())
+            })?;
+        let (rows, cols) = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .map(|runtime| runtime.current_size())
+            .unwrap_or_else(|| {
+                self.state
+                    .new_pane_size(crate::ui::NewPanePlacement::Existing {
+                        ws_idx,
+                        pane: pane_id,
+                    })
+            });
+        if let Some(replaced) = self.terminal_runtimes.remove(&terminal_id) {
+            // Same as a respawn: absorb the exit the stopped process reports.
+            if replaced.child_pid().is_some() {
+                self.respawn_replaced_runtimes.insert(pane_id);
+            }
+            replaced.shutdown();
+        }
+        let agent = plan.agent.clone();
+        let detected = crate::detect::parse_agent_label(&agent);
+        let terminal = self.state.terminals.get_mut(&terminal_id)?;
+        terminal.cwd = cwd;
+        terminal.restore_error = None;
+        terminal.pending_agent_resume_plan = Some(plan);
+        // Shown as the agent at once, idle, as a restored pane is.
+        if let Some(detected) = detected {
+            let _ = terminal.set_detected_state_with_screen_signals_at(
+                Some(detected),
+                crate::detect::AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                std::time::Instant::now(),
+            );
+        }
+        terminal.revision = terminal.revision.saturating_add(1);
+        if !self.start_pending_agent_resume_for_terminal(&terminal_id, rows, cols, true) {
+            // Not started yet (for example no screen size): the pending-resume
+            // loop starts it as it does after a restore.
+            self.sync_pending_agent_resume_deadline(std::time::Instant::now());
+        }
+        self.schedule_session_save();
+        Some(agent)
+    }
+
     pub(crate) fn claim_worktree_runtime_restore_failure(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -1466,7 +1563,12 @@ impl App {
                 return self.handle_pane_clear_scrollback(request.id, target)
             }
             Method::PaneClose(params) => return self.handle_pane_close(request.id, params),
-            Method::PaneRespawn(target) => return self.handle_pane_respawn(request.id, target),
+            Method::PaneRespawn(target) => {
+                return self.handle_pane_respawn(request.id, target, false)
+            }
+            Method::PaneRespawnAgent(target) => {
+                return self.handle_pane_respawn(request.id, target, true)
+            }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})
@@ -2637,6 +2739,127 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    /// The resume command herdr would type for this pane, made harmless: the
+    /// command name is not a real program, so the shell only reports it.
+    #[cfg(unix)]
+    fn give_pane_a_resumable_agent(app: &mut App, terminal_id: &crate::terminal::TerminalId) {
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(terminal_id)
+            .expect("test terminal should exist");
+        let _ = terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Working,
+            false,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        terminal.restore_reported_resume(crate::agent_resume::ReportedAgentResume {
+            source: "herdr-test".into(),
+            agent: "claude".into(),
+            argv: vec![
+                "herdr-respawn-resume-238".into(),
+                "--resume".into(),
+                "sid-238".into(),
+            ],
+        });
+        terminal.set_manual_label("keep me".into());
+        terminal
+            .add_todo(
+                "unfinished",
+                crate::terminal::todo::TodoPriority::Normal,
+                None,
+                100,
+            )
+            .expect("todo should be added");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn respawn_pane_agent_types_the_agent_s_resume_command_and_keeps_its_records() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        // `cat` as the pane's shell: the typed command is echoed on the
+        // screen and run by nothing, and no shell history records it.
+        app.state.default_shell = "/bin/cat".into();
+        give_pane_a_resumable_agent(&mut app, &terminal_id);
+
+        assert_eq!(app.respawn_pane_agent(pane_id).as_deref(), Some("claude"));
+
+        let runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("the resume should have started a shell in the pane");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut screen = String::new();
+        while Instant::now() < deadline {
+            screen = runtime.visible_text();
+            if screen.contains("herdr-respawn-resume-238 --resume sid-238") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            screen.contains("herdr-respawn-resume-238 --resume sid-238"),
+            "the shell should have been given the agent's resume command, got: {screen}"
+        );
+        assert_eq!(
+            app.state
+                .workspaces
+                .first()
+                .and_then(|ws| ws.terminal_id(pane_id)),
+            Some(&terminal_id),
+            "pane should keep its terminal id"
+        );
+        let terminal = app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .expect("terminal should survive the respawn");
+        assert!(terminal.pending_agent_resume_plan.is_none());
+        assert_eq!(terminal.manual_label.as_deref(), Some("keep me"));
+        assert_eq!(terminal.outstanding_todo_count(), 1);
+        assert_eq!(
+            terminal.reported_resume().map(|resume| resume.argv.clone()),
+            Some(vec![
+                "herdr-respawn-resume-238".to_string(),
+                "--resume".to_string(),
+                "sid-238".to_string(),
+            ]),
+            "the agent's records stay, so a later restore resumes it too"
+        );
+
+        shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn respawn_pane_agent_leaves_a_pane_without_an_agent_session_alone() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+
+        assert!(app.pane_agent_resume_plan(pane_id).is_none());
+        assert_eq!(app.respawn_pane_agent(pane_id), None);
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "nothing should have been started"
+        );
+
+        let response = app.handle_pane_respawn(
+            "req".into(),
+            crate::api::schema::PaneRespawnParams {
+                pane_id: app.public_pane_id(0, pane_id).expect("public pane id"),
+                force: true,
+            },
+            true,
+        );
+        assert!(
+            response.contains("\"no_agent_session\""),
+            "a forced resume of a pane with no agent session is refused: {response}"
+        );
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
     }
 
     #[cfg(unix)]

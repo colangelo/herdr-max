@@ -61,10 +61,12 @@ pub struct PaneCloseParams {
     pub force: bool,
 }
 
-/// `pane.respawn`. Without `force`, a respawn that would stop a running
-/// process or that leaves open todos behind is refused with
-/// `confirmation_required`; with it, the pane respawns and the result says
-/// what it went ahead over.
+/// `pane.respawn` and `pane.respawn_agent`. Without `force`, a respawn that
+/// would stop a running process or that leaves open todos behind is refused
+/// with `confirmation_required`; with it, the pane respawns and the result says
+/// what it went ahead over. `pane.respawn_agent` starts the pane's agent again
+/// from its saved session, as a restore does, and is refused with
+/// `no_agent_session` when the pane has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneRespawnParams {
     pub pane_id: String,

@@ -449,6 +449,27 @@ mod tests {
         }
     }
 
+    // Fork issue 238: `--resume` is its own method, so an older server refuses
+    // it instead of running a plain respawn.
+    #[test]
+    fn pane_respawn_resume_sends_respawn_agent() {
+        for (values, params) in [
+            (
+                vec!["pane", "--resume"],
+                serde_json::json!({"pane_id": "pane"}),
+            ),
+            (
+                vec!["pane", "--resume", "--force"],
+                serde_json::json!({"pane_id": "pane", "force": true}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(request("respawn", &values[..]).unwrap()).unwrap(),
+                serde_json::json!({"id": "cli:pane:respawn", "method": "pane.respawn_agent", "params": params}),
+            );
+        }
+    }
+
     #[test]
     fn pane_projection_dash_leading_targets_and_empty_values() {
         let params = parse_pane_split_args(&["-literal", "--direction", "right"], None);

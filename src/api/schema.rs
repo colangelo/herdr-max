@@ -179,6 +179,10 @@ operations::define_operations! {
     // Fork: a stop whose attached clients wait for the server the caller starts
     // next (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
     ServerStopForRestart(EmptyParams) => "server.stop_for_restart", false, false;
+    // Fork: a respawn that resumes the pane's agent session. Its own method so
+    // an older server answers "unknown method" instead of a plain respawn that
+    // stops the agent (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
+    PaneRespawnAgent(PaneRespawnParams) => "pane.respawn_agent", true, false;
 }
 
 #[cfg(test)]

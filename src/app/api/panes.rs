@@ -2282,10 +2282,29 @@ impl App {
     /// Respawn a pane's process. Without `force`, a respawn that would stop
     /// live work is refused with `confirmation_required` naming it, and
     /// nothing changes on any client's screen (fork issue 125).
-    pub(super) fn handle_pane_respawn(&mut self, id: String, params: PaneRespawnParams) -> String {
+    ///
+    /// With `resume_agent`, the pane comes back running its agent's resume
+    /// command instead (fork issue 238); a pane with no resumable agent session
+    /// is refused before anything else is asked.
+    pub(super) fn handle_pane_respawn(
+        &mut self,
+        id: String,
+        params: PaneRespawnParams,
+        resume_agent: bool,
+    ) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if resume_agent && self.pane_agent_resume_plan(pane_id).is_none() {
+            return encode_error(
+                id,
+                "no_agent_session",
+                format!(
+                    "pane {} has no agent session herdr can resume; `pane respawn` without --resume restarts its process",
+                    params.pane_id
+                ),
+            );
+        }
         let has_live_child = self.pane_has_live_child(ws_idx, pane_id);
         let stopped_process = has_live_child
             .then(|| self.pane_live_process(ws_idx, pane_id))
@@ -2299,7 +2318,12 @@ impl App {
             return respawn_refusal(id, &params.pane_id, stopped_process.as_ref(), &open_todos);
         }
         let report = params.force.then_some((stopped_process, open_todos));
-        if !self.respawn_pane_runtime(pane_id, crate::app::api::RespawnTarget::LaunchArgv) {
+        let respawned = if resume_agent {
+            self.respawn_pane_agent(pane_id).is_some()
+        } else {
+            self.respawn_pane_runtime(pane_id, crate::app::api::RespawnTarget::LaunchArgv)
+        };
+        if !respawned {
             return encode_error(id, "respawn_failed", "failed to respawn the pane process");
         }
         self.emit_pane_updated(ws_idx, pane_id);

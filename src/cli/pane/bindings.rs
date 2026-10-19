@@ -467,14 +467,33 @@ pub(super) const LEAVES: &[Leaf] = &[
         PaneClearScrollbackProjection,
         PaneClearScrollback
     ),
-    leaf!(
-        "respawn",
-        "Restart a pane's process in place",
-        "cli:pane:respawn",
-        Json,
-        PaneRespawnProjection,
-        PaneRespawn
-    ),
+    // Fork: `--resume` sends `pane.respawn_agent`, which brings the pane's
+    // agent back from its saved session as a restore does
+    // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
+    Leaf {
+        name: "respawn",
+        about: "Restart a pane's process in place",
+        id: "cli:pane:respawn",
+        output: Output::Json,
+        arguments: || {
+            let mut arguments = PaneRespawnProjection::arguments();
+            arguments.push(
+                clap::Arg::new("resume")
+                    .long("resume")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Start the pane's agent again from its saved session, as a restore does"),
+            );
+            arguments
+        },
+        method: |matches| {
+            let params = PaneRespawnProjection::from_matches(matches)?;
+            Ok(if matches.get_flag("resume") {
+                Method::PaneRespawnAgent(params)
+            } else {
+                Method::PaneRespawn(params)
+            })
+        },
+    },
     Leaf {
         name: "sync",
         about: "Put a pane in or out of its tab's synced input",

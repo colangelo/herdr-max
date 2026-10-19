@@ -70,6 +70,7 @@ mod tests {
         "pane.clear_scrollback",
         "pane.report_hint",
         "pane.respawn",
+        "pane.respawn_agent",
         "pane.scroll_application",
         "pane.sync",
         "pane.sync_pair",
