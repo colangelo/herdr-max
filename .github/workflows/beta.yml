@@ -45,33 +45,15 @@ jobs:
       - name: Compute shared beta build id and version
         id: compute
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_NUMBER: ${{ github.run_number }}
           CODENAME: ${{ inputs.codename }}
-        run: |
-          BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          # Beta build id = a monotonic run number (keeps `brew upgrade` ordering
-          # intact — Homebrew compares the number first) plus a mnemonic codename:
-          # the surname of a Juventus player from 2012 to today, chosen
-          # deterministically from the run number so each build reads like
-          # "0.7.5-ac-beta.7-pirlo" instead of an opaque timestamp.
-          NAMES=(pirlo vidal pogba marchisio tevez llorente chiellini bonucci barzagli lichtsteiner asamoah giovinco vucinic buffon evra dybala higuain mandzukic khedira pjanic cuadrado benatia rugani sturaro alves douglascosta bernardeschi matuidi szczesny ronaldo ramsey rabiot deligt demiral danilo alexsandro kulusevski mckennie morata chiesa bentancur arthur vlahovic locatelli kean zakaria gatti bremer paredes kostic milik fagioli miretti perin thuram koopmeiners cambiaso yildiz weah conceicao kalulu kelly digregorio douglasluiz mbangula)
-          NAME=${NAMES[$(( RUN_NUMBER % ${#NAMES[@]} ))]}
-          # A pinned codename keeps a run of builds reading the same while the
-          # run number still increments, so `brew upgrade` ordering is untouched.
-          # Checked against the pool: a typo would otherwise mint a version token
-          # nothing else in the channel shares.
-          if [ -n "${CODENAME}" ]; then
-            case " ${NAMES[*]} " in
-              *" ${CODENAME} "*) NAME="${CODENAME}" ;;
-              *)
-                echo "codename '${CODENAME}' is not in the pool" >&2
-                exit 1
-                ;;
-            esac
-          fi
-          BUILD_ID="${RUN_NUMBER}-${NAME}"
-          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
-          echo "version=${BASE}-ac-beta.${BUILD_ID}" >> "$GITHUB_OUTPUT"
+        # The number is the larger of this run's number and the published
+        # beta's plus one, so a beta built on our own Mac (`just beta-local`)
+        # never shares a number with a later run here. Scheme and codename
+        # pool: scripts/beta_version.sh.
+        run: scripts/beta_version.sh "${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prep
@@ -172,6 +154,11 @@ jobs:
     env:
       BETA_VERSION: ${{ needs.prep.outputs.version }}
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref || 'master' }}
+          persist-credentials: false
+
       - name: Calculate checksums
         run: |
           BASE_URL="https://github.com/colangelo/herdr-max/releases/download/beta"
@@ -190,45 +177,7 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/colangelo/homebrew-tap.git"
           cd homebrew-tap
 
-          cat > Formula/herdr-beta.rb << FORMULA
-          class HerdrBeta < Formula
-            desc "Terminal workspace manager for AI coding agents (beta channel)"
-            homepage "https://github.com/colangelo/herdr-max"
-            version "${BETA_VERSION}"
-            license "AGPL-3.0-or-later"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/colangelo/herdr-max/releases/download/beta/herdr-macos-aarch64"
-                sha256 "${DARWIN_ARM64}"
-              else
-                url "https://github.com/colangelo/herdr-max/releases/download/beta/herdr-macos-x86_64"
-                sha256 "${DARWIN_AMD64}"
-              end
-            end
-
-            def install
-              binary = Dir["herdr-*"].first || "herdr"
-              bin.install binary => "herdr-beta"
-            end
-
-            def caveats
-              <<~EOS
-                herdr runs a persistent background server. To upgrade without killing
-                your running panes, migrate the server onto the new binary after upgrading:
-
-                  brew upgrade herdr-beta
-                  herdr-beta server live-handoff --import-exe "#{opt_bin}/herdr-beta"
-
-                (self-update is disabled for Homebrew installs; use brew upgrade.)
-              EOS
-            end
-
-            test do
-              assert_match "herdr #{version}", shell_output("#{bin}/herdr-beta --version")
-            end
-          end
-          FORMULA
+          ../scripts/beta_formula.sh "${BETA_VERSION}" "${DARWIN_ARM64}" "${DARWIN_AMD64}" > Formula/herdr-beta.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
