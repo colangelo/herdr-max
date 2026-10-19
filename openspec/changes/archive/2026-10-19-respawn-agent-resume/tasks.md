@@ -13,4 +13,4 @@
 ## 3. Verification
 
 - [x] 3.1 Unit tests: resume command typed and records kept; no-session refusal; CLI mapping
-- [ ] 3.2 Live throwaway on the beta: an agent pane respawned with `--resume` comes back under the new server
+- [x] 3.2 Live throwaway on the beta: an agent pane respawned with `--resume` comes back under the new server
