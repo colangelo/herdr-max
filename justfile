@@ -360,15 +360,27 @@ beta-local ref="master" codename="":
 # (self-update is disabled for brew, but `server live-handoff` is source-agnostic).
 # Usage: just brew-upgrade            # stable formula/binary `herdr`
 #        just brew-upgrade herdr-beta # beta formula/binary `herdr-beta`
+# The handoff names the version it expects, so a different build is refused, and
+# keeps the server in the user's macOS context (logout-proof) when the binary
+# supports --user-context
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/237).
 # Always addresses the brew binary by its full path: another `{{formula}}` earlier
 # on PATH (e.g. a hand-built ~/.local/bin/herdr) would otherwise shadow it and the
 # upgrade would silently act on the wrong binary.
 brew-upgrade formula="herdr":
-    @test -x "$(brew --prefix)/bin/{{formula}}" || { echo "$(brew --prefix)/bin/{{formula}} not installed — run: brew install colangelo/tap/{{formula}}"; exit 1; }
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(brew --prefix)/bin/{{formula}}"
+    test -x "$bin" || { echo "$bin not installed — run: brew install colangelo/tap/{{formula}}"; exit 1; }
     brew update
     brew upgrade {{formula}}
-    "$(brew --prefix)/bin/{{formula}}" server live-handoff --import-exe "$(brew --prefix)/bin/{{formula}}"
-    @echo "{{formula}} upgraded; running server handed off onto $(brew --prefix)/bin/{{formula}}, panes preserved"
+    version=$("$bin" --version | awk '{print $2}')
+    flags=(--expected-version "$version")
+    if "$bin" server live-handoff --help 2>&1 | grep -q -- --user-context; then
+        flags+=(--user-context)
+    fi
+    "$bin" server live-handoff --import-exe "$bin" "${flags[@]}"
+    echo "{{formula}} upgraded to $version; running server handed off onto $bin, panes preserved"
 
 # Hands the current (stable) server off to the herdr-beta binary via live handoff
 # (source-agnostic); they share one session socket, so it takes over in place.
