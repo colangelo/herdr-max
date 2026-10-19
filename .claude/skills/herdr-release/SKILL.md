@@ -22,7 +22,22 @@ stable release, distributed as a **separate** tap formula so it coexists with
 stable herdr. Use it to dogfood work (e.g. a freshly synced/featured `master`)
 before cutting the stable `X.Y.Z-ac`.
 
-Trigger (dispatches `.github/workflows/beta.yml`; default ref `master`):
+Two builders publish the same rolling beta. **`just beta-local` is the default
+on m4m** (#235): it builds the Apple-silicon binary there under
+`/tmp/m4m-heavy.lock` (~2 min cold, ~1 min warm, against ~8–9 min on GitHub)
+and publishes it through the same `scripts/beta_publish.sh` and
+`scripts/beta_formula.sh`. Its formula is arm64-only (`depends_on arch:
+:arm64`; no Intel Mac is left). The ref must be pushed to GitHub; the build
+clone, tap clone and cargo target live in `~/.local/state/herdr-beta-local`.
+
+```bash
+just beta-local                          # build on this Mac + publish, from origin/master
+BETA_LOCAL_DRY_RUN=1 just beta-local my-branch   # build + check only
+```
+
+`just beta` (GitHub) is the backup, and the only beta that also builds the
+Intel binary. Trigger (dispatches `.github/workflows/beta.yml`; default ref
+`master`):
 
 ```bash
 just beta                  # build + publish beta from master
@@ -34,16 +49,19 @@ gh run watch --repo colangelo/herdr-max
 What it does: builds the **two macOS targets only** (fast; no Linux beta), then
 replaces the single rolling **`beta` GitHub prerelease** (tag `beta`, deleted +
 recreated each run) and rewrites `Formula/herdr-beta.rb` in
-colangelo/homebrew-tap. A `prep` job stamps **one** shared
-`HERDR_BUILD_ID=<run-number>-<codename>` — the workflow run number plus the
+colangelo/homebrew-tap. Both builders stamp **one** shared
+`HERDR_BUILD_ID=<number>-<codename>` from `scripts/beta_version.sh`: the number
+is the larger of the GitHub run number and the published beta's number plus
+one (so a local beta and a later GitHub run never share a number), plus the
 surname of a Juventus player (2012→today), picked deterministically from the
-run number by indexing the hardcoded `NAMES=(...)` array in `beta.yml`. So the
-binary's `herdr --version` and the formula `version` are both exactly
-`X.Y.Z-ac-beta.<run>-<codename>` (e.g. `0.7.5-ac-beta.45-zakaria`; channel
-`HERDR_BUILD_CHANNEL=ac-beta`; Cargo.toml still plain `X.Y.Z`). The run number
+number by indexing the `NAMES=(...)` array in that script. So the binary's
+`herdr --version` and the formula `version` are both exactly
+`X.Y.Z-ac-beta.<number>-<codename>` (e.g. `0.7.5-ac-beta.45-zakaria`; channel
+`HERDR_BUILD_CHANNEL=ac-beta`; Cargo.toml still plain `X.Y.Z`). The number
 keeps `brew upgrade` monotonic — Homebrew compares the leading number first, so
 the codename is purely cosmetic. **Do not revert this to a timestamp**; the
-surname scheme is intentional. Rotate the pool by editing `NAMES` in `beta.yml`.
+surname scheme is intentional. Rotate the pool by editing `NAMES` in
+`scripts/beta_version.sh`.
 
 The `codename` dispatch input pins the suffix so a run of builds reads the same
 (`0.8.0-ac-beta.66-pirlo`, `…67-pirlo`); the run number still increments, so

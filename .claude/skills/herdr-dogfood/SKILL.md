@@ -7,8 +7,9 @@ description: Use when a change to the herdr fork should end up visible in the us
 
 The loop (since the 0.9.3 cutover, October 2026): branch off `sync/merge` →
 implement → every cargo run through the lead's runner → commit → draft-PR CI →
-fast-forward `master` → `just beta` (beta.yml from master) → install on m4m by
-mac-m4, then on mbm5 by mac-m5 via manager-aruba (`just brew-upgrade herdr-beta`,
+fast-forward `master` → `just beta-local` on m4m (~2 min; `just beta` on GitHub is
+the backup) → install on mbm5 by mac-m5 via manager-aruba, then on m4m by
+mac-m4 (`just brew-upgrade herdr-beta`,
 live handoff, panes preserved) → enable in config → `herdr-beta server
 reload-config` → user verifies. Never `git push origin master` new work directly.
 
@@ -73,8 +74,8 @@ command gh pr checks --repo colangelo/herdr-max --watch
 git merge --ff-only <branch> && git push internal master && git push origin master
 
 # 4. Beta from master, then the installs.
-just beta                         # dispatches beta.yml from origin/master
-command gh run watch <run-id> --repo colangelo/herdr-max --exit-status
+just beta-local                   # m4m builds origin/master and publishes (~2 min)
+# backup: just beta, then command gh run watch <run-id> --repo colangelo/herdr-max --exit-status
 ```
 
 5. Install, seamless (live handoff, panes and sessions kept): mac-m4 runs
@@ -104,7 +105,7 @@ never dismiss as "pre-existing".
 |---|---|
 | Option set in config but nothing changes after reload | wiring point 4 incomplete (`apply_live_config` missing) |
 | `--default-config` doesn't list the option | `src/main.rs` template entry missing (point 5) |
-| Beta built without the change | master not fast-forwarded and pushed to `origin` before `just beta` |
+| Beta built without the change | master not fast-forwarded and pushed to `origin` before `just beta-local` / `just beta` |
 | `cargo` fights other agents for CPU / a load alert | ran cargo directly instead of through the runner |
 | `brew upgrade` says already up to date | `brew update` missing or the formula job hasn't finished |
 | Unrelated files swept into the commit | `git add -A` with sibling-agent WIP present |
