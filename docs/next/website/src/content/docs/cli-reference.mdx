@@ -264,7 +264,7 @@ herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--n
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
 herdr pane clear [<pane_id>|--pane ID|--current]
 herdr pane close <pane_id> [--force]
-herdr pane respawn <pane_id> [--force]
+herdr pane respawn <pane_id> [--resume] [--force]
 ```
 
 Without `--preset`, `pane layout` reads the pane geometry. With it, the command rebuilds the target pane's tab. `--set` remains an alias for `--preset`; `even-h`, `even-v` and `main-v` abbreviate the corresponding names. For example, `herdr pane layout --preset main-vertical --current` places the tab's focused pane on the left half and stacks the other panes on the right in current pane order. Five or more other panes use two right columns, filled top-down with the first taking `ceil(n/2)` panes. Focus stays unchanged. The new preset uses `layout.apply_preset` and requires a server supporting that method; the three original presets keep using `layout.set_preset`.
@@ -292,6 +292,16 @@ the pane still carries under `.result.open_todos`. Like the closes above, it
 never puts a question on anyone's screen; respawning from the TUI still asks in
 a dialog. Use it to recover a wedged agent or dev server without losing the
 pane's place in the layout.
+
+`pane respawn --resume` brings the pane's agent back instead of a plain shell:
+the pane gets a fresh shell in its current directory, and Herdr types the
+agent's resume command into it, the same command a restore would run and that
+`pane get` shows as `agent_session.restore_argv` (its session, name and the
+launch flags Herdr kept). The pane keeps its agent session, name, label and
+todos. Use it to move an agent onto a newly installed Herdr binary, or to
+restart one that is stuck, without losing its conversation. A pane with no
+agent session Herdr can resume returns `no_agent_session` and changes nothing.
+`--force` works as above; an agent that is running needs it.
 
 For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,

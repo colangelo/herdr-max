@@ -105,7 +105,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.respawn_agent`, `pane.wait_for_output` |
 | Popup | `popup.close`, `plugin.popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset`, `layout.apply_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.message`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -409,6 +409,18 @@ on any client, and repeating the request gets the same answer. With
 `{"type": "respawned", "stopped_process": {"pid": ..., "name": ...}, "open_todos": [...]}`:
 the process it stopped (`null` when none was running) and the open todos the
 pane keeps. Unknown pane ids fail with `pane_not_found`.
+
+`pane.respawn_agent` takes the same parameters and answers the same way, but
+the pane comes back running its agent: a fresh shell in the pane's current
+directory types the command in the pane's `agent_session.restore_argv`, as a
+restore would. The pane keeps its agent session, name, label and todos. A pane
+with no agent session Herdr can resume fails with `no_agent_session` before
+anything is checked or changed. It is a separate method so that a server
+without it answers with an unknown-method error rather than a plain respawn:
+
+```json
+{"id":"req_resume","method":"pane.respawn_agent","params":{"pane_id":"w1:p1","force":true}}
+```
 
 The CLI wrapper for `notification.show` is:
 
