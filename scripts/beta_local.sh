@@ -15,6 +15,8 @@
 #   BETA_LOCAL_LOCK       the shared heavy-build lock (default /tmp/m4m-heavy.lock)
 #   BETA_LOCAL_JOBS       cargo jobs (default 6)
 #   CODENAME              pin the codename, as in `just beta`
+#   BETA_SIGN_IDENTITY    codesign identity (default the keychain's first
+#                         "Apple Development" one)
 #   ZIG                   zig 0.16 (default the brew zig@0.16 keg when present)
 set -euo pipefail
 
@@ -27,6 +29,7 @@ JOBS=${BETA_LOCAL_JOBS:-6}
 DRY_RUN=${BETA_LOCAL_DRY_RUN:-}
 TARGET=aarch64-apple-darwin
 ASSET=herdr-macos-aarch64
+SIGN_ID=dev.herdr.beta
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 
 step() { echo "==> $*"; }
@@ -73,10 +76,23 @@ lockf -k "$LOCK" nice -n 15 env \
   timeout 2400 rustup run "$TOOLCHAIN" cargo build --release --locked --target "$TARGET"
 step "built in $(($(date +%s) - started)) s"
 
-step "3/6 check the binary"
+step "3/6 sign and check the binary"
 mkdir -p "$STATE/out"
 BIN=$STATE/out/$ASSET
 cp "target/${TARGET}/release/herdr" "$BIN"
+# One identifier and a real certificate keep the code identity the same from
+# build to build, so a macOS privacy (TCC) answer for herdr-beta survives an
+# upgrade; an ad-hoc binary is a new app to TCC every build
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/236).
+IDENTITY=${BETA_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
+  sed -n 's/.*"\(Apple Development: .*\)"$/\1/p' | head -1)}
+[ -n "$IDENTITY" ] || die "no Apple Development signing identity in the keychain; set BETA_SIGN_IDENTITY"
+codesign --force --sign "$IDENTITY" --identifier "$SIGN_ID" --timestamp=none "$BIN"
+requirement=$(codesign -d -r- "$BIN" 2>&1)
+case "$requirement" in
+  *"identifier \"${SIGN_ID}\" and anchor apple generic"*) ;;
+  *) die "unexpected signature: ${requirement}" ;;
+esac
 got=$("$BIN" --version)
 [ "$got" = "herdr ${VERSION}" ] || die "the binary says '${got}', expected 'herdr ${VERSION}'"
 SHA256=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
