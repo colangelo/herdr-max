@@ -339,10 +339,21 @@ latest-json-check tag="":
 # `beta` prerelease, and updates the colangelo/homebrew-tap herdr-beta formula.
 # Install/upgrade the result with `brew install colangelo/tap/herdr-beta`.
 # Pass a codename to pin the build's suffix, e.g. `just beta master pirlo`;
-# it must be one of the names in beta.yml's pool. Empty derives it from the run.
+# it must be one of the names in scripts/beta_version.sh's pool. Empty derives
+# it from the build number. The only beta that also builds the Intel binary.
+# GitHub build of the rolling beta (~8-9 min); the backup for `just beta-local`.
 beta ref="master" codename="":
     command gh workflow run beta.yml --repo colangelo/herdr-max --ref {{ref}} -f ref={{ref}} -f codename={{codename}}
     @echo "beta build dispatched from {{ref}} — watch: gh run watch --repo colangelo/herdr-max"
+
+# Fork: build the Apple-silicon beta on this Mac (~1-2 min on m4m, under the
+# shared heavy-build lock) and publish it like `just beta` does: the rolling
+# `beta` prerelease and the herdr-beta formula. REF must be pushed to GitHub.
+# `BETA_LOCAL_DRY_RUN=1 just beta-local` builds and checks without publishing.
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/235)
+# Build and publish the rolling beta on this Mac, Apple silicon only (~2 min)
+beta-local ref="master" codename="":
+    CODENAME={{codename}} scripts/beta_local.sh {{ref}}
 
 # Upgrade a Homebrew-installed herdr and live-hand-off the running server onto the
 # new binary so panes survive — replicates `herdr update --handoff` for brew installs
