@@ -35,6 +35,11 @@ just beta-local                          # build on this Mac + publish, from ori
 BETA_LOCAL_DRY_RUN=1 just beta-local my-branch   # build + check only
 ```
 
+`just beta-linux` adds static herdr-linux-x86_64 and -aarch64 of the published
+beta (same commit and version string, with .sha256 files) to its release, built
+on GitHub in ~10 min, for Linux herdr machines (#239). A later beta drops them,
+so run it again after the next `just beta-local` when a Linux machine needs it.
+
 `just beta` (GitHub) is the backup, and the only beta that also builds the
 Intel binary. Trigger (dispatches `.github/workflows/beta.yml`; default ref
 `master`):
