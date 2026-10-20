@@ -355,6 +355,21 @@ beta ref="master" codename="":
 beta-local ref="master" codename="":
     CODENAME={{codename}} scripts/beta_local.sh {{ref}}
 
+# Fork: add static Linux binaries (x86_64, aarch64) of the published beta to its
+# release, built on GitHub from the beta's commit with its version string, with
+# .sha256 files. For Linux herdr machines: install by hand, or upload with
+# HERDR_REMOTE_BINARY. Takes ~10 min; a later beta drops them again.
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/239)
+# Build Linux binaries of the published beta on GitHub (~10 min)
+beta-linux:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    title=$(command gh release view beta --repo colangelo/herdr-max --json name --jq .name)
+    build_id=${title##*-ac-beta.}
+    sha=$(command gh api repos/colangelo/herdr-max/git/ref/tags/beta --jq .object.sha)
+    command gh workflow run beta-linux.yml --repo colangelo/herdr-max --ref master -f ref="$sha" -f build_id="$build_id"
+    echo "Linux build of ${title#Beta } (${sha:0:8}) dispatched — watch: gh run list --repo colangelo/herdr-max --workflow beta-linux.yml"
+
 # Upgrade a Homebrew-installed herdr and live-hand-off the running server onto the
 # new binary so panes survive — replicates `herdr update --handoff` for brew installs
 # (self-update is disabled for brew, but `server live-handoff` is source-agnostic).

@@ -127,3 +127,4 @@ fi
 
 step "6/6 published ${VERSION}"
 echo "install: brew update && just brew-upgrade herdr-beta (mbm5 first, then m4m)"
+echo "Linux binaries for herdr machines: just beta-linux"

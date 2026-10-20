@@ -13,6 +13,7 @@ SCRIPT = ROOT / "scripts" / "beta_version.sh"
 FORMULA = ROOT / "scripts" / "beta_formula.sh"
 LOCAL = ROOT / "scripts" / "beta_local.sh"
 BETA_WORKFLOW = ROOT / ".github" / "workflows" / "beta.yml"
+BETA_LINUX_WORKFLOW = ROOT / ".github" / "workflows" / "beta-linux.yml"
 
 # A stand-in for `gh release view beta`: prints $FAKE_BETA_TITLE, or fails
 # with $FAKE_GH_ERROR.
@@ -181,6 +182,36 @@ class BetaFormulaTests(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("class HerdrBeta", workflow)
+
+
+class BetaLinuxWorkflowTests(unittest.TestCase):
+    """Linux binaries of the published beta (fork issue 239): same commit and
+    version string, both static musl targets, uploaded only onto that beta."""
+
+    def setUp(self) -> None:
+        self.text = BETA_LINUX_WORKFLOW.read_text()
+
+    def test_builds_both_static_linux_targets_on_the_beta_channel(self) -> None:
+        self.assertIn("target: x86_64-unknown-linux-musl", self.text)
+        self.assertIn("target: aarch64-unknown-linux-musl", self.text)
+        self.assertIn("HERDR_BUILD_CHANNEL: ac-beta", self.text)
+        self.assertIn("HERDR_BUILD_ID: ${{ inputs.build_id }}", self.text)
+        self.assertIn("ref: ${{ inputs.ref }}", self.text)
+
+    def test_checks_the_version_string(self) -> None:
+        self.assertIn('expected \'herdr ${BASE}-ac-beta.${HERDR_BUILD_ID}\'', self.text)
+
+    def test_uploads_only_onto_its_own_beta_with_checksums(self) -> None:
+        self.assertIn('WANT="Beta ${BASE}-ac-beta.${BUILD_ID}"', self.text)
+        self.assertIn("nothing uploaded", self.text)
+        self.assertIn("gh release upload beta", self.text)
+        self.assertIn("sha256sum", self.text)
+        self.assertNotIn("gh release delete", self.text)
+
+    def test_inputs_reach_the_shell_through_env_only(self) -> None:
+        for line in self.text.splitlines():
+            if "${{ inputs." in line:
+                self.assertNotIn("run:", line)
 
 
 if __name__ == "__main__":
