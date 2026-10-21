@@ -70,10 +70,12 @@
   Tests: rendered layout, `conflict_overlay_resolves_through_server`
 - [ ] 3.7 Per action, the crash and replay tests of plan § 6, with worklink
 - [ ] 3.8 Done and not-doing keys on ac's own rows: the server runs
-  `asks.py task-answer … --via herdr --client <id>` with `NATS_URL`, `NATS_USER` and
-  `NATS_PASSWORD` removed from the child's env, so asks.py uses the relay file and never
-  herdr's read-only `herdr-<host>` credential; herdr never holds the relay credential
-  (#241 comment 24885, CONTEXT + infra). Test: `ask_answer_child_env_has_no_nats_vars`
+  `asks.py task-answer <key> done|not-doing [--take-back] --fingerprint <fp shown> --via herdr
+  --client <id>` on its own Mac, with a FIXED environment (PATH, HOME and only what asks.py
+  needs), never the server's own: no `NATS_*`, so asks.py uses the relay file and never
+  herdr's read-only `herdr-<host>` credential, and no `GESTORE_ASKS_*` (asks.py:115-125) that a
+  pane or test could have leaked in; herdr never holds the relay credential (#241 comment
+  24885, contracts v0.8 § 2.5). Test: `ask_answer_child_env_is_fixed`
 
 ## 4. Phase 5: todos become tasks
 
