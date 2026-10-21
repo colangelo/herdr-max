@@ -69,6 +69,11 @@
 - [ ] 3.6 `TaskConflict` overlay with `m`, `t`, `e` and `Esc`.
   Tests: rendered layout, `conflict_overlay_resolves_through_server`
 - [ ] 3.7 Per action, the crash and replay tests of plan § 6, with worklink
+- [ ] 3.8 Done and not-doing keys on ac's own rows: the server runs
+  `asks.py task-answer … --via herdr --client <id>` with `NATS_URL`, `NATS_USER` and
+  `NATS_PASSWORD` removed from the child's env, so asks.py uses the relay file and never
+  herdr's read-only `herdr-<host>` credential; herdr never holds the relay credential
+  (#241 comment 24885, CONTEXT + infra). Test: `ask_answer_child_env_has_no_nats_vars`
 
 ## 4. Phase 5: todos become tasks
 
