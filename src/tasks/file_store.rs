@@ -9,14 +9,13 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
 
 use serde::{Deserialize, Serialize};
 
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 use super::store::{
-    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream,
+    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
 };
 
 const EXTENSION: &str = "json";
@@ -30,7 +29,7 @@ struct Stored {
 
 pub(crate) struct FileStore {
     dir: PathBuf,
-    watchers: Vec<(String, Sender<WatchEvent>)>,
+    watchers: Vec<(String, WatchSink)>,
 }
 
 impl FileStore {
@@ -83,17 +82,15 @@ impl FileStore {
         let Ok(Some((_, value))) = self.read(key) else {
             return;
         };
-        self.watchers.retain(|(prefix, sender)| {
+        self.watchers.retain(|(prefix, sink)| {
             if !key.starts_with(prefix.as_str()) {
                 return true;
             }
-            sender
-                .send(WatchEvent {
-                    key: StoreKey(key.to_owned()),
-                    rev,
-                    value: Some(value.clone()),
-                })
-                .is_ok()
+            sink(WatchEvent {
+                key: StoreKey(key.to_owned()),
+                rev,
+                value: Some(value.clone()),
+            })
         });
     }
 }
@@ -184,10 +181,9 @@ impl TaskStore for FileStore {
         Ok(found)
     }
 
-    fn watch(&mut self, prefix: &str) -> StoreResult<WatchStream> {
-        let (sender, receiver) = mpsc::channel();
-        self.watchers.push((prefix.to_owned(), sender));
-        Ok(receiver)
+    fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()> {
+        self.watchers.push((prefix.to_owned(), sink));
+        Ok(())
     }
 }
 
@@ -346,8 +342,20 @@ mod tests {
     fn a_watcher_sees_writes_under_its_prefix_only() {
         let scratch = Scratch::new();
         let mut store = FileStore::open(scratch.0.clone()).unwrap();
-        let tasks = store.watch("task.").unwrap();
-        let runs = store.watch("run.").unwrap();
+        let (task_sender, tasks) = std::sync::mpsc::channel();
+        let (run_sender, runs) = std::sync::mpsc::channel();
+        store
+            .watch(
+                "task.",
+                Box::new(move |event| task_sender.send(event).is_ok()),
+            )
+            .unwrap();
+        store
+            .watch(
+                "run.",
+                Box::new(move |event| run_sender.send(event).is_ok()),
+            )
+            .unwrap();
         let one = task("tk-1");
         let write = WriteId::generate();
         store

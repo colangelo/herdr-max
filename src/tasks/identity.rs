@@ -4,10 +4,6 @@
 use super::ids::HostId;
 use super::model::TaskError;
 
-/// The owner part used when no `[tasks] host_id` is set. Only the file
-/// backend may run on it: the key would not mean the same on another Mac.
-const LOCAL_HOST: &str = "local";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackendKind {
     File,
@@ -27,8 +23,7 @@ pub(crate) struct TaskIdentity {
 impl TaskIdentity {
     pub(crate) fn from_config(config: &crate::config::TasksConfig, session: Option<&str>) -> Self {
         Self {
-            host: HostId::new(&config.host_id)
-                .unwrap_or_else(|| HostId::new(LOCAL_HOST).expect("a valid host id")),
+            host: HostId::new(&config.host_id).unwrap_or_else(HostId::local),
             session: session
                 .unwrap_or(crate::session::DEFAULT_SESSION_NAME)
                 .to_owned(),

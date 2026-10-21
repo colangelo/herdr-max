@@ -16,7 +16,7 @@ use tokio::runtime::Runtime;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 use super::store::{
-    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream,
+    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
 };
 
 /// Where and as whom to connect.
@@ -154,19 +154,17 @@ impl TaskStore for KvStore {
         Ok(found)
     }
 
-    fn watch(&mut self, prefix: &str) -> StoreResult<WatchStream> {
-        let subject = format!("{prefix}>");
+    fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()> {
         let mut watch = self
             .runtime
             .block_on(async {
                 if prefix.is_empty() {
                     self.bucket.watch_all().await
                 } else {
-                    self.bucket.watch(subject).await
+                    self.bucket.watch(format!("{prefix}>")).await
                 }
             })
             .map_err(unavailable)?;
-        let (sender, receiver) = std::sync::mpsc::channel();
         self.runtime.spawn(async move {
             while let Some(item) = watch.next().await {
                 let Ok(entry) = item else { continue };
@@ -175,12 +173,12 @@ impl TaskStore for KvStore {
                     rev: Rev(entry.revision),
                     value: live(&entry).map(|(_, value)| value),
                 };
-                if sender.send(event).is_err() {
+                if !sink(event) {
                     break;
                 }
             }
         });
-        Ok(receiver)
+        Ok(())
     }
 }
 

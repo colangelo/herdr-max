@@ -30,5 +30,5 @@ pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
-pub(crate) use service::{StoreEvent, SubmitError, TaskService, WriteOutcome};
-pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream};
+pub(crate) use service::{Backoff, StoreEvent, SubmitError, TaskService, WriteOutcome};
+pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink};

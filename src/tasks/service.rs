@@ -1,25 +1,49 @@
 //! The store task and the server-side handle to it.
 //!
-//! A backend blocks, so one dedicated thread owns it and does every call. It
-//! reports back as [`StoreEvent`]s, which the app drains from its event
-//! channel before it handles the next API request. The API side only reads
-//! the cache and queues commands: it never waits on the store.
+//! A backend blocks, so one dedicated thread builds it, owns it and does every
+//! call. It reports back as [`StoreEvent`]s, which the app drains from its
+//! event channel before it handles the next API request. The API side only
+//! reads the cache and queues commands: it never waits on the store.
+//!
+//! Commands and watch changes share one channel, so the thread sleeps until
+//! there is something to do. If the thread ends, for any reason, the service
+//! learns it from a `Stopped` event and fails every write still pending.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use super::cache::TaskCache;
 use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::{Task, TaskError};
-use super::store::{StoreError, TaskStore, WatchEvent};
+use super::store::{StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 
-/// How often the store thread looks at its watch while no command arrives.
-const WATCH_POLL: Duration = Duration::from_millis(25);
+/// How long the thread waits before trying again to reach a store that is down.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Backoff {
+    pub initial: Duration,
+    pub max: Duration,
+}
 
-/// What the app asks the store thread to do.
-enum StoreCommand {
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(30),
+        }
+    }
+}
+
+impl Backoff {
+    fn next(self, current: Duration) -> Duration {
+        (current * 2).min(self.max)
+    }
+}
+
+/// A write for the store thread.
+enum WriteCommand {
     Create {
         key: TaskKey,
         doc: Box<Task>,
@@ -31,13 +55,19 @@ enum StoreCommand {
         expected: Rev,
         write: WriteId,
     },
+}
+
+/// Everything the store thread's one channel carries.
+enum Message {
+    Write(WriteCommand),
+    Watch(WatchEvent),
     Shutdown,
 }
 
 /// What the store thread reports.
 #[derive(Debug)]
 pub(crate) enum StoreEvent {
-    /// Everything the store held at start.
+    /// Everything the store held, read after the store was reached.
     Loaded(Vec<WatchEvent>),
     /// A change seen by the watch.
     Changed(WatchEvent),
@@ -46,8 +76,10 @@ pub(crate) enum StoreEvent {
         write: WriteId,
         outcome: WriteOutcome,
     },
-    /// The store failed in a way no write explains (for example, at start).
-    Failed(String),
+    /// The store cannot be reached or read right now; the thread keeps trying.
+    Degraded(String),
+    /// The thread has ended; nothing more will be applied or reported.
+    Stopped(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +95,7 @@ pub(crate) enum WriteOutcome {
     Exists {
         current: (Rev, Vec<u8>),
     },
-    /// The store could not be reached or failed; the write is not applied.
+    /// The write was not applied.
     Failed(String),
 }
 
@@ -89,7 +121,9 @@ impl SubmitError {
 pub(crate) struct TaskService {
     identity: Option<TaskIdentity>,
     cache: TaskCache,
-    commands: Option<Sender<StoreCommand>>,
+    commands: Option<Sender<Message>>,
+    /// Raised by the thread when it ends, after it let go of the store.
+    finished: Option<Receiver<()>>,
     /// Writes sent and not yet answered, by write id.
     pending: HashMap<WriteId, TaskKey>,
     /// Outcomes not yet taken, in arrival order.
@@ -107,6 +141,7 @@ impl TaskService {
             identity: None,
             cache: TaskCache::new(),
             commands: None,
+            finished: None,
             pending: HashMap::new(),
             outcomes: Vec::new(),
             failure: None,
@@ -122,19 +157,50 @@ impl TaskService {
         service
     }
 
-    /// Run `store` on its own thread. `emit` delivers each event to the app
-    /// and returns false once the app is gone, which ends the thread.
+    /// As [`Self::without_store`], with the reason the store is not usable.
+    pub(crate) fn unavailable(identity: TaskIdentity, reason: String) -> Self {
+        let mut service = Self::without_store(identity);
+        service.failure = Some(reason);
+        service
+    }
+
+    /// Build a store with `open` on a new thread and run it there. `open` is
+    /// tried again after a backoff while it answers `Unavailable`; any other
+    /// error ends the thread. `emit` delivers each event to the app and
+    /// returns false once the app is gone, which ends the thread.
     pub(crate) fn start(
-        store: Box<dyn TaskStore>,
+        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
         identity: TaskIdentity,
         emit: impl Fn(StoreEvent) -> bool + Send + 'static,
     ) -> std::io::Result<Self> {
-        let (commands, receiver) = mpsc::channel();
+        Self::start_with(open, identity, Backoff::default(), emit)
+    }
+
+    pub(crate) fn start_with(
+        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
+        identity: TaskIdentity,
+        backoff: Backoff,
+        emit: impl Fn(StoreEvent) -> bool + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let watch_sender = sender.clone();
         crate::thread_spawn::spawn_named("herdr-task-store", move || {
-            run_store(store, receiver, emit);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                run_store(open, receiver, watch_sender, backoff, &emit)
+            }));
+            let reason = match result {
+                Ok(reason) => reason,
+                Err(_) => Some("the task store thread panicked".to_owned()),
+            };
+            if let Some(reason) = reason {
+                emit(StoreEvent::Stopped(reason));
+            }
+            let _ = done_sender.send(());
         })?;
         let mut service = Self::without_store(identity);
-        service.commands = Some(commands);
+        service.commands = Some(sender);
+        service.finished = Some(done_receiver);
         Ok(service)
     }
 
@@ -163,16 +229,10 @@ impl TaskService {
     /// arrives later as a [`StoreEvent::Outcome`].
     pub(crate) fn submit_create(&mut self, task: &Task) -> Result<WriteId, SubmitError> {
         self.check_may_write(task)?;
-        task.validate().map_err(SubmitError::Refused)?;
-        self.cache
-            .check_pane_capacity(task)
-            .map_err(SubmitError::Refused)?;
-        let write = WriteId::generate();
-        let mut doc = task.clone();
-        doc.record_write(write.clone(), |id| self.pending.contains_key(id));
+        let (doc, write) = self.prepare(task)?;
         let key = doc.key();
         self.send(
-            StoreCommand::Create {
+            WriteCommand::Create {
                 key: key.clone(),
                 doc: Box::new(doc),
                 write: write.clone(),
@@ -189,16 +249,10 @@ impl TaskService {
         expected: Rev,
     ) -> Result<WriteId, SubmitError> {
         self.check_may_write(task)?;
-        task.validate().map_err(SubmitError::Refused)?;
-        self.cache
-            .check_pane_capacity(task)
-            .map_err(SubmitError::Refused)?;
-        let write = WriteId::generate();
-        let mut doc = task.clone();
-        doc.record_write(write.clone(), |id| self.pending.contains_key(id));
+        let (doc, write) = self.prepare(task)?;
         let key = doc.key();
         self.send(
-            StoreCommand::Update {
+            WriteCommand::Update {
                 key: key.clone(),
                 doc: Box::new(doc),
                 expected,
@@ -207,6 +261,18 @@ impl TaskService {
             write,
             key,
         )
+    }
+
+    /// Validate `task`, give it a fresh write id and record the id in its copy.
+    fn prepare(&self, task: &Task) -> Result<(Task, WriteId), SubmitError> {
+        task.validate().map_err(SubmitError::Refused)?;
+        self.cache
+            .check_pane_capacity(task)
+            .map_err(SubmitError::Refused)?;
+        let write = WriteId::generate();
+        let mut doc = task.clone();
+        doc.record_write(write.clone(), |id| self.pending.contains_key(id));
+        Ok((doc, write))
     }
 
     /// A write goes only to the store of the server that owns the task, and
@@ -223,30 +289,40 @@ impl TaskService {
 
     fn send(
         &mut self,
-        command: StoreCommand,
+        command: WriteCommand,
         write: WriteId,
         key: TaskKey,
     ) -> Result<WriteId, SubmitError> {
         let commands = self.commands.as_ref().ok_or(SubmitError::Disabled)?;
-        if commands.send(command).is_err() {
-            self.commands = None;
+        if commands.send(Message::Write(command)).is_err() {
+            self.mark_stopped("the task store thread is gone".to_owned());
             return Err(SubmitError::Stopped);
         }
         self.pending.insert(write.clone(), key);
         Ok(write)
     }
 
-    /// Take what the store thread reported. Returns whether the cache or the
-    /// pending set changed.
+    /// The thread is gone: nothing pending will ever be answered.
+    fn mark_stopped(&mut self, reason: String) {
+        self.commands = None;
+        self.failure = Some(reason.clone());
+        for (write, _) in self.pending.drain() {
+            self.outcomes
+                .push((write, WriteOutcome::Failed(reason.clone())));
+        }
+    }
+
+    /// Take what the store thread reported. Returns whether anything a reader
+    /// can see changed.
     pub(crate) fn apply(&mut self, event: StoreEvent) -> bool {
         match event {
             StoreEvent::Loaded(events) => {
                 self.loaded = true;
-                let mut changed = true;
+                self.failure = None;
                 for event in &events {
-                    changed |= self.cache.apply(event);
+                    self.cache.apply(event);
                 }
-                changed
+                true
             }
             StoreEvent::Changed(event) => self.cache.apply(&event),
             StoreEvent::Outcome { write, outcome } => {
@@ -254,8 +330,12 @@ impl TaskService {
                 self.outcomes.push((write, outcome));
                 known
             }
-            StoreEvent::Failed(message) => {
+            StoreEvent::Degraded(message) => {
                 self.failure = Some(message);
+                true
+            }
+            StoreEvent::Stopped(reason) => {
+                self.mark_stopped(reason);
                 true
             }
         }
@@ -265,75 +345,150 @@ impl TaskService {
     pub(crate) fn take_outcomes(&mut self) -> Vec<(WriteId, WriteOutcome)> {
         std::mem::take(&mut self.outcomes)
     }
+
+    /// Stop taking writes, let the thread finish what is queued, and wait for
+    /// it to let go of the store. Returns whether it did within `timeout`.
+    /// For a handoff: the replacement may open the store only after this.
+    pub(crate) fn quiesce(&mut self, timeout: Duration) -> bool {
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.send(Message::Shutdown);
+        }
+        match self.finished.take() {
+            Some(finished) => finished.recv_timeout(timeout).is_ok(),
+            None => true,
+        }
+    }
 }
 
 impl Drop for TaskService {
     fn drop(&mut self) {
         // Do not wait for the thread: a slow store must not hold up a quit.
         if let Some(commands) = &self.commands {
-            let _ = commands.send(StoreCommand::Shutdown);
+            let _ = commands.send(Message::Shutdown);
         }
     }
 }
 
+/// The thread body. Returns why it ended, or `None` for an orderly stop.
 fn run_store(
-    mut store: Box<dyn TaskStore>,
-    commands: mpsc::Receiver<StoreCommand>,
-    emit: impl Fn(StoreEvent) -> bool,
-) {
-    let watch = match store.watch("") {
-        Ok(watch) => watch,
-        Err(err) => {
-            emit(StoreEvent::Failed(format!("watch failed: {err:?}")));
-            return;
+    mut open: impl FnMut() -> StoreResult<Box<dyn TaskStore>>,
+    messages: Receiver<Message>,
+    watch_sender: Sender<Message>,
+    backoff: Backoff,
+    emit: &impl Fn(StoreEvent) -> bool,
+) -> Option<String> {
+    // Reach the store, trying again while it is only unreachable.
+    let mut wait = backoff.initial;
+    let mut store = loop {
+        match open() {
+            Ok(store) => break store,
+            Err(StoreError::Unavailable(why)) => {
+                if !emit(StoreEvent::Degraded(format!(
+                    "the task store is not reachable: {why}"
+                ))) {
+                    return None;
+                }
+                if pause(&messages, wait, emit) {
+                    return None;
+                }
+                wait = backoff.next(wait);
+            }
+            Err(err) => return Some(format!("cannot open the task store: {err:?}")),
         }
     };
-    match store.scan("") {
-        Ok(found) => {
-            let events = found
-                .into_iter()
-                .map(|(key, rev, value)| WatchEvent {
-                    key,
-                    rev,
-                    value: Some(value),
-                })
-                .collect();
-            if !emit(StoreEvent::Loaded(events)) {
-                return;
+
+    // Watch first, so nothing that lands during the scan is missed.
+    let sink: WatchSink = Box::new(move |event| watch_sender.send(Message::Watch(event)).is_ok());
+    if let Err(err) = store.watch("", sink) {
+        return Some(format!("cannot watch the task store: {err:?}"));
+    }
+    let mut wait = backoff.initial;
+    loop {
+        match store.scan("") {
+            Ok(found) => {
+                let events = found
+                    .into_iter()
+                    .map(|(key, rev, value)| WatchEvent {
+                        key,
+                        rev,
+                        value: Some(value),
+                    })
+                    .collect();
+                if !emit(StoreEvent::Loaded(events)) {
+                    return None;
+                }
+                break;
             }
-        }
-        Err(err) => {
-            if !emit(StoreEvent::Failed(format!("scan failed: {err:?}"))) {
-                return;
+            Err(err) => {
+                if !emit(StoreEvent::Degraded(format!(
+                    "cannot read the task store: {err:?}"
+                ))) {
+                    return None;
+                }
+                if pause(&messages, wait, emit) {
+                    return None;
+                }
+                wait = backoff.next(wait);
             }
         }
     }
-    loop {
-        while let Ok(event) = watch.try_recv() {
-            if !emit(StoreEvent::Changed(event)) {
-                return;
+
+    while let Ok(message) = messages.recv() {
+        match message {
+            Message::Shutdown => return None,
+            Message::Watch(event) => {
+                if !emit(StoreEvent::Changed(event)) {
+                    return None;
+                }
+            }
+            Message::Write(command) => {
+                let (write, outcome) = run_write(store.as_mut(), command);
+                if !emit(StoreEvent::Outcome { write, outcome }) {
+                    return None;
+                }
             }
         }
-        match commands.recv_timeout(WATCH_POLL) {
-            Ok(StoreCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
-            Ok(command) => {
-                let (write, outcome) = run_command(store.as_mut(), command);
+    }
+    // Every sender is gone: the service was dropped.
+    None
+}
+
+/// Wait `delay` for a stop. Writes that arrive meanwhile fail at once, since
+/// there is nothing to write to. Returns true when the thread should end.
+fn pause(
+    messages: &Receiver<Message>,
+    delay: Duration,
+    emit: &impl Fn(StoreEvent) -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + delay;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match messages.recv_timeout(left) {
+            Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => return true,
+            Err(RecvTimeoutError::Timeout) => return false,
+            Ok(Message::Watch(_)) => {}
+            Ok(Message::Write(command)) => {
+                let outcome = WriteOutcome::Failed("the task store is not connected".to_owned());
+                let write = match command {
+                    WriteCommand::Create { write, .. } | WriteCommand::Update { write, .. } => {
+                        write
+                    }
+                };
                 if !emit(StoreEvent::Outcome { write, outcome }) {
-                    return;
+                    return true;
                 }
             }
         }
     }
 }
 
-fn run_command(store: &mut dyn TaskStore, command: StoreCommand) -> (WriteId, WriteOutcome) {
+fn run_write(store: &mut dyn TaskStore, command: WriteCommand) -> (WriteId, WriteOutcome) {
     let (write, result) = match command {
-        StoreCommand::Create { key, doc, write } => {
+        WriteCommand::Create { key, doc, write } => {
             let result = store.create(&key, &doc, write.clone());
             (write, result)
         }
-        StoreCommand::Update {
+        WriteCommand::Update {
             key,
             doc,
             expected,
@@ -342,7 +497,6 @@ fn run_command(store: &mut dyn TaskStore, command: StoreCommand) -> (WriteId, Wr
             let result = store.update(&key, &doc, expected, write.clone());
             (write, result)
         }
-        StoreCommand::Shutdown => unreachable!("shutdown is handled by the loop"),
     };
     let outcome = match result {
         Ok(rev) => WriteOutcome::Applied { rev },
@@ -356,7 +510,7 @@ fn run_command(store: &mut dyn TaskStore, command: StoreCommand) -> (WriteId, Wr
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::mpsc::Receiver;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -364,45 +518,67 @@ mod tests {
     use crate::tasks::identity::{test_identity, BackendKind};
     use crate::tasks::ids::{HostId, TaskId};
     use crate::tasks::model::{Origin, Timestamp, Via};
-    use crate::tasks::store::{StoreKey, StoreResult, WatchStream};
+    use crate::tasks::store::StoreKey;
 
-    /// An in-memory store whose writes take `delay`.
-    struct SlowStore {
+    const FAST: Backoff = Backoff {
+        initial: Duration::from_millis(10),
+        max: Duration::from_millis(40),
+    };
+
+    /// An in-memory store with knobs for the ways a real one misbehaves.
+    struct FakeStore {
         /// How many writes reached the store.
-        writes: Arc<std::sync::atomic::AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        /// Set when the store is dropped, which is when a real one lets go.
+        released: Arc<AtomicBool>,
         delay: Duration,
+        panic_on_write: bool,
+        scan_failures: Arc<AtomicUsize>,
         docs: BTreeMap<String, (Rev, Vec<u8>)>,
-        watchers: Vec<Sender<WatchEvent>>,
+        sinks: Vec<WatchSink>,
     }
 
-    impl SlowStore {
+    impl FakeStore {
         fn new(delay: Duration) -> Self {
             Self {
                 writes: Arc::default(),
+                released: Arc::default(),
                 delay,
+                panic_on_write: false,
+                scan_failures: Arc::default(),
                 docs: BTreeMap::new(),
-                watchers: Vec::new(),
+                sinks: Vec::new(),
             }
         }
 
         fn put(&mut self, key: &TaskKey, doc: &Task, rev: Rev) {
             let bytes = serde_json::to_vec(doc).unwrap();
             self.docs.insert(key.to_string(), (rev, bytes.clone()));
-            for watcher in &self.watchers {
-                let _ = watcher.send(WatchEvent {
+            self.sinks.retain(|sink| {
+                sink(WatchEvent {
                     key: StoreKey::from(key),
                     rev,
                     value: Some(bytes.clone()),
-                });
-            }
+                })
+            });
+        }
+
+        fn before_write(&self) {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_write, "the store broke");
+            std::thread::sleep(self.delay);
         }
     }
 
-    impl TaskStore for SlowStore {
+    impl Drop for FakeStore {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl TaskStore for FakeStore {
         fn create(&mut self, key: &TaskKey, doc: &Task, _write: WriteId) -> StoreResult<Rev> {
-            self.writes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(self.delay);
+            self.before_write();
             if let Some(current) = self.docs.get(&key.to_string()) {
                 return Err(StoreError::AlreadyExists {
                     current: current.clone(),
@@ -419,9 +595,7 @@ mod tests {
             expected: Rev,
             _write: WriteId,
         ) -> StoreResult<Rev> {
-            self.writes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(self.delay);
+            self.before_write();
             match self.docs.get(&key.to_string()) {
                 Some((rev, _)) if *rev == expected => {
                     let next = Rev(rev.0 + 1);
@@ -439,6 +613,15 @@ mod tests {
         }
 
         fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>> {
+            if self
+                .scan_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(StoreError::Io("the disk hiccuped".into()));
+            }
             Ok(self
                 .docs
                 .iter()
@@ -447,20 +630,19 @@ mod tests {
                 .collect())
         }
 
-        fn watch(&mut self, _prefix: &str) -> StoreResult<WatchStream> {
-            let (sender, receiver) = mpsc::channel();
-            self.watchers.push(sender);
-            Ok(receiver)
+        fn watch(&mut self, _prefix: &str, sink: WatchSink) -> StoreResult<()> {
+            self.sinks.push(sink);
+            Ok(())
         }
     }
 
-    fn task(id: &str) -> Task {
+    fn task_owned_by(host: &str, id: &str) -> Task {
         Task::new(
-            HostId::new("m4m").unwrap(),
+            HostId::new(host).unwrap(),
             TaskId::new(id).unwrap(),
             "a task",
             Origin {
-                host: "m4m".into(),
+                host: host.into(),
                 by: "x".into(),
                 via: Via::Cli,
             },
@@ -469,14 +651,33 @@ mod tests {
         .unwrap()
     }
 
-    fn start(delay: Duration) -> (TaskService, Receiver<StoreEvent>) {
+    fn task(id: &str) -> Task {
+        task_owned_by("m4m", id)
+    }
+
+    fn one_shot(store: FakeStore) -> impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send {
+        let mut store = Some(store);
+        move || {
+            store
+                .take()
+                .map(|store| Box::new(store) as Box<dyn TaskStore>)
+                .ok_or_else(|| StoreError::Io("opened twice".into()))
+        }
+    }
+
+    fn start_with_store(store: FakeStore) -> (TaskService, Receiver<StoreEvent>) {
+        start_with_opener(one_shot(store), test_identity("m4m"))
+    }
+
+    fn start_with_opener(
+        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
+        identity: TaskIdentity,
+    ) -> (TaskService, Receiver<StoreEvent>) {
         let (events, received) = mpsc::channel();
         let events = Mutex::new(events);
-        let service = TaskService::start(
-            Box::new(SlowStore::new(delay)),
-            test_identity("m4m"),
-            move |event| events.lock().unwrap().send(event).is_ok(),
-        )
+        let service = TaskService::start_with(open, identity, FAST, move |event| {
+            events.lock().unwrap().send(event).is_ok()
+        })
         .unwrap();
         (service, received)
     }
@@ -500,13 +701,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn slow_store_never_blocks_api() {
-        let (mut service, received) = start(Duration::from_millis(1500));
-        // Wait for the initial load, so the cache is ready.
+    fn loaded(store: FakeStore) -> (TaskService, Receiver<StoreEvent>) {
+        let (mut service, received) = start_with_store(store);
         pump(&mut service, &received, Duration::from_secs(5), |service| {
             service.is_loaded()
         });
+        (service, received)
+    }
+
+    #[test]
+    fn slow_store_never_blocks_api() {
+        let (mut service, received) = loaded(FakeStore::new(Duration::from_millis(1500)));
 
         // The write answers at once, though the store takes 1.5 s to do it.
         let one = task("tk-1");
@@ -533,9 +738,8 @@ mod tests {
             Duration::from_secs(10),
             |service| service.pending_count() == 0 && service.cache().len() == 1,
         );
-        let outcomes = service.take_outcomes();
         assert_eq!(
-            outcomes,
+            service.take_outcomes(),
             vec![(write, WriteOutcome::Applied { rev: Rev(1) })]
         );
         let cached = service.cache().get(&one.key()).unwrap();
@@ -545,7 +749,7 @@ mod tests {
 
     #[test]
     fn a_stale_update_comes_back_as_a_conflict_not_an_error() {
-        let (mut service, received) = start(Duration::ZERO);
+        let (mut service, received) = loaded(FakeStore::new(Duration::ZERO));
         let one = task("tk-1");
         service.submit_create(&one).unwrap();
         pump(&mut service, &received, Duration::from_secs(5), |service| {
@@ -583,76 +787,42 @@ mod tests {
             Err(SubmitError::Disabled)
         );
 
-        let (mut service, _received) = start(Duration::ZERO);
+        let store = FakeStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        let (mut service, _received) = start_with_store(store);
         let mut long = task("tk-1");
         long.title = "x".repeat(201);
         let err = service.submit_create(&long).unwrap_err();
         assert_eq!(err.code(), "task_title_too_long");
         assert_eq!(service.pending_count(), 0);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn the_initial_load_fills_the_cache() {
-        let mut store = SlowStore::new(Duration::ZERO);
+        let mut store = FakeStore::new(Duration::ZERO);
         let one = task("tk-1");
         store.put(&one.key(), &one, Rev(4));
-        let (events, received) = mpsc::channel();
-        let events = Mutex::new(events);
-        let mut service = TaskService::start(Box::new(store), test_identity("m4m"), move |event| {
-            events.lock().unwrap().send(event).is_ok()
-        })
-        .unwrap();
-        pump(&mut service, &received, Duration::from_secs(5), |service| {
-            service.cache().len() == 1
-        });
+        let (service, _received) = loaded(store);
         assert_eq!(service.cache().get(&one.key()).unwrap().rev, Rev(4));
     }
 
     #[test]
     fn dropping_the_service_stops_the_thread_without_waiting_for_it() {
-        let (events, received) = mpsc::channel();
-        let events = Mutex::new(events);
-        let service = TaskService::start(
-            Box::new(SlowStore::new(Duration::from_secs(30))),
-            test_identity("m4m"),
-            move |event| events.lock().unwrap().send(event).is_ok(),
-        )
-        .unwrap();
+        let (service, received) = start_with_store(FakeStore::new(Duration::from_secs(30)));
         let started = Instant::now();
         drop(service);
         assert!(started.elapsed() < Duration::from_millis(250));
         drop(received);
     }
-    fn owned_by(host: &str, id: &str) -> Task {
-        Task::new(
-            HostId::new(host).unwrap(),
-            TaskId::new(id).unwrap(),
-            "a task",
-            Origin {
-                host: host.into(),
-                by: "x".into(),
-                via: Via::Cli,
-            },
-            Timestamp("2026-10-21T20:00:00Z".into()),
-        )
-        .unwrap()
-    }
 
     #[test]
     fn foreign_task_write_refused_not_queued() {
-        let store = SlowStore::new(Duration::ZERO);
+        let store = FakeStore::new(Duration::ZERO);
         let writes = Arc::clone(&store.writes);
-        let (events, received) = mpsc::channel();
-        let events = Mutex::new(events);
-        let mut service = TaskService::start(Box::new(store), test_identity("m4m"), move |event| {
-            events.lock().unwrap().send(event).is_ok()
-        })
-        .unwrap();
-        pump(&mut service, &received, Duration::from_secs(5), |service| {
-            service.is_loaded()
-        });
+        let (mut service, received) = loaded(store);
 
-        let theirs = owned_by("ac-mbm5", "tk-1");
+        let theirs = task_owned_by("ac-mbm5", "tk-1");
         for result in [
             service.submit_create(&theirs),
             service.submit_update(&theirs, Rev(1)),
@@ -669,11 +839,11 @@ mod tests {
         assert_eq!(service.pending_count(), 0, "a refused write is not queued");
 
         // The own host's task goes through, and only it reaches the store.
-        service.submit_create(&owned_by("m4m", "tk-2")).unwrap();
+        service.submit_create(&task("tk-2")).unwrap();
         pump(&mut service, &received, Duration::from_secs(5), |service| {
             service.pending_count() == 0
         });
-        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -687,7 +857,7 @@ mod tests {
         // No store is started for it, so no credential is read, and the answer
         // names the bus session rather than saying tasks are off.
         let mut service = TaskService::without_store(throwaway.clone());
-        let err = service.submit_create(&owned_by("m4m", "tk-1")).unwrap_err();
+        let err = service.submit_create(&task("tk-1")).unwrap_err();
         assert_eq!(err.code(), "task_not_bus_session");
         assert_eq!(
             err,
@@ -710,5 +880,153 @@ mod tests {
         };
         assert!(own_file.may_use_bus());
         assert_eq!(own_file.check_write(&HostId::new("m4m").unwrap()), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn the_store_is_built_on_its_own_thread_even_when_started_inside_a_runtime() {
+        // The app is built inside a runtime. A backend that blocks on a runtime
+        // of its own (the kv one does) would panic if it were built here.
+        let built_on = Arc::new(Mutex::new(None));
+        let record = Arc::clone(&built_on);
+        let (mut service, received) = start_with_opener(
+            move || {
+                *record.lock().unwrap() = std::thread::current().name().map(str::to_owned);
+                let inner = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .map_err(|err| StoreError::Io(err.to_string()))?;
+                inner.block_on(async {});
+                Ok(Box::new(FakeStore::new(Duration::ZERO)) as Box<dyn TaskStore>)
+            },
+            test_identity("m4m"),
+        );
+        let deadline = Duration::from_secs(5);
+        tokio::task::spawn_blocking(move || {
+            pump(&mut service, &received, deadline, |service| {
+                service.is_loaded()
+            });
+            service
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            built_on.lock().unwrap().as_deref(),
+            Some("herdr-task-store")
+        );
+    }
+
+    #[test]
+    fn an_unreachable_store_is_retried_and_writes_meanwhile_fail_fast() {
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&tries);
+        let mut store = Some(FakeStore::new(Duration::ZERO));
+        let (mut service, received) = start_with_opener(
+            move || {
+                if counted.fetch_add(1, Ordering::SeqCst) < 3 {
+                    return Err(StoreError::Unavailable("the network is not up".into()));
+                }
+                Ok(Box::new(store.take().unwrap()) as Box<dyn TaskStore>)
+            },
+            test_identity("m4m"),
+        );
+
+        // While it cannot connect the service says why, and refuses to pretend.
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.failure().is_some()
+        });
+        assert!(service.failure().unwrap().contains("not reachable"));
+        let write = service.submit_create(&task("tk-1")).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        let outcomes = service.take_outcomes();
+        assert_eq!(outcomes[0].0, write);
+        assert!(
+            matches!(&outcomes[0].1, WriteOutcome::Failed(why) if why.contains("not connected")),
+            "{outcomes:?}"
+        );
+
+        // Once the store answers, it loads and the failure clears.
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+        assert_eq!(service.failure(), None);
+        assert!(tries.load(Ordering::SeqCst) >= 4);
+    }
+
+    #[test]
+    fn a_failed_first_scan_is_retried_not_left_empty() {
+        let mut store = FakeStore::new(Duration::ZERO);
+        let one = task("tk-1");
+        store.put(&one.key(), &one, Rev(2));
+        store.scan_failures.store(2, Ordering::SeqCst);
+        let (service, _received) = loaded(store);
+        assert_eq!(service.cache().get(&one.key()).unwrap().rev, Rev(2));
+    }
+
+    #[test]
+    fn a_dead_store_thread_is_noticed_and_fails_every_pending_write() {
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.panic_on_write = true;
+        let (mut service, received) = loaded(store);
+        let first = service.submit_create(&task("tk-1")).unwrap();
+        let second = service.submit_create(&task("tk-2")).unwrap();
+
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            !service.is_running()
+        });
+        assert_eq!(service.pending_count(), 0);
+        assert!(service.failure().unwrap().contains("panicked"));
+        let failed: Vec<WriteId> = service
+            .take_outcomes()
+            .into_iter()
+            .inspect(|(_, outcome)| assert!(matches!(outcome, WriteOutcome::Failed(_))))
+            .map(|(write, _)| write)
+            .collect();
+        assert!(failed.contains(&first) && failed.contains(&second));
+        assert_eq!(
+            service.submit_create(&task("tk-3")).unwrap_err().code(),
+            "tasks_disabled",
+            "a service whose thread died takes no more writes"
+        );
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_opened_stops_the_service_with_the_reason() {
+        let (mut service, received) = start_with_opener(
+            || Err(StoreError::Io("the directory is locked".into())),
+            test_identity("m4m"),
+        );
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            !service.is_running()
+        });
+        assert!(service.failure().unwrap().contains("locked"));
+    }
+
+    #[test]
+    fn quiesce_finishes_queued_writes_and_returns_only_after_the_store_is_released() {
+        let store = FakeStore::new(Duration::from_millis(100));
+        let writes = Arc::clone(&store.writes);
+        let released = Arc::clone(&store.released);
+        let (mut service, _received) = loaded(store);
+        service.submit_create(&task("tk-1")).unwrap();
+        service.submit_create(&task("tk-2")).unwrap();
+
+        assert!(service.quiesce(Duration::from_secs(5)));
+        assert_eq!(writes.load(Ordering::SeqCst), 2, "queued writes finished");
+        assert!(released.load(Ordering::SeqCst), "the store was let go");
+        assert_eq!(
+            service.submit_create(&task("tk-3")).unwrap_err().code(),
+            "tasks_disabled"
+        );
+    }
+
+    #[test]
+    fn quiesce_gives_up_on_a_store_that_does_not_answer() {
+        let store = FakeStore::new(Duration::from_secs(3));
+        let (mut service, _received) = loaded(store);
+        service.submit_create(&task("tk-1")).unwrap();
+        let started = Instant::now();
+        assert!(!service.quiesce(Duration::from_millis(200)));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

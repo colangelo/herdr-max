@@ -4,8 +4,6 @@
 //! Every call blocks, so only the store task calls a backend; the API handler
 //! never does (it answers from the cache).
 
-use std::sync::mpsc::Receiver;
-
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 
@@ -42,7 +40,9 @@ pub(crate) struct WatchEvent {
     pub value: Option<Vec<u8>>,
 }
 
-pub(crate) type WatchStream = Receiver<WatchEvent>;
+/// Where a backend delivers watch events. Returns false once nobody listens,
+/// which tells the backend to drop the watch.
+pub(crate) type WatchSink = Box<dyn Fn(WatchEvent) -> bool + Send + 'static>;
 
 /// Whether the document in `current` already holds `write` in its
 /// `last_writes`: an earlier try of the same write landed and only its
@@ -74,6 +74,6 @@ pub(crate) trait TaskStore: Send + 'static {
     /// Every key that starts with `prefix`, with its revision and document.
     fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>>;
 
-    /// Changes under `prefix` from now on.
-    fn watch(&mut self, prefix: &str) -> StoreResult<WatchStream>;
+    /// Report every change under `prefix` from now on to `sink`.
+    fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()>;
 }

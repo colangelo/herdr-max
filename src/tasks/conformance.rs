@@ -38,7 +38,10 @@ fn title_of(bytes: &[u8]) -> String {
 
 /// Run every case on `store`, whose keys under `task.` start out empty.
 pub(super) fn run(store: &mut dyn TaskStore) {
-    let watch = store.watch("task.").expect("a watch starts");
+    let (sender, watch) = std::sync::mpsc::channel();
+    store
+        .watch("task.", Box::new(move |event| sender.send(event).is_ok()))
+        .expect("a watch starts");
 
     // Create, read back, and refuse a second create by another write.
     let one = task("tk-conf-1", "first");

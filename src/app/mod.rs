@@ -230,21 +230,23 @@ fn start_task_service(
         return crate::tasks::TaskService::without_store(identity);
     }
     let dir = crate::session::data_dir().join("tasks").join("store");
-    let store = match crate::tasks::FileStore::open(dir.clone()) {
-        Ok(store) => store,
-        Err(err) => {
-            tracing::warn!(dir = %dir.display(), error = ?err, "cannot open the task store; tasks are off");
-            return crate::tasks::TaskService::without_store(identity);
-        }
-    };
     let tx = event_tx.clone();
-    match crate::tasks::TaskService::start(Box::new(store), identity.clone(), move |event| {
-        tx.blocking_send(AppEvent::TaskStore(event)).is_ok()
-    }) {
+    let started = crate::tasks::TaskService::start(
+        move || {
+            crate::tasks::FileStore::open(dir.clone())
+                .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
+        },
+        identity.clone(),
+        move |event| tx.blocking_send(AppEvent::TaskStore(event)).is_ok(),
+    );
+    match started {
         Ok(service) => service,
         Err(err) => {
             tracing::warn!(error = %err, "cannot start the task store thread; tasks are off");
-            crate::tasks::TaskService::without_store(identity)
+            crate::tasks::TaskService::unavailable(
+                identity,
+                format!("cannot start the task store thread: {err}"),
+            )
         }
     }
 }

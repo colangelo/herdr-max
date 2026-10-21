@@ -28,6 +28,11 @@ impl HostId {
         is_valid_host_id(value).then(|| Self(value.to_owned()))
     }
 
+    /// The owner name of a server with no `[tasks] host_id`.
+    pub(crate) fn local() -> Self {
+        Self("local".to_owned())
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -48,16 +53,21 @@ pub(crate) struct TaskId(String);
 impl TaskId {
     pub(crate) fn new(value: &str) -> Option<Self> {
         let rest = value.strip_prefix("tk-")?;
+        // Lowercase only: on a case-insensitive disk `tk-ABC` and `tk-abc`
+        // would be one file.
         let valid = !rest.is_empty()
             && value.len() <= TASK_ID_MAX_BYTES
             && value
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
         valid.then(|| Self(value.to_owned()))
     }
 
     pub(crate) fn generate() -> Self {
-        Self(format!("tk-{}", crate::ulid::new_ulid()))
+        Self(format!(
+            "tk-{}",
+            crate::ulid::new_ulid().to_ascii_lowercase()
+        ))
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -157,12 +167,12 @@ mod tests {
 
     #[test]
     fn task_keys_round_trip_and_refuse_bad_parts() {
-        let key: TaskKey = "task.ac-mbm5.tk-01J0".parse().unwrap();
+        let key: TaskKey = "task.ac-mbm5.tk-01j0".parse().unwrap();
         assert_eq!(key.host.as_str(), "ac-mbm5");
-        assert_eq!(key.id.as_str(), "tk-01J0");
-        assert_eq!(key.to_string(), "task.ac-mbm5.tk-01J0");
+        assert_eq!(key.id.as_str(), "tk-01j0");
+        assert_eq!(key.to_string(), "task.ac-mbm5.tk-01j0");
         let json = serde_json::to_string(&key).unwrap();
-        assert_eq!(json, "\"task.ac-mbm5.tk-01J0\"");
+        assert_eq!(json, "\"task.ac-mbm5.tk-01j0\"");
         assert_eq!(serde_json::from_str::<TaskKey>(&json).unwrap(), key);
 
         for bad in [
@@ -173,6 +183,7 @@ mod tests {
             "task.m4m.1",
             "task..tk-1",
             "task.m4m.tk-",
+            "task.m4m.tk-ABC",
         ] {
             assert!(bad.parse::<TaskKey>().is_err(), "{bad}");
         }
