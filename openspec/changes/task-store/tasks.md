@@ -18,7 +18,7 @@
 
 ## 2. Phase 2: the store and the read-only panel
 
-- [ ] 2.1 `src/tasks/`: `Task`, `TaskKey`, `TaskStore` trait, `TaskCache`. Tests:
+- [x] 2.1 `src/tasks/`: `Task`, `TaskKey`, `TaskStore` trait, `TaskCache`. Tests:
   `task_record_limits`, `status_machine_refuses_bad_moves`
 - [ ] 2.2 The `file` backend under the session data dir, with per-key revisions.
   Test: `file_store_compare_and_set_conflicts`

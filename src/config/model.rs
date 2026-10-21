@@ -1754,7 +1754,7 @@ impl TasksConfig {
     /// checked whenever it is set; the `kv` backend also needs one, and a
     /// `bus_session`.
     pub fn check(&self) -> Result<(), String> {
-        if !self.host_id.is_empty() && !is_valid_host_id(&self.host_id) {
+        if !self.host_id.is_empty() && !crate::tasks::is_valid_host_id(&self.host_id) {
             return Err(format!(
                 "tasks.host_id {:?} must use lowercase letters, digits and '-' (at most 63, not starting with '-')",
                 self.host_id
@@ -1770,15 +1770,6 @@ impl TasksConfig {
         }
         Ok(())
     }
-}
-
-fn is_valid_host_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && !value.starts_with('-')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Sending a message to a session from the command bar.

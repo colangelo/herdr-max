@@ -1,0 +1,22 @@
+//! The task store (fork issue 241): the record, its limits and status machine,
+//! the `TaskStore` trait the backends implement, and the server's cache.
+//!
+//! Plain data, testable without a bus, a disk or a runtime. The store task
+//! that drives a backend and the API that reads the cache come later; until
+//! they exist nothing outside the tests calls this module.
+// The store task and the API (tasks 2.3 and 2.10) are the first callers of these
+// types and their re-exports; drop the allow when they land.
+#![allow(dead_code, unused_imports)]
+
+mod cache;
+mod ids;
+mod model;
+mod store;
+
+pub(crate) use cache::{CachedTask, TaskCache};
+pub(crate) use ids::{is_valid_host_id, HostId, Rev, TaskId, TaskKey, WriteId};
+pub(crate) use model::{
+    Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
+    PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
+};
+pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream};
