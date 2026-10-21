@@ -2233,6 +2233,90 @@ mod tests {
         assert!(restored_terminal_agent_session(Some(&session), true).is_none());
     }
 
+    /// `session-2e82664c.json` is a session in the format saved at herdr
+    /// 2e82664c, before panes carried `pane_key` and `run_id`. It must load, save
+    /// back without those fields while they are empty, and give each pane a key
+    /// when it is restored.
+    #[tokio::test]
+    async fn session_file_from_2e82664c_loads_unchanged() {
+        let fixture = include_str!("../../tests/fixtures/session/session-2e82664c.json");
+        let mut snapshot = super::super::snapshot::parse_snapshot(fixture)
+            .expect("a session saved before pane_key must load");
+
+        let original: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let saved = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            saved, original,
+            "saving an old session back must add no field while the new ones are empty"
+        );
+        let saved_text = saved.to_string();
+        assert!(!saved_text.contains("pane_key"), "{saved_text}");
+        assert!(!saved_text.contains("run_id"), "{saved_text}");
+
+        // Restore keeps what the file said and makes a key for every pane.
+        let cwd = std::env::current_dir().unwrap();
+        for workspace in &mut snapshot.workspaces {
+            workspace.identity_cwd = cwd.clone();
+            for tab in &mut workspace.tabs {
+                for pane in tab.panes.values_mut() {
+                    pane.cwd = cwd.clone();
+                }
+            }
+        }
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let panes: Vec<_> = workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .collect();
+        assert_eq!(panes.len(), 3);
+        let keys: HashSet<&str> = panes
+            .iter()
+            .map(|pane| terminals[&pane.attached_terminal_id].pane_key.as_str())
+            .collect();
+        assert_eq!(keys.len(), 3, "every pane has its own key");
+        assert!(keys.iter().all(|key| crate::ulid::is_ulid(key)));
+        assert!(panes
+            .iter()
+            .all(|pane| terminals[&pane.attached_terminal_id].run_id.is_none()));
+        let todo_texts: Vec<&str> = terminals
+            .values()
+            .flat_map(|terminal| terminal.todos().iter().map(|todo| todo.text.as_str()))
+            .collect();
+        assert_eq!(todo_texts.len(), 2, "{todo_texts:?}");
+
+        // The next save writes those keys, so they outlive the next restart.
+        let recaptured = super::super::snapshot::capture(
+            &workspaces,
+            &terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Some(0),
+            0,
+            None,
+        );
+        let saved_keys: HashSet<String> = recaptured
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| pane.pane_key.clone())
+            .collect();
+        assert_eq!(saved_keys.len(), 3);
+    }
+
     #[tokio::test]
     async fn failed_cold_restore_preserves_panes_and_saved_directories() {
         for missing_shell in [false, true] {

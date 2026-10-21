@@ -1,0 +1,132 @@
+{
+  "version": 3,
+  "workspaces": [
+    {
+      "id": "wone",
+      "custom_name": "herdr",
+      "identity_cwd": "/home/test/projects/herdr",
+      "pin_order": 1,
+      "public_pane_numbers": {
+        "1": 1,
+        "2": 2,
+        "3": 3
+      },
+      "next_public_pane_number": 4,
+      "public_tab_numbers": [
+        1,
+        2
+      ],
+      "next_public_tab_number": 3,
+      "tabs": [
+        {
+          "custom_name": "work",
+          "layout": {
+            "Split": {
+              "direction": "Horizontal",
+              "ratio": 0.5,
+              "first": {
+                "Pane": 1
+              },
+              "second": {
+                "Pane": 2
+              }
+            }
+          },
+          "panes": {
+            "1": {
+              "cwd": "/home/test/projects/herdr",
+              "label": "build",
+              "agent_name": "herdr-wrk",
+              "managed_agent_kind": "claude",
+              "agent_session": {
+                "source": "herdr:claude",
+                "agent": "claude",
+                "kind": "id",
+                "value": "9b54318e-3f33-4acc-9827-92470f540d36"
+              },
+              "agent_resume": {
+                "source": "herdr:claude",
+                "agent": "claude",
+                "argv": [
+                  "claude",
+                  "--resume",
+                  "9b54318e-3f33-4acc-9827-92470f540d36"
+                ]
+              },
+              "agent_launch": {
+                "agent": "claude",
+                "flags": [
+                  "--model",
+                  "sonnet"
+                ],
+                "started_at_ms": 1790000000000
+              },
+              "launch_argv": [
+                "claude",
+                "--model",
+                "sonnet"
+              ],
+              "todos": [
+                {
+                  "id": 1,
+                  "text": "finish the store",
+                  "done": false,
+                  "priority": "high",
+                  "link_pane": 2,
+                  "link_label": "tests",
+                  "created_at_unix": 1790000001,
+                  "updated_at_unix": 1790000002
+                },
+                {
+                  "id": 2,
+                  "text": "ship the beta",
+                  "done": true,
+                  "priority": "normal",
+                  "created_at_unix": 1790000003,
+                  "updated_at_unix": 1790000004
+                }
+              ],
+              "next_todo_id": 3,
+              "last_input_at_ms": 1790000005123,
+              "pin_order": 1,
+              "former_public_ids": [
+                "wtwo:p1"
+              ]
+            },
+            "2": {
+              "cwd": "/home/test/projects/herdr",
+              "label": "tests"
+            }
+          },
+          "zoomed": false,
+          "focused": 1,
+          "root_pane": 1
+        },
+        {
+          "custom_name": null,
+          "layout": {
+            "Pane": 3
+          },
+          "panes": {
+            "3": {
+              "cwd": "/home/test/projects/herdr/docs"
+            }
+          },
+          "zoomed": false,
+          "focused": 3,
+          "root_pane": 3
+        }
+      ],
+      "active_tab": 0
+    }
+  ],
+  "active": 0,
+  "selected": 0,
+  "sidebar_width": 28,
+  "sidebar_section_split": 0.5,
+  "collapsed_space_keys": [],
+  "last_client_size": [
+    200,
+    50
+  ]
+}

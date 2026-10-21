@@ -11,7 +11,7 @@
 - [x] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
   that the default build links no NATS crate. Test: `default_build_has_no_nats`
   (cargo tree)
-- [ ] 1.5 Old session files load, and new optional fields are skipped when empty.
+- [x] 1.5 Old session files load, and new optional fields are skipped when empty.
   Test: `session_file_from_2e82664c_loads_unchanged`
 - [ ] 1.6 Ship as a beta, install on mbm5 first, and confirm every pane has a saved
   `pane_key` on both Macs. Proof: `herdr-beta pane list --json` shows them
