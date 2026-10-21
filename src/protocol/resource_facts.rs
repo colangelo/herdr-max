@@ -201,6 +201,47 @@ mod tests {
         .unwrap();
         assert!(old.pane_tasks.is_none());
 
+        // An endpoint from before the fact: a copy of the struct as it was,
+        // which does not know `pane_tasks`, reads what the new server sends.
+        #[derive(Debug, Default, Deserialize)]
+        struct BeforeTasks {
+            #[serde(default)]
+            pane_todos: Option<BTreeMap<String, ClientPaneTodoSummary>>,
+            #[serde(default)]
+            workspace_pins: Option<BTreeMap<String, u64>>,
+        }
+        let new_server = serde_json::to_value(ClientShellResourceFacts {
+            pane_todos: Some(
+                [(
+                    "pane".to_owned(),
+                    ClientPaneTodoSummary {
+                        total: 1,
+                        open: 1,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            ),
+            pane_tasks: Some(
+                [(
+                    "pane".to_owned(),
+                    ClientPaneTaskSummary {
+                        open: 3,
+                        pending: 1,
+                        conflicts: 0,
+                        revision: 9,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(new_server.get("pane_tasks").is_some());
+        let old: BeforeTasks = serde_json::from_value(new_server).unwrap();
+        assert_eq!(old.pane_todos.unwrap()["pane"].open, 1);
+        assert!(old.workspace_pins.is_none());
+
         // A server with no tasks writes the same JSON an older server did.
         let json = serde_json::to_value(ClientShellResourceFacts::default()).unwrap();
         assert!(json.get("pane_tasks").is_none());

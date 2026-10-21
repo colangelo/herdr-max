@@ -5,7 +5,7 @@
 //! arrives later as `task.changed`.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
@@ -249,7 +249,8 @@ impl App {
     /// One task as the API shows it, with what the cache knows beside it.
     fn task_info(&self, rev: Rev, task: &Task, context: &InfoContext) -> TaskInfo {
         let key = task.key();
-        let derived = crate::tasks::derive(task, self.tasks.runs(), |_| AskRow::Open, context.now);
+        let derived =
+            crate::tasks::derive(task, self.tasks.runs(), |_| AskRow::Unknown, context.now);
         TaskInfo {
             key: key.to_string(),
             id: task.id.to_string(),
@@ -421,7 +422,7 @@ impl App {
     }
 
     fn answer_write(
-        &self,
+        &mut self,
         id: String,
         result: Result<WriteId, SubmitError>,
         rev: Rev,
@@ -429,6 +430,8 @@ impl App {
     ) -> String {
         match result {
             Ok(write) => {
+                // The pane's counts moved with the write taken.
+                self.wake_for_task_counts();
                 let context = self.task_info_context();
                 encode_success(
                     id,
@@ -722,32 +725,46 @@ impl App {
         let Some(wait) = self.tasks.next_status_deadline() else {
             return;
         };
-        let now = Instant::now();
+        let now = SystemTime::now();
         let due = now + wait;
-        // An earlier timer that is still to fire covers this one: it re-arms.
+        // An earlier deadline the timer was already given covers this one: it
+        // fires, and the next arm sets the later one.
         if self
-            .task_status_timer
+            .task_timer_deadline
             .is_some_and(|armed| armed > now && armed <= due)
         {
             return;
         }
-        self.task_status_timer = Some(due);
-        let tx = self.event_tx.clone();
-        let generation = self.tasks.generation();
-        let spawned = crate::thread_spawn::spawn_named("herdr-task-timer", move || {
-            std::thread::sleep(wait);
-            let _ = tx.blocking_send(crate::events::AppEvent::TaskStatusDue { generation });
-        });
-        if let Err(err) = spawned {
-            tracing::warn!(%err, "cannot start the task status timer");
-            self.task_status_timer = None;
+        if self.task_timer.is_none() {
+            match spawn_task_timer(self.event_tx.clone()) {
+                Ok(timer) => self.task_timer = Some(timer),
+                Err(err) => {
+                    tracing::warn!(%err, "cannot start the task status timer");
+                    return;
+                }
+            }
+        }
+        if let Some(timer) = &self.task_timer {
+            if timer.send((self.tasks.generation(), due)).is_ok() {
+                self.task_timer_deadline = Some(due);
+            } else {
+                self.task_timer = None;
+            }
+        }
+    }
+
+    /// Tell the clients that a pane's task counts moved.
+    pub(super) fn wake_for_task_counts(&mut self) {
+        if self.tasks.take_pane_counts_changed() {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
         }
     }
 
     /// The timer fired: tell subscribers which tasks changed their shown status
     /// with the clock alone, and arm the next one.
     pub(super) fn task_status_timer_fired(&mut self) {
-        self.task_status_timer = None;
+        self.task_timer_deadline = None;
         let revision = self.tasks.cache().revision();
         for key in self.tasks.due_status_changes() {
             self.emit_event(EventEnvelope {
@@ -768,41 +785,52 @@ impl App {
     /// What the store thread reported: tell subscribers how writes ended, how
     /// conflicts were settled, and that the cache changed.
     pub(super) fn publish_task_changes(&mut self, changed: bool) {
-        let context = self.task_info_context();
+        self.wake_for_task_counts();
+        let outcomes = self.tasks.take_outcomes();
+        let resolutions = self.tasks.take_resolutions();
+        if outcomes.is_empty() && resolutions.is_empty() && !changed {
+            return;
+        }
         let revision = self.tasks.cache().revision();
         let mut events = Vec::new();
-        for (write, outcome) in self.tasks.take_outcomes() {
-            let info = self.outcome_info(outcome, &context);
-            events.push(EventData::TaskChanged {
-                key: None,
-                revision,
-                write_id: Some(write.to_string()),
-                outcome: Some(info),
-                ticket: None,
-                resolution: None,
-            });
-        }
-        for (ticket, outcome) in self.tasks.take_resolutions() {
-            let info = match outcome {
-                ResolveOutcome::Requeued => TaskResolutionInfo::Requeued,
-                ResolveOutcome::Dropped { cancelled } => TaskResolutionInfo::Dropped {
-                    cancelled: cancelled.iter().map(ToString::to_string).collect(),
-                },
-                ResolveOutcome::Stale { current } => TaskResolutionInfo::Stale {
-                    current: current
-                        .and_then(|(rev, bytes)| self.task_info_from_bytes(rev, &bytes, &context))
-                        .map(Box::new),
-                },
-                ResolveOutcome::Failed(message) => TaskResolutionInfo::Failed { message },
-            };
-            events.push(EventData::TaskChanged {
-                key: None,
-                revision,
-                write_id: None,
-                outcome: None,
-                ticket: Some(ticket),
-                resolution: Some(info),
-            });
+        // Only what is told needs the pane index and the key sets.
+        if !outcomes.is_empty() || !resolutions.is_empty() {
+            let context = self.task_info_context();
+            for (write, outcome) in outcomes {
+                let info = self.outcome_info(outcome, &context);
+                events.push(EventData::TaskChanged {
+                    key: None,
+                    revision,
+                    write_id: Some(write.to_string()),
+                    outcome: Some(info),
+                    ticket: None,
+                    resolution: None,
+                });
+            }
+            for (ticket, outcome) in resolutions {
+                let info = match outcome {
+                    ResolveOutcome::Requeued => TaskResolutionInfo::Requeued,
+                    ResolveOutcome::Dropped { cancelled } => TaskResolutionInfo::Dropped {
+                        cancelled: cancelled.iter().map(ToString::to_string).collect(),
+                    },
+                    ResolveOutcome::Stale { current } => TaskResolutionInfo::Stale {
+                        current: current
+                            .and_then(|(rev, bytes)| {
+                                self.task_info_from_bytes(rev, &bytes, &context)
+                            })
+                            .map(Box::new),
+                    },
+                    ResolveOutcome::Failed(message) => TaskResolutionInfo::Failed { message },
+                };
+                events.push(EventData::TaskChanged {
+                    key: None,
+                    revision,
+                    write_id: None,
+                    outcome: None,
+                    ticket: Some(ticket),
+                    resolution: Some(info),
+                });
+            }
         }
         if changed {
             events.push(EventData::TaskChanged {
@@ -821,6 +849,45 @@ impl App {
             });
         }
     }
+}
+
+/// The one thread that tells the app when a run crosses its five minutes. It
+/// is given the next deadline (an earlier one replaces a later one) and checks
+/// the wall clock at least every half minute, so a Mac that slept does not
+/// make it late by the length of the sleep.
+fn spawn_task_timer(
+    tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+) -> std::io::Result<std::sync::mpsc::Sender<(u64, SystemTime)>> {
+    use std::time::Duration;
+    let (arm_tx, arm_rx) = std::sync::mpsc::channel::<(u64, SystemTime)>();
+    crate::thread_spawn::spawn_named("herdr-task-timer", move || {
+        let mut armed: Option<(u64, SystemTime)> = None;
+        loop {
+            let wait = match armed {
+                None => Duration::from_secs(3600),
+                Some((_, deadline)) => deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO)
+                    .min(Duration::from_secs(30)),
+            };
+            match arm_rx.recv_timeout(wait) {
+                Ok(message) => armed = Some(message),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some((generation, deadline)) = armed {
+                        if SystemTime::now() >= deadline {
+                            armed = None;
+                            let due = crate::events::AppEvent::TaskStatusDue { generation };
+                            if tx.blocking_send(due).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    })?;
+    Ok(arm_tx)
 }
 
 #[cfg(all(test, unix))]
@@ -1022,6 +1089,48 @@ mod tests {
             },
         ));
         assert_eq!(unknown["error"]["code"], "task_write_unknown");
+    }
+
+    #[test]
+    fn a_store_event_that_changes_a_panes_count_wakes_the_clients() {
+        let mut h = harness().loaded();
+        let pane_id = h.pane_id.clone();
+        h.request(Method::TaskAdd(TaskAddParams {
+            title: "on a pane".into(),
+            pane_id: Some(pane_id),
+            ..TaskAddParams::default()
+        }));
+        assert!(
+            h.app.render_dirty.is_pending(),
+            "taking the write moves the pane's count"
+        );
+        h.app.render_dirty.take();
+        assert!(!h.app.render_dirty.is_pending());
+
+        // The store takes it: "pending" goes out of the count, and a client
+        // frame is asked for, so the sidebar shows it.
+        h.wait(|app| app.tasks.pending_count() == 0);
+        assert!(
+            h.app.render_dirty.is_pending(),
+            "a store event that changes a count asks for a frame"
+        );
+    }
+
+    #[test]
+    fn a_task_waiting_on_a_row_nobody_reads_yet_shows_its_stored_status() {
+        let mut h = harness().loaded();
+        let response = h.request(Method::TaskAdd(TaskAddParams {
+            title: "waits on an ask".into(),
+            waits_on: Some("asks.row-1".into()),
+            ..TaskAddParams::default()
+        }));
+        let task = &response["result"]["task"];
+        assert_eq!(task["waits_on"], "asks.row-1");
+        assert_eq!(
+            task["shown"], "open",
+            "not Waiting until the asks feed says the row is open"
+        );
+        assert!(task["waits_on_missing"].is_null());
     }
 
     #[test]

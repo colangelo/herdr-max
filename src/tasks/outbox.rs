@@ -320,6 +320,27 @@ impl Outbox {
         Ok(removed)
     }
 
+    /// Drop one entry and leave the ones queued behind it where they are.
+    /// Returns what was behind it (the entries that named it as their base),
+    /// so the caller can decide about them.
+    pub(crate) fn remove_head(&mut self, write: &WriteId) -> io::Result<Vec<Entry>> {
+        let Some(index) = self.entries.iter().position(|entry| &entry.write == write) else {
+            return Ok(Vec::new());
+        };
+        let entry = self.entries.remove(index);
+        remove_durably(&self.entry_path(&entry), &self.dir)?;
+        let _ = fs::remove_file(self.receipt_path(&entry.write));
+        if let Some(Base::After(ahead)) = &entry.base {
+            let _ = fs::remove_file(self.receipt_path(ahead));
+        }
+        Ok(self
+            .entries
+            .iter()
+            .filter(|other| other.base.as_ref() == Some(&Base::After(write.clone())))
+            .cloned()
+            .collect())
+    }
+
     /// Remember that the store holds a newer version, and hold the entry.
     pub(crate) fn mark_conflict(
         &mut self,

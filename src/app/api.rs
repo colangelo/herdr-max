@@ -65,7 +65,10 @@ impl App {
                 if generation == self.tasks.generation() {
                     let changed = self.tasks.apply(event);
                     self.publish_task_changes(changed);
-                    self.arm_task_status_timer();
+                    // The next deadline only moves when a run record came in.
+                    if self.tasks.take_runs_changed() {
+                        self.arm_task_status_timer();
+                    }
                 }
                 false
             }

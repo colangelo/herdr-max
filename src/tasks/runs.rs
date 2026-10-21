@@ -256,16 +256,17 @@ impl RunCache {
         found.into_iter()
     }
 
-    /// The next moment a run of a task in `tasks` crosses the five minutes,
-    /// after `now`.
-    pub(crate) fn next_expiry<'a>(
-        &self,
-        tasks: impl Iterator<Item = &'a Task>,
-        now: SystemTime,
-    ) -> Option<SystemTime> {
-        tasks
-            .flat_map(|task| self.runs_of(task))
-            .filter(|run| run.record.state == RunState::Starting)
+    /// A starting run whose starter the owner of its task believes.
+    fn believed_starting(&self) -> impl Iterator<Item = &CachedRun> {
+        self.runs.values().filter(|run| {
+            run.record.state == RunState::Starting
+                && (run.starter == run.record.task.host.as_str() || run.starter == WORKLINK)
+        })
+    }
+
+    /// The next moment a run crosses the five minutes, after `now`.
+    pub(crate) fn next_expiry(&self, now: SystemTime) -> Option<SystemTime> {
+        self.believed_starting()
             .map(CachedRun::starting_deadline)
             .filter(|deadline| *deadline > now)
             .min()
@@ -273,22 +274,15 @@ impl RunCache {
 
     /// The tasks with a run that crossed the five minutes after `since`, up to
     /// and including `now`: their shown status changed with the clock alone.
-    pub(crate) fn expired_between<'a>(
-        &self,
-        tasks: impl Iterator<Item = &'a Task>,
-        since: SystemTime,
-        now: SystemTime,
-    ) -> Vec<TaskKey> {
+    pub(crate) fn expired_between(&self, since: SystemTime, now: SystemTime) -> Vec<TaskKey> {
+        let mut tasks: Vec<TaskKey> = self
+            .believed_starting()
+            .filter(|run| run.starting_deadline() > since && run.starting_deadline() <= now)
+            .map(|run| run.record.task.clone())
+            .collect();
+        tasks.sort();
+        tasks.dedup();
         tasks
-            .filter(|task| {
-                self.runs_of(task).any(|run| {
-                    run.record.state == RunState::Starting
-                        && run.starting_deadline() > since
-                        && run.starting_deadline() <= now
-                })
-            })
-            .map(Task::key)
-            .collect()
     }
 }
 
@@ -300,6 +294,9 @@ pub(crate) enum AskRow {
     Closed,
     /// The row does not exist (any more).
     Missing,
+    /// Nobody can say: the asks feed is not read here (yet). The task is not
+    /// held back by it.
+    Unknown,
 }
 
 /// What a reader shows. Only `Done`, `Dropped`, `Open`, `Running` and `Unknown`
@@ -368,7 +365,7 @@ pub(crate) fn derive(
                     waits_on_missing: false,
                 }
             }
-            AskRow::Closed => {}
+            AskRow::Closed | AskRow::Unknown => {}
             AskRow::Missing => waits_on_missing = true,
         }
     }
@@ -541,6 +538,15 @@ mod tests {
             (Running, Some(Answered), vec![], Shown::Waiting, false),
             // ...and not once it is closed
             (Open, Some(Closed), vec![], Shown::Open, false),
+            // a feed nobody reads yet holds nothing back: the stored status shows
+            (Open, Some(AskRow::Unknown), vec![], Shown::Open, false),
+            (
+                Running,
+                Some(AskRow::Unknown),
+                vec![],
+                Shown::Running,
+                false,
+            ),
             // a missing row changes nothing but is said
             (Running, Some(Missing), vec![], Shown::Running, true),
             // "run unknown" takes Running's place, above Waiting
@@ -627,23 +633,21 @@ mod tests {
     #[test]
     fn the_five_minutes_are_announced_once_by_the_clock() {
         let cache = cache_with(&[("m4m", "rn-1", RunState::Starting, Duration::from_secs(60))]);
-        let task = task(TaskStatus::Open, None);
-        let tasks = [task];
         let due = base() - Duration::from_secs(60) + STARTING_GRACE;
-        assert_eq!(cache.next_expiry(tasks.iter(), base()), Some(due));
+        assert_eq!(cache.next_expiry(base()), Some(due));
         // Not yet crossed, then crossed, then already announced.
         assert!(cache
-            .expired_between(tasks.iter(), base(), due - Duration::from_secs(1))
+            .expired_between(base(), due - Duration::from_secs(1))
             .is_empty());
         assert_eq!(
-            cache.expired_between(tasks.iter(), base(), due).len(),
+            cache.expired_between(base(), due).len(),
             1,
             "the moment it crosses"
         );
         assert!(cache
-            .expired_between(tasks.iter(), due, due + Duration::from_secs(60))
+            .expired_between(due, due + Duration::from_secs(60))
             .is_empty());
-        assert_eq!(cache.next_expiry(tasks.iter(), due), None);
+        assert_eq!(cache.next_expiry(due), None);
     }
 
     #[test]
