@@ -1,17 +1,17 @@
 ## 1. Prerequisites (ship before the freeze)
 
-- [ ] 1.1 `pane_key` on `TerminalState`, saved and restored in `PaneSnapshot`, kept by
+- [x] 1.1 `pane_key` on `TerminalState`, saved and restored in `PaneSnapshot`, kept by
   moves, optional in `PaneInfo`. Test: `pane_key_survives_restore_move_and_handoff`
-- [ ] 1.2 `HERDR_RUN_ID` taken from the `pane.split` and `tab.create` env into
+- [x] 1.2 `HERDR_RUN_ID` taken from the `pane.split` and `tab.create` env into
   `PaneSnapshot.run_id`, returned by `pane.get` and `pane.list`, still passed to the
   shell. Tests: `run_id_from_env_is_kept_across_restore`, plus the existing digest test
   unchanged
-- [ ] 1.3 `[tasks] host_id`, `bus_session`, `backend` in config, with validation.
+- [x] 1.3 `[tasks] host_id`, `bus_session`, `backend` in config, with validation.
   Test: `tasks_config_rejects_missing_host_id_for_kv`
-- [ ] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
+- [x] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
   that the default build links no NATS crate. Test: `default_build_has_no_nats`
   (cargo tree)
-- [ ] 1.5 Old session files load, and new optional fields are skipped when empty.
+- [x] 1.5 Old session files load, and new optional fields are skipped when empty.
   Test: `session_file_from_2e82664c_loads_unchanged`
 - [ ] 1.6 Ship as a beta, install on mbm5 first, and confirm every pane has a saved
   `pane_key` on both Macs. Proof: `herdr-beta pane list --json` shows them

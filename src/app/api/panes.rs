@@ -52,6 +52,7 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
+        let run_id = super::env::run_id_from_env(&extra_env);
         let direction = match params.direction {
             crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
             crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
@@ -106,11 +107,12 @@ impl App {
                 params.focus,
             ),
         };
-        let (target_tab_idx, new_pane) = match split_result {
+        let (target_tab_idx, mut new_pane) = match split_result {
             Some(Ok(result)) => result,
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        new_pane.terminal.run_id = run_id;
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
             pane.right_click_passthrough = matches!(
                 params.right_click,
@@ -4078,6 +4080,194 @@ mod tests {
             Err(crate::app::terminal_targets::TerminalTargetError::NotFound { .. })
         ));
         assert!(app.resolve_agent_target(&move_result.pane.pane_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn pane_key_survives_restore_move_and_handoff() {
+        let mut app = app_with_linked_worktree();
+        app.state.workspaces.push(Workspace::test_new("other"));
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        seed_terminal_states(&mut app);
+        let key = app.state.terminals[&source_terminal].pane_key.clone();
+        assert!(crate::ulid::is_ulid(&key), "{key}");
+
+        let pane_info = |app: &App, public_id: &str| {
+            let (ws_idx, pane_id) = app.parse_pane_id(public_id).unwrap();
+            app.pane_metadata(ws_idx, pane_id).unwrap()
+        };
+        let source_public = app.public_pane_id(0, source).unwrap();
+        assert_eq!(
+            pane_info(&app, &source_public).pane_key.as_deref(),
+            Some(key.as_str())
+        );
+
+        // A move to another space gives the pane a new public id, not a new key.
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: app.public_tab_id(1, 0).unwrap(),
+                    target_pane_id: Some(app.public_pane_id(1, target).unwrap()),
+                    split: SplitDirection::Down,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert_eq!(move_result.pane.pane_key.as_deref(), Some(key.as_str()));
+
+        // A live handoff carries the saved snapshot as JSON; a restart reads
+        // it from disk. Both go through the same snapshot, then `restore`.
+        let snapshot = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.last_client_size,
+        );
+        let snapshot: crate::persist::SessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (events, _event_rx) = tokio::sync::mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = crate::persist::restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            if cfg!(windows) {
+                "C:\\Windows\\System32\\whoami.exe"
+            } else {
+                "/bin/sh"
+            },
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        let restored_keys: Vec<&str> = workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .map(|pane| terminals[&pane.attached_terminal_id].pane_key.as_str())
+            .collect();
+        assert!(restored_keys.contains(&key.as_str()), "{restored_keys:?}");
+    }
+
+    #[tokio::test]
+    async fn run_id_from_env_is_kept_across_restore() {
+        let mut app = app_with_linked_worktree();
+        seed_terminal_states(&mut app);
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_public = app.public_pane_id(0, source).unwrap();
+
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(source_public),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                right_click: Default::default(),
+                env: std::collections::HashMap::from([
+                    ("HERDR_RUN_ID".to_string(), "run-split".to_string()),
+                    ("OTHER".to_string(), "kept".to_string()),
+                ]),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info");
+        };
+        assert_eq!(pane.run_id.as_deref(), Some("run-split"));
+        let (ws_idx, pane_id) = app.parse_pane_id(&pane.pane_id).unwrap();
+        assert_eq!(
+            app.pane_metadata(ws_idx, pane_id)
+                .unwrap()
+                .run_id
+                .as_deref(),
+            Some("run-split"),
+            "pane.get and pane.list read the same field"
+        );
+        assert_eq!(
+            app.pane_metadata(0, source).unwrap().run_id,
+            None,
+            "the source pane has no run"
+        );
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            crate::api::schema::TabCreateParams {
+                workspace_id: Some(app.public_workspace_id(0)),
+                cwd: None,
+                focus: false,
+                label: None,
+                env: std::collections::HashMap::from([(
+                    "HERDR_RUN_ID".to_string(),
+                    "run-tab".to_string(),
+                )]),
+            },
+        );
+        assert!(!response.contains("\"error\""), "{response}");
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
+
+        let mut live: Vec<String> = app
+            .state
+            .terminals
+            .values()
+            .filter_map(|terminal| terminal.run_id.clone())
+            .collect();
+        live.sort();
+        assert_eq!(live, vec!["run-split", "run-tab"]);
+
+        let snapshot = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.last_client_size,
+        );
+        let snapshot: crate::persist::SessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (events, _event_rx) = tokio::sync::mpsc::channel(4);
+        let (_workspaces, terminals, _runtimes) = crate::persist::restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            if cfg!(windows) {
+                "C:\\Windows\\System32\\whoami.exe"
+            } else {
+                "/bin/sh"
+            },
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        let mut restored: Vec<String> = terminals
+            .values()
+            .filter_map(|terminal| terminal.run_id.clone())
+            .collect();
+        restored.sort();
+        assert_eq!(restored, vec!["run-split", "run-tab"]);
     }
 
     #[test]

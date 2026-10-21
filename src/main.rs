@@ -64,6 +64,7 @@ mod terminal_theme;
 mod test_git;
 mod thread_spawn;
 mod ui;
+mod ulid;
 mod update;
 mod workspace;
 mod worktree;

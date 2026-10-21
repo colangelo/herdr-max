@@ -600,6 +600,15 @@ pub struct PaneReleaseAgentParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneInfo {
     pub pane_id: String,
+    /// A stable id for the pane (a ULID). It stays the same across a restart,
+    /// a move to another space and a live handoff, while `pane_id` changes on
+    /// a move. Absent from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_key: Option<String>,
+    /// The run the pane was started for, from `HERDR_RUN_ID` in the `env` of
+    /// `pane.split` or `tab.create`. Absent for a pane started without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub terminal_id: String,
     pub workspace_id: String,
     pub tab_id: String,

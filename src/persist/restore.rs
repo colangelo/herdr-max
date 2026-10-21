@@ -144,7 +144,8 @@ fn restore_pane_todos(
 }
 
 /// What a pane keeps whatever happens to its process: its todos (links are
-/// remapped once every tab is restored), when it last got input, and its pin.
+/// remapped once every tab is restored), when it last got input, its pin and
+/// its stable key.
 /// Every restore path calls this, including a pane whose directory or shell is
 /// unavailable, so the next snapshot does not save them away.
 fn restore_durable_pane_metadata(
@@ -158,6 +159,10 @@ fn restore_durable_pane_metadata(
     restore_pane_todos(terminal, &pane.todos, pane.next_todo_id, todo_links);
     terminal.restored_last_input_at_ms = pane.last_input_at_ms;
     terminal.pin_order = pane.pin_order;
+    if let Some(key) = pane.pane_key.as_ref().filter(|key| !key.is_empty()) {
+        terminal.pane_key = key.clone();
+    }
+    terminal.run_id = pane.run_id.clone();
 }
 
 /// The flags the pane's agent was launched with, as saved.
@@ -1466,6 +1471,8 @@ mod tests {
             last_input_at_ms: Some(1_790_000_000_123),
             pin_order: None,
             former_public_ids: Vec::new(),
+            pane_key: None,
+            run_id: None,
         };
         let target_pane = super::super::snapshot::PaneSnapshot {
             agent_resume: None,
@@ -1481,6 +1488,8 @@ mod tests {
             last_input_at_ms: None,
             pin_order: None,
             former_public_ids: Vec::new(),
+            pane_key: None,
+            run_id: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -2224,6 +2233,90 @@ mod tests {
         assert!(restored_terminal_agent_session(Some(&session), true).is_none());
     }
 
+    /// `session-2e82664c.json` is a session in the format saved at herdr
+    /// 2e82664c, before panes carried `pane_key` and `run_id`. It must load, save
+    /// back without those fields while they are empty, and give each pane a key
+    /// when it is restored.
+    #[tokio::test]
+    async fn session_file_from_2e82664c_loads_unchanged() {
+        let fixture = include_str!("../../tests/fixtures/session/session-2e82664c.json");
+        let mut snapshot = super::super::snapshot::parse_snapshot(fixture)
+            .expect("a session saved before pane_key must load");
+
+        let original: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let saved = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            saved, original,
+            "saving an old session back must add no field while the new ones are empty"
+        );
+        let saved_text = saved.to_string();
+        assert!(!saved_text.contains("pane_key"), "{saved_text}");
+        assert!(!saved_text.contains("run_id"), "{saved_text}");
+
+        // Restore keeps what the file said and makes a key for every pane.
+        let cwd = std::env::current_dir().unwrap();
+        for workspace in &mut snapshot.workspaces {
+            workspace.identity_cwd = cwd.clone();
+            for tab in &mut workspace.tabs {
+                for pane in tab.panes.values_mut() {
+                    pane.cwd = cwd.clone();
+                }
+            }
+        }
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let panes: Vec<_> = workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .collect();
+        assert_eq!(panes.len(), 3);
+        let keys: HashSet<&str> = panes
+            .iter()
+            .map(|pane| terminals[&pane.attached_terminal_id].pane_key.as_str())
+            .collect();
+        assert_eq!(keys.len(), 3, "every pane has its own key");
+        assert!(keys.iter().all(|key| crate::ulid::is_ulid(key)));
+        assert!(panes
+            .iter()
+            .all(|pane| terminals[&pane.attached_terminal_id].run_id.is_none()));
+        let todo_texts: Vec<&str> = terminals
+            .values()
+            .flat_map(|terminal| terminal.todos().iter().map(|todo| todo.text.as_str()))
+            .collect();
+        assert_eq!(todo_texts.len(), 2, "{todo_texts:?}");
+
+        // The next save writes those keys, so they outlive the next restart.
+        let recaptured = super::super::snapshot::capture(
+            &workspaces,
+            &terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Some(0),
+            0,
+            None,
+        );
+        let saved_keys: HashSet<String> = recaptured
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| pane.pane_key.clone())
+            .collect();
+        assert_eq!(saved_keys.len(), 3);
+    }
+
     #[tokio::test]
     async fn failed_cold_restore_preserves_panes_and_saved_directories() {
         for missing_shell in [false, true] {
@@ -2508,6 +2601,8 @@ mod tests {
                             last_input_at_ms: None,
                             pin_order: None,
                             former_public_ids: Vec::new(),
+                            pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -2597,6 +2692,8 @@ mod tests {
                             last_input_at_ms: None,
                             pin_order: None,
                             former_public_ids: Vec::new(),
+                            pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -2677,6 +2774,8 @@ mod tests {
                                 last_input_at_ms: None,
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
+                                pane_key: None,
+                                run_id: None,
                             },
                         ),
                         (
@@ -2695,6 +2794,8 @@ mod tests {
                                 last_input_at_ms: None,
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
+                                pane_key: None,
+                                run_id: None,
                             },
                         ),
                     ]),
@@ -2776,6 +2877,8 @@ mod tests {
                                 last_input_at_ms: None,
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
+                                pane_key: None,
+                                run_id: None,
                             },
                         ),
                         (
@@ -2794,6 +2897,8 @@ mod tests {
                                 last_input_at_ms: None,
                                 pin_order: None,
                                 former_public_ids: vec!["w1:p1".into(), "w9:p7".into()],
+                                pane_key: None,
+                                run_id: None,
                             },
                         ),
                     ]),
@@ -2857,6 +2962,8 @@ mod tests {
                     last_input_at_ms: None,
                     pin_order: None,
                     former_public_ids: Vec::new(),
+                    pane_key: None,
+                    run_id: None,
                 },
             )
         };
@@ -2879,6 +2986,8 @@ mod tests {
             last_input_at_ms: None,
             pin_order: None,
             former_public_ids: Vec::new(),
+            pane_key: None,
+            run_id: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -3041,6 +3150,8 @@ mod tests {
                             last_input_at_ms: None,
                             pin_order: None,
                             former_public_ids: Vec::new(),
+                            pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -3442,6 +3553,8 @@ mod tests {
                 last_input_at_ms: None,
                 pin_order: None,
                 former_public_ids: Vec::new(),
+                pane_key: None,
+                run_id: None,
             },
         );
         let mut history = SessionHistorySnapshot {

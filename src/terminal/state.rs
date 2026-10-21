@@ -231,6 +231,14 @@ pub struct TerminalState {
     /// panel (fork issue 148): `Some` is pinned, a lower number is higher up.
     /// Session state, saved with the pane and carried through a handoff.
     pub pin_order: Option<u64>,
+    /// A stable id for this pane (a ULID), made when the terminal is created.
+    /// Saved with the pane and restored, so it outlives a restart, a move to
+    /// another space and a live handoff, unlike the public pane id.
+    pub pane_key: String,
+    /// The run this pane was started for, taken from `HERDR_RUN_ID` in the
+    /// env of `pane.split` or `tab.create`. Saved with the pane, so a server
+    /// can find the pane of a run after a crash.
+    pub run_id: Option<String>,
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit: Option<RecentAgentProcessExit>,
     /// An agent process exit observed since detection last saw an agent
@@ -295,6 +303,8 @@ impl TerminalState {
             todo_revision: 0,
             restored_last_input_at_ms: None,
             pin_order: None,
+            pane_key: crate::ulid::new_ulid(),
+            run_id: None,
             respawn_shell_on_exit: false,
             recent_agent_process_exit: None,
             last_observed_agent_exit: None,

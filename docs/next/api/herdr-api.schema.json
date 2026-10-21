@@ -961,6 +961,13 @@
             "pane_id": {
               "type": "string"
             },
+            "pane_key": {
+              "description": "A stable id for the pane (a ULID). It stays the same across a restart,\na move to another space and a live handoff, while `pane_id` changes on\na move. Absent from servers that predate it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "pinned": {
               "description": "Pinned agents sit at the top of the agent panel in pin order.",
               "type": "boolean"
@@ -975,6 +982,13 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "run_id": {
+              "description": "The run the pane was started for, from `HERDR_RUN_ID` in the `env` of\n`pane.split` or `tab.create`. Absent for a pane started without one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "scroll": {
               "anyOf": [
@@ -9460,6 +9474,13 @@
             "pane_id": {
               "type": "string"
             },
+            "pane_key": {
+              "description": "A stable id for the pane (a ULID). It stays the same across a restart,\na move to another space and a live handoff, while `pane_id` changes on\na move. Absent from servers that predate it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "pinned": {
               "description": "Pinned agents sit at the top of the agent panel in pin order.",
               "type": "boolean"
@@ -9474,6 +9495,13 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "run_id": {
+              "description": "The run the pane was started for, from `HERDR_RUN_ID` in the `env` of\n`pane.split` or `tab.create`. Absent for a pane started without one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "scroll": {
               "anyOf": [

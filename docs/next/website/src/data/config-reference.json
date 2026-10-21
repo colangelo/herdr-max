@@ -1831,6 +1831,34 @@
       ]
     },
     {
+      "id": "tasks",
+      "title": "Tasks",
+      "keys": [
+        {
+          "key": "tasks.backend",
+          "type": "enum",
+          "default": "\"file\"",
+          "description": "Where tasks are kept: in this session's data dir (`file`), or in a NATS JetStream KV bucket shared by both Macs (`kv`, which needs a build with the `tasks-kv` feature).",
+          "values": [
+            "file",
+            "kv"
+          ]
+        },
+        {
+          "key": "tasks.host_id",
+          "type": "string",
+          "default": "\"\"",
+          "description": "A stable name for this machine, written once, such as `m4m` or `ac-mbm5`. It is the owner part of every task key, so it never follows the live hostname. Lowercase letters, digits and `-`. The `kv` backend needs it."
+        },
+        {
+          "key": "tasks.bus_session",
+          "type": "string",
+          "default": "\"\"",
+          "description": "The session that talks to the bus. Other sessions on this machine refuse task writes. The `kv` backend needs it."
+        }
+      ]
+    },
+    {
       "id": "advanced",
       "title": "Advanced",
       "keys": [
