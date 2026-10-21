@@ -278,11 +278,15 @@ pub enum ResponseResult {
     },
     IssueList {
         issues: Vec<super::tasks::IssueInfo>,
+        /// How many issues match, before `limit` and `offset`.
+        total: u64,
         projects: Vec<super::tasks::IssueProjectInfo>,
         mirror: super::tasks::MirrorInfo,
     },
     AskList {
         asks: Vec<super::tasks::AskInfo>,
+        /// How many rows match, before `limit` and `offset`.
+        total: u64,
         mirror: super::tasks::MirrorInfo,
     },
     /// A `task.resolve_conflict` that was taken: how it ended arrives later as

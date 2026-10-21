@@ -23,6 +23,7 @@ fn mirror_info(status: MirrorStatus) -> MirrorInfo {
 
 pub(crate) fn issue_info(key: &str, row: &IssueRow) -> IssueInfo {
     let IssueRecord {
+        v: _,
         issue_ref,
         title,
         state,
@@ -67,7 +68,8 @@ pub(crate) fn issue_info(key: &str, row: &IssueRow) -> IssueInfo {
 }
 
 /// Every project that has issues or a sync row, with how its last sync went.
-/// A project with issues and no sync row is `synced: false`.
+/// A project with issues and no sync row is `synced: false`. The counts are
+/// kept by the cache, so this walks projects, not issues.
 pub(crate) fn project_infos(cache: &IssueCache) -> Vec<IssueProjectInfo> {
     let mut projects: BTreeMap<(String, String, u64), IssueProjectInfo> = BTreeMap::new();
     let blank = |forge: &str, forge_id: &str, project_id: u64| IssueProjectInfo {
@@ -80,13 +82,15 @@ pub(crate) fn project_infos(cache: &IssueCache) -> Vec<IssueProjectInfo> {
         error_class: None,
         last_attempt: None,
         last_ok: None,
+        issues_open: 0,
+        issues_total: 0,
     };
-    for (_, row) in cache.issues() {
-        let r = &row.record.issue_ref;
-        let entry = projects
-            .entry((r.forge.clone(), r.forge_id.clone(), r.project_id))
-            .or_insert_with(|| blank(&r.forge, &r.forge_id, r.project_id));
-        entry.project_path = Some(r.project_path.clone());
+    for ((forge, forge_id, project_id), count) in cache.projects() {
+        let mut info = blank(forge, forge_id, *project_id);
+        info.project_path = Some(count.project_path.clone());
+        info.issues_open = count.open as u64;
+        info.issues_total = count.total as u64;
+        projects.insert((forge.clone(), forge_id.clone(), *project_id), info);
     }
     for (_, row) in cache.syncs() {
         let Some(project) = row.record.project.as_ref().map(|p| &p.project_ref) else {
@@ -131,63 +135,80 @@ pub(crate) fn ask_info(key: &str, rev: Rev, record: &AskRecord) -> AskInfo {
     }
 }
 
+const DEFAULT_LIMIT: usize = 500;
+const MAX_LIMIT: usize = 2000;
+
+fn window(limit: Option<u32>, offset: Option<u32>) -> (usize, usize) {
+    let limit = limit
+        .map_or(DEFAULT_LIMIT, |limit| limit as usize)
+        .min(MAX_LIMIT);
+    (limit, offset.map_or(0, |offset| offset as usize))
+}
+
+/// The page asked for and how many issues match in all. Rows are already in
+/// key order, so nothing is sorted, and only the page is copied.
 pub(crate) fn list_issues(
     cache: &IssueCache,
     params: &IssueListParams,
-) -> Result<Vec<IssueInfo>, String> {
+) -> Result<(Vec<IssueInfo>, usize), String> {
     let wanted = match params.state.as_deref() {
         None | Some("open") => Some(IssueState::Open),
         Some("closed") => Some(IssueState::Closed),
         Some("all") => None,
         Some(other) => return Err(format!("state must be open, closed or all, not {other}")),
     };
-    let mut issues: Vec<_> = cache
-        .issues()
-        .filter(|(_, row)| wanted.is_none_or(|state| row.record.state == state))
-        .filter(|(_, row)| {
-            params.project.as_deref().is_none_or(|project| {
-                let r = &row.record.issue_ref;
-                r.project_path == project || r.project_id.to_string() == project
-            })
-        })
-        .map(|(key, row)| issue_info(key, row))
-        .collect();
-    issues.sort_by(|a, b| {
-        let key = |i: &IssueInfo| {
-            (
-                i.issue_ref.forge.clone(),
-                i.issue_ref.forge_id.clone(),
-                i.issue_ref.project_id,
-                i.issue_ref.number,
-            )
-        };
-        key(a).cmp(&key(b))
-    });
-    Ok(issues)
+    let (limit, offset) = window(params.limit, params.offset);
+    let mut total = 0;
+    let mut page = Vec::new();
+    for row in cache.issues() {
+        if wanted.is_some_and(|state| row.record.state != state) {
+            continue;
+        }
+        if let Some(project) = params.project.as_deref() {
+            let r = &row.record.issue_ref;
+            if r.project_path != project && r.project_id.to_string() != project {
+                continue;
+            }
+        }
+        if total >= offset && page.len() < limit {
+            page.push(issue_info(&row.name, row));
+        }
+        total += 1;
+    }
+    Ok((page, total))
 }
 
-pub(crate) fn list_asks(cache: &AskCache, params: &AskListParams) -> Vec<AskInfo> {
+pub(crate) fn list_asks(cache: &AskCache, params: &AskListParams) -> (Vec<AskInfo>, usize) {
     let kind = params.kind.as_deref().unwrap_or("task");
-    cache
-        .rows()
-        .filter(|(_, entry)| kind == "any" || entry.record.kind.as_deref() == Some(kind))
-        .filter(|(_, entry)| {
-            params.include_closed || !matches!(entry.record.status.as_str(), "closed" | "dropped")
-        })
-        .map(|(key, entry)| ask_info(key, entry.rev, &entry.record))
-        .collect()
+    let (limit, offset) = window(params.limit, params.offset);
+    let mut total = 0;
+    let mut page = Vec::new();
+    for (key, entry) in cache.rows() {
+        if kind != "any" && entry.record.kind.as_deref() != Some(kind) {
+            continue;
+        }
+        if !params.include_closed && matches!(entry.record.status.as_str(), "closed" | "dropped") {
+            continue;
+        }
+        if total >= offset && page.len() < limit {
+            page.push(ask_info(key, entry.rev, &entry.record));
+        }
+        total += 1;
+    }
+    (page, total)
 }
 
 impl App {
     pub(super) fn handle_issue_list(&mut self, id: String, params: IssueListParams) -> String {
-        let issues = match list_issues(self.tasks.issues(), &params) {
-            Ok(issues) => issues,
+        let (issues, total) = match list_issues(self.tasks.issues(), &params) {
+            Ok(page) => page,
             Err(message) => return encode_error(id, "invalid_issue_state", message),
         };
         encode_success(
             id,
             ResponseResult::IssueList {
                 issues,
+                total: total as u64,
                 projects: project_infos(self.tasks.issues()),
                 mirror: mirror_info(self.tasks.mirror_status(Mirror::Issues)),
             },
@@ -195,10 +216,12 @@ impl App {
     }
 
     pub(super) fn handle_ask_list(&mut self, id: String, params: AskListParams) -> String {
+        let (asks, total) = list_asks(self.tasks.asks(), &params);
         encode_success(
             id,
             ResponseResult::AskList {
-                asks: list_asks(self.tasks.asks(), &params),
+                asks,
+                total: total as u64,
                 mirror: mirror_info(self.tasks.mirror_status(Mirror::Asks)),
             },
         )
@@ -207,14 +230,12 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::time::SystemTime;
-
-    use crate::api::schema::{AskListParams, IssueListParams, Method, Request};
+    use crate::api::schema::{AskListParams, IssueListParams, Method, Request, TaskTarget};
     use crate::app::App;
     use crate::config::Config;
     use crate::tasks::{
-        derive, AskRow, HostId, Mirror, Origin, RunCache, Shown, StoreEvent, StoreKey, Task,
-        TaskId, Timestamp, Via, WatchEvent,
+        parse_ask_event, parse_issue_event, AskRow, HostId, Mirror, MirrorChanges, Origin, Rev,
+        StoreEvent, StoreKey, Task, TaskId, Timestamp, Via, WatchEvent,
     };
 
     fn app() -> App {
@@ -231,10 +252,40 @@ mod tests {
     fn event(key: &str, rev: u64, doc: serde_json::Value) -> WatchEvent {
         WatchEvent {
             key: StoreKey(key.into()),
-            rev: crate::tasks::Rev(rev),
+            rev: Rev(rev),
             value: Some(serde_json::to_vec(&doc).unwrap()),
             at: None,
         }
+    }
+
+    fn gone(key: &str, rev: u64) -> WatchEvent {
+        WatchEvent {
+            key: StoreKey(key.into()),
+            rev: Rev(rev),
+            value: None,
+            at: None,
+        }
+    }
+
+    /// What the store thread hands the app: parsed rows, then `Current`.
+    fn changes(which: Mirror, events: &[WatchEvent]) -> StoreEvent {
+        StoreEvent::MirrorChanges {
+            which,
+            changes: match which {
+                Mirror::Issues => {
+                    MirrorChanges::Issues(events.iter().filter_map(parse_issue_event).collect())
+                }
+                Mirror::Asks => {
+                    MirrorChanges::Asks(events.iter().filter_map(parse_ask_event).collect())
+                }
+            },
+        }
+    }
+
+    fn load(app: &mut App, which: Mirror, events: &[WatchEvent]) {
+        app.tasks.apply(StoreEvent::MirrorReset { which });
+        app.tasks.apply(changes(which, events));
+        app.tasks.apply(StoreEvent::MirrorCurrent { which });
     }
 
     fn issue(number: u64, title: &str, state: &str, extra: serde_json::Value) -> serde_json::Value {
@@ -260,6 +311,13 @@ mod tests {
             method,
         });
         serde_json::from_str(&raw).unwrap()
+    }
+
+    fn all() -> IssueListParams {
+        IssueListParams {
+            state: Some("all".into()),
+            ..IssueListParams::default()
+        }
     }
 
     fn mirrored_issues() -> (App, Vec<(String, u64, serde_json::Value)>) {
@@ -293,55 +351,204 @@ mod tests {
             ),
         ];
         let mut app = app();
-        app.tasks.apply(StoreEvent::MirrorLoaded {
-            which: Mirror::Issues,
-            events: rows
-                .iter()
-                .map(|(key, rev, doc)| event(key, *rev, doc.clone()))
-                .collect(),
-        });
+        let events: Vec<_> = rows
+            .iter()
+            .map(|(key, rev, doc)| event(key, *rev, doc.clone()))
+            .collect();
+        load(&mut app, Mirror::Issues, &events);
         (app, rows)
     }
 
     #[test]
     fn issue_rows_equal_mirror_records() {
         let (mut app, rows) = mirrored_issues();
-        let answer = call(
-            &mut app,
-            Method::IssueList(IssueListParams {
-                state: Some("all".into()),
-                ..IssueListParams::default()
-            }),
-        );
+        let answer = call(&mut app, Method::IssueList(all()));
         let listed = answer["result"]["issues"].as_array().unwrap();
         assert_eq!(listed.len(), rows.len());
+        assert_eq!(answer["result"]["total"], rows.len());
         for (listed, (key, rev, doc)) in listed.iter().zip(&rows) {
             assert_eq!(listed["key"], key.as_str());
             assert_eq!(listed["mirror_rev"], *rev, "the revision the watch saw");
-            for field in ["state", "web_url", "author", "created_at", "updated_at"] {
+            for field in [
+                "title",
+                "state",
+                "web_url",
+                "author",
+                "created_at",
+                "updated_at",
+                "source_rev",
+                "last_sync",
+                "labels",
+                "assignees",
+                "ref",
+            ] {
                 assert_eq!(listed[field], doc[field], "{key}.{field}");
             }
-            assert_eq!(listed["source_rev"], doc["source_rev"]);
-            assert_eq!(listed["last_sync"], doc["last_sync"]);
-            // The whole IssueRef rides along, not only the number.
-            assert_eq!(listed["ref"], doc["ref"], "{key}.ref");
-            assert_eq!(listed["labels"], doc["labels"], "{key}.labels");
-            assert_eq!(listed["assignees"], doc["assignees"], "{key}.assignees");
             assert!(listed["labels"].is_array() && listed["assignees"].is_array());
-            // Non-ASCII text survives; a cut title is only a prefix of the forge's.
-            let title = listed["title"].as_str().unwrap();
-            assert!(
-                doc["title"].as_str().unwrap().starts_with(title),
-                "{key}.title"
-            );
             assert_eq!(
                 listed["truncated"].as_bool(),
                 doc["truncated"].as_bool(),
                 "{key}"
             );
         }
-        assert!(listed[1]["title"].as_str().unwrap().contains("\u{65e5}"));
         assert!(listed[0]["truncated"].is_null(), "left out unless true");
+    }
+
+    #[test]
+    fn text_from_the_forge_is_cleaned_and_cut_not_refused() {
+        let mut app = app();
+        let long = "x".repeat(5000);
+        load(
+            &mut app,
+            Mirror::Issues,
+            &[event(
+                "issue.gitea.gitea-lab.84.9",
+                5,
+                issue(
+                    9,
+                    &format!("evil\u{1b}[2J\u{202e}title{long}"),
+                    "open",
+                    serde_json::json!({
+                        "labels": ["ok\u{7}", "bell"],
+                        "author": "a\nb",
+                        "source_rev": {"huge": "y".repeat(5000)},
+                    }),
+                ),
+            )],
+        );
+        let answer = call(&mut app, Method::IssueList(all()));
+        let row = &answer["result"]["issues"][0];
+        let title = row["title"].as_str().unwrap();
+        assert!(title.starts_with("evil[2Jtitle"), "{title}");
+        assert!(!title.chars().any(char::is_control));
+        assert!(title.chars().count() <= 2000);
+        assert_eq!(row["truncated"], true, "a cut title says so");
+        assert_eq!(row["labels"][0], "ok");
+        assert_eq!(row["author"], "a b");
+        assert!(
+            row["source_rev"].is_null(),
+            "an oversized marker is dropped"
+        );
+    }
+
+    #[test]
+    fn a_refused_record_takes_the_older_row_of_its_key_with_it() {
+        let mut app = app();
+        let key = "issue.gitea.gitea-lab.84.1";
+        load(
+            &mut app,
+            Mirror::Issues,
+            &[event(
+                key,
+                3,
+                issue(1, "first", "open", serde_json::json!({})),
+            )],
+        );
+        // The same key now holds a record that names another issue.
+        app.tasks.apply(changes(
+            Mirror::Issues,
+            &[event(
+                key,
+                4,
+                issue(2, "liar", "open", serde_json::json!({})),
+            )],
+        ));
+        let answer = call(&mut app, Method::IssueList(all()));
+        assert_eq!(answer["result"]["total"], 0, "no stale row stays");
+        assert_eq!(app.tasks.issues().rejected().len(), 1);
+        // A newer record version is skipped with a reason, too.
+        let mut newer = issue(1, "future", "open", serde_json::json!({}));
+        newer["v"] = serde_json::json!(2);
+        app.tasks
+            .apply(changes(Mirror::Issues, &[event(key, 5, newer)]));
+        assert_eq!(app.tasks.issues().len(), 0);
+        assert!(app.tasks.issues().rejected()[1].1.contains("newer"));
+    }
+
+    #[test]
+    fn issue_list_pages_and_counts_without_copying_the_rest() {
+        let mut app = app();
+        let events: Vec<_> = (1..=30u64)
+            .map(|n| {
+                event(
+                    &format!("issue.gitea.gitea-lab.84.{n}"),
+                    n,
+                    issue(n, &format!("issue {n}"), "open", serde_json::json!({})),
+                )
+            })
+            .collect();
+        load(&mut app, Mirror::Issues, &events);
+        let page = call(
+            &mut app,
+            Method::IssueList(IssueListParams {
+                limit: Some(10),
+                offset: Some(5),
+                ..IssueListParams::default()
+            }),
+        );
+        let numbers: Vec<_> = page["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["ref"]["number"].as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            numbers,
+            (6..=15).collect::<Vec<_>>(),
+            "key order, not text order"
+        );
+        assert_eq!(page["result"]["total"], 30);
+        // The default and the most are bounded.
+        let huge = call(
+            &mut app,
+            Method::IssueList(IssueListParams {
+                limit: Some(u32::MAX),
+                ..IssueListParams::default()
+            }),
+        );
+        assert_eq!(huge["result"]["issues"].as_array().unwrap().len(), 30);
+        let project = &huge["result"]["projects"][0];
+        assert_eq!(project["issues_total"], 30);
+        assert_eq!(project["issues_open"], 30);
+    }
+
+    #[test]
+    fn project_counts_follow_rows_that_change_state_or_go_away() {
+        let (mut app, _) = mirrored_issues();
+        let counts = |app: &mut App| {
+            let answer = call(app, Method::IssueList(all()));
+            let p = &answer["result"]["projects"][0];
+            (
+                p["issues_open"].as_u64().unwrap(),
+                p["issues_total"].as_u64().unwrap(),
+            )
+        };
+        assert_eq!(counts(&mut app), (2, 3));
+        // Closing one, then deleting another (a watch delete event).
+        app.tasks.apply(changes(
+            Mirror::Issues,
+            &[event(
+                "issue.gitea.gitea-lab.84.1",
+                20,
+                issue(1, "plain", "closed", serde_json::json!({})),
+            )],
+        ));
+        assert_eq!(counts(&mut app), (1, 3));
+        app.tasks.apply(changes(
+            Mirror::Issues,
+            &[gone("issue.gitea.gitea-lab.84.2", 21)],
+        ));
+        assert_eq!(counts(&mut app), (0, 2));
+        // An old revision arriving late changes nothing.
+        app.tasks.apply(changes(
+            Mirror::Issues,
+            &[event(
+                "issue.gitea.gitea-lab.84.1",
+                10,
+                issue(1, "plain", "open", serde_json::json!({})),
+            )],
+        ));
+        assert_eq!(counts(&mut app), (0, 2));
     }
 
     #[test]
@@ -397,9 +604,9 @@ mod tests {
         assert_eq!(project["project_id"], 84);
         assert_eq!(project["synced"], false);
         assert!(project["last_ok"].is_null());
-        app.tasks.apply(StoreEvent::MirrorChanged {
-            which: Mirror::Issues,
-            event: event(
+        app.tasks.apply(changes(
+            Mirror::Issues,
+            &[event(
                 "sync.gitea.gitea-lab.84",
                 5,
                 serde_json::json!({
@@ -408,8 +615,8 @@ mod tests {
                     "status": "ok", "last_ok": "2026-10-21T12:00:00Z",
                     "last_attempt": "2026-10-21T12:00:01Z", "issues": 3
                 }),
-            ),
-        });
+            )],
+        ));
         let synced = call(&mut app, Method::IssueList(IssueListParams::default()));
         let project = &synced["result"]["projects"][0];
         assert_eq!(project["synced"], true);
@@ -419,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_list_before_the_mirror_is_read_says_why() {
+    fn mirror_state_is_shown_and_clears_when_the_bucket_is_read() {
         let mut app = app();
         app.tasks.apply(StoreEvent::MirrorState {
             which: Mirror::Issues,
@@ -429,6 +636,21 @@ mod tests {
         assert_eq!(answer["result"]["mirror"]["loaded"], false);
         assert_eq!(answer["result"]["mirror"]["detail"], "the bucket is away");
         assert!(answer["result"]["issues"].as_array().unwrap().is_empty());
+        // Once the start is delivered the reason is gone.
+        app.tasks.apply(StoreEvent::MirrorCurrent {
+            which: Mirror::Issues,
+        });
+        let answer = call(&mut app, Method::IssueList(IssueListParams::default()));
+        assert_eq!(answer["result"]["mirror"]["loaded"], true);
+        assert!(answer["result"]["mirror"]["detail"].is_null());
+        // Reading it again from its start empties what was kept.
+        let (mut app, _) = mirrored_issues();
+        app.tasks.apply(StoreEvent::MirrorReset {
+            which: Mirror::Issues,
+        });
+        let answer = call(&mut app, Method::IssueList(all()));
+        assert_eq!(answer["result"]["total"], 0);
+        assert_eq!(answer["result"]["mirror"]["loaded"], false);
     }
 
     fn asks_app() -> App {
@@ -437,14 +659,15 @@ mod tests {
             serde_json::json!({"status": status, "kind": kind, "title": title,
                                "where": "herdr-max #241", "filed_by": "gestore-lab"})
         };
-        app.tasks.apply(StoreEvent::MirrorLoaded {
-            which: Mirror::Asks,
-            events: vec![
+        load(
+            &mut app,
+            Mirror::Asks,
+            &[
                 event("gestore-lab.a1", 2, row("task", "open", "do the thing")),
                 event("gestore-lab.a2", 3, row("decision", "open", "pick one")),
                 event("gestore-lab.a3", 4, row("task", "closed", "done thing")),
             ],
-        });
+        );
         app
     }
 
@@ -461,6 +684,7 @@ mod tests {
         };
         let default = call(&mut app, Method::AskList(AskListParams::default()));
         assert_eq!(keys(&default), ["gestore-lab.a1"]);
+        assert_eq!(default["result"]["total"], 1);
         assert_eq!(default["result"]["asks"][0]["where"], "herdr-max #241");
         assert_eq!(default["result"]["asks"][0]["rev"], 2);
         assert_eq!(default["result"]["mirror"]["loaded"], true);
@@ -480,11 +704,22 @@ mod tests {
             }),
         );
         assert_eq!(keys(&any), ["gestore-lab.a1", "gestore-lab.a2"]);
+        let paged = call(
+            &mut app,
+            Method::AskList(AskListParams {
+                kind: Some("any".into()),
+                include_closed: true,
+                limit: Some(1),
+                offset: Some(1),
+            }),
+        );
+        assert_eq!(keys(&paged), ["gestore-lab.a2"]);
+        assert_eq!(paged["result"]["total"], 3);
     }
 
-    #[test]
-    fn a_task_waits_on_what_the_real_ask_rows_say() {
-        let mut app = asks_app();
+    /// Put a task that waits on `row` into the cache and read it back through
+    /// `task.show`, the way a client does.
+    fn shown_waiting_on(app: &mut App, row: &str) -> serde_json::Value {
         let mut task = Task::new(
             HostId::new("m4m").unwrap(),
             TaskId::new("tk-1").unwrap(),
@@ -497,34 +732,120 @@ mod tests {
             Timestamp("2026-10-21T20:00:00Z".into()),
         )
         .unwrap();
-        let runs = RunCache::new();
-        let now = SystemTime::now();
-        let mut shown = |app: &App, row: &str| {
-            task.waits_on = Some(row.to_owned());
-            derive(&task, &runs, |row| app.tasks.ask_state(row), now)
-        };
+        task.waits_on = Some(row.to_owned());
+        let rev = app.tasks.cache().revision() + 1;
+        app.tasks.apply(StoreEvent::Changed(WatchEvent {
+            key: StoreKey("task.m4m.tk-1".into()),
+            rev: Rev(rev),
+            value: Some(serde_json::to_vec(&task).unwrap()),
+            at: None,
+        }));
+        let shown = call(
+            app,
+            Method::TaskShow(TaskTarget {
+                key: "task.m4m.tk-1".into(),
+            }),
+        );
+        shown["result"]["task"].clone()
+    }
+
+    #[test]
+    fn a_task_waits_on_what_the_real_ask_rows_say() {
+        let mut app = asks_app();
         // Open: waiting.
-        assert_eq!(shown(&app, "gestore-lab.a1").status, Shown::Waiting);
+        assert_eq!(
+            shown_waiting_on(&mut app, "gestore-lab.a1")["shown"],
+            "waiting"
+        );
         // Closed: the stored status comes back.
-        let closed = shown(&app, "gestore-lab.a3");
-        assert_eq!(closed.status, Shown::Open);
-        assert!(!closed.waits_on_missing);
+        let closed = shown_waiting_on(&mut app, "gestore-lab.a3");
+        assert_eq!(closed["shown"], "open");
+        assert!(closed["waits_on_missing"].is_null());
         // Answered: still waiting (the task has not picked the answer up).
-        app.tasks.apply(StoreEvent::MirrorChanged {
-            which: Mirror::Asks,
-            event: event(
+        app.tasks.apply(changes(
+            Mirror::Asks,
+            &[event(
                 "gestore-lab.a1",
                 9,
                 serde_json::json!({"status": "answered", "kind": "task"}),
-            ),
-        });
-        assert_eq!(shown(&app, "gestore-lab.a1").status, Shown::Waiting);
+            )],
+        ));
+        assert_eq!(
+            shown_waiting_on(&mut app, "gestore-lab.a1")["shown"],
+            "waiting"
+        );
+        // Dropped counts as closed.
+        app.tasks.apply(changes(
+            Mirror::Asks,
+            &[event(
+                "gestore-lab.a1",
+                10,
+                serde_json::json!({"status": "dropped", "kind": "task"}),
+            )],
+        ));
+        assert_eq!(
+            shown_waiting_on(&mut app, "gestore-lab.a1")["shown"],
+            "open"
+        );
+        // A row the desk re-filed: the task follows `superseded_by`.
+        app.tasks.apply(changes(
+            Mirror::Asks,
+            &[
+                event(
+                    "gestore-lab.old",
+                    1,
+                    serde_json::json!({"status": "closed", "superseded_by": "gestore-lab.new"}),
+                ),
+                event("gestore-lab.new", 1, serde_json::json!({"status": "open"})),
+            ],
+        ));
+        assert_eq!(
+            shown_waiting_on(&mut app, "gestore-lab.old")["shown"],
+            "waiting"
+        );
         // A row that is not there: flagged, not waiting.
-        let missing = shown(&app, "gestore-lab.gone");
-        assert_eq!(missing.status, Shown::Open);
-        assert!(missing.waits_on_missing);
+        let missing = shown_waiting_on(&mut app, "gestore-lab.gone");
+        assert_eq!(missing["shown"], "open");
+        assert_eq!(missing["waits_on_missing"], true);
+        // A row deleted in the bucket (a watch delete event) is missing too.
+        app.tasks
+            .apply(changes(Mirror::Asks, &[gone("gestore-lab.new", 12)]));
+        assert_eq!(
+            shown_waiting_on(&mut app, "gestore-lab.new")["waits_on_missing"],
+            true
+        );
         // Until the asks are read nothing is called missing.
-        let fresh = self::app();
+        let mut fresh = self::app();
+        let unread = shown_waiting_on(&mut fresh, "gestore-lab.gone");
+        assert!(unread["waits_on_missing"].is_null());
         assert_eq!(fresh.tasks.ask_state("gestore-lab.gone"), AskRow::Unknown);
+    }
+
+    #[test]
+    fn only_an_ask_a_task_waits_on_counts_as_a_change_for_readers() {
+        let mut app = asks_app();
+        shown_waiting_on(&mut app, "gestore-lab.a1");
+        let moved = |app: &mut App, key: &str, rev: u64, status: &str| {
+            app.tasks.apply(changes(
+                Mirror::Asks,
+                &[event(
+                    key,
+                    rev,
+                    serde_json::json!({"status": status, "kind": "task"}),
+                )],
+            ))
+        };
+        assert!(
+            !moved(&mut app, "gestore-lab.other", 5, "open"),
+            "nobody waits on it"
+        );
+        assert!(
+            !moved(&mut app, "gestore-lab.a1", 10, "answered"),
+            "waiting either way"
+        );
+        assert!(
+            moved(&mut app, "gestore-lab.a1", 11, "closed"),
+            "waiting ends"
+        );
     }
 }

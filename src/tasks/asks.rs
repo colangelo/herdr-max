@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::clean::{clean, clean_opt};
 use super::ids::Rev;
 use super::runs::AskRow;
 use super::store::WatchEvent;
@@ -49,24 +50,26 @@ pub(crate) struct AskRecord {
 }
 
 impl AskRecord {
-    fn check_sizes(&self) -> Result<(), &'static str> {
-        let long = |text: &Option<String>| {
-            text.as_deref()
-                .is_some_and(|text| text.chars().count() > FIELD_MAX_CHARS)
-        };
-        if self.status.chars().count() > 64
-            || long(&self.kind)
-            || long(&self.title)
-            || long(&self.how)
-            || long(&self.where_)
-            || long(&self.horizon)
-            || long(&self.filed_by)
-            || long(&self.answer)
-            || long(&self.superseded_by)
-        {
-            return Err("a field is too long");
+    /// Clean every string and cut what is too long: a long answer is still
+    /// the row ac wrote.
+    fn sanitize(&mut self) {
+        self.status = clean(&self.status, 64).0;
+        for field in [
+            &mut self.kind,
+            &mut self.title,
+            &mut self.how,
+            &mut self.where_,
+            &mut self.horizon,
+            &mut self.filed_by,
+            &mut self.answer,
+            &mut self.answered_at,
+            &mut self.superseded_by,
+            &mut self.source,
+            &mut self.created_at,
+            &mut self.updated_at,
+        ] {
+            clean_opt(field, FIELD_MAX_CHARS);
         }
-        Ok(())
     }
 
     pub(crate) fn is_task(&self) -> bool {
@@ -90,6 +93,50 @@ pub(crate) struct AskEntry {
     pub record: AskRecord,
 }
 
+/// One watch event, read and cleaned off the app's thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AskChange {
+    Row {
+        name: String,
+        rev: Rev,
+        record: Box<AskRecord>,
+    },
+    Gone {
+        name: String,
+    },
+    /// A document that cannot be used; the older row for its key goes too.
+    Rejected {
+        name: String,
+        why: String,
+    },
+}
+
+/// Read one event. `None` for a key that is not a row (no gestore prefix).
+pub(crate) fn parse_event(event: &WatchEvent) -> Option<AskChange> {
+    let name = &event.key.0;
+    // A key is `<gestore>.<id>`; anything without a dot is not a row.
+    if !name.contains('.') {
+        return None;
+    }
+    let Some(bytes) = &event.value else {
+        return Some(AskChange::Gone { name: name.clone() });
+    };
+    match serde_json::from_slice::<AskRecord>(bytes) {
+        Ok(mut record) => {
+            record.sanitize();
+            Some(AskChange::Row {
+                name: name.clone(),
+                rev: event.rev,
+                record: Box::new(record),
+            })
+        }
+        Err(err) => Some(AskChange::Rejected {
+            name: name.clone(),
+            why: format!("unreadable: {err}"),
+        }),
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AskCache {
     rows: BTreeMap<String, AskEntry>,
@@ -109,44 +156,46 @@ impl AskCache {
         self.rows.iter()
     }
 
-    /// Apply one change from a scan or a watch. Returns whether the cache
-    /// changed.
-    pub(crate) fn apply(&mut self, event: &WatchEvent) -> bool {
-        let name = &event.key.0;
-        let Some(bytes) = &event.value else {
-            return self.rows.remove(name).is_some();
-        };
-        // A key is `<gestore>.<id>`; anything without a dot is not a row.
-        if !name.contains('.') {
-            return false;
-        }
-        let record = match serde_json::from_slice::<AskRecord>(bytes) {
-            Ok(record) => record,
-            Err(err) => return self.reject(name, format!("unreadable: {err}")),
-        };
-        if let Err(why) = record.check_sizes() {
-            return self.reject(name, why.into());
-        }
-        if self.rows.get(name).is_some_and(|row| row.rev >= event.rev) {
-            return false;
-        }
-        self.rows.insert(
-            name.clone(),
-            AskEntry {
-                rev: event.rev,
-                record,
-            },
-        );
-        true
+    /// Forget everything: the bucket is read again from its start.
+    pub(crate) fn clear(&mut self) -> bool {
+        let any = !self.rows.is_empty();
+        self.rows.clear();
+        any
     }
 
-    fn reject(&mut self, name: &str, why: String) -> bool {
-        self.rejected.push((name.to_owned(), why));
-        if self.rejected.len() > REJECTED_KEPT {
-            let excess = self.rejected.len() - REJECTED_KEPT;
-            self.rejected.drain(..excess);
+    /// Read and apply one event, together (for tests).
+    #[cfg(test)]
+    pub(crate) fn apply_event(&mut self, event: &WatchEvent) -> bool {
+        parse_event(event).is_some_and(|change| self.apply(change))
+    }
+
+    /// Apply one change. Returns whether the cache changed.
+    pub(crate) fn apply(&mut self, change: AskChange) -> bool {
+        match change {
+            AskChange::Row { name, rev, record } => {
+                if self.rows.get(&name).is_some_and(|row| row.rev >= rev) {
+                    return false;
+                }
+                self.rows.insert(
+                    name,
+                    AskEntry {
+                        rev,
+                        record: *record,
+                    },
+                );
+                true
+            }
+            AskChange::Gone { name } => self.rows.remove(&name).is_some(),
+            AskChange::Rejected { name, why } => {
+                tracing::warn!(key = %name, %why, "an ask row was refused");
+                self.rejected.push((name.clone(), why));
+                if self.rejected.len() > REJECTED_KEPT {
+                    let excess = self.rejected.len() - REJECTED_KEPT;
+                    self.rejected.drain(..excess);
+                }
+                self.rows.remove(&name).is_some()
+            }
         }
-        false
     }
 
     /// How the row `key` looks to a task that waits on it: a row the desk
@@ -184,7 +233,7 @@ mod tests {
     #[test]
     fn a_row_is_read_for_the_fields_this_server_shows() {
         let mut cache = AskCache::default();
-        assert!(cache.apply(&event(
+        assert!(cache.apply_event(&event(
             "gestore-lab.t1021-01",
             3,
             serde_json::json!({
@@ -211,16 +260,16 @@ mod tests {
             }
             doc
         };
-        cache.apply(&event("g.a", 1, row("open", None)));
-        cache.apply(&event("g.b", 1, row("answered", None)));
-        cache.apply(&event("g.c", 1, row("closed", None)));
-        cache.apply(&event("g.d", 1, row("dropped", None)));
-        cache.apply(&event("g.e", 1, row("paused", None)));
+        cache.apply_event(&event("g.a", 1, row("open", None)));
+        cache.apply_event(&event("g.b", 1, row("answered", None)));
+        cache.apply_event(&event("g.c", 1, row("closed", None)));
+        cache.apply_event(&event("g.d", 1, row("dropped", None)));
+        cache.apply_event(&event("g.e", 1, row("paused", None)));
         // The desk re-filed g.old as g.a.
-        cache.apply(&event("g.old", 1, row("dropped", Some("g.a"))));
+        cache.apply_event(&event("g.old", 1, row("dropped", Some("g.a"))));
         // A loop of replacements ends rather than runs for ever.
-        cache.apply(&event("g.x", 1, row("open", Some("g.y"))));
-        cache.apply(&event("g.y", 1, row("open", Some("g.x"))));
+        cache.apply_event(&event("g.x", 1, row("open", Some("g.y"))));
+        cache.apply_event(&event("g.y", 1, row("open", Some("g.x"))));
 
         assert_eq!(cache.state_of("g.a"), AskRow::Open);
         assert_eq!(cache.state_of("g.b"), AskRow::Answered);
@@ -235,21 +284,33 @@ mod tests {
     #[test]
     fn damaged_or_oversized_rows_are_refused_and_removals_apply() {
         let mut cache = AskCache::default();
-        assert!(!cache.apply(&WatchEvent {
+        assert!(!cache.apply_event(&WatchEvent {
             key: StoreKey("g.bad".into()),
             rev: Rev(1),
             value: Some(b"[]".to_vec()),
             at: None
         }));
-        assert!(!cache.apply(&event(
+        // Too long is cut, not refused.
+        assert!(cache.apply_event(&event(
             "g.long",
             1,
-            serde_json::json!({"status": "open", "title": "x".repeat(FIELD_MAX_CHARS + 1)})
+            serde_json::json!({"status": "open", "title": "x\u{1b}".repeat(FIELD_MAX_CHARS + 1)})
         )));
-        assert_eq!(cache.rejected().len(), 2);
-        cache.apply(&event("g.ok", 1, serde_json::json!({"status": "open"})));
+        let title = cache.rows().next().unwrap().1.record.title.clone().unwrap();
+        assert_eq!(title.chars().count(), FIELD_MAX_CHARS);
+        assert!(!title.chars().any(char::is_control));
+        assert_eq!(cache.rejected().len(), 1);
+        cache.apply_event(&event("g.ok", 1, serde_json::json!({"status": "open"})));
+        assert_eq!(cache.len(), 2);
+        // A damaged document takes the older row of its key with it.
+        assert!(cache.apply_event(&WatchEvent {
+            key: StoreKey("g.long".into()),
+            rev: Rev(2),
+            value: Some(b"[]".to_vec()),
+            at: None
+        }));
         assert_eq!(cache.len(), 1);
-        assert!(cache.apply(&WatchEvent {
+        assert!(cache.apply_event(&WatchEvent {
             key: StoreKey("g.ok".into()),
             rev: Rev(2),
             value: None,

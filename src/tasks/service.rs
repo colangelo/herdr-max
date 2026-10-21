@@ -17,16 +17,17 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use super::asks::AskCache;
+use super::asks::{AskCache, AskChange};
 use super::cache::TaskCache;
 use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
-use super::issues::IssueCache;
+use super::issues::{IssueCache, IssueChange};
 use super::model::{MoveContext, Task, TaskError, TaskStatus, Timestamp, RUNS_KEPT};
 use super::outbox::{Base, Entry, Op, Outbox};
 use super::runs::{derive, AskRow, Derived, RunCache, RunState};
 use super::store::{
-    landed_last, Mirror, StoreError, StoreResult, TaskStore, WatchEvent, WatchSink,
+    landed_last, Mirror, MirrorEvent, MirrorSink, StoreError, StoreResult, TaskStore, WatchEvent,
+    WatchSink,
 };
 
 /// Writes that may wait for the store at once. More are refused, so a store
@@ -179,7 +180,7 @@ enum Message {
     Resolve(ResolveCommand),
     Watch(WatchEvent),
     /// A change in one of the buckets that are only read.
-    Mirror(Mirror, WatchEvent),
+    Mirror(Mirror, MirrorEvent),
     Shutdown,
 }
 
@@ -190,13 +191,18 @@ pub(crate) enum StoreEvent {
     Loaded(Vec<WatchEvent>),
     /// A change seen by the watch.
     Changed(WatchEvent),
-    /// Everything a read-only bucket held when the thread attached to it.
-    MirrorLoaded {
+    /// The thread is about to read a read-only bucket from its start: what
+    /// the app kept of it (revisions may restart if the bucket was made again)
+    /// is dropped.
+    MirrorReset { which: Mirror },
+    /// Changes to a read-only bucket, read and cleaned on the store thread:
+    /// the entries it held, in chunks, then what changed.
+    MirrorChanges {
         which: Mirror,
-        events: Vec<WatchEvent>,
+        changes: MirrorChanges,
     },
-    /// A change seen by the watch of a read-only bucket.
-    MirrorChanged { which: Mirror, event: WatchEvent },
+    /// Every entry the bucket held at the start has been delivered.
+    MirrorCurrent { which: Mirror },
     /// Why a read-only bucket cannot be read (the thread keeps trying), or
     /// `None` when it can.
     MirrorState {
@@ -223,6 +229,13 @@ pub(crate) enum StoreEvent {
     Degraded(String),
     /// The thread has ended; nothing more will be applied or reported.
     Stopped(String),
+}
+
+/// The ready rows of one read-only bucket.
+#[derive(Debug)]
+pub(crate) enum MirrorChanges {
+    Issues(Vec<IssueChange>),
+    Asks(Vec<AskChange>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -885,7 +898,18 @@ impl TaskService {
     /// Take what the store thread reported. Returns whether anything a reader
     /// can see changed.
     pub(crate) fn apply(&mut self, event: StoreEvent) -> bool {
+        // A bucket that is only read cannot change a pane's counts.
+        let mirror = matches!(
+            event,
+            StoreEvent::MirrorReset { .. }
+                | StoreEvent::MirrorChanges { .. }
+                | StoreEvent::MirrorCurrent { .. }
+                | StoreEvent::MirrorState { .. }
+        );
         let changed = self.apply_event(event);
+        if mirror {
+            return changed;
+        }
         if changed {
             self.refresh_pane_counts();
         }
@@ -905,6 +929,18 @@ impl TaskService {
     /// Whether a read-only bucket has been read yet, and why not.
     pub(crate) fn mirror_status(&self, which: Mirror) -> MirrorStatus {
         self.mirror_status.get(&which).cloned().unwrap_or_default()
+    }
+
+    /// The ask rows some task waits on.
+    fn waited_on(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .cache
+            .iter()
+            .filter_map(|(_, cached)| cached.task.waits_on.clone())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
     }
 
     /// What an ask a task waits on is doing. Until the asks have been read, no
@@ -1032,13 +1068,48 @@ impl TaskService {
                 }
                 task_changed || any_run
             }
-            StoreEvent::MirrorLoaded { which, events } => {
-                for event in &events {
-                    match which {
-                        Mirror::Issues => self.issues.apply(event),
-                        Mirror::Asks => self.asks.apply(event),
-                    };
+            StoreEvent::MirrorReset { which } => {
+                let watched = self.waited_on();
+                let was_loaded = self.mirror_status(which).loaded;
+                match which {
+                    Mirror::Issues => self.issues.clear(),
+                    Mirror::Asks => self.asks.clear(),
+                };
+                self.mirror_status.insert(which, MirrorStatus::default());
+                // A task that waits on an ask goes back to not knowing.
+                which == Mirror::Asks && was_loaded && !watched.is_empty()
+            }
+            StoreEvent::MirrorChanges { which, changes } => match changes {
+                MirrorChanges::Issues(list) => {
+                    for change in list {
+                        self.issues.apply(change);
+                    }
+                    // The panel polls for issues; nothing waits on them.
+                    false
                 }
+                MirrorChanges::Asks(list) => {
+                    // Tell readers only when what a waiting task sees moved.
+                    let watched = self.waited_on();
+                    let seen = |service: &Self| -> Vec<u8> {
+                        watched
+                            .iter()
+                            .map(|key| match service.asks.state_of(key) {
+                                // Open and answered both keep a task waiting.
+                                AskRow::Open | AskRow::Answered => 0,
+                                AskRow::Closed | AskRow::Unknown => 1,
+                                AskRow::Missing => 2,
+                            })
+                            .collect()
+                    };
+                    let before = seen(self);
+                    for change in list {
+                        self.asks.apply(change);
+                    }
+                    let _ = which;
+                    self.mirror_status(Mirror::Asks).loaded && seen(self) != before
+                }
+            },
+            StoreEvent::MirrorCurrent { which } => {
                 self.mirror_status.insert(
                     which,
                     MirrorStatus {
@@ -1046,17 +1117,11 @@ impl TaskService {
                         detail: None,
                     },
                 );
-                true
+                which == Mirror::Asks && !self.waited_on().is_empty()
             }
-            StoreEvent::MirrorChanged { which, event } => match which {
-                Mirror::Issues => self.issues.apply(&event),
-                Mirror::Asks => self.asks.apply(&event),
-            },
             StoreEvent::MirrorState { which, detail } => {
-                let status = self.mirror_status.entry(which).or_default();
-                let changed = status.detail != detail;
-                status.detail = detail;
-                changed
+                self.mirror_status.entry(which).or_default().detail = detail;
+                false
             }
             StoreEvent::Queued(writes) => {
                 for (write, key, doc) in writes {
@@ -1362,6 +1427,8 @@ fn run_store(
 
     // The read-only buckets: what fails is tried again, later.
     let mut mirrors_left = Mirror::ALL.to_vec();
+    // Messages found while reading ahead for a batch, handled next.
+    let mut carry: std::collections::VecDeque<Message> = std::collections::VecDeque::new();
     let mut mirror_wait = backoff.initial;
     let mut mirror_due = std::time::Instant::now();
 
@@ -1377,6 +1444,7 @@ fn run_store(
             (a, b) => a.or(b),
         };
         let message = match wait {
+            _ if !carry.is_empty() => carry.pop_front(),
             Some(wait) => match messages.recv_timeout(wait) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -1400,8 +1468,24 @@ fn run_store(
         match message {
             Some(Message::Shutdown) => break,
             Some(Message::Mirror(which, event)) => {
-                if !emit(StoreEvent::MirrorChanged { which, event }) {
-                    return None;
+                let (events, lost) = mirror_batch(which, event, &messages, &mut carry);
+                for event in events {
+                    if !emit(event) {
+                        return None;
+                    }
+                }
+                for (which, why) in lost {
+                    if !emit(StoreEvent::MirrorState {
+                        which,
+                        detail: Some(format!("the watch was lost: {why}")),
+                    }) {
+                        return None;
+                    }
+                    if !mirrors_left.contains(&which) {
+                        mirrors_left.push(which);
+                    }
+                    mirror_wait = backoff.initial;
+                    mirror_due = std::time::Instant::now();
                 }
                 continue;
             }
@@ -1447,8 +1531,9 @@ fn run_store(
     None
 }
 
-/// Attach to the read-only buckets in `left`. What could not be read stays in
-/// `left`. Returns whether any failed, or `None` when nobody listens any more.
+/// Attach to the read-only buckets in `left`. What could not be reached stays
+/// in `left`. Returns whether any failed, or `None` when nobody listens any
+/// more. Attaching starts a watch and returns: the entries arrive as messages.
 fn attach_mirrors(
     store: &mut dyn TaskStore,
     left: &mut Vec<Mirror>,
@@ -1458,28 +1543,98 @@ fn attach_mirrors(
     let mut failed = false;
     for which in std::mem::take(left) {
         let sender = sender.clone();
-        let sink: WatchSink =
+        let sink: MirrorSink =
             Box::new(move |event| sender.send(Message::Mirror(which, event)).is_ok());
-        let event = match store.mirror(which, sink) {
-            Ok(Some(events)) => StoreEvent::MirrorLoaded { which, events },
-            Ok(None) => StoreEvent::MirrorState {
-                which,
-                detail: Some("not available with this backend".to_owned()),
-            },
+        // Before the watch can deliver anything: the app starts from empty.
+        if !emit(StoreEvent::MirrorReset { which }) {
+            return None;
+        }
+        let state = match store.mirror(which, sink) {
+            Ok(true) => None,
+            Ok(false) => Some("not available with this backend".to_owned()),
             Err(err) => {
                 failed = true;
                 left.push(which);
-                StoreEvent::MirrorState {
-                    which,
-                    detail: Some(err.to_string()),
-                }
+                Some(err.to_string())
             }
         };
-        if !emit(event) {
-            return None;
+        if let Some(detail) = state {
+            if !emit(StoreEvent::MirrorState {
+                which,
+                detail: Some(detail),
+            }) {
+                return None;
+            }
         }
     }
     Some(failed)
+}
+
+/// How many mirror messages are read and handed on at once: enough to be
+/// cheap per message, few enough that a write or a stop waits no longer than
+/// a moment behind them.
+const MIRROR_BATCH: usize = 256;
+
+/// Read `first` and the mirror messages already waiting, parse them here (off
+/// the app's thread) and return the events to hand on, in order, and the
+/// watches that were lost. A message of another kind that is met stops the
+/// batch and is put in `carry`.
+fn mirror_batch(
+    which: Mirror,
+    event: MirrorEvent,
+    messages: &Receiver<Message>,
+    carry: &mut std::collections::VecDeque<Message>,
+) -> (Vec<StoreEvent>, Vec<(Mirror, String)>) {
+    fn flush(out: &mut Vec<StoreEvent>, issues: &mut Vec<IssueChange>, asks: &mut Vec<AskChange>) {
+        if !issues.is_empty() {
+            out.push(StoreEvent::MirrorChanges {
+                which: Mirror::Issues,
+                changes: MirrorChanges::Issues(std::mem::take(issues)),
+            });
+        }
+        if !asks.is_empty() {
+            out.push(StoreEvent::MirrorChanges {
+                which: Mirror::Asks,
+                changes: MirrorChanges::Asks(std::mem::take(asks)),
+            });
+        }
+    }
+    let mut out = Vec::new();
+    let mut lost = Vec::new();
+    let mut issues = Vec::new();
+    let mut asks = Vec::new();
+    let mut next = Some((which, event));
+    let mut taken = 0;
+    while let Some((which, event)) = next.take() {
+        match event {
+            MirrorEvent::Entry(entry) => match which {
+                Mirror::Issues => issues.extend(super::issues::parse_event(&entry)),
+                Mirror::Asks => asks.extend(super::asks::parse_event(&entry)),
+            },
+            MirrorEvent::Current => {
+                flush(&mut out, &mut issues, &mut asks);
+                out.push(StoreEvent::MirrorCurrent { which });
+            }
+            MirrorEvent::Lost(why) => {
+                flush(&mut out, &mut issues, &mut asks);
+                lost.push((which, why));
+            }
+        }
+        taken += 1;
+        if taken >= MIRROR_BATCH {
+            break;
+        }
+        match messages.try_recv() {
+            Ok(Message::Mirror(which, event)) => next = Some((which, event)),
+            Ok(other) => {
+                carry.push_back(other);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    flush(&mut out, &mut issues, &mut asks);
+    (out, lost)
 }
 
 /// Before the thread ends: the writes still waiting in the channel go into the
@@ -1902,10 +2057,12 @@ mod tests {
         sinks: Vec<WatchSink>,
         /// How many attaches to a read-only bucket still fail.
         mirror_failures: Arc<AtomicUsize>,
+        /// How many attaches to a read-only bucket went through.
+        mirror_attaches: Arc<AtomicUsize>,
         /// What the read-only buckets hold.
         mirror_docs: Arc<Mutex<Vec<(Mirror, WatchEvent)>>>,
         /// The watches on them, for a test to push changes through.
-        mirror_sinks: Arc<Mutex<Vec<(Mirror, WatchSink)>>>,
+        mirror_sinks: Arc<Mutex<Vec<(Mirror, MirrorSink)>>>,
     }
 
     impl FakeStore {
@@ -1924,6 +2081,7 @@ mod tests {
                 docs: BTreeMap::new(),
                 sinks: Vec::new(),
                 mirror_failures: Arc::default(),
+                mirror_attaches: Arc::default(),
                 mirror_docs: Arc::default(),
                 mirror_sinks: Arc::default(),
             }
@@ -2050,11 +2208,7 @@ mod tests {
             Ok(())
         }
 
-        fn mirror(
-            &mut self,
-            which: Mirror,
-            sink: WatchSink,
-        ) -> StoreResult<Option<Vec<WatchEvent>>> {
+        fn mirror(&mut self, which: Mirror, sink: MirrorSink) -> StoreResult<bool> {
             let failing = self
                 .mirror_failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -2064,16 +2218,22 @@ mod tests {
             if failing {
                 return Err(StoreError::Unavailable("the bucket is away".to_owned()));
             }
+            self.mirror_attaches.fetch_add(1, Ordering::SeqCst);
+            // What the bucket holds, then the end of the start, as a watch does.
+            let docs: Vec<_> = self
+                .mirror_docs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(of, _)| *of == which)
+                .map(|(_, event)| event.clone())
+                .collect();
+            for event in docs {
+                assert!(sink(MirrorEvent::Entry(event)));
+            }
+            assert!(sink(MirrorEvent::Current));
             self.mirror_sinks.lock().unwrap().push((which, sink));
-            Ok(Some(
-                self.mirror_docs
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(of, _)| *of == which)
-                    .map(|(_, event)| event.clone())
-                    .collect(),
-            ))
+            Ok(true)
         }
     }
 
@@ -2169,7 +2329,8 @@ mod tests {
     #[test]
     fn mirrors_load_retry_and_follow_changes() {
         let mut store = FakeStore::new(Duration::ZERO);
-        // The first attach (the issues) fails; the asks go through.
+        // The first attach (the asks, which go first) fails; the issues go
+        // through, and the asks come on the retry.
         store.mirror_failures = Arc::new(AtomicUsize::new(1));
         let docs = store.mirror_docs.clone();
         let sinks = store.mirror_sinks.clone();
@@ -2182,22 +2343,21 @@ mod tests {
         // Before the asks are read no ask can be called missing.
         assert_eq!(service.ask_state("g.a"), AskRow::Unknown);
         pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.mirror_status(Mirror::Issues).loaded
+        });
+        assert_eq!(service.ask_state("g.a"), AskRow::Unknown, "not read yet");
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
             service.mirror_status(Mirror::Asks).loaded
         });
         assert_eq!(service.ask_state("g.a"), AskRow::Open);
         assert_eq!(service.ask_state("g.nope"), AskRow::Missing);
-
-        // The issues come on the retry, with their reason shown until then.
-        pump(&mut service, &received, Duration::from_secs(5), |service| {
-            service.mirror_status(Mirror::Issues).loaded
-        });
-        assert_eq!(service.mirror_status(Mirror::Issues).detail, None);
+        assert_eq!(service.mirror_status(Mirror::Asks).detail, None);
 
         // A change on a watch reaches the cache.
         let push = |which: Mirror, event: WatchEvent| {
             let sinks = sinks.lock().unwrap();
             let (_, sink) = sinks.iter().find(|(of, _)| *of == which).unwrap();
-            assert!(sink(event));
+            assert!(sink(MirrorEvent::Entry(event)));
         };
         push(
             Mirror::Asks,
@@ -2227,6 +2387,89 @@ mod tests {
         });
         let row = service.issues().get("issue.gitea.gitea-lab.84.7").unwrap();
         assert_eq!(row.mirror_rev, Rev(9));
+    }
+
+    #[test]
+    fn a_lost_watch_is_attached_again_from_the_start() {
+        let store = FakeStore::new(Duration::ZERO);
+        let docs = store.mirror_docs.clone();
+        let sinks = store.mirror_sinks.clone();
+        let attaches = store.mirror_attaches.clone();
+        docs.lock().unwrap().push((
+            Mirror::Asks,
+            mirror_event("g.a", 7, serde_json::json!({"status": "open"})),
+        ));
+        let (mut service, received) = start_with_store(store);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.mirror_status(Mirror::Asks).loaded
+                && service.mirror_status(Mirror::Issues).loaded
+        });
+        assert_eq!(attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(service.ask_state("g.a"), AskRow::Open);
+
+        // The bucket was made again: its revisions start over, and a row
+        // that is gone must not stay.
+        *docs.lock().unwrap() = vec![(
+            Mirror::Asks,
+            mirror_event("g.b", 1, serde_json::json!({"status": "open"})),
+        )];
+        {
+            let sinks = sinks.lock().unwrap();
+            let (_, sink) = sinks.iter().find(|(of, _)| *of == Mirror::Asks).unwrap();
+            assert!(sink(MirrorEvent::Lost("the watch ended".into())));
+        }
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.ask_state("g.b") == AskRow::Open
+        });
+        assert_eq!(
+            attaches.load(Ordering::SeqCst),
+            3,
+            "only the lost one is attached again"
+        );
+        assert_eq!(
+            service.ask_state("g.a"),
+            AskRow::Missing,
+            "the old row is gone"
+        );
+        assert_eq!(service.mirror_status(Mirror::Asks).detail, None);
+    }
+
+    #[test]
+    fn a_big_start_does_not_hold_up_a_write() {
+        let mut store = FakeStore::new(Duration::ZERO);
+        // Thousands of rows are waiting before the write is sent.
+        {
+            let mut docs = store.mirror_docs.lock().unwrap();
+            for n in 0..5000u64 {
+                docs.push((
+                    Mirror::Asks,
+                    mirror_event(
+                        &format!("g.{n}"),
+                        n + 1,
+                        serde_json::json!({"status": "open"}),
+                    ),
+                ));
+            }
+        }
+        store.mirror_failures = Arc::default();
+        let (mut service, received) = start_with_store(store);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+        let write = service.submit_create(&task("tk-big")).unwrap();
+        pump(
+            &mut service,
+            &received,
+            Duration::from_secs(10),
+            |service| service.recent_outcome(&write).is_some(),
+        );
+        pump(
+            &mut service,
+            &received,
+            Duration::from_secs(10),
+            |service| service.mirror_status(Mirror::Asks).loaded,
+        );
+        assert_eq!(service.asks().len(), 5000);
     }
 
     #[test]

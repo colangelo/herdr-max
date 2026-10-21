@@ -69,6 +69,8 @@ fn project(path: &str, id: u64, synced: bool) -> IssueProjectInfo {
         error_class: None,
         last_attempt: None,
         last_ok: synced.then(|| "2026-10-21T12:00:00Z".to_owned()),
+        issues_open: 0,
+        issues_total: 0,
     }
 }
 
@@ -228,6 +230,7 @@ fn open_with(
         let result = match method {
             Method::IssueList(_) => ResponseResult::IssueList {
                 issues: issues.clone(),
+                total: issues.len() as u64,
                 projects: projects.clone(),
                 mirror: loaded(),
             },
@@ -237,6 +240,7 @@ fn open_with(
             },
             Method::AskList(_) => ResponseResult::AskList {
                 asks: asks.clone(),
+                total: asks.len() as u64,
                 mirror: loaded(),
             },
             other => panic!("unexpected request {other:?}"),
@@ -510,6 +514,7 @@ fn a_mirror_that_is_not_read_yet_says_why_instead_of_showing_an_empty_list() {
                 &id,
                 Ok(ResponseResult::IssueList {
                     issues: Vec::new(),
+                    total: 0,
                     projects: Vec::new(),
                     mirror: MirrorInfo {
                         loaded: false,

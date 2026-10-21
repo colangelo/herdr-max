@@ -92,8 +92,24 @@ pub(crate) enum Mirror {
 }
 
 impl Mirror {
-    pub(crate) const ALL: [Mirror; 2] = [Mirror::Issues, Mirror::Asks];
+    /// The small bucket first: the asks decide whether a task waits, the
+    /// issues only fill the panel.
+    pub(crate) const ALL: [Mirror; 2] = [Mirror::Asks, Mirror::Issues];
 }
+
+/// What a read-only bucket's watch delivers: the entries that were there when
+/// it started (last value of each key, in order), then `Current` once they
+/// are all in, then the changes. `Lost` ends the watch: the thread attaches
+/// again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MirrorEvent {
+    Entry(WatchEvent),
+    Current,
+    Lost(String),
+}
+
+/// Like [`WatchSink`]: returns false once nobody listens any more.
+pub(crate) type MirrorSink = Box<dyn Fn(MirrorEvent) -> bool + Send + 'static>;
 
 pub(crate) trait TaskStore: Send + 'static {
     /// Create `key`. If it already holds a document whose `last_writes`
@@ -122,10 +138,12 @@ pub(crate) trait TaskStore: Send + 'static {
     /// Report every change under `prefix` from now on to `sink`.
     fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()>;
 
-    /// Watch another bucket, read-only, and return everything it holds now.
-    /// `Ok(None)` when this backend has no such bucket (the file backend has
-    /// none); an error when it should have and cannot be read.
-    fn mirror(&mut self, _which: Mirror, _sink: WatchSink) -> StoreResult<Option<Vec<WatchEvent>>> {
-        Ok(None)
+    /// Watch another bucket, read-only, from its first entry: `sink` gets
+    /// every key's last value, `Current`, then the changes. Returns at once;
+    /// a scan of a big bucket must not hold up this thread. `Ok(false)` when
+    /// this backend has no such bucket (the file backend has none); an error
+    /// when it should have and cannot be reached.
+    fn mirror(&mut self, _which: Mirror, _sink: MirrorSink) -> StoreResult<bool> {
+        Ok(false)
     }
 }

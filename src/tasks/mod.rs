@@ -11,6 +11,7 @@
 mod asks;
 mod bus_env;
 mod cache;
+mod clean;
 #[cfg(test)]
 mod conformance;
 mod file_store;
@@ -25,13 +26,17 @@ mod runs;
 mod service;
 mod store;
 
-pub(crate) use asks::{AskCache, AskEntry, AskRecord};
+pub(crate) use asks::parse_event as parse_ask_event;
+pub(crate) use asks::{AskCache, AskChange, AskEntry, AskRecord};
 pub(crate) use bus_env::{load as load_bus_env, BusEnv};
 pub(crate) use cache::{CachedTask, TaskCache};
 pub(crate) use file_store::FileStore;
 pub(crate) use identity::{BackendKind, TaskIdentity};
 pub(crate) use ids::{is_valid_host_id, HostId, Rev, TaskId, TaskKey, WriteId};
-pub(crate) use issues::{IssueCache, IssueRecord, IssueRow, IssueState, SyncRecord, SyncRow};
+pub(crate) use issues::parse_event as parse_issue_event;
+pub(crate) use issues::{
+    IssueCache, IssueChange, IssueRecord, IssueRow, IssueState, ProjectCount, SyncRecord, SyncRow,
+};
 #[cfg(feature = "tasks-kv")]
 pub(crate) use kv_store::{KvSettings, KvStore};
 pub(crate) use model::{
@@ -40,9 +45,10 @@ pub(crate) use model::{
 };
 pub(crate) use runs::{derive, AskRow, Derived, RunCache, RunRecord, RunState, Shown};
 pub(crate) use service::{
-    Backoff, Choice, EventContext, HeldConflict, MirrorStatus, ResolveOutcome, StartOptions,
-    StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
+    Backoff, Choice, EventContext, HeldConflict, MirrorChanges, MirrorStatus, ResolveOutcome,
+    StartOptions, StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
 };
 pub(crate) use store::{
-    Mirror, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
+    Mirror, MirrorEvent, MirrorSink, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent,
+    WatchSink,
 };

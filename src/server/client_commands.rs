@@ -397,11 +397,11 @@ mod tests {
         for (method, digest) in [
             (
                 "ask.list",
-                "965b507de5be881419caa29e6c9e32e9323092a9fc36f041cbb5b380ae8abf97",
+                "819cff50eadf473b50e1c279757ca1dbf00da988a912e7d8c4261be3e3d4113c",
             ),
             (
                 "issue.list",
-                "8cfb923c37267fc68d44a1cf52fc7bf59208a5e35f3e661fba9306ae22aeb172",
+                "a9b086aa85e98fc663a142da6f56810399ed4b50b822c525065d8df991bcc289",
             ),
             (
                 "task.add",

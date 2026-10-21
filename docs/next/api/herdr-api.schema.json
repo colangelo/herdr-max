@@ -2534,6 +2534,24 @@
                 "string",
                 "null"
               ]
+            },
+            "limit": {
+              "description": "At most this many rows (500 when absent, 2000 at most).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "description": "Skip this many first, in key order.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "type": "object"
@@ -3041,6 +3059,24 @@
         "IssueListParams": {
           "description": "Params for `issue.list`: the forge issues worklink mirrors.",
           "properties": {
+            "limit": {
+              "description": "At most this many issues (500 when absent, 2000 at most).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "description": "Skip this many first, in key order.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "project": {
               "description": "Only this project: its numeric id, or its path (`ac/worklink`).",
               "type": [
@@ -10553,6 +10589,19 @@
             "forge_id": {
               "type": "string"
             },
+            "issues_open": {
+              "default": 0,
+              "description": "How many of the project's issues are open, and how many there are.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "issues_total": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "last_attempt": {
               "type": [
                 "string",
@@ -13457,6 +13506,12 @@
                   },
                   "type": "array"
                 },
+                "total": {
+                  "description": "How many issues match, before `limit` and `offset`.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "type": {
                   "const": "issue_list",
                   "type": "string"
@@ -13465,6 +13520,7 @@
               "required": [
                 "type",
                 "issues",
+                "total",
                 "projects",
                 "mirror"
               ],
@@ -13481,6 +13537,12 @@
                 "mirror": {
                   "$ref": "#/schemas/success_response/$defs/MirrorInfo"
                 },
+                "total": {
+                  "description": "How many rows match, before `limit` and `offset`.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "type": {
                   "const": "ask_list",
                   "type": "string"
@@ -13489,6 +13551,7 @@
               "required": [
                 "type",
                 "asks",
+                "total",
                 "mirror"
               ],
               "type": "object"

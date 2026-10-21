@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::clean::{clean, clean_opt};
 use super::ids::Rev;
 use super::store::WatchEvent;
 
@@ -40,6 +41,9 @@ pub(crate) enum IssueState {
 /// One issue as worklink mirrors it: no body, no comments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct IssueRecord {
+    /// The record's version; a newer one than this reader knows is skipped.
+    #[serde(default)]
+    pub v: Option<u32>,
     #[serde(rename = "ref")]
     pub issue_ref: IssueRefRecord,
     pub title: String,
@@ -66,32 +70,51 @@ pub(crate) struct IssueRecord {
     pub truncated: bool,
 }
 
+/// The newest record version this reader understands.
+const SUPPORTED_VERSION: u32 = 1;
+/// A forge's own revision marker is kept only when it is this small.
+const SOURCE_REV_MAX_BYTES: usize = 256;
+
 impl IssueRecord {
-    fn check_sizes(&self) -> Result<(), &'static str> {
-        let long = |text: &str| text.chars().count() > FIELD_MAX_CHARS;
-        let optional_long = |text: &Option<String>| text.as_deref().is_some_and(long);
-        let r = &self.issue_ref;
-        if self.title.chars().count() > TITLE_MAX_CHARS
-            || long(&r.forge)
-            || long(&r.forge_id)
-            || long(&r.host)
-            || long(&r.project_path)
-            || optional_long(&self.author)
-            || optional_long(&self.created_at)
-            || optional_long(&self.updated_at)
-            || optional_long(&self.web_url)
-            || optional_long(&self.last_sync)
-        {
-            return Err("a field is too long");
+    /// Clean every string and cut what is too long (a long title is cut and
+    /// flagged, not refused: the row is still the forge's issue).
+    fn sanitize(&mut self) {
+        let (title, cut) = clean(&self.title, TITLE_MAX_CHARS);
+        self.title = title;
+        self.truncated |= cut;
+        let r = &mut self.issue_ref;
+        for field in [
+            &mut r.forge,
+            &mut r.forge_id,
+            &mut r.host,
+            &mut r.project_path,
+        ] {
+            *field = clean(field, FIELD_MAX_CHARS).0;
         }
-        if self.labels.len() > LIST_MAX
-            || self.assignees.len() > LIST_MAX
-            || self.labels.iter().any(|label| long(label))
-            || self.assignees.iter().any(|name| long(name))
-        {
-            return Err("too many or too long labels or assignees");
+        for list in [&mut self.labels, &mut self.assignees] {
+            list.truncate(LIST_MAX);
+            for item in list.iter_mut() {
+                *item = clean(item, FIELD_MAX_CHARS).0;
+            }
         }
-        Ok(())
+        for field in [
+            &mut self.author,
+            &mut self.created_at,
+            &mut self.updated_at,
+            &mut self.web_url,
+            &mut self.last_sync,
+        ] {
+            clean_opt(field, FIELD_MAX_CHARS);
+        }
+        match self.source_rev.take() {
+            Some(serde_json::Value::String(text)) => {
+                self.source_rev = Some(serde_json::Value::String(clean(&text, 256).0));
+            }
+            Some(value) if value.to_string().len() <= SOURCE_REV_MAX_BYTES => {
+                self.source_rev = Some(value);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -131,8 +154,38 @@ pub(crate) struct ProjectRefRecord {
     pub project_path: Option<String>,
 }
 
+impl SyncRecord {
+    fn sanitize(&mut self) {
+        self.status = clean(&self.status, 64).0;
+        for field in [
+            &mut self.error_class,
+            &mut self.last_attempt,
+            &mut self.last_ok,
+            &mut self.last_full,
+        ] {
+            clean_opt(field, FIELD_MAX_CHARS);
+        }
+        if let Some(project) = self.project.as_mut() {
+            let p = &mut project.project_ref;
+            p.forge = clean(&p.forge, FIELD_MAX_CHARS).0;
+            p.forge_id = clean(&p.forge_id, FIELD_MAX_CHARS).0;
+            clean_opt(&mut p.host, FIELD_MAX_CHARS);
+            clean_opt(&mut p.project_path, FIELD_MAX_CHARS);
+        }
+    }
+}
+
+/// `(forge, forge_id, project_id, number)`: an issue's place, which also
+/// orders the cache.
+pub(crate) type IssueKey = (String, String, u64, u64);
+
+/// `(forge, forge_id, project_id)`.
+pub(crate) type ProjectKey = (String, String, u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IssueRow {
+    /// The bucket key, `issue.<forge>.<forge_id>.<project_id>.<number>`.
+    pub name: String,
     /// The KV revision the watch saw for this key.
     pub mirror_rev: Rev,
     pub record: IssueRecord,
@@ -144,8 +197,16 @@ pub(crate) struct SyncRow {
     pub record: SyncRecord,
 }
 
+/// What a project's issues add up to, kept as rows come and go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectCount {
+    pub project_path: String,
+    pub open: usize,
+    pub total: usize,
+}
+
 /// `issue.<forge>.<forge_id>.<project_id>.<number>`: the four parts.
-fn parse_issue_key(key: &str) -> Option<(&str, &str, u64, u64)> {
+fn parse_issue_key(key: &str) -> Option<IssueKey> {
     let mut parts = key.strip_prefix("issue.")?.split('.');
     let forge = parts.next()?;
     let forge_id = parts.next()?;
@@ -154,11 +215,11 @@ fn parse_issue_key(key: &str) -> Option<(&str, &str, u64, u64)> {
     parts
         .next()
         .is_none()
-        .then_some((forge, forge_id, project_id, number))
+        .then(|| (forge.to_owned(), forge_id.to_owned(), project_id, number))
 }
 
 /// `sync.<forge>.<forge_id>.<project_id>`.
-fn parse_sync_key(key: &str) -> Option<(&str, &str, u64)> {
+fn parse_sync_key(key: &str) -> Option<ProjectKey> {
     let mut parts = key.strip_prefix("sync.")?.split('.');
     let forge = parts.next()?;
     let forge_id = parts.next()?;
@@ -166,13 +227,102 @@ fn parse_sync_key(key: &str) -> Option<(&str, &str, u64)> {
     parts
         .next()
         .is_none()
-        .then_some((forge, forge_id, project_id))
+        .then(|| (forge.to_owned(), forge_id.to_owned(), project_id))
+}
+
+/// One watch event, read and cleaned off the app's thread. Applying it is a
+/// map insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IssueChange {
+    Issue {
+        name: String,
+        rev: Rev,
+        record: Box<IssueRecord>,
+    },
+    IssueGone {
+        name: String,
+    },
+    Sync {
+        name: String,
+        rev: Rev,
+        record: Box<SyncRecord>,
+    },
+    SyncGone {
+        name: String,
+    },
+    /// A document that cannot be used. The older row for its key goes too:
+    /// showing it would be showing what the forge no longer says.
+    Rejected {
+        name: String,
+        why: String,
+    },
+}
+
+/// Read one event. `None` for a key that is neither an issue nor a sync row.
+pub(crate) fn parse_event(event: &WatchEvent) -> Option<IssueChange> {
+    let name = &event.key.0;
+    let rejected = |why: String| IssueChange::Rejected {
+        name: name.clone(),
+        why,
+    };
+    if let Some((forge, forge_id, project_id, number)) = parse_issue_key(name) {
+        let Some(bytes) = &event.value else {
+            return Some(IssueChange::IssueGone { name: name.clone() });
+        };
+        let mut record = match serde_json::from_slice::<IssueRecord>(bytes) {
+            Ok(record) => record,
+            Err(err) => return Some(rejected(format!("unreadable: {err}"))),
+        };
+        if record.v.is_some_and(|v| v > SUPPORTED_VERSION) {
+            return Some(rejected(format!(
+                "record version {} is newer than this reader",
+                record.v.unwrap_or_default()
+            )));
+        }
+        let r = &record.issue_ref;
+        if r.forge != forge
+            || r.forge_id != forge_id
+            || r.project_id != project_id
+            || r.number != number
+        {
+            return Some(rejected("the document names another issue".into()));
+        }
+        record.sanitize();
+        return Some(IssueChange::Issue {
+            name: name.clone(),
+            rev: event.rev,
+            record: Box::new(record),
+        });
+    }
+    if let Some((forge, forge_id, project_id)) = parse_sync_key(name) {
+        let Some(bytes) = &event.value else {
+            return Some(IssueChange::SyncGone { name: name.clone() });
+        };
+        let mut record = match serde_json::from_slice::<SyncRecord>(bytes) {
+            Ok(record) => record,
+            Err(err) => return Some(rejected(format!("unreadable: {err}"))),
+        };
+        if let Some(project) = &record.project {
+            let p = &project.project_ref;
+            if p.forge != forge || p.forge_id != forge_id || p.project_id != project_id {
+                return Some(rejected("the document names another project".into()));
+            }
+        }
+        record.sanitize();
+        return Some(IssueChange::Sync {
+            name: name.clone(),
+            rev: event.rev,
+            record: Box::new(record),
+        });
+    }
+    None
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct IssueCache {
-    issues: BTreeMap<String, IssueRow>,
+    issues: BTreeMap<IssueKey, IssueRow>,
     syncs: BTreeMap<String, SyncRow>,
+    projects: BTreeMap<ProjectKey, ProjectCount>,
     rejected: Vec<(String, String)>,
 }
 
@@ -185,94 +335,123 @@ impl IssueCache {
         &self.rejected
     }
 
-    pub(crate) fn issues(&self) -> impl Iterator<Item = (&String, &IssueRow)> {
-        self.issues.iter()
+    /// The issues in key order (forge, forge id, project, number).
+    pub(crate) fn issues(&self) -> impl Iterator<Item = &IssueRow> {
+        self.issues.values()
     }
 
     pub(crate) fn syncs(&self) -> impl Iterator<Item = (&String, &SyncRow)> {
         self.syncs.iter()
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<&IssueRow> {
-        self.issues.get(key)
+    /// How many issues each project has, open and in all.
+    pub(crate) fn projects(&self) -> impl Iterator<Item = (&ProjectKey, &ProjectCount)> {
+        self.projects.iter()
     }
 
-    /// Apply one change from a scan or a watch. Returns whether the cache
-    /// changed. A document that does not match its key or breaks a limit is
-    /// refused; keys that are neither issues nor syncs are not this cache's.
-    pub(crate) fn apply(&mut self, event: &WatchEvent) -> bool {
-        let name = &event.key.0;
-        if let Some((forge, forge_id, project_id, number)) = parse_issue_key(name) {
-            let Some(bytes) = &event.value else {
-                return self.issues.remove(name).is_some();
-            };
-            let record = match serde_json::from_slice::<IssueRecord>(bytes) {
-                Ok(record) => record,
-                Err(err) => return self.reject(name, format!("unreadable: {err}")),
-            };
-            let r = &record.issue_ref;
-            if r.forge != forge
-                || r.forge_id != forge_id
-                || r.project_id != project_id
-                || r.number != number
-            {
-                return self.reject(name, "the document names another issue".into());
+    pub(crate) fn get(&self, name: &str) -> Option<&IssueRow> {
+        self.issues.get(&parse_issue_key(name)?)
+    }
+
+    /// Forget everything: the bucket is read again from its start.
+    pub(crate) fn clear(&mut self) -> bool {
+        let any = !self.issues.is_empty() || !self.syncs.is_empty();
+        self.issues.clear();
+        self.syncs.clear();
+        self.projects.clear();
+        any
+    }
+
+    /// Read and apply one event (what the store thread and the app do in two
+    /// steps, together; for tests).
+    #[cfg(test)]
+    pub(crate) fn apply_event(&mut self, event: &WatchEvent) -> bool {
+        parse_event(event).is_some_and(|change| self.apply(change))
+    }
+
+    fn count(&mut self, row: &IssueRow, add: bool) {
+        let r = &row.record.issue_ref;
+        let key = (r.forge.clone(), r.forge_id.clone(), r.project_id);
+        if add {
+            let entry = self.projects.entry(key).or_insert_with(|| ProjectCount {
+                project_path: r.project_path.clone(),
+                open: 0,
+                total: 0,
+            });
+            entry.project_path.clone_from(&r.project_path);
+            entry.total += 1;
+            entry.open += usize::from(row.record.state == IssueState::Open);
+        } else if let Some(entry) = self.projects.get_mut(&key) {
+            entry.total = entry.total.saturating_sub(1);
+            entry.open = entry
+                .open
+                .saturating_sub(usize::from(row.record.state == IssueState::Open));
+            if entry.total == 0 {
+                self.projects.remove(&key);
             }
-            if let Err(why) = record.check_sizes() {
-                return self.reject(name, why.into());
-            }
-            if self
-                .issues
-                .get(name)
-                .is_some_and(|row| row.mirror_rev >= event.rev)
-            {
-                return false;
-            }
-            self.issues.insert(
-                name.clone(),
-                IssueRow {
-                    mirror_rev: event.rev,
-                    record,
-                },
-            );
-            return true;
         }
-        if let Some((forge, forge_id, project_id)) = parse_sync_key(name) {
-            let Some(bytes) = &event.value else {
-                return self.syncs.remove(name).is_some();
-            };
-            let record = match serde_json::from_slice::<SyncRecord>(bytes) {
-                Ok(record) => record,
-                Err(err) => return self.reject(name, format!("unreadable: {err}")),
-            };
-            if let Some(project) = &record.project {
-                let p = &project.project_ref;
-                if p.forge != forge || p.forge_id != forge_id || p.project_id != project_id {
-                    return self.reject(name, "the document names another project".into());
+    }
+
+    fn remove_issue(&mut self, name: &str) -> bool {
+        let Some(key) = parse_issue_key(name) else {
+            return false;
+        };
+        let Some(old) = self.issues.remove(&key) else {
+            return false;
+        };
+        self.count(&old, false);
+        true
+    }
+
+    /// Apply one change. Returns whether the cache changed.
+    pub(crate) fn apply(&mut self, change: IssueChange) -> bool {
+        match change {
+            IssueChange::Issue { name, rev, record } => {
+                let Some(key) = parse_issue_key(&name) else {
+                    return false;
+                };
+                if self
+                    .issues
+                    .get(&key)
+                    .is_some_and(|row| row.mirror_rev >= rev)
+                {
+                    return false;
                 }
+                self.remove_issue(&name);
+                let row = IssueRow {
+                    name,
+                    mirror_rev: rev,
+                    record: *record,
+                };
+                self.count(&row, true);
+                self.issues.insert(key, row);
+                true
             }
-            if self.syncs.get(name).is_some_and(|row| row.rev >= event.rev) {
-                return false;
+            IssueChange::IssueGone { name } => self.remove_issue(&name),
+            IssueChange::Sync { name, rev, record } => {
+                if self.syncs.get(&name).is_some_and(|row| row.rev >= rev) {
+                    return false;
+                }
+                self.syncs.insert(
+                    name,
+                    SyncRow {
+                        rev,
+                        record: *record,
+                    },
+                );
+                true
             }
-            self.syncs.insert(
-                name.clone(),
-                SyncRow {
-                    rev: event.rev,
-                    record,
-                },
-            );
-            return true;
+            IssueChange::SyncGone { name } => self.syncs.remove(&name).is_some(),
+            IssueChange::Rejected { name, why } => {
+                tracing::warn!(key = %name, %why, "an issue mirror row was refused");
+                self.rejected.push((name.clone(), why));
+                if self.rejected.len() > REJECTED_KEPT {
+                    let excess = self.rejected.len() - REJECTED_KEPT;
+                    self.rejected.drain(..excess);
+                }
+                self.remove_issue(&name) | self.syncs.remove(&name).is_some()
+            }
         }
-        false
-    }
-
-    fn reject(&mut self, name: &str, why: String) -> bool {
-        self.rejected.push((name.to_owned(), why));
-        if self.rejected.len() > REJECTED_KEPT {
-            let excess = self.rejected.len() - REJECTED_KEPT;
-            self.rejected.drain(..excess);
-        }
-        false
     }
 }
 
@@ -305,12 +484,12 @@ mod tests {
     #[test]
     fn issues_and_syncs_are_cached_by_key_with_the_revision_the_watch_saw() {
         let mut cache = IssueCache::default();
-        assert!(cache.apply(&issue_event(
+        assert!(cache.apply_event(&issue_event(
             "issue.gitea.gitea-lab.84.7",
             11,
             issue_doc(7, "first")
         )));
-        assert!(cache.apply(&issue_event(
+        assert!(cache.apply_event(&issue_event(
             "sync.gitea.gitea-lab.84",
             4,
             serde_json::json!({
@@ -325,7 +504,7 @@ mod tests {
         assert_eq!(cache.syncs().count(), 1);
 
         // A re-sync that changes no field still moves the revision.
-        assert!(cache.apply(&issue_event(
+        assert!(cache.apply_event(&issue_event(
             "issue.gitea.gitea-lab.84.7",
             12,
             issue_doc(7, "first")
@@ -335,7 +514,7 @@ mod tests {
             Rev(12)
         );
         // An older or equal revision changes nothing.
-        assert!(!cache.apply(&issue_event(
+        assert!(!cache.apply_event(&issue_event(
             "issue.gitea.gitea-lab.84.7",
             12,
             issue_doc(7, "other")
@@ -346,26 +525,30 @@ mod tests {
     fn a_document_that_names_another_issue_or_breaks_a_limit_is_refused() {
         let mut cache = IssueCache::default();
         // Under the key of #7, a document for #8.
-        assert!(!cache.apply(&issue_event(
+        assert!(!cache.apply_event(&issue_event(
             "issue.gitea.gitea-lab.84.7",
             1,
             issue_doc(8, "wrong")
         )));
-        assert!(!cache.apply(&issue_event(
+        // A title that is too long is cut and flagged, not refused.
+        assert!(cache.apply_event(&issue_event(
             "issue.gitea.gitea-lab.84.9",
             1,
             issue_doc(9, &"x".repeat(TITLE_MAX_CHARS + 1))
         )));
-        assert!(!cache.apply(&WatchEvent {
+        let row = cache.get("issue.gitea.gitea-lab.84.9").unwrap();
+        assert_eq!(row.record.title.chars().count(), TITLE_MAX_CHARS);
+        assert!(row.record.truncated);
+        assert!(!cache.apply_event(&WatchEvent {
             key: StoreKey("issue.gitea.gitea-lab.84.10".into()),
             rev: Rev(1),
             value: Some(b"{nope".to_vec()),
             at: None
         }));
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.rejected().len(), 3);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.rejected().len(), 2);
         // Not an issues key at all: not this cache's business.
-        assert!(!cache.apply(&issue_event("mr.gitea.x.1.2", 1, issue_doc(1, "x"))));
+        assert!(!cache.apply_event(&issue_event("mr.gitea.x.1.2", 1, issue_doc(1, "x"))));
     }
 
     #[test]
@@ -373,7 +556,7 @@ mod tests {
         let mut cache = IssueCache::default();
         let mut doc = issue_doc(7, "state from the future");
         doc["state"] = serde_json::json!("merged");
-        assert!(cache.apply(&issue_event("issue.gitea.gitea-lab.84.7", 1, doc)));
+        assert!(cache.apply_event(&issue_event("issue.gitea.gitea-lab.84.7", 1, doc)));
         assert_eq!(
             cache
                 .get("issue.gitea.gitea-lab.84.7")
@@ -382,7 +565,7 @@ mod tests {
                 .state,
             IssueState::Unknown
         );
-        assert!(cache.apply(&WatchEvent {
+        assert!(cache.apply_event(&WatchEvent {
             key: StoreKey("issue.gitea.gitea-lab.84.7".into()),
             rev: Rev(2),
             value: None,

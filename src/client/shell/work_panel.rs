@@ -89,6 +89,8 @@ pub(super) enum Feed<T> {
 #[derive(Debug, Clone, Default)]
 pub(super) struct IssuesData {
     pub(super) issues: Vec<IssueInfo>,
+    /// How many the server has; more than `issues` when it cut the list.
+    pub(super) total: u64,
     pub(super) projects: Vec<IssueProjectInfo>,
     pub(super) mirror: Option<MirrorInfo>,
 }
@@ -96,6 +98,7 @@ pub(super) struct IssuesData {
 #[derive(Debug, Clone, Default)]
 pub(super) struct AsksData {
     pub(super) asks: Vec<AskInfo>,
+    pub(super) total: u64,
     pub(super) mirror: Option<MirrorInfo>,
 }
 
@@ -280,6 +283,20 @@ impl ClientWorkPanelOverlay {
                 return rows;
             }
         }
+        if matches!(
+            view,
+            WorkView::ThisRepo | WorkView::NeedsMe | WorkView::InFlight
+        ) {
+            if let Feed::Ready(data) = &self.issues {
+                if data.total > data.issues.len() as u64 {
+                    rows.push(WorkRow::Note(format!(
+                        "the server sent the first {} of {} open issues",
+                        data.issues.len(),
+                        data.total
+                    )));
+                }
+            }
+        }
         match view {
             WorkView::ThisRepo => {
                 let mut issues = self.open_issues();
@@ -383,6 +400,13 @@ impl ClientWorkPanelOverlay {
                             count: data.asks.len(),
                         });
                         rows.extend((0..data.asks.len()).map(WorkRow::Ask));
+                        if data.total > data.asks.len() as u64 {
+                            rows.push(WorkRow::Note(format!(
+                                "the server sent the first {} of {} task rows",
+                                data.asks.len(),
+                                data.total
+                            )));
+                        }
                     }
                     Feed::Failed(why) => rows.push(WorkRow::Note(format!("asks: {why}"))),
                     _ => {}
@@ -1094,12 +1118,14 @@ impl ClientShellState {
                 PendingEndpointKind::WorkIssues,
                 Ok(ResponseResult::IssueList {
                     issues,
+                    total,
                     projects,
                     mirror,
                 }),
             ) => {
                 panel.issues = Feed::Ready(IssuesData {
                     issues,
+                    total,
                     projects,
                     mirror: Some(mirror),
                 })
@@ -1107,9 +1133,17 @@ impl ClientShellState {
             (PendingEndpointKind::WorkTasks, Ok(ResponseResult::TaskList { tasks, .. })) => {
                 panel.tasks = Feed::Ready(tasks)
             }
-            (PendingEndpointKind::WorkAsks, Ok(ResponseResult::AskList { asks, mirror })) => {
+            (
+                PendingEndpointKind::WorkAsks,
+                Ok(ResponseResult::AskList {
+                    asks,
+                    total,
+                    mirror,
+                }),
+            ) => {
                 panel.asks = Feed::Ready(AsksData {
                     asks,
+                    total,
                     mirror: Some(mirror),
                 })
             }

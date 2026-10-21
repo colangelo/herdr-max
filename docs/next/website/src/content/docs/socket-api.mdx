@@ -609,7 +609,7 @@ the forge issues worklink mirrors (`ISSUES`) and ac's rows from the gestore
 answers from memory. They need the `kv` backend; on the file backend `mirror`
 says `"not available with this backend"` and the lists are empty.
 
-`issue.list {project?, state?}` leaves out closed issues unless `state` is
+`issue.list {project?, state?, limit?, offset?}` leaves out closed issues unless `state` is
 `closed` or `all`; `project` is a numeric project id or a path (`ac/worklink`).
 Each issue carries its whole `ref` (`forge`, `forge_id`, `host`, `project_id`,
 `project_path`, `number`), `mirror_rev` (the bucket revision the server's watch
@@ -620,12 +620,21 @@ is no body and no comment. `projects` lists each project with how its last sync
 went (`status`, `last_ok`, `last_attempt`, `error_class`); a project with issues
 and no sync row is `"synced": false`, which a panel shows as "not synced".
 
-`ask.list {kind?, include_closed?}` returns rows whose `kind` is `task` unless
+`ask.list {kind?, include_closed?, limit?, offset?}` returns rows whose `kind` is `task` unless
 `kind` names another (`any` for every kind), without closed or dropped rows
 unless `include_closed` is set. A task that names an ask row in `waits_on` is
 `waiting` while that row is open or answered; a row that is not there flags the
 task with `waits_on_missing`, and until the asks have been read no row is called
 missing.
+
+Both lists are paged: `limit` (500 when absent, 2000 at most) and `offset`, in key
+order, and the answer's `total` counts every match before the page is cut. Each
+project in `projects` carries `issues_open` and `issues_total`. The server reads
+a bucket with one ordered watch that starts at the last value of every key, so a
+bucket of thousands of rows loads without a request per row, and a watch that is
+lost is attached again from the start. Text from a forge is stripped of control
+characters and cut to a bound (a cut title sets `truncated`); a record the
+server cannot use is skipped with a warning and its older row is dropped.
 
 Both answers carry `mirror`: `loaded` says the bucket has been read, and
 `detail` says why not (the bus is away, or the backend has no such bucket).

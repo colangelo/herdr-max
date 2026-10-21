@@ -18,7 +18,8 @@ use tokio::runtime::Runtime;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 use super::store::{
-    landed_before, Mirror, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
+    landed_before, Mirror, MirrorEvent, MirrorSink, StoreError, StoreKey, StoreResult, TaskStore,
+    WatchEvent, WatchSink,
 };
 
 /// Where and as whom to connect.
@@ -281,53 +282,72 @@ impl TaskStore for KvStore {
         Ok(())
     }
 
-    fn mirror(&mut self, which: Mirror, sink: WatchSink) -> StoreResult<Option<Vec<WatchEvent>>> {
+    fn mirror(&mut self, which: Mirror, sink: MirrorSink) -> StoreResult<bool> {
         let name = match which {
             Mirror::Issues => self.issues_bucket.clone(),
             Mirror::Asks => self.asks_bucket.clone(),
         };
         let context = self.context.clone();
-        // Watch first, so nothing that lands during the scan is missed.
-        let (found, watch) = self.runtime.block_on(async {
+        // An ordered consumer that starts at the last value of every key and
+        // then follows the changes: no scan, no key list, nothing that waits
+        // for one answer per key. (No durable consumer; the server may be
+        // configured to refuse one.)
+        let (empty, mut watch) = self.runtime.block_on(async {
             let bucket = context.get_key_value(&name).await.map_err(unavailable)?;
-            let watch = bucket.watch_all().await.map_err(unavailable)?;
-            let mut keys = Vec::new();
-            let mut stream = bucket.keys().await.map_err(unavailable)?;
-            while let Some(key) = stream.next().await {
-                keys.push(key.map_err(unavailable)?);
-            }
-            let mut found = Vec::new();
-            for key in keys {
-                let entry = bucket.entry(key).await.map_err(unavailable)?;
-                if let Some(entry) = entry {
-                    if let Some((rev, value)) = live(&entry) {
-                        found.push(WatchEvent {
-                            key: StoreKey(entry.key.clone()),
-                            rev,
-                            value: Some(value),
-                            at: Some(entry.created.into()),
-                        });
-                    }
-                }
-            }
-            Ok::<_, StoreError>((found, watch))
+            let empty = bucket.status().await.map_err(unavailable)?.values() == 0;
+            let watch = bucket.watch_with_history(">").await.map_err(unavailable)?;
+            Ok::<_, StoreError>((empty, watch))
         })?;
-        let mut watch = watch;
         self.runtime.spawn(async move {
-            while let Some(item) = watch.next().await {
-                let Ok(entry) = item else { continue };
+            // An empty bucket sends no entry to say the start is over.
+            if empty && !sink(MirrorEvent::Current) {
+                return;
+            }
+            let mut told = empty;
+            let mut failures = 0u32;
+            loop {
+                let item = match watch.next().await {
+                    Some(item) => item,
+                    None => {
+                        let _ = sink(MirrorEvent::Lost("the watch ended".to_owned()));
+                        return;
+                    }
+                };
+                let entry = match item {
+                    Ok(entry) => {
+                        failures = 0;
+                        entry
+                    }
+                    Err(err) => {
+                        // The consumer re-creates itself on most errors; a run
+                        // of them means it cannot.
+                        failures += 1;
+                        if failures >= 10 {
+                            let _ = sink(MirrorEvent::Lost(format!("the watch failed: {err}")));
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                let current = entry.seen_current;
                 let event = WatchEvent {
                     key: StoreKey(entry.key.clone()),
                     rev: Rev(entry.revision),
                     value: live(&entry).map(|(_, value)| value),
                     at: Some(entry.created.into()),
                 };
-                if !sink(event) {
-                    break;
+                if !sink(MirrorEvent::Entry(event)) {
+                    return;
+                }
+                if current && !told {
+                    told = true;
+                    if !sink(MirrorEvent::Current) {
+                        return;
+                    }
                 }
             }
         });
-        Ok(Some(found))
+        Ok(true)
     }
 }
 
@@ -468,6 +488,103 @@ mod tests {
         let mut store =
             KvStore::connect(&settings(&server.url)).expect("connect to the throwaway server");
         crate::tasks::conformance::run(&mut store);
+    }
+
+    /// Make `name` on the throwaway server and put `entries` in it.
+    fn fill_bucket(server: &Server, name: &str, entries: &[(&str, &str)]) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            let kv = async_nats::jetstream::new(client)
+                .create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: name.into(),
+                    history: 3,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            for (key, value) in entries {
+                kv.put(*key, value.to_string().into()).await.unwrap();
+            }
+        });
+    }
+
+    fn events_until_current(received: &std::sync::mpsc::Receiver<MirrorEvent>) -> Vec<WatchEvent> {
+        let mut entries = Vec::new();
+        loop {
+            match received.recv_timeout(Duration::from_secs(10)).unwrap() {
+                MirrorEvent::Entry(event) => entries.push(event),
+                MirrorEvent::Current => return entries,
+                MirrorEvent::Lost(why) => panic!("the watch was lost: {why}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_mirror_delivers_every_last_value_then_current_then_the_changes() {
+        let Some(server) = Server::start(None) else {
+            return;
+        };
+        server.create_bucket(None);
+        // `a` was written twice; only its last value is delivered. `gone` is
+        // deleted, and the delete marker is delivered as an absent value.
+        fill_bucket(
+            &server,
+            "ASKS",
+            &[
+                ("g.a", "{\"status\":\"open\"}"),
+                ("g.a", "{\"status\":\"answered\"}"),
+            ],
+        );
+        fill_bucket(&server, "ISSUES", &[]);
+        let mut store = KvStore::connect(&settings(&server.url)).unwrap();
+
+        let (sink_tx, received) = std::sync::mpsc::channel();
+        let sink_tx = std::sync::Mutex::new(sink_tx);
+        assert!(store
+            .mirror(
+                Mirror::Asks,
+                Box::new(move |event| sink_tx.lock().unwrap().send(event).is_ok())
+            )
+            .unwrap());
+        let start = events_until_current(&received);
+        assert_eq!(start.len(), 1, "{start:?}");
+        assert_eq!(start[0].key.0, "g.a");
+        assert_eq!(
+            start[0].value.as_deref(),
+            Some(&b"{\"status\":\"answered\"}"[..])
+        );
+
+        // An empty bucket says it is current without any entry.
+        let (empty_tx, empty_rx) = std::sync::mpsc::channel();
+        let empty_tx = std::sync::Mutex::new(empty_tx);
+        assert!(store
+            .mirror(
+                Mirror::Issues,
+                Box::new(move |event| empty_tx.lock().unwrap().send(event).is_ok())
+            )
+            .unwrap());
+        assert!(events_until_current(&empty_rx).is_empty());
+
+        // Then the changes: a put, and a delete as an absent value.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            let kv = async_nats::jetstream::new(client)
+                .get_key_value("ASKS")
+                .await
+                .unwrap();
+            kv.put("g.b", "{\"status\":\"open\"}".into()).await.unwrap();
+            kv.delete("g.a").await.unwrap();
+        });
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            match received.recv_timeout(Duration::from_secs(10)).unwrap() {
+                MirrorEvent::Entry(event) => seen.push((event.key.0, event.value.is_some())),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(seen, [("g.b".to_owned(), true), ("g.a".to_owned(), false)]);
     }
 
     #[test]

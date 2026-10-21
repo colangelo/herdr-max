@@ -351,6 +351,12 @@ pub struct IssueListParams {
     /// `open` (the default), `closed` or `all`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// At most this many issues (500 when absent, 2000 at most).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Skip this many first, in key order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
 }
 
 /// Params for `ask.list`: ac's rows in the asks bucket.
@@ -362,6 +368,12 @@ pub struct AskListParams {
     /// Rows that are closed or dropped too.
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub include_closed: bool,
+    /// At most this many rows (500 when absent, 2000 at most).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Skip this many first, in key order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
 }
 
 /// An issue's place on its forge.
@@ -427,6 +439,11 @@ pub struct IssueProjectInfo {
     /// When the sync last succeeded: the panel's last-sync line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ok: Option<String>,
+    /// How many of the project's issues are open, and how many there are.
+    #[serde(default)]
+    pub issues_open: u64,
+    #[serde(default)]
+    pub issues_total: u64,
 }
 
 /// Whether the server has read a bucket, and why not when it has not.
