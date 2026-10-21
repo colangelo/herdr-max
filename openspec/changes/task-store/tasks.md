@@ -22,7 +22,7 @@
   `task_record_limits`, `status_machine_refuses_bad_moves`
 - [x] 2.2 The `file` backend under the session data dir, with per-key revisions.
   Test: `file_store_compare_and_set_conflicts`
-- [ ] 2.3 The store task and internal events; API answers from the cache.
+- [x] 2.3 The store task and internal events; API answers from the cache.
   Test: `slow_store_never_blocks_api` (a fake store that sleeps)
 - [ ] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
   Test: `kv_backend_conformance` (against a local nats-server, feature-gated)

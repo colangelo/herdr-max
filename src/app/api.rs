@@ -60,6 +60,10 @@ impl App {
                 self.handle_api_worktree_read_finished(*result);
                 changes_workspace
             }
+            AppEvent::TaskStore(event) => {
+                self.tasks.apply(event);
+                false
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false

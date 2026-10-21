@@ -117,6 +117,8 @@ pub struct App {
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) policy: AppPolicy,
+    /// The task store and its cache (fork issue 241).
+    pub(crate) tasks: crate::tasks::TaskService,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
@@ -205,6 +207,40 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 fn auto_updates_enabled(background_updates: bool) -> bool {
     background_updates && !cfg!(debug_assertions)
+}
+
+/// Start the task store for a server that saves its session. The `kv` backend
+/// is not built yet, so it leaves tasks off, with a warning.
+fn start_task_service(
+    config: &crate::config::TasksConfig,
+    policy: &AppPolicy,
+    event_tx: &mpsc::Sender<AppEvent>,
+) -> crate::tasks::TaskService {
+    if !policy.persist_session {
+        return crate::tasks::TaskService::disabled();
+    }
+    if config.backend == crate::config::TasksBackend::Kv {
+        tracing::warn!("tasks.backend = \"kv\" is not available in this build; tasks are off");
+        return crate::tasks::TaskService::disabled();
+    }
+    let dir = crate::session::data_dir().join("tasks").join("store");
+    let store = match crate::tasks::FileStore::open(dir.clone()) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(dir = %dir.display(), error = ?err, "cannot open the task store; tasks are off");
+            return crate::tasks::TaskService::disabled();
+        }
+    };
+    let tx = event_tx.clone();
+    match crate::tasks::TaskService::start(Box::new(store), move |event| {
+        tx.blocking_send(AppEvent::TaskStore(event)).is_ok()
+    }) {
+        Ok(service) => service,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot start the task store thread; tasks are off");
+            crate::tasks::TaskService::disabled()
+        }
+    }
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -648,6 +684,7 @@ impl App {
             }
         }
 
+        let tasks = start_task_service(&config.tasks, &policy, &event_tx);
         let last_focus = state.active.and_then(|idx| {
             state
                 .workspaces
@@ -667,6 +704,7 @@ impl App {
             state,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            tasks,
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -1730,6 +1768,45 @@ mod tests {
 
         assert!(!app.drain_internal_events());
         assert!(!app.git_refresh_in_flight);
+    }
+
+    #[test]
+    fn task_store_events_reach_the_cache_before_the_next_api_request() {
+        use crate::tasks::{
+            HostId, Origin, Rev, StoreEvent, Task, TaskId, Timestamp, Via, WatchEvent,
+        };
+
+        let mut app = test_app();
+        assert_eq!(app.tasks.cache().len(), 0, "a test app runs no store");
+        let task = Task::new(
+            HostId::new("m4m").unwrap(),
+            TaskId::new("tk-1").unwrap(),
+            "from the store",
+            Origin {
+                host: "m4m".into(),
+                by: "x".into(),
+                via: Via::Cli,
+            },
+            Timestamp("2026-10-21T20:00:00Z".into()),
+        )
+        .unwrap();
+        app.event_tx
+            .try_send(AppEvent::TaskStore(StoreEvent::Changed(WatchEvent {
+                key: crate::tasks::StoreKey::from(&task.key()),
+                rev: Rev(1),
+                value: Some(serde_json::to_vec(&task).unwrap()),
+            })))
+            .unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorkspaceList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+
+        assert!(response.contains("\"result\""), "{response}");
+        assert_eq!(app.tasks.cache().len(), 1);
     }
 
     #[test]

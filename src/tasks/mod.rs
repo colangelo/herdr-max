@@ -12,6 +12,7 @@ mod cache;
 mod file_store;
 mod ids;
 mod model;
+mod service;
 mod store;
 
 pub(crate) use cache::{CachedTask, TaskCache};
@@ -21,4 +22,5 @@ pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
+pub(crate) use service::{StoreEvent, SubmitError, TaskService, WriteOutcome};
 pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream};
