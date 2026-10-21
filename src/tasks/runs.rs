@@ -328,9 +328,10 @@ pub(crate) struct Derived {
 
 /// The status a reader shows for `task`, in this order: (1) a stored Done or
 /// Dropped; (2) Running, for a run from an allowed starter that is `running`,
-/// or `starting` for less than five minutes by the bus entry's time; (3)
-/// Waiting, while `waits_on` names a row that is open or answered; (4) the
-/// stored status, or "run unknown" when a run is unknown or stuck.
+/// or `starting` for less than five minutes by the bus entry's time, or "run
+/// unknown" in its place when a run is unknown or stuck (a run that may be
+/// executing matters more than waiting on an ask); (3) Waiting, while
+/// `waits_on` names a row that is open or answered; (4) the stored status.
 pub(crate) fn derive(
     task: &Task,
     runs: &RunCache,
@@ -355,6 +356,9 @@ pub(crate) fn derive(
             RunState::Done | RunState::Failed | RunState::Stopped => {}
         }
     }
+    if stuck {
+        return shown(Shown::RunUnknown);
+    }
     let mut waits_on_missing = false;
     if let Some(row) = task.waits_on.as_deref() {
         match ask(row) {
@@ -368,14 +372,10 @@ pub(crate) fn derive(
             AskRow::Missing => waits_on_missing = true,
         }
     }
-    let status = if stuck {
-        Shown::RunUnknown
-    } else {
-        match task.status {
-            TaskStatus::Running => Shown::Running,
-            TaskStatus::Open => Shown::Open,
-            _ => Shown::Unknown,
-        }
+    let status = match task.status {
+        TaskStatus::Running => Shown::Running,
+        TaskStatus::Open => Shown::Open,
+        _ => Shown::Unknown,
     };
     Derived {
         status,
@@ -543,12 +543,12 @@ mod tests {
             (Open, Some(Closed), vec![], Shown::Open, false),
             // a missing row changes nothing but is said
             (Running, Some(Missing), vec![], Shown::Running, true),
-            // Waiting beats "run unknown"
+            // "run unknown" takes Running's place, above Waiting
             (
                 Open,
                 Some(AskOpen),
                 vec![("m4m", "rn-1", Starting, stale)],
-                Shown::Waiting,
+                Shown::RunUnknown,
                 false,
             ),
             // 4: the stored status; a finished run changes nothing

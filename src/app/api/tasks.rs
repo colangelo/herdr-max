@@ -13,7 +13,7 @@ use crate::api::schema::{
     TaskClosedInfo, TaskConflictChoice, TaskConflictInfo, TaskFields, TaskInfo, TaskIssueRefInfo,
     TaskListParams, TaskMoveStatusParams, TaskOutcomeInfo, TaskPaneInfo, TaskPriorityInfo,
     TaskResolutionInfo, TaskResolveConflictParams, TaskShownInfo, TaskStatusInfo, TaskStoreInfo,
-    TaskTarget, TaskUpdateParams,
+    TaskTarget, TaskUpdateParams, TaskWriteStatusParams,
 };
 use crate::app::App;
 use crate::tasks::{
@@ -580,6 +580,62 @@ impl App {
         self.answer_write(id, result, Rev(params.expected_rev), &task)
     }
 
+    pub(super) fn handle_task_write_status(
+        &mut self,
+        id: String,
+        params: TaskWriteStatusParams,
+    ) -> String {
+        let write = WriteId::from_string(params.write_id.clone());
+        let outcome = self.tasks.recent_outcome(&write).cloned();
+        if let Some(outcome) = outcome {
+            let context = self.task_info_context();
+            let info = self.outcome_info(outcome, &context);
+            return encode_success(
+                id,
+                ResponseResult::TaskWrite {
+                    write_id: write.to_string(),
+                    pending: false,
+                    saved: false,
+                    outcome: Some(info),
+                },
+            );
+        }
+        if self.tasks.is_pending_write(&write) {
+            return encode_success(
+                id,
+                ResponseResult::TaskWrite {
+                    write_id: write.to_string(),
+                    pending: true,
+                    saved: self.tasks.is_saved(&write),
+                    outcome: None,
+                },
+            );
+        }
+        encode_error(
+            id,
+            "task_write_unknown",
+            format!("no recent write {}", params.write_id),
+        )
+    }
+
+    fn outcome_info(&self, outcome: WriteOutcome, context: &InfoContext) -> TaskOutcomeInfo {
+        let current =
+            |rev: Rev, bytes: &[u8]| self.task_info_from_bytes(rev, bytes, context).map(Box::new);
+        match outcome {
+            WriteOutcome::Applied { rev } => TaskOutcomeInfo::Applied { rev: rev.0 },
+            WriteOutcome::Conflict { current: found } => TaskOutcomeInfo::Conflict {
+                current: found.and_then(|(rev, bytes)| current(rev, &bytes)),
+            },
+            WriteOutcome::Exists {
+                current: (rev, bytes),
+            } => TaskOutcomeInfo::Exists {
+                current: current(rev, &bytes),
+            },
+            WriteOutcome::Failed(message) => TaskOutcomeInfo::Failed { message },
+            WriteOutcome::Unknown(message) => TaskOutcomeInfo::Unknown { message },
+        }
+    }
+
     pub(super) fn handle_task_conflicts(&mut self, id: String) -> String {
         let context = self.task_info_context();
         let conflicts = self
@@ -716,22 +772,7 @@ impl App {
         let revision = self.tasks.cache().revision();
         let mut events = Vec::new();
         for (write, outcome) in self.tasks.take_outcomes() {
-            let current = |rev: Rev, bytes: &[u8]| self.task_info_from_bytes(rev, bytes, &context);
-            let info = match outcome {
-                WriteOutcome::Applied { rev } => TaskOutcomeInfo::Applied { rev: rev.0 },
-                WriteOutcome::Conflict { current: found } => TaskOutcomeInfo::Conflict {
-                    current: found
-                        .and_then(|(rev, bytes)| current(rev, &bytes))
-                        .map(Box::new),
-                },
-                WriteOutcome::Exists {
-                    current: (rev, bytes),
-                } => TaskOutcomeInfo::Exists {
-                    current: current(rev, &bytes).map(Box::new),
-                },
-                WriteOutcome::Failed(message) => TaskOutcomeInfo::Failed { message },
-                WriteOutcome::Unknown(message) => TaskOutcomeInfo::Unknown { message },
-            };
+            let info = self.outcome_info(outcome, &context);
             events.push(EventData::TaskChanged {
                 key: None,
                 revision,
@@ -949,6 +990,38 @@ mod tests {
         assert_eq!(listed["result"]["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(listed["result"]["store"]["state"], "ready");
         assert_eq!(listed["result"]["store"]["pending"], 0);
+    }
+
+    #[test]
+    fn write_status_tells_a_waiting_caller_how_its_write_fared() {
+        let mut h = harness().loaded();
+        let response = h.request(Method::TaskAdd(TaskAddParams {
+            title: "ask me later".into(),
+            ..TaskAddParams::default()
+        }));
+        let write_id = response["result"]["write_id"].as_str().unwrap().to_owned();
+        let ask = |h: &mut Harness| {
+            h.request(Method::TaskWriteStatus(
+                crate::api::schema::TaskWriteStatusParams {
+                    write_id: write_id.clone(),
+                },
+            ))
+        };
+        // Nothing has been drained yet: the write is waiting.
+        let waiting = ask(&mut h);
+        assert_eq!(waiting["result"]["pending"], true);
+        h.wait(|app| app.tasks.pending_count() == 0);
+        let done = ask(&mut h);
+        assert_eq!(done["result"]["pending"], false);
+        assert_eq!(done["result"]["outcome"]["status"], "applied");
+        // Asking again, after the events were published, still answers.
+        assert_eq!(ask(&mut h)["result"]["outcome"]["rev"], 1);
+        let unknown = h.request(Method::TaskWriteStatus(
+            crate::api::schema::TaskWriteStatusParams {
+                write_id: "never-made".into(),
+            },
+        ));
+        assert_eq!(unknown["error"]["code"], "task_write_unknown");
     }
 
     #[test]

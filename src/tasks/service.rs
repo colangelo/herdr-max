@@ -293,6 +293,10 @@ pub(crate) struct TaskService {
     latest: HashMap<TaskKey, (WriteId, Task)>,
     /// Outcomes not yet taken, in arrival order.
     outcomes: Vec<(WriteId, WriteOutcome)>,
+    /// The last few outcomes by write id, kept after they were taken so a
+    /// caller that asks later still learns how its write ended.
+    recent: HashMap<WriteId, WriteOutcome>,
+    recent_order: std::collections::VecDeque<WriteId>,
     /// Why the store is unusable, when it is.
     failure: Option<String>,
     /// The store's first scan has arrived, so the cache is complete.
@@ -334,6 +338,8 @@ impl TaskService {
             pending: HashMap::new(),
             latest: HashMap::new(),
             outcomes: Vec::new(),
+            recent: HashMap::new(),
+            recent_order: std::collections::VecDeque::new(),
             failure: None,
             loaded: false,
             pane_counts: HashMap::new(),
@@ -460,6 +466,16 @@ impl TaskService {
     /// answers "pending" at once, before this is true.
     pub(crate) fn is_saved(&self, write: &WriteId) -> bool {
         self.saved.contains(write)
+    }
+
+    /// How a write ended, if it did lately.
+    pub(crate) fn recent_outcome(&self, write: &WriteId) -> Option<&WriteOutcome> {
+        self.recent.get(write)
+    }
+
+    /// Whether the write is still waiting for the store.
+    pub(crate) fn is_pending_write(&self, write: &WriteId) -> bool {
+        self.pending.contains_key(write)
     }
 
     /// The writes held for a decision, oldest first.
@@ -773,6 +789,14 @@ impl TaskService {
     }
 
     fn push_outcome(&mut self, write: WriteId, outcome: WriteOutcome) {
+        if self.recent.insert(write.clone(), outcome.clone()).is_none() {
+            self.recent_order.push_back(write.clone());
+            if self.recent_order.len() > MAX_OUTCOMES {
+                if let Some(old) = self.recent_order.pop_front() {
+                    self.recent.remove(&old);
+                }
+            }
+        }
         self.outcomes.push((write, outcome));
         if self.outcomes.len() > MAX_OUTCOMES {
             let excess = self.outcomes.len() - MAX_OUTCOMES;

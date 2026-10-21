@@ -100,7 +100,7 @@ Raw socket method names use dot notation:
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show`, `notification.list`, `notification.mark_seen`, `notification.clear` |
 | Todo | `todo.list`, `todo.add`, `todo.update`, `todo.remove`, `todo.clear` |
-| Task | `task.list`, `task.show`, `task.add`, `task.update`, `task.done`, `task.drop`, `task.reopen`, `task.bind`, `task.conflicts`, `task.resolve_conflict` |
+| Task | `task.list`, `task.show`, `task.add`, `task.update`, `task.done`, `task.drop`, `task.reopen`, `task.bind`, `task.conflicts`, `task.resolve_conflict`, `task.write_status` |
 | Client | `client.list`, `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
@@ -589,6 +589,8 @@ applied on top of the held version). A resolver who looked at an older conflict
 gets `stale_revision`. `task.done`, `task.drop` and `task.reopen` take an
 optional `expected_rev`; without one they are checked against the version the
 server holds.
+
+`task.write_status {write_id}` answers whether a write is still waiting for the store (and whether it is saved on disk) or how it ended, for a caller that prefers asking to subscribing; the server remembers the last thousand outcomes.
 
 `shown` is the status a reader should display: the stored `status`, changed by
 the task's run records and by the asks row it waits on (`waiting`,

@@ -196,6 +196,8 @@ operations::define_operations! {
     TaskReopen(TaskMoveStatusParams) => "task.reopen", false, true;
     TaskBind(TaskBindParams) => "task.bind", false, true;
     TaskConflicts(EmptyParams) => "task.conflicts", false, true;
+    // Not advertised to the client shell: the CLI polls it for a write's outcome.
+    TaskWriteStatus(TaskWriteStatusParams) => "task.write_status", false, false;
     TaskResolveConflict(TaskResolveConflictParams) => "task.resolve_conflict", false, true;
 }
 

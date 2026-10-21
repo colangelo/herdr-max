@@ -264,6 +264,15 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "super::is_false")]
         pending: bool,
     },
+    /// How a write fared: waiting for the store (and whether it is saved on
+    /// disk yet), or ended with an outcome.
+    TaskWrite {
+        write_id: String,
+        pending: bool,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<super::tasks::TaskOutcomeInfo>,
+    },
     TaskConflicts {
         conflicts: Vec<super::tasks::TaskConflictInfo>,
     },

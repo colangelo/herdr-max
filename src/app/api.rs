@@ -1400,6 +1400,9 @@ impl App {
             Method::TaskBind(params) => {
                 return self.handle_task_bind(request.id, params);
             }
+            Method::TaskWriteStatus(params) => {
+                return self.handle_task_write_status(request.id, params);
+            }
             Method::TaskConflicts(_) => {
                 return self.handle_task_conflicts(request.id);
             }

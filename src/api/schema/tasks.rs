@@ -289,6 +289,13 @@ pub struct TaskConflictInfo {
     pub theirs_rev: u64,
 }
 
+/// Params for `task.write_status`: how a write fared, for a caller (the CLI)
+/// that waits for its outcome by asking again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TaskWriteStatusParams {
+    pub write_id: String,
+}
+
 /// How a write ended, in `task.changed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]

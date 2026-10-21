@@ -5913,6 +5913,18 @@
           ],
           "type": "object"
         },
+        "TaskWriteStatusParams": {
+          "description": "Params for `task.write_status`: how a write fared, for a caller (the CLI)\nthat waits for its outcome by asking again.",
+          "properties": {
+            "write_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "write_id"
+          ],
+          "type": "object"
+        },
         "ToastHerdrPosition": {
           "enum": [
             "top-left",
@@ -8574,6 +8586,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.write_status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskWriteStatusParams"
             }
           },
           "required": [
@@ -12994,6 +13022,41 @@
               "required": [
                 "type",
                 "task"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "How a write fared: waiting for the store (and whether it is saved on\ndisk yet), or ended with an outcome.",
+              "properties": {
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskOutcomeInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pending": {
+                  "type": "boolean"
+                },
+                "saved": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "task_write",
+                  "type": "string"
+                },
+                "write_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "write_id",
+                "pending",
+                "saved"
               ],
               "type": "object"
             },
