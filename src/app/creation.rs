@@ -328,6 +328,7 @@ impl App {
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             pane_key: Some(terminal.pane_key.clone()),
+            run_id: terminal.run_id.clone(),
             terminal_id: terminal.id.to_string(),
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,

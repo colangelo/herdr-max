@@ -1179,6 +1179,7 @@ mod tests {
             agent_session: None,
             last_input_at_unix: None,
             pane_key: None,
+            run_id: None,
             scroll: None,
             revision: 0,
         }

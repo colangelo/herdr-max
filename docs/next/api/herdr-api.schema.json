@@ -983,6 +983,13 @@
               "minimum": 0,
               "type": "integer"
             },
+            "run_id": {
+              "description": "The run the pane was started for, from `HERDR_RUN_ID` in the `env` of\n`pane.split` or `tab.create`. Absent for a pane started without one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "scroll": {
               "anyOf": [
                 {
@@ -9488,6 +9495,13 @@
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "run_id": {
+              "description": "The run the pane was started for, from `HERDR_RUN_ID` in the `env` of\n`pane.split` or `tab.create`. Absent for a pane started without one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "scroll": {
               "anyOf": [

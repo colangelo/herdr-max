@@ -162,6 +162,7 @@ fn restore_durable_pane_metadata(
     if let Some(key) = pane.pane_key.as_ref().filter(|key| !key.is_empty()) {
         terminal.pane_key = key.clone();
     }
+    terminal.run_id = pane.run_id.clone();
 }
 
 /// The flags the pane's agent was launched with, as saved.
@@ -1471,6 +1472,7 @@ mod tests {
             pin_order: None,
             former_public_ids: Vec::new(),
             pane_key: None,
+            run_id: None,
         };
         let target_pane = super::super::snapshot::PaneSnapshot {
             agent_resume: None,
@@ -1487,6 +1489,7 @@ mod tests {
             pin_order: None,
             former_public_ids: Vec::new(),
             pane_key: None,
+            run_id: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -2515,6 +2518,7 @@ mod tests {
                             pin_order: None,
                             former_public_ids: Vec::new(),
                             pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -2605,6 +2609,7 @@ mod tests {
                             pin_order: None,
                             former_public_ids: Vec::new(),
                             pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -2686,6 +2691,7 @@ mod tests {
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
+                                run_id: None,
                             },
                         ),
                         (
@@ -2705,6 +2711,7 @@ mod tests {
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
+                                run_id: None,
                             },
                         ),
                     ]),
@@ -2787,6 +2794,7 @@ mod tests {
                                 pin_order: None,
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
+                                run_id: None,
                             },
                         ),
                         (
@@ -2806,6 +2814,7 @@ mod tests {
                                 pin_order: None,
                                 former_public_ids: vec!["w1:p1".into(), "w9:p7".into()],
                                 pane_key: None,
+                                run_id: None,
                             },
                         ),
                     ]),
@@ -2870,6 +2879,7 @@ mod tests {
                     pin_order: None,
                     former_public_ids: Vec::new(),
                     pane_key: None,
+                    run_id: None,
                 },
             )
         };
@@ -2893,6 +2903,7 @@ mod tests {
             pin_order: None,
             former_public_ids: Vec::new(),
             pane_key: None,
+            run_id: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -3056,6 +3067,7 @@ mod tests {
                             pin_order: None,
                             former_public_ids: Vec::new(),
                             pane_key: None,
+                            run_id: None,
                         },
                     )]),
                     zoomed: false,
@@ -3458,6 +3470,7 @@ mod tests {
                 pin_order: None,
                 former_public_ids: Vec::new(),
                 pane_key: None,
+                run_id: None,
             },
         );
         let mut history = SessionHistorySnapshot {
