@@ -36,6 +36,9 @@ pub(crate) use power::monitor_host_power;
 mod launchd_spawn;
 pub(crate) use launchd_spawn::{leave_launchd_job, spawn_launchd_job};
 
+mod disclaimed_spawn;
+pub(crate) use disclaimed_spawn::spawn_disclaimed_daemon;
+
 #[cfg(test)]
 mod config_file_tests;
 

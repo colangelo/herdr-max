@@ -490,6 +490,26 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     }
 }
 
+/// Starts a live handoff's replacement server, detached like any server
+/// daemon, and returns its pid. On macOS the replacement is responsible for
+/// itself, so privacy prompts from its panes name its own binary rather than
+/// the server it replaces (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/240).
+#[cfg(unix)]
+pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::configure_server_daemon_context(command);
+        match macos::spawn_disclaimed_daemon(command) {
+            Ok(pid) => return Ok(pid),
+            Err(err) => {
+                tracing::info!(%err, "spawning the handoff server without its own responsibility");
+            }
+        }
+    }
+    detach_server_daemon_command(command);
+    command.spawn().map(|child| child.id())
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }

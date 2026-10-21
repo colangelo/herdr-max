@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
-use std::process::{Child, Command};
+use std::process::Command;
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -208,7 +208,7 @@ pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
     socket_path: &Path,
     token: &str,
-) -> io::Result<Child> {
+) -> io::Result<u32> {
     let fallback_exe;
     let exe = if let Some(import_exe) = import_exe {
         import_exe
@@ -237,8 +237,7 @@ pub(crate) fn spawn_handoff_import(
             .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
             .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
     }
-    crate::platform::detach_server_daemon_command(&mut command);
-    command.spawn().map_err(|err| {
+    crate::platform::spawn_handoff_server(&mut command).map_err(|err| {
         io::Error::new(
             err.kind(),
             format!(
@@ -250,29 +249,37 @@ pub(crate) fn spawn_handoff_import(
 }
 
 #[cfg(unix)]
-pub(crate) fn cleanup_failed_import_child(child: &mut Child) {
-    let pid = child.id();
-    match child.try_wait() {
-        Ok(Some(status)) => {
+pub(crate) fn cleanup_failed_import_child(pid: u32) {
+    use std::os::unix::process::ExitStatusExt;
+
+    let raw_pid = pid as libc::pid_t;
+    let mut status = 0;
+    // SAFETY: waitpid on our own child with a valid status pointer.
+    match unsafe { libc::waitpid(raw_pid, &mut status, libc::WNOHANG) } {
+        reaped if reaped == raw_pid => {
+            let status = std::process::ExitStatus::from_raw(status);
             info!(pid, status = %status, "handoff import server exited during rollback");
             return;
         }
-        Ok(None) => {}
-        Err(err) => {
+        0 => {}
+        _ => {
+            let err = io::Error::last_os_error();
             warn!(pid, err = %err, "failed to inspect handoff import server before rollback");
         }
     }
 
-    if let Err(err) = child.kill() {
+    // SAFETY: plain syscall on our own child's pid, which is not reaped yet.
+    if unsafe { libc::kill(raw_pid, libc::SIGKILL) } != 0 {
+        let err = io::Error::last_os_error();
         warn!(pid, err = %err, "failed to kill handoff import server during rollback");
     }
-    match child.wait() {
-        Ok(status) => {
-            info!(pid, status = %status, "handoff import server reaped during rollback");
-        }
-        Err(err) => {
-            warn!(pid, err = %err, "failed to reap handoff import server during rollback");
-        }
+    // SAFETY: as above.
+    if unsafe { libc::waitpid(raw_pid, &mut status, 0) } == raw_pid {
+        let status = std::process::ExitStatus::from_raw(status);
+        info!(pid, status = %status, "handoff import server reaped during rollback");
+    } else {
+        let err = io::Error::last_os_error();
+        warn!(pid, err = %err, "failed to reap handoff import server during rollback");
     }
 }
 
