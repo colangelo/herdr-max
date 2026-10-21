@@ -199,6 +199,9 @@ operations::define_operations! {
     // Not advertised to the client shell: the CLI polls it for a write's outcome.
     TaskWriteStatus(TaskWriteStatusParams) => "task.write_status", false, false;
     TaskResolveConflict(TaskResolveConflictParams) => "task.resolve_conflict", false, true;
+    // Read-only views of the buckets worklink and the gestore fill (issue 241, 2.13).
+    IssueList(IssueListParams) => "issue.list", false, true;
+    AskList(AskListParams) => "ask.list", false, true;
 }
 
 #[cfg(test)]

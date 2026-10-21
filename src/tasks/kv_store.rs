@@ -18,7 +18,7 @@ use tokio::runtime::Runtime;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 use super::store::{
-    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
+    landed_before, Mirror, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
 };
 
 /// Where and as whom to connect.
@@ -30,6 +30,9 @@ pub(crate) struct KvSettings {
     /// The JetStream domain (`hub` in the fleet), when there is one.
     pub domain: Option<String>,
     pub bucket: String,
+    /// Worklink's issue mirror and the asks, which are read, never written.
+    pub issues_bucket: String,
+    pub asks_bucket: String,
     /// The prefix of reply inboxes. The fleet's herdr users may only receive
     /// replies on `_INBOX_herdr_<host>`.
     pub inbox_prefix: Option<String>,
@@ -43,6 +46,8 @@ impl std::fmt::Debug for KvSettings {
             .field("password", &self.password.as_ref().map(|_| "<hidden>"))
             .field("domain", &self.domain)
             .field("bucket", &self.bucket)
+            .field("issues_bucket", &self.issues_bucket)
+            .field("asks_bucket", &self.asks_bucket)
             .field("inbox_prefix", &self.inbox_prefix)
             .finish()
     }
@@ -57,6 +62,8 @@ impl KvSettings {
             password: Some(env.password),
             domain: env.js_domain,
             bucket: env.bucket,
+            issues_bucket: env.issues_bucket,
+            asks_bucket: env.asks_bucket,
             inbox_prefix: Some(
                 env.inbox_prefix
                     .unwrap_or_else(|| format!("_INBOX_herdr_{host_id}")),
@@ -68,6 +75,9 @@ impl KvSettings {
 pub(crate) struct KvStore {
     runtime: Runtime,
     bucket: Bucket,
+    context: async_nats::jetstream::Context,
+    issues_bucket: String,
+    asks_bucket: String,
 }
 
 impl KvStore {
@@ -79,7 +89,7 @@ impl KvStore {
             .enable_all()
             .build()
             .map_err(|err| StoreError::Io(err.to_string()))?;
-        let bucket = runtime.block_on(async {
+        let (bucket, context) = runtime.block_on(async {
             let mut options = async_nats::ConnectOptions::new();
             if let (Some(user), Some(password)) = (&settings.user, &settings.password) {
                 options = options.user_and_password(user.clone(), password.clone());
@@ -92,12 +102,19 @@ impl KvStore {
                 Some(domain) => async_nats::jetstream::with_domain(client, domain),
                 None => async_nats::jetstream::new(client),
             };
-            context
+            let bucket = context
                 .get_key_value(&settings.bucket)
                 .await
-                .map_err(unavailable)
+                .map_err(unavailable)?;
+            Ok::<_, StoreError>((bucket, context))
         })?;
-        Ok(Self { runtime, bucket })
+        Ok(Self {
+            runtime,
+            bucket,
+            context,
+            issues_bucket: settings.issues_bucket.clone(),
+            asks_bucket: settings.asks_bucket.clone(),
+        })
     }
 
     fn entry(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>)>> {
@@ -263,6 +280,55 @@ impl TaskStore for KvStore {
         });
         Ok(())
     }
+
+    fn mirror(&mut self, which: Mirror, sink: WatchSink) -> StoreResult<Option<Vec<WatchEvent>>> {
+        let name = match which {
+            Mirror::Issues => self.issues_bucket.clone(),
+            Mirror::Asks => self.asks_bucket.clone(),
+        };
+        let context = self.context.clone();
+        // Watch first, so nothing that lands during the scan is missed.
+        let (found, watch) = self.runtime.block_on(async {
+            let bucket = context.get_key_value(&name).await.map_err(unavailable)?;
+            let watch = bucket.watch_all().await.map_err(unavailable)?;
+            let mut keys = Vec::new();
+            let mut stream = bucket.keys().await.map_err(unavailable)?;
+            while let Some(key) = stream.next().await {
+                keys.push(key.map_err(unavailable)?);
+            }
+            let mut found = Vec::new();
+            for key in keys {
+                let entry = bucket.entry(key).await.map_err(unavailable)?;
+                if let Some(entry) = entry {
+                    if let Some((rev, value)) = live(&entry) {
+                        found.push(WatchEvent {
+                            key: StoreKey(entry.key.clone()),
+                            rev,
+                            value: Some(value),
+                            at: Some(entry.created.into()),
+                        });
+                    }
+                }
+            }
+            Ok::<_, StoreError>((found, watch))
+        })?;
+        let mut watch = watch;
+        self.runtime.spawn(async move {
+            while let Some(item) = watch.next().await {
+                let Ok(entry) = item else { continue };
+                let event = WatchEvent {
+                    key: StoreKey(entry.key.clone()),
+                    rev: Rev(entry.revision),
+                    value: live(&entry).map(|(_, value)| value),
+                    at: Some(entry.created.into()),
+                };
+                if !sink(event) {
+                    break;
+                }
+            }
+        });
+        Ok(Some(found))
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +453,8 @@ mod tests {
             password: None,
             domain: None,
             bucket: "TASKS".into(),
+            issues_bucket: "ISSUES".into(),
+            asks_bucket: "ASKS".into(),
             inbox_prefix: None,
         }
     }
@@ -414,6 +482,8 @@ mod tests {
             password: "hunter2".into(),
             js_domain: None,
             bucket: "TASKS".into(),
+            issues_bucket: "ISSUES".into(),
+            asks_bucket: "ASKS".into(),
             inbox_prefix: None,
         };
         let settings = KvSettings::from_bus_env(env.clone(), "m4m");

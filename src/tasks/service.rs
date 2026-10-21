@@ -17,13 +17,17 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use super::asks::AskCache;
 use super::cache::TaskCache;
 use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
+use super::issues::IssueCache;
 use super::model::{MoveContext, Task, TaskError, TaskStatus, Timestamp, RUNS_KEPT};
 use super::outbox::{Base, Entry, Op, Outbox};
 use super::runs::{derive, AskRow, Derived, RunCache, RunState};
-use super::store::{landed_last, StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
+use super::store::{
+    landed_last, Mirror, StoreError, StoreResult, TaskStore, WatchEvent, WatchSink,
+};
 
 /// Writes that may wait for the store at once. More are refused, so a store
 /// that stopped answering cannot make the server queue without end.
@@ -174,6 +178,8 @@ enum Message {
     Write(WriteCommand),
     Resolve(ResolveCommand),
     Watch(WatchEvent),
+    /// A change in one of the buckets that are only read.
+    Mirror(Mirror, WatchEvent),
     Shutdown,
 }
 
@@ -184,6 +190,19 @@ pub(crate) enum StoreEvent {
     Loaded(Vec<WatchEvent>),
     /// A change seen by the watch.
     Changed(WatchEvent),
+    /// Everything a read-only bucket held when the thread attached to it.
+    MirrorLoaded {
+        which: Mirror,
+        events: Vec<WatchEvent>,
+    },
+    /// A change seen by the watch of a read-only bucket.
+    MirrorChanged { which: Mirror, event: WatchEvent },
+    /// Why a read-only bucket cannot be read (the thread keeps trying), or
+    /// `None` when it can.
+    MirrorState {
+        which: Mirror,
+        detail: Option<String>,
+    },
     /// Writes found waiting in the outbox when the thread started, from an
     /// earlier run of the server: they count as pending until they settle.
     Queued(Vec<(WriteId, TaskKey, Box<Task>)>),
@@ -275,6 +294,13 @@ pub(crate) struct PaneTaskCounts {
     pub revision: u64,
 }
 
+/// Whether a read-only bucket has been read, and why not when it has not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MirrorStatus {
+    pub loaded: bool,
+    pub detail: Option<String>,
+}
+
 pub(crate) struct TaskService {
     /// Tells events of this service from those of one it replaced.
     generation: u64,
@@ -325,6 +351,11 @@ pub(crate) struct TaskService {
     /// How requests to settle a held write ended, not yet taken.
     resolutions: Vec<(u64, ResolveOutcome)>,
     next_ticket: u64,
+    /// Worklink's mirror of forge issues, read-only.
+    issues: IssueCache,
+    /// ac's asks, read-only.
+    asks: AskCache,
+    mirror_status: HashMap<Mirror, MirrorStatus>,
 }
 
 impl TaskService {
@@ -357,6 +388,9 @@ impl TaskService {
             open_tickets: HashSet::new(),
             resolutions: Vec::new(),
             next_ticket: 1,
+            issues: IssueCache::default(),
+            asks: AskCache::default(),
+            mirror_status: HashMap::new(),
         }
     }
 
@@ -858,6 +892,31 @@ impl TaskService {
         changed
     }
 
+    /// The mirrored forge issues.
+    pub(crate) fn issues(&self) -> &IssueCache {
+        &self.issues
+    }
+
+    /// The asks.
+    pub(crate) fn asks(&self) -> &AskCache {
+        &self.asks
+    }
+
+    /// Whether a read-only bucket has been read yet, and why not.
+    pub(crate) fn mirror_status(&self, which: Mirror) -> MirrorStatus {
+        self.mirror_status.get(&which).cloned().unwrap_or_default()
+    }
+
+    /// What an ask a task waits on is doing. Until the asks have been read, no
+    /// row can be called missing: it is unknown.
+    pub(crate) fn ask_state(&self, key: &str) -> AskRow {
+        if self.mirror_status(Mirror::Asks).loaded {
+            self.asks.state_of(key)
+        } else {
+            AskRow::Unknown
+        }
+    }
+
     /// The counts a pane shows, if it has any tasks, open or waiting.
     pub(crate) fn pane_counts(&self, pane_key: &str) -> Option<PaneTaskCounts> {
         self.pane_counts.get(pane_key).copied()
@@ -972,6 +1031,32 @@ impl TaskService {
                     }
                 }
                 task_changed || any_run
+            }
+            StoreEvent::MirrorLoaded { which, events } => {
+                for event in &events {
+                    match which {
+                        Mirror::Issues => self.issues.apply(event),
+                        Mirror::Asks => self.asks.apply(event),
+                    };
+                }
+                self.mirror_status.insert(
+                    which,
+                    MirrorStatus {
+                        loaded: true,
+                        detail: None,
+                    },
+                );
+                true
+            }
+            StoreEvent::MirrorChanged { which, event } => match which {
+                Mirror::Issues => self.issues.apply(&event),
+                Mirror::Asks => self.asks.apply(&event),
+            },
+            StoreEvent::MirrorState { which, detail } => {
+                let status = self.mirror_status.entry(which).or_default();
+                let changed = status.detail != detail;
+                status.detail = detail;
+                changed
             }
             StoreEvent::Queued(writes) => {
                 for (write, key, doc) in writes {
@@ -1213,6 +1298,7 @@ fn run_store(
     };
 
     // Watch first, so nothing that lands during the scan is missed.
+    let mirror_sender = watch_sender.clone();
     let sink: WatchSink = Box::new(move |event| watch_sender.send(Message::Watch(event)).is_ok());
     if let Err(err) = store.watch("", sink) {
         return Some(format!("cannot watch the task store: {err}"));
@@ -1274,23 +1360,51 @@ fn run_store(
         }
     }
 
+    // The read-only buckets: what fails is tried again, later.
+    let mut mirrors_left = Mirror::ALL.to_vec();
+    let mut mirror_wait = backoff.initial;
+    let mut mirror_due = std::time::Instant::now();
+
     // Try the outbox now, then whenever something arrives or a retry is due.
     let mut retry_wait = backoff.initial;
     let mut retry_due = flush(&mut outbox, store.as_mut(), emit);
     loop {
-        let message = match retry_due {
-            Some(true) => match messages.recv_timeout(retry_wait) {
+        let mirror_in = (!mirrors_left.is_empty())
+            .then(|| mirror_due.saturating_duration_since(std::time::Instant::now()));
+        let outbox_in = (retry_due == Some(true)).then_some(retry_wait);
+        let wait = match (outbox_in, mirror_in) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let message = match wait {
+            Some(wait) => match messages.recv_timeout(wait) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
-            _ => match messages.recv() {
+            None => match messages.recv() {
                 Ok(message) => Some(message),
                 Err(_) => break,
             },
         };
+        if !mirrors_left.is_empty() && std::time::Instant::now() >= mirror_due {
+            match attach_mirrors(store.as_mut(), &mut mirrors_left, &mirror_sender, emit) {
+                None => return None,
+                Some(true) => {
+                    mirror_due = std::time::Instant::now() + mirror_wait;
+                    mirror_wait = backoff.next(mirror_wait);
+                }
+                Some(false) => {}
+            }
+        }
         match message {
             Some(Message::Shutdown) => break,
+            Some(Message::Mirror(which, event)) => {
+                if !emit(StoreEvent::MirrorChanged { which, event }) {
+                    return None;
+                }
+                continue;
+            }
             Some(Message::Watch(event)) => {
                 if !emit(StoreEvent::Changed(event)) {
                     return None;
@@ -1333,6 +1447,41 @@ fn run_store(
     None
 }
 
+/// Attach to the read-only buckets in `left`. What could not be read stays in
+/// `left`. Returns whether any failed, or `None` when nobody listens any more.
+fn attach_mirrors(
+    store: &mut dyn TaskStore,
+    left: &mut Vec<Mirror>,
+    sender: &Sender<Message>,
+    emit: &impl Fn(StoreEvent) -> bool,
+) -> Option<bool> {
+    let mut failed = false;
+    for which in std::mem::take(left) {
+        let sender = sender.clone();
+        let sink: WatchSink =
+            Box::new(move |event| sender.send(Message::Mirror(which, event)).is_ok());
+        let event = match store.mirror(which, sink) {
+            Ok(Some(events)) => StoreEvent::MirrorLoaded { which, events },
+            Ok(None) => StoreEvent::MirrorState {
+                which,
+                detail: Some("not available with this backend".to_owned()),
+            },
+            Err(err) => {
+                failed = true;
+                left.push(which);
+                StoreEvent::MirrorState {
+                    which,
+                    detail: Some(err.to_string()),
+                }
+            }
+        };
+        if !emit(event) {
+            return None;
+        }
+    }
+    Some(failed)
+}
+
 /// Before the thread ends: the writes still waiting in the channel go into the
 /// outbox, so the next owner finds them, and the directory entries are made
 /// durable before it reads them.
@@ -1356,7 +1505,7 @@ fn finish(outbox: &mut Outbox, messages: &Receiver<Message>, emit: &impl Fn(Stor
                     requeued: None,
                 })));
             }
-            Message::Watch(_) | Message::Shutdown => {}
+            Message::Watch(_) | Message::Mirror(..) | Message::Shutdown => {}
         }
     }
     outbox.sync();
@@ -1398,7 +1547,7 @@ fn pause(
         match messages.recv_timeout(left) {
             Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => return true,
             Err(RecvTimeoutError::Timeout) => return false,
-            Ok(Message::Watch(_)) => {}
+            Ok(Message::Watch(_) | Message::Mirror(..)) => {}
             Ok(Message::Resolve(command)) => {
                 // Settling a conflict needs the store's current version.
                 let refused = StoreEvent::Resolved(Box::new(Resolution {
@@ -1751,6 +1900,12 @@ mod tests {
         scan_failures: Arc<AtomicUsize>,
         docs: BTreeMap<String, (Rev, Vec<u8>)>,
         sinks: Vec<WatchSink>,
+        /// How many attaches to a read-only bucket still fail.
+        mirror_failures: Arc<AtomicUsize>,
+        /// What the read-only buckets hold.
+        mirror_docs: Arc<Mutex<Vec<(Mirror, WatchEvent)>>>,
+        /// The watches on them, for a test to push changes through.
+        mirror_sinks: Arc<Mutex<Vec<(Mirror, WatchSink)>>>,
     }
 
     impl FakeStore {
@@ -1768,6 +1923,9 @@ mod tests {
                 scan_failures: Arc::default(),
                 docs: BTreeMap::new(),
                 sinks: Vec::new(),
+                mirror_failures: Arc::default(),
+                mirror_docs: Arc::default(),
+                mirror_sinks: Arc::default(),
             }
         }
 
@@ -1891,6 +2049,41 @@ mod tests {
             self.sinks.push(sink);
             Ok(())
         }
+
+        fn mirror(
+            &mut self,
+            which: Mirror,
+            sink: WatchSink,
+        ) -> StoreResult<Option<Vec<WatchEvent>>> {
+            let failing = self
+                .mirror_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                return Err(StoreError::Unavailable("the bucket is away".to_owned()));
+            }
+            self.mirror_sinks.lock().unwrap().push((which, sink));
+            Ok(Some(
+                self.mirror_docs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(of, _)| *of == which)
+                    .map(|(_, event)| event.clone())
+                    .collect(),
+            ))
+        }
+    }
+
+    fn mirror_event(key: &str, rev: u64, doc: serde_json::Value) -> WatchEvent {
+        WatchEvent {
+            key: StoreKey(key.into()),
+            rev: Rev(rev),
+            value: Some(serde_json::to_vec(&doc).unwrap()),
+            at: None,
+        }
     }
 
     fn task_owned_by(host: &str, id: &str) -> Task {
@@ -1971,6 +2164,86 @@ mod tests {
             service.is_loaded()
         });
         (service, received)
+    }
+
+    #[test]
+    fn mirrors_load_retry_and_follow_changes() {
+        let mut store = FakeStore::new(Duration::ZERO);
+        // The first attach (the issues) fails; the asks go through.
+        store.mirror_failures = Arc::new(AtomicUsize::new(1));
+        let docs = store.mirror_docs.clone();
+        let sinks = store.mirror_sinks.clone();
+        docs.lock().unwrap().push((
+            Mirror::Asks,
+            mirror_event("g.a", 3, serde_json::json!({"status": "open"})),
+        ));
+        let (mut service, received) = start_with_store(store);
+
+        // Before the asks are read no ask can be called missing.
+        assert_eq!(service.ask_state("g.a"), AskRow::Unknown);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.mirror_status(Mirror::Asks).loaded
+        });
+        assert_eq!(service.ask_state("g.a"), AskRow::Open);
+        assert_eq!(service.ask_state("g.nope"), AskRow::Missing);
+
+        // The issues come on the retry, with their reason shown until then.
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.mirror_status(Mirror::Issues).loaded
+        });
+        assert_eq!(service.mirror_status(Mirror::Issues).detail, None);
+
+        // A change on a watch reaches the cache.
+        let push = |which: Mirror, event: WatchEvent| {
+            let sinks = sinks.lock().unwrap();
+            let (_, sink) = sinks.iter().find(|(of, _)| *of == which).unwrap();
+            assert!(sink(event));
+        };
+        push(
+            Mirror::Asks,
+            mirror_event("g.a", 4, serde_json::json!({"status": "answered"})),
+        );
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.ask_state("g.a") == AskRow::Answered
+        });
+        push(
+            Mirror::Issues,
+            mirror_event(
+                "issue.gitea.gitea-lab.84.7",
+                9,
+                serde_json::json!({
+                    "v": 1,
+                    "ref": {"forge": "gitea", "forge_id": "gitea-lab", "host": "gitea.example",
+                            "project_id": 84, "project_path": "ac/worklink", "number": 7},
+                    "title": "t", "state": "open", "labels": [], "assignees": [],
+                    "author": "ac", "created_at": "2026-10-21T10:00:00Z",
+                    "updated_at": "2026-10-21T11:00:00Z", "web_url": "https://gitea.example/i/7",
+                    "source_rev": "abc", "last_sync": "2026-10-21T12:00:00Z"
+                }),
+            ),
+        );
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.issues().len() == 1
+        });
+        let row = service.issues().get("issue.gitea.gitea-lab.84.7").unwrap();
+        assert_eq!(row.mirror_rev, Rev(9));
+    }
+
+    #[test]
+    fn a_backend_without_the_buckets_says_so_and_asks_stay_unknown() {
+        // The file backend has no mirror: the thread reports that.
+        let mut service = TaskService::disabled();
+        service.apply(StoreEvent::MirrorState {
+            which: Mirror::Asks,
+            detail: Some("not available with this backend".to_owned()),
+        });
+        let status = service.mirror_status(Mirror::Asks);
+        assert!(!status.loaded);
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("not available with this backend")
+        );
+        assert_eq!(service.ask_state("g.a"), AskRow::Unknown);
     }
 
     #[test]

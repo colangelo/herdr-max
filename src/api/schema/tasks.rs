@@ -341,3 +341,132 @@ pub enum TaskResolutionInfo {
         message: String,
     },
 }
+
+/// Params for `issue.list`: the forge issues worklink mirrors.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IssueListParams {
+    /// Only this project: its numeric id, or its path (`ac/worklink`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// `open` (the default), `closed` or `all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Params for `ask.list`: ac's rows in the asks bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AskListParams {
+    /// Only rows of this kind. `task` when absent; `any` for every kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Rows that are closed or dropped too.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub include_closed: bool,
+}
+
+/// An issue's place on its forge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IssueRefInfo {
+    pub forge: String,
+    pub forge_id: String,
+    pub host: String,
+    pub project_id: u64,
+    pub project_path: String,
+    pub number: u64,
+}
+
+/// One mirrored issue, as worklink wrote it. No body, no comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IssueInfo {
+    /// The row's key: `issue.<forge>.<forge_id>.<project_id>.<number>`.
+    pub key: String,
+    #[serde(rename = "ref")]
+    pub issue_ref: IssueRefInfo,
+    /// The revision of the row that the server's watch saw.
+    pub mirror_rev: u64,
+    pub title: String,
+    /// `open`, `closed` or `unknown`.
+    pub state: String,
+    pub labels: Vec<String>,
+    pub assignees: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
+    /// The forge's own revision marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_rev: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<String>,
+    /// Present (true) when the title was cut.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub truncated: bool,
+}
+
+/// How the last sync of one project went. A project with no sync row is
+/// `synced: false`: the panel says "not synced".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IssueProjectInfo {
+    pub forge: String,
+    pub forge_id: String,
+    pub project_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    pub synced: bool,
+    /// `ok` or `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt: Option<String>,
+    /// When the sync last succeeded: the panel's last-sync line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ok: Option<String>,
+}
+
+/// Whether the server has read a bucket, and why not when it has not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MirrorInfo {
+    pub loaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One row of the asks bucket (the fields this server shows).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AskInfo {
+    /// The row's key: `<gestore>.<id>`.
+    pub key: String,
+    pub rev: u64,
+    /// `open`, `answered`, `closed` or `dropped`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}

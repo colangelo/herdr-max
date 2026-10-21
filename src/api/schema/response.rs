@@ -276,6 +276,15 @@ pub enum ResponseResult {
     TaskConflicts {
         conflicts: Vec<super::tasks::TaskConflictInfo>,
     },
+    IssueList {
+        issues: Vec<super::tasks::IssueInfo>,
+        projects: Vec<super::tasks::IssueProjectInfo>,
+        mirror: super::tasks::MirrorInfo,
+    },
+    AskList {
+        asks: Vec<super::tasks::AskInfo>,
+        mirror: super::tasks::MirrorInfo,
+    },
     /// A `task.resolve_conflict` that was taken: how it ended arrives later as
     /// `task.changed`, under this ticket.
     TaskResolving {

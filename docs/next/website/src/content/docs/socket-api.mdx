@@ -101,6 +101,7 @@ Raw socket method names use dot notation:
 | Notification | `notification.show`, `notification.list`, `notification.mark_seen`, `notification.clear` |
 | Todo | `todo.list`, `todo.add`, `todo.update`, `todo.remove`, `todo.clear` |
 | Task | `task.list`, `task.show`, `task.add`, `task.update`, `task.done`, `task.drop`, `task.reopen`, `task.bind`, `task.conflicts`, `task.resolve_conflict`, `task.write_status` |
+| Work | `issue.list`, `ask.list` |
 | Client | `client.list`, `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
@@ -599,6 +600,40 @@ the task's run records and by the asks row it waits on (`waiting`,
 write tasks; neither write is queued. `task.list` leaves closed tasks out unless
 `include_closed` is set, and carries a `store` object with the store's state and
 how many writes are waiting or held.
+
+### Work views
+
+`issue.list` and `ask.list` are read-only views of two buckets other tools fill:
+the forge issues worklink mirrors (`ISSUES`) and ac's rows from the gestore
+(`ASKS`). The server reads both over the same bus connection as the tasks and
+answers from memory. They need the `kv` backend; on the file backend `mirror`
+says `"not available with this backend"` and the lists are empty.
+
+`issue.list {project?, state?}` leaves out closed issues unless `state` is
+`closed` or `all`; `project` is a numeric project id or a path (`ac/worklink`).
+Each issue carries its whole `ref` (`forge`, `forge_id`, `host`, `project_id`,
+`project_path`, `number`), `mirror_rev` (the bucket revision the server's watch
+saw for that row), and the forge's fields: `title`, `state`, `labels`,
+`assignees`, `author`, `created_at`, `updated_at`, `web_url`, `source_rev`,
+`last_sync`. `truncated` appears (as `true`) only when the title was cut. There
+is no body and no comment. `projects` lists each project with how its last sync
+went (`status`, `last_ok`, `last_attempt`, `error_class`); a project with issues
+and no sync row is `"synced": false`, which a panel shows as "not synced".
+
+`ask.list {kind?, include_closed?}` returns rows whose `kind` is `task` unless
+`kind` names another (`any` for every kind), without closed or dropped rows
+unless `include_closed` is set. A task that names an ask row in `waits_on` is
+`waiting` while that row is open or answered; a row that is not there flags the
+task with `waits_on_missing`, and until the asks have been read no row is called
+missing.
+
+Both answers carry `mirror`: `loaded` says the bucket has been read, and
+`detail` says why not (the bus is away, or the backend has no such bucket).
+
+```json
+{"id":"req_i1","method":"issue.list","params":{"project":"ac/worklink","state":"all"}}
+{"id":"req_i1","result":{"type":"issue_list","issues":[{"key":"issue.gitea.gitea-lab.84.7","ref":{"forge":"gitea","forge_id":"gitea-lab","host":"gitea.example","project_id":84,"project_path":"ac/worklink","number":7},"mirror_rev":11,"title":"sync fails on rename","state":"open","labels":["bug"],"assignees":[]}],"projects":[{"forge":"gitea","forge_id":"gitea-lab","project_id":84,"project_path":"ac/worklink","synced":true,"status":"ok","last_ok":"2026-10-21T12:00:00Z"}],"mirror":{"loaded":true}}}
+```
 
 ### Clients
 

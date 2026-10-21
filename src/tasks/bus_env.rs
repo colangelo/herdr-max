@@ -11,6 +11,8 @@ use std::fmt;
 use std::path::Path;
 
 const DEFAULT_BUCKET: &str = "TASKS";
+const DEFAULT_ISSUES_BUCKET: &str = "ISSUES";
+const DEFAULT_ASKS_BUCKET: &str = "ASKS";
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct BusEnv {
@@ -20,6 +22,9 @@ pub(crate) struct BusEnv {
     /// The JetStream domain (`hub` in the fleet).
     pub js_domain: Option<String>,
     pub bucket: String,
+    /// Worklink's issue mirror and the asks, read-only (defaults `ISSUES`, `ASKS`).
+    pub issues_bucket: String,
+    pub asks_bucket: String,
     /// Replaces the default reply inbox prefix when the file names one.
     pub inbox_prefix: Option<String>,
 }
@@ -32,6 +37,8 @@ impl fmt::Debug for BusEnv {
             .field("password", &"<hidden>")
             .field("js_domain", &self.js_domain)
             .field("bucket", &self.bucket)
+            .field("issues_bucket", &self.issues_bucket)
+            .field("asks_bucket", &self.asks_bucket)
             .field("inbox_prefix", &self.inbox_prefix)
             .finish()
     }
@@ -125,6 +132,8 @@ fn parse(text: &str) -> Result<BusEnv, String> {
     let mut password = None;
     let mut js_domain = None;
     let mut bucket = None;
+    let mut issues_bucket = None;
+    let mut asks_bucket = None;
     let mut inbox_prefix = None;
     for (index, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -142,6 +151,8 @@ fn parse(text: &str) -> Result<BusEnv, String> {
             "NATS_PASSWORD" => &mut password,
             "NATS_JS_DOMAIN" => &mut js_domain,
             "TASKS_BUCKET" => &mut bucket,
+            "ISSUES_BUCKET" => &mut issues_bucket,
+            "ASKS_BUCKET" => &mut asks_bucket,
             "NATS_INBOX_PREFIX" => &mut inbox_prefix,
             // Other keys belong to other readers of the same file.
             _ => continue,
@@ -154,6 +165,8 @@ fn parse(text: &str) -> Result<BusEnv, String> {
         password: password.ok_or("NATS_PASSWORD is missing")?,
         js_domain,
         bucket: bucket.unwrap_or_else(|| DEFAULT_BUCKET.to_owned()),
+        issues_bucket: issues_bucket.unwrap_or_else(|| DEFAULT_ISSUES_BUCKET.to_owned()),
+        asks_bucket: asks_bucket.unwrap_or_else(|| DEFAULT_ASKS_BUCKET.to_owned()),
         inbox_prefix,
     })
 }

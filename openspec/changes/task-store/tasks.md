@@ -42,7 +42,7 @@
 - [x] 2.12 CLI `herdr-beta task add|list|show|update|done|drop|reopen|bind`, with
   `--json`, the outcome wait, and the `todo.*` fallback.
   Test: `cli_falls_back_when_task_methods_missing`
-- [ ] 2.13 `issue.list` and `ask.list`, read by the server from `ISSUES` and `ASKS`;
+- [x] 2.13 `issue.list` and `ask.list`, read by the server from `ISSUES` and `ASKS`;
   each issue row carries its full `IssueRef` and `mirror_rev` (the KV revision its watch saw;
   contracts v0.9 OP-01, OP-06).
   Test: `issue_rows_equal_mirror_records`

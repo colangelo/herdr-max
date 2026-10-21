@@ -83,6 +83,18 @@ pub(crate) fn landed_last(current: &[u8], write: &WriteId) -> bool {
     serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.last() == Some(write))
 }
 
+/// The other buckets the server reads (never writes): worklink's mirror of
+/// forge issues, and ac's asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Mirror {
+    Issues,
+    Asks,
+}
+
+impl Mirror {
+    pub(crate) const ALL: [Mirror; 2] = [Mirror::Issues, Mirror::Asks];
+}
+
 pub(crate) trait TaskStore: Send + 'static {
     /// Create `key`. If it already holds a document whose `last_writes`
     /// contains `write`, an earlier try of this same write landed and its
@@ -109,4 +121,11 @@ pub(crate) trait TaskStore: Send + 'static {
 
     /// Report every change under `prefix` from now on to `sink`.
     fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()>;
+
+    /// Watch another bucket, read-only, and return everything it holds now.
+    /// `Ok(None)` when this backend has no such bucket (the file backend has
+    /// none); an error when it should have and cannot be read.
+    fn mirror(&mut self, _which: Mirror, _sink: WatchSink) -> StoreResult<Option<Vec<WatchEvent>>> {
+        Ok(None)
+    }
 }

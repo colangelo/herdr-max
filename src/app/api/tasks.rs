@@ -17,8 +17,8 @@ use crate::api::schema::{
 };
 use crate::app::App;
 use crate::tasks::{
-    AskRow, Choice, IssueRef, MoveContext, Origin, Owner, PaneBinding, Priority, ResolveOutcome,
-    Rev, Shown, SubmitError, Task, TaskError, TaskId, TaskKey, TaskStatus, Timestamp, Via, WriteId,
+    Choice, IssueRef, MoveContext, Origin, Owner, PaneBinding, Priority, ResolveOutcome, Rev,
+    Shown, SubmitError, Task, TaskError, TaskId, TaskKey, TaskStatus, Timestamp, Via, WriteId,
     WriteOutcome,
 };
 
@@ -249,8 +249,12 @@ impl App {
     /// One task as the API shows it, with what the cache knows beside it.
     fn task_info(&self, rev: Rev, task: &Task, context: &InfoContext) -> TaskInfo {
         let key = task.key();
-        let derived =
-            crate::tasks::derive(task, self.tasks.runs(), |_| AskRow::Unknown, context.now);
+        let derived = crate::tasks::derive(
+            task,
+            self.tasks.runs(),
+            |row| self.tasks.ask_state(row),
+            context.now,
+        );
         TaskInfo {
             key: key.to_string(),
             id: task.id.to_string(),
