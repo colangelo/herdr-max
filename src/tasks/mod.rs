@@ -9,11 +9,13 @@
 #![allow(dead_code, unused_imports)]
 
 mod cache;
+mod file_store;
 mod ids;
 mod model;
 mod store;
 
 pub(crate) use cache::{CachedTask, TaskCache};
+pub(crate) use file_store::FileStore;
 pub(crate) use ids::{is_valid_host_id, HostId, Rev, TaskId, TaskKey, WriteId};
 pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,

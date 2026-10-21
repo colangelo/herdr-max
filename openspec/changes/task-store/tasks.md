@@ -20,7 +20,7 @@
 
 - [x] 2.1 `src/tasks/`: `Task`, `TaskKey`, `TaskStore` trait, `TaskCache`. Tests:
   `task_record_limits`, `status_machine_refuses_bad_moves`
-- [ ] 2.2 The `file` backend under the session data dir, with per-key revisions.
+- [x] 2.2 The `file` backend under the session data dir, with per-key revisions.
   Test: `file_store_compare_and_set_conflicts`
 - [ ] 2.3 The store task and internal events; API answers from the cache.
   Test: `slow_store_never_blocks_api` (a fake store that sleeps)
