@@ -26,8 +26,12 @@ pub(crate) enum StoreError {
     AlreadyExists { current: (Rev, Vec<u8>) },
     /// The backend cannot be reached now; the write belongs in the outbox.
     Unavailable(String),
-    /// A local read or write failed, or the request was refused as invalid.
+    /// A local read or write failed, perhaps for now (a full disk, an I/O
+    /// error): the write stays in the outbox and is tried again.
     Io(String),
+    /// The request itself is refused for good (a bad key, a document that
+    /// cannot be written): trying again would change nothing.
+    Refused(String),
     /// The write was sent but its fate is unknown (a timed-out publish may
     /// have been stored). Neither applied nor failed: replaying the write id
     /// finds out.
@@ -39,7 +43,10 @@ impl std::fmt::Display for StoreError {
         match self {
             Self::Conflict { .. } => f.write_str("the revision moved"),
             Self::AlreadyExists { .. } => f.write_str("the key already exists"),
-            Self::Unavailable(why) | Self::Io(why) | Self::Indeterminate(why) => f.write_str(why),
+            Self::Unavailable(why)
+            | Self::Io(why)
+            | Self::Refused(why)
+            | Self::Indeterminate(why) => f.write_str(why),
         }
     }
 }
@@ -67,6 +74,13 @@ pub(crate) type WatchSink = Box<dyn Fn(WatchEvent) -> bool + Send + 'static>;
 /// acknowledgement was lost.
 pub(crate) fn landed_before(current: &[u8], write: &WriteId) -> bool {
     serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.contains(write))
+}
+
+/// Whether `write` is the newest write the document in `current` holds. A
+/// write that is only somewhere in `last_writes` may have been followed by a
+/// foreign one, whose changes a replay on top of it would overwrite.
+pub(crate) fn landed_last(current: &[u8], write: &WriteId) -> bool {
+    serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.last() == Some(write))
 }
 
 pub(crate) trait TaskStore: Send + 'static {

@@ -90,10 +90,11 @@ impl FileStore {
     fn write(&mut self, key: &str, rev: Rev, value: &Task) -> StoreResult<()> {
         let path = self
             .path_for(key)
-            .ok_or_else(|| StoreError::Io(format!("not a usable key: {key}")))?;
-        let value = serde_json::to_value(value).map_err(|err| StoreError::Io(err.to_string()))?;
+            .ok_or_else(|| StoreError::Refused(format!("not a usable key: {key}")))?;
+        let value =
+            serde_json::to_value(value).map_err(|err| StoreError::Refused(err.to_string()))?;
         let bytes = serde_json::to_vec(&Stored { rev: rev.0, value })
-            .map_err(|err| StoreError::Io(err.to_string()))?;
+            .map_err(|err| StoreError::Refused(err.to_string()))?;
         let temp = self.dir.join(format!(
             "{key}.{EXTENSION}.{}.tmp",
             crate::ulid::new_ulid().to_ascii_lowercase()

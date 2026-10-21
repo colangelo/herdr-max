@@ -129,18 +129,27 @@ impl<'de> Deserialize<'de> for TaskKey {
     }
 }
 
-/// The id of one write (a ULID). The record keeps the last few applied.
+/// The id of one write (a ULID). The record keeps the last few applied. Always
+/// kept in lower case, whoever wrote it: ids name files on a case-insensitive
+/// disk, and two spellings of one id must compare equal.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(from = "String")]
 pub(crate) struct WriteId(String);
+
+impl From<String> for WriteId {
+    fn from(mut value: String) -> Self {
+        value.make_ascii_lowercase();
+        Self(value)
+    }
+}
 
 impl WriteId {
     pub(crate) fn generate() -> Self {
-        Self(crate::ulid::new_ulid())
+        Self::from(crate::ulid::new_ulid())
     }
 
     pub(crate) fn from_string(value: String) -> Self {
-        Self(value)
+        Self::from(value)
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -198,5 +207,14 @@ mod tests {
         assert!(TaskId::new(first.as_str()).is_some(), "{first}");
         assert_ne!(first, TaskId::generate());
         assert_ne!(WriteId::generate(), WriteId::generate());
+    }
+
+    #[test]
+    fn a_write_id_has_one_spelling_however_it_arrives() {
+        let made = WriteId::generate();
+        assert_eq!(made.as_str(), made.as_str().to_ascii_lowercase());
+        let shouted: WriteId = serde_json::from_str("\"01J0ABCDEF\"").unwrap();
+        assert_eq!(shouted, WriteId::from_string("01j0abcdef".into()));
+        assert_eq!(serde_json::to_string(&shouted).unwrap(), "\"01j0abcdef\"");
     }
 }

@@ -119,7 +119,7 @@ impl KvStore {
     fn document(doc: &Task) -> StoreResult<Bytes> {
         serde_json::to_vec(doc)
             .map(Bytes::from)
-            .map_err(|err| StoreError::Io(err.to_string()))
+            .map_err(|err| StoreError::Refused(err.to_string()))
     }
 }
 
@@ -133,7 +133,7 @@ fn unavailable(err: impl std::fmt::Display) -> StoreError {
 /// been stored all the same, so only a bad key is a plain failure.
 fn create_error(kind: CreateErrorKind, why: String) -> StoreError {
     match kind {
-        CreateErrorKind::InvalidKey => StoreError::Io(why),
+        CreateErrorKind::InvalidKey => StoreError::Refused(why),
         CreateErrorKind::AlreadyExists
         | CreateErrorKind::Publish
         | CreateErrorKind::Ack
@@ -144,7 +144,7 @@ fn create_error(kind: CreateErrorKind, why: String) -> StoreError {
 /// What a failed update means; see [`create_error`].
 fn update_error(kind: UpdateErrorKind, why: String) -> StoreError {
     match kind {
-        UpdateErrorKind::InvalidKey => StoreError::Io(why),
+        UpdateErrorKind::InvalidKey => StoreError::Refused(why),
         UpdateErrorKind::WrongLastRevision | UpdateErrorKind::TimedOut | UpdateErrorKind::Other => {
             StoreError::Indeterminate(why)
         }
@@ -468,7 +468,7 @@ mod tests {
         }
         assert!(matches!(
             create_error(CreateErrorKind::InvalidKey, "x".into()),
-            StoreError::Io(_)
+            StoreError::Refused(_)
         ));
         for kind in [UpdateErrorKind::TimedOut, UpdateErrorKind::Other] {
             assert!(matches!(
@@ -478,7 +478,7 @@ mod tests {
         }
         assert!(matches!(
             update_error(UpdateErrorKind::InvalidKey, "x".into()),
-            StoreError::Io(_)
+            StoreError::Refused(_)
         ));
     }
 }

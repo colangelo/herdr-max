@@ -23,6 +23,8 @@ use super::model::Task;
 
 const LOCK_FILE: &str = ".lock";
 const RECEIPTS_DIR: &str = "receipts";
+/// How many damaged entries are kept aside.
+const CORRUPT_KEPT: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -117,9 +119,9 @@ impl Outbox {
                 Some("tmp") => {
                     let _ = fs::remove_file(&path);
                 }
-                Some("json") => match read_entry(&path) {
+                Some("json") => match read_entry(&path)? {
                     Some(entry) => found.push(entry),
-                    None => set_aside(&path),
+                    None => self.set_aside(&path),
                 },
                 _ => {}
             }
@@ -129,6 +131,28 @@ impl Outbox {
         self.entries = found;
         self.drop_orphan_receipts();
         Ok(())
+    }
+
+    /// Keep a damaged entry for a person to look at, out of the way. Only the
+    /// newest [`CORRUPT_KEPT`] are kept.
+    fn set_aside(&self, path: &Path) {
+        let aside = path.with_extension("json.corrupt");
+        tracing::warn!(file = %path.display(), "setting aside a corrupt outbox entry");
+        let _ = fs::rename(path, aside);
+        let Ok(found) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut asides: Vec<PathBuf> = found
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "corrupt"))
+            .collect();
+        // Names start with the sequence number, so the oldest sort first.
+        asides.sort();
+        let excess = asides.len().saturating_sub(CORRUPT_KEPT);
+        for old in asides.into_iter().take(excess) {
+            let _ = fs::remove_file(old);
+        }
     }
 
     /// Receipts nothing depends on are leftovers of a crash between steps.
@@ -240,6 +264,8 @@ impl Outbox {
                 self.entries.insert(index, entry);
                 return Err(err);
             }
+            // The receipt must be on disk before the entry that produced it goes.
+            sync_dir(&self.dir.join(RECEIPTS_DIR));
         }
         remove_durably(&self.entry_path(&entry), &self.dir)?;
         if let Some(Base::After(base)) = &entry.base {
@@ -312,6 +338,7 @@ impl Outbox {
             return Ok(());
         };
         let mut entry = self.entries[index].clone();
+        let old_base = entry.base.take();
         entry.conflict = None;
         entry.op = op;
         entry.base = base;
@@ -320,6 +347,11 @@ impl Outbox {
         }
         self.persist(&entry)?;
         self.entries[index] = entry;
+        // It no longer follows the write ahead of it, which kept a receipt for
+        // it alone.
+        if let Some(Base::After(ahead)) = old_base {
+            let _ = fs::remove_file(self.receipt_path(&ahead));
+        }
         Ok(())
     }
 
@@ -378,23 +410,21 @@ impl Outbox {
     }
 }
 
-fn read_entry(path: &Path) -> Option<Entry> {
+/// Read one entry file. `Ok(None)` means the file is not a readable entry (a
+/// bad name or bad content) and belongs aside; a file that cannot be read at
+/// all is an error, and nothing is set aside because of it.
+fn read_entry(path: &Path) -> io::Result<Option<Entry>> {
     let seq = path
-        .file_name()?
-        .to_str()?
-        .split_once('-')?
-        .0
-        .parse::<u64>()
-        .ok()?;
-    let mut entry: Entry = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.split_once('-'))
+        .and_then(|(seq, _)| seq.parse::<u64>().ok());
+    let bytes = fs::read(path)?;
+    let (Some(seq), Ok(mut entry)) = (seq, serde_json::from_slice::<Entry>(&bytes)) else {
+        return Ok(None);
+    };
     entry.seq = seq;
-    Some(entry)
-}
-
-fn set_aside(path: &Path) {
-    let aside = path.with_extension("json.corrupt");
-    tracing::warn!(file = %path.display(), "setting aside a corrupt outbox entry");
-    let _ = fs::rename(path, aside);
+    Ok(Some(entry))
 }
 
 fn remove_durably(path: &Path, dir: &Path) -> io::Result<()> {
@@ -774,6 +804,107 @@ mod tests {
         assert_eq!(outbox.receipt(&w("w1")), Some(Rev(1)));
         outbox.fail(&w("w2")).unwrap();
         assert_eq!(outbox.receipt(&w("w1")), None, "nothing depends on it now");
+    }
+
+    #[test]
+    fn receipts_of_generated_ids_survive_a_reopen() {
+        // Real write ids, not hand-written lower-case ones: a receipt is found
+        // again by the id it was written under.
+        let scratch = Scratch::new();
+        let (first, second) = (WriteId::generate(), WriteId::generate());
+        {
+            let mut outbox = Outbox::open(scratch.0.clone()).unwrap();
+            outbox
+                .push(first.clone(), Op::Create, task("tk-a", "one"), None)
+                .unwrap();
+            outbox
+                .push(
+                    second.clone(),
+                    Op::Update,
+                    task("tk-a", "two"),
+                    Some(Base::After(first.clone())),
+                )
+                .unwrap();
+            outbox.complete(&first, Rev(4)).unwrap();
+        }
+        let outbox = Outbox::open(scratch.0.clone()).unwrap();
+        assert_eq!(outbox.receipt(&first), Some(Rev(4)));
+        assert_eq!(outbox.expected_rev(&outbox.entries()[0]), Some(Rev(4)));
+    }
+
+    #[test]
+    fn releasing_an_entry_onto_a_revision_drops_the_receipt_it_followed() {
+        let scratch = Scratch::new();
+        let mut outbox = Outbox::open(scratch.0.clone()).unwrap();
+        outbox
+            .push(w("w1"), Op::Create, task("tk-a", "one"), None)
+            .unwrap();
+        outbox
+            .push(
+                w("w2"),
+                Op::Update,
+                task("tk-a", "two"),
+                Some(Base::After(w("w1"))),
+            )
+            .unwrap();
+        outbox.complete(&w("w1"), Rev(1)).unwrap();
+        outbox.mark_conflict(&w("w2"), Some(Rev(5)), None).unwrap();
+        assert_eq!(outbox.receipt(&w("w1")), Some(Rev(1)));
+        outbox
+            .release(&w("w2"), Op::Update, Some(Base::Rev(Rev(5))), None)
+            .unwrap();
+        assert_eq!(outbox.receipt(&w("w1")), None);
+    }
+
+    #[test]
+    fn only_the_newest_corrupt_entries_are_kept_aside() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).unwrap();
+        for seq in 1..=(CORRUPT_KEPT + 5) {
+            fs::write(scratch.0.join(format!("{seq:020}-bad.json")), b"{nope").unwrap();
+        }
+        let outbox = Outbox::open(scratch.0.clone()).unwrap();
+        assert_eq!(outbox.len(), 0);
+        let mut asides: Vec<String> = fs::read_dir(&scratch.0)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".corrupt"))
+            .collect();
+        asides.sort();
+        assert_eq!(asides.len(), CORRUPT_KEPT);
+        assert!(
+            asides[0].starts_with(&format!("{:020}", 6)),
+            "the oldest went: {asides:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_that_cannot_be_read_is_not_taken_for_a_corrupt_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        {
+            let mut outbox = Outbox::open(scratch.0.clone()).unwrap();
+            outbox
+                .push(w("w1"), Op::Create, task("tk-a", "one"), None)
+                .unwrap();
+        }
+        let path = fs::read_dir(&scratch.0)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&path).is_ok() {
+            // Running as a user who can read anything: the case cannot be made.
+            return;
+        }
+        assert!(Outbox::open(scratch.0.clone()).is_err());
+        assert!(path.exists(), "left where it is, not set aside");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(Outbox::open(scratch.0.clone()).unwrap().len(), 1);
     }
 
     #[test]
