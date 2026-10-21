@@ -210,9 +210,11 @@ fn auto_updates_enabled(background_updates: bool) -> bool {
 }
 
 /// Start the task store for a server that saves its session. A server that is
-/// not the bus session starts no kv store and so reads no NATS credential; the
-/// `kv` backend is not built into the default build and leaves tasks off, with
-/// a warning.
+/// not the bus session starts no kv store and so reads no NATS credential. The
+/// `kv` backend reads its credential from `[tasks] bus_env` on the store
+/// thread; without the `tasks-kv` build it says so and runs nothing, and a
+/// missing or unsafe credential file stops it with the reason, rather than
+/// quietly using the file store instead.
 fn start_task_service(
     config: &crate::config::TasksConfig,
     policy: &AppPolicy,
@@ -223,23 +225,27 @@ fn start_task_service(
     }
     let session = crate::session::active_name();
     let identity = crate::tasks::TaskIdentity::from_config(config, session.as_deref());
-    if config.backend == crate::config::TasksBackend::Kv {
-        if identity.may_use_bus() {
-            tracing::warn!("tasks.backend = \"kv\" is not available in this build; tasks are off");
+    let open: Box<
+        dyn FnMut() -> crate::tasks::StoreResult<Box<dyn crate::tasks::TaskStore>> + Send,
+    > = if config.backend == crate::config::TasksBackend::Kv {
+        if !identity.may_use_bus() {
+            return crate::tasks::TaskService::without_store(identity);
         }
-        return crate::tasks::TaskService::without_store(identity);
-    }
-    let dir = crate::session::data_dir().join("tasks").join("store");
-    let tx = event_tx.clone();
-    let started = crate::tasks::TaskService::start(
-        move || {
+        match kv_task_store_opener(config, &identity) {
+            Ok(open) => open,
+            Err(reason) => return crate::tasks::TaskService::unavailable(identity, reason),
+        }
+    } else {
+        let dir = crate::session::data_dir().join("tasks").join("store");
+        Box::new(move || {
             crate::tasks::FileStore::open(dir.clone())
                 .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
-        },
-        identity.clone(),
-        move |event| tx.blocking_send(AppEvent::TaskStore(event)).is_ok(),
-    );
-    match started {
+        })
+    };
+    let tx = event_tx.clone();
+    match crate::tasks::TaskService::start(open, identity.clone(), move |event| {
+        tx.blocking_send(AppEvent::TaskStore(event)).is_ok()
+    }) {
         Ok(service) => service,
         Err(err) => {
             tracing::warn!(error = %err, "cannot start the task store thread; tasks are off");
@@ -249,6 +255,31 @@ fn start_task_service(
             )
         }
     }
+}
+
+/// Opens the kv store: reads the credential file, then connects. Both happen
+/// on the store thread when the closure runs.
+#[cfg(feature = "tasks-kv")]
+fn kv_task_store_opener(
+    config: &crate::config::TasksConfig,
+    identity: &crate::tasks::TaskIdentity,
+) -> Result<crate::tasks::StoreOpener, String> {
+    let path = crate::config::config_dir().join(&config.bus_env);
+    let host = identity.host.to_string();
+    Ok(Box::new(move || {
+        let env = crate::tasks::load_bus_env(&path).map_err(crate::tasks::StoreError::Io)?;
+        let settings = crate::tasks::KvSettings::from_bus_env(env, &host);
+        crate::tasks::KvStore::connect(&settings)
+            .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
+    }))
+}
+
+#[cfg(not(feature = "tasks-kv"))]
+fn kv_task_store_opener(
+    _config: &crate::config::TasksConfig,
+    _identity: &crate::tasks::TaskIdentity,
+) -> Result<crate::tasks::StoreOpener, String> {
+    Err("tasks.backend = \"kv\" needs a build with the tasks-kv feature".to_owned())
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -1776,6 +1807,40 @@ mod tests {
 
         assert!(!app.drain_internal_events());
         assert!(!app.git_refresh_in_flight);
+    }
+
+    fn kv_tasks_config(bus_env: &str) -> crate::config::TasksConfig {
+        crate::config::TasksConfig {
+            backend: crate::config::TasksBackend::Kv,
+            host_id: "m4m".into(),
+            bus_session: "default".into(),
+            bus_env: bus_env.into(),
+        }
+    }
+
+    #[cfg(not(feature = "tasks-kv"))]
+    #[test]
+    fn the_kv_backend_without_its_feature_says_so_instead_of_using_the_file_store() {
+        let config = kv_tasks_config("bus.env");
+        let identity = crate::tasks::TaskIdentity::from_config(&config, None);
+        let reason = kv_task_store_opener(&config, &identity).err().unwrap();
+        assert!(reason.contains("tasks-kv"), "{reason}");
+    }
+
+    #[cfg(feature = "tasks-kv")]
+    #[test]
+    fn the_kv_backend_refuses_a_missing_credential_file_with_the_reason() {
+        let missing = std::env::temp_dir().join("herdr-no-such-bus.env");
+        let config = kv_tasks_config(&missing.display().to_string());
+        let identity = crate::tasks::TaskIdentity::from_config(&config, None);
+        let mut open = kv_task_store_opener(&config, &identity).unwrap();
+        match open() {
+            Err(crate::tasks::StoreError::Io(why)) => {
+                assert!(why.contains("bus credential file"), "{why}")
+            }
+            Err(err) => panic!("expected Io, got {err:?}"),
+            Ok(_) => panic!("a missing credential file must not open a store"),
+        }
     }
 
     #[test]

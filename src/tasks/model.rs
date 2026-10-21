@@ -231,6 +231,8 @@ pub(crate) enum TaskError {
     /// Running to Open needs that the run that ends is still the current one.
     RunNotCurrent,
     PaneFull,
+    /// An update names revision 0, which no stored task has.
+    BadRevision,
     /// The task belongs to another host, which is the only one that writes it.
     OwnedElsewhere {
         owner_host: String,
@@ -254,6 +256,7 @@ impl TaskError {
             Self::RunAlreadyActive => "task_run_active",
             Self::RunNotCurrent => "task_run_not_current",
             Self::PaneFull => "task_pane_full",
+            Self::BadRevision => "task_bad_revision",
             Self::OwnedElsewhere { .. } => "task_owned_elsewhere",
             Self::NotBusSession { .. } => "task_not_bus_session",
         }

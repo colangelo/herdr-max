@@ -26,8 +26,22 @@ pub(crate) enum StoreError {
     AlreadyExists { current: (Rev, Vec<u8>) },
     /// The backend cannot be reached now; the write belongs in the outbox.
     Unavailable(String),
-    /// A local read or write failed.
+    /// A local read or write failed, or the request was refused as invalid.
     Io(String),
+    /// The write was sent but its fate is unknown (a timed-out publish may
+    /// have been stored). Neither applied nor failed: replaying the write id
+    /// finds out.
+    Indeterminate(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict { .. } => f.write_str("the revision moved"),
+            Self::AlreadyExists { .. } => f.write_str("the key already exists"),
+            Self::Unavailable(why) | Self::Io(why) | Self::Indeterminate(why) => f.write_str(why),
+        }
+    }
 }
 
 pub(crate) type StoreResult<T> = Result<T, StoreError>;

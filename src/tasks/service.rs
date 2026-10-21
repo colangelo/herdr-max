@@ -20,6 +20,10 @@ use super::ids::{Rev, TaskKey, WriteId};
 use super::model::{Task, TaskError};
 use super::store::{StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 
+/// Builds the backend. Runs on the store thread, and is tried again after a
+/// backoff while it answers `Unavailable`.
+pub(crate) type StoreOpener = Box<dyn FnMut() -> StoreResult<Box<dyn TaskStore>> + Send>;
+
 /// How long the thread waits before trying again to reach a store that is down.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backoff {
@@ -97,6 +101,8 @@ pub(crate) enum WriteOutcome {
     },
     /// The write was not applied.
     Failed(String),
+    /// The write may or may not have been applied; a replay of its id decides.
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +255,9 @@ impl TaskService {
         expected: Rev,
     ) -> Result<WriteId, SubmitError> {
         self.check_may_write(task)?;
+        if expected == Rev(0) {
+            return Err(SubmitError::Refused(TaskError::BadRevision));
+        }
         let (doc, write) = self.prepare(task)?;
         let key = doc.key();
         self.send(
@@ -306,9 +315,11 @@ impl TaskService {
     fn mark_stopped(&mut self, reason: String) {
         self.commands = None;
         self.failure = Some(reason.clone());
+        // One of them may have been in flight when the thread ended: its fate
+        // is unknown, and a replay of its write id decides.
         for (write, _) in self.pending.drain() {
             self.outcomes
-                .push((write, WriteOutcome::Failed(reason.clone())));
+                .push((write, WriteOutcome::Unknown(reason.clone())));
         }
     }
 
@@ -393,14 +404,14 @@ fn run_store(
                 }
                 wait = backoff.next(wait);
             }
-            Err(err) => return Some(format!("cannot open the task store: {err:?}")),
+            Err(err) => return Some(format!("cannot open the task store: {err}")),
         }
     };
 
     // Watch first, so nothing that lands during the scan is missed.
     let sink: WatchSink = Box::new(move |event| watch_sender.send(Message::Watch(event)).is_ok());
     if let Err(err) = store.watch("", sink) {
-        return Some(format!("cannot watch the task store: {err:?}"));
+        return Some(format!("cannot watch the task store: {err}"));
     }
     let mut wait = backoff.initial;
     loop {
@@ -421,7 +432,7 @@ fn run_store(
             }
             Err(err) => {
                 if !emit(StoreEvent::Degraded(format!(
-                    "cannot read the task store: {err:?}"
+                    "cannot read the task store: {err}"
                 ))) {
                     return None;
                 }
@@ -503,6 +514,7 @@ fn run_write(store: &mut dyn TaskStore, command: WriteCommand) -> (WriteId, Writ
         Err(StoreError::Conflict { current }) => WriteOutcome::Conflict { current },
         Err(StoreError::AlreadyExists { current }) => WriteOutcome::Exists { current },
         Err(StoreError::Unavailable(why) | StoreError::Io(why)) => WriteOutcome::Failed(why),
+        Err(StoreError::Indeterminate(why)) => WriteOutcome::Unknown(why),
     };
     (write, outcome)
 }
@@ -533,6 +545,7 @@ mod tests {
         released: Arc<AtomicBool>,
         delay: Duration,
         panic_on_write: bool,
+        indeterminate: bool,
         scan_failures: Arc<AtomicUsize>,
         docs: BTreeMap<String, (Rev, Vec<u8>)>,
         sinks: Vec<WatchSink>,
@@ -545,6 +558,7 @@ mod tests {
                 released: Arc::default(),
                 delay,
                 panic_on_write: false,
+                indeterminate: false,
                 scan_failures: Arc::default(),
                 docs: BTreeMap::new(),
                 sinks: Vec::new(),
@@ -563,10 +577,14 @@ mod tests {
             });
         }
 
-        fn before_write(&self) {
+        fn before_write(&self) -> StoreResult<()> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             assert!(!self.panic_on_write, "the store broke");
             std::thread::sleep(self.delay);
+            if self.indeterminate {
+                return Err(StoreError::Indeterminate("the publish timed out".into()));
+            }
+            Ok(())
         }
     }
 
@@ -578,7 +596,7 @@ mod tests {
 
     impl TaskStore for FakeStore {
         fn create(&mut self, key: &TaskKey, doc: &Task, _write: WriteId) -> StoreResult<Rev> {
-            self.before_write();
+            self.before_write()?;
             if let Some(current) = self.docs.get(&key.to_string()) {
                 return Err(StoreError::AlreadyExists {
                     current: current.clone(),
@@ -595,7 +613,7 @@ mod tests {
             expected: Rev,
             _write: WriteId,
         ) -> StoreResult<Rev> {
-            self.before_write();
+            self.before_write()?;
             match self.docs.get(&key.to_string()) {
                 Some((rev, _)) if *rev == expected => {
                     let next = Rev(rev.0 + 1);
@@ -745,6 +763,32 @@ mod tests {
         let cached = service.cache().get(&one.key()).unwrap();
         assert_eq!(cached.rev, Rev(1));
         assert_eq!(cached.task.title, "a task");
+    }
+
+    #[test]
+    fn a_publish_that_may_have_landed_is_unknown_not_failed() {
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.indeterminate = true;
+        let (mut service, received) = loaded(store);
+        let write = service.submit_create(&task("tk-1")).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        assert_eq!(
+            service.take_outcomes(),
+            vec![(write, WriteOutcome::Unknown("the publish timed out".into()))]
+        );
+    }
+
+    #[test]
+    fn an_update_of_revision_zero_is_refused_before_it_is_queued() {
+        let store = FakeStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        let (mut service, _received) = loaded(store);
+        let err = service.submit_update(&task("tk-1"), Rev(0)).unwrap_err();
+        assert_eq!(err.code(), "task_bad_revision");
+        assert_eq!(service.pending_count(), 0);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -979,7 +1023,7 @@ mod tests {
         let failed: Vec<WriteId> = service
             .take_outcomes()
             .into_iter()
-            .inspect(|(_, outcome)| assert!(matches!(outcome, WriteOutcome::Failed(_))))
+            .inspect(|(_, outcome)| assert!(matches!(outcome, WriteOutcome::Unknown(_))))
             .map(|(write, _)| write)
             .collect();
         assert!(failed.contains(&first) && failed.contains(&second));

@@ -8,6 +8,7 @@
 // types and their re-exports; drop the allow when they land.
 #![allow(dead_code, unused_imports)]
 
+mod bus_env;
 mod cache;
 #[cfg(test)]
 mod conformance;
@@ -20,6 +21,7 @@ mod model;
 mod service;
 mod store;
 
+pub(crate) use bus_env::{load as load_bus_env, BusEnv};
 pub(crate) use cache::{CachedTask, TaskCache};
 pub(crate) use file_store::FileStore;
 pub(crate) use identity::{BackendKind, TaskIdentity};
@@ -30,5 +32,7 @@ pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
-pub(crate) use service::{Backoff, StoreEvent, SubmitError, TaskService, WriteOutcome};
+pub(crate) use service::{
+    Backoff, StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
+};
 pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink};

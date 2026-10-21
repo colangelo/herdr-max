@@ -99,6 +99,14 @@ pub(super) fn run(store: &mut dyn TaskStore) {
         Err(StoreError::Conflict { current: None })
     );
 
+    // Revision 0 never matches: it must not create a key that is not there.
+    let w6 = WriteId::generate();
+    assert_eq!(
+        store.update(&ghost.key(), &with_write(ghost.clone(), &w6), Rev(0), w6),
+        Err(StoreError::Conflict { current: None })
+    );
+    assert_eq!(store.get(&StoreKey::from(&ghost.key())).unwrap(), None);
+
     // Scan lists by prefix.
     let two = task("tk-conf-2", "second");
     let w5 = WriteId::generate();
