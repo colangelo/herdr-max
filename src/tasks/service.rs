@@ -20,6 +20,12 @@ use super::ids::{Rev, TaskKey, WriteId};
 use super::model::{Task, TaskError};
 use super::store::{StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 
+/// Writes that may wait for the store at once. More are refused, so a store
+/// that stopped answering cannot make the server queue without end.
+const MAX_PENDING_WRITES: usize = 256;
+/// Outcomes kept for the API to take; the oldest go first.
+const MAX_OUTCOMES: usize = 1024;
+
 /// Builds the backend. Runs on the store thread, and is tried again after a
 /// backoff while it answers `Unavailable`.
 pub(crate) type StoreOpener = Box<dyn FnMut() -> StoreResult<Box<dyn TaskStore>> + Send>;
@@ -112,6 +118,8 @@ pub(crate) enum SubmitError {
     /// The store thread is gone.
     Stopped,
     Refused(TaskError),
+    /// Too many writes are waiting for the store.
+    Busy,
 }
 
 impl SubmitError {
@@ -120,6 +128,7 @@ impl SubmitError {
             Self::Disabled => "tasks_disabled",
             Self::Stopped => "task_store_stopped",
             Self::Refused(err) => err.code(),
+            Self::Busy => "task_store_busy",
         }
     }
 }
@@ -288,6 +297,12 @@ impl TaskService {
     /// only from the session that may use the bus. Refused before anything is
     /// validated or queued.
     fn check_may_write(&self, task: &Task) -> Result<(), SubmitError> {
+        if !task.can_be_rewritten() {
+            return Err(SubmitError::Refused(TaskError::NotRewritable));
+        }
+        if self.pending.len() >= MAX_PENDING_WRITES {
+            return Err(SubmitError::Busy);
+        }
         match &self.identity {
             Some(identity) => identity
                 .check_write(&task.owner_host)
@@ -311,15 +326,23 @@ impl TaskService {
         Ok(write)
     }
 
+    fn push_outcome(&mut self, write: WriteId, outcome: WriteOutcome) {
+        self.outcomes.push((write, outcome));
+        if self.outcomes.len() > MAX_OUTCOMES {
+            let excess = self.outcomes.len() - MAX_OUTCOMES;
+            self.outcomes.drain(..excess);
+        }
+    }
+
     /// The thread is gone: nothing pending will ever be answered.
     fn mark_stopped(&mut self, reason: String) {
         self.commands = None;
         self.failure = Some(reason.clone());
         // One of them may have been in flight when the thread ended: its fate
         // is unknown, and a replay of its write id decides.
-        for (write, _) in self.pending.drain() {
-            self.outcomes
-                .push((write, WriteOutcome::Unknown(reason.clone())));
+        let pending: Vec<WriteId> = self.pending.drain().map(|(write, _)| write).collect();
+        for write in pending {
+            self.push_outcome(write, WriteOutcome::Unknown(reason.clone()));
         }
     }
 
@@ -338,7 +361,7 @@ impl TaskService {
             StoreEvent::Changed(event) => self.cache.apply(&event),
             StoreEvent::Outcome { write, outcome } => {
                 let known = self.pending.remove(&write).is_some();
-                self.outcomes.push((write, outcome));
+                self.push_outcome(write, outcome);
                 known
             }
             StoreEvent::Degraded(message) => {
@@ -778,6 +801,36 @@ mod tests {
             service.take_outcomes(),
             vec![(write, WriteOutcome::Unknown("the publish timed out".into()))]
         );
+    }
+
+    #[test]
+    fn a_store_that_stops_answering_cannot_make_the_queue_grow_without_end() {
+        let (mut service, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
+        for n in 0..MAX_PENDING_WRITES {
+            service
+                .submit_create(&task(&format!("tk-{n}")))
+                .unwrap_or_else(|err| panic!("write {n}: {err:?}"));
+        }
+        let err = service.submit_create(&task("tk-over")).unwrap_err();
+        assert_eq!(err, SubmitError::Busy);
+        assert_eq!(err.code(), "task_store_busy");
+        assert_eq!(service.pending_count(), MAX_PENDING_WRITES);
+    }
+
+    #[test]
+    fn a_task_this_build_cannot_rewrite_is_refused() {
+        let (mut service, _received) = loaded(FakeStore::new(Duration::ZERO));
+        let mut newer = task("tk-1");
+        newer.schema = 2;
+        let err = service.submit_update(&newer, Rev(1)).unwrap_err();
+        assert_eq!(err.code(), "task_schema_newer");
+        let mut odd = task("tk-2");
+        odd.status = crate::tasks::TaskStatus::Unknown;
+        assert_eq!(
+            service.submit_update(&odd, Rev(1)).unwrap_err().code(),
+            "task_schema_newer"
+        );
+        assert_eq!(service.pending_count(), 0);
     }
 
     #[test]

@@ -6,6 +6,9 @@ use super::ids::{Rev, TaskKey};
 use super::model::{Task, TaskError, TaskStatus, OPEN_TASKS_PER_PANE};
 use super::store::{StoreKey, WatchEvent};
 
+/// How many refused documents the cache remembers; the oldest go first.
+const REJECTED_KEPT: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CachedTask {
     pub rev: Rev,
@@ -90,6 +93,10 @@ impl TaskCache {
 
     fn reject(&mut self, key: &StoreKey, why: String) -> bool {
         self.rejected.push((key.clone(), why));
+        if self.rejected.len() > REJECTED_KEPT {
+            let excess = self.rejected.len() - REJECTED_KEPT;
+            self.rejected.drain(..excess);
+        }
         false
     }
 
@@ -143,7 +150,7 @@ impl TaskCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tasks::ids::{HostId, TaskId};
+    use crate::tasks::ids::{HostId, TaskId, WriteId};
     use crate::tasks::model::{Origin, PaneBinding, Timestamp, Via};
 
     fn task(host: &str, id: &str) -> Task {
@@ -236,6 +243,78 @@ mod tests {
 
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.rejected().len(), 3);
+    }
+
+    #[test]
+    fn a_document_that_is_too_big_for_a_writer_is_refused() {
+        let mut cache = TaskCache::new();
+        let mut big = task("m4m", "tk-1");
+        big.runs = (0..21).map(|n| format!("rn-{n}")).collect();
+        assert!(!cache.apply(&event(&big, 1)));
+        let mut big = task("m4m", "tk-2");
+        big.last_writes = (0..65)
+            .map(|n| WriteId::from_string(format!("w{n}")))
+            .collect();
+        assert!(!cache.apply(&event(&big, 1)));
+        let mut big = task("m4m", "tk-3");
+        big.review = Some("x".repeat(201));
+        assert!(!cache.apply(&event(&big, 1)));
+        let mut big = task("m4m", "tk-4");
+        big.pane = Some(PaneBinding {
+            host: "m4m".into(),
+            session: "main".into(),
+            pane_key: None,
+            label: "l".repeat(201),
+        });
+        assert!(!cache.apply(&event(&big, 1)));
+        assert_eq!(cache.len(), 0);
+        assert!(cache
+            .rejected()
+            .iter()
+            .all(|(_, why)| why.contains("task_record_too_large")));
+    }
+
+    #[test]
+    fn a_newer_writers_document_is_shown_but_not_rewritable() {
+        let mut cache = TaskCache::new();
+        let one = task("m4m", "tk-1");
+        let mut json = serde_json::to_value(&one).unwrap();
+        json["schema"] = 2.into();
+        json["status"] = "paused".into();
+        json["priority"] = "urgent".into();
+        json["origin"]["via"] = "voice".into();
+        json["owner"] = serde_json::json!({ "kind": "robot", "name": "x" });
+        let newer = WatchEvent {
+            key: StoreKey::from(&one.key()),
+            rev: Rev(3),
+            value: Some(serde_json::to_vec(&json).unwrap()),
+        };
+        assert!(cache.apply(&newer), "{:?}", cache.rejected());
+        let shown = &cache.get(&one.key()).unwrap().task;
+        assert_eq!(shown.status, TaskStatus::Unknown);
+        assert_eq!(shown.priority, crate::tasks::Priority::Unknown);
+        assert_eq!(shown.owner, crate::tasks::Owner::Unknown);
+        assert_eq!(shown.title, "a task", "what it can read is kept");
+        assert!(!shown.can_be_rewritten());
+        assert!(one.can_be_rewritten());
+    }
+
+    #[test]
+    fn the_list_of_refused_documents_does_not_grow_without_end() {
+        let mut cache = TaskCache::new();
+        for n in 0..(REJECTED_KEPT + 50) {
+            let garbage = WatchEvent {
+                key: StoreKey(format!("task.m4m.tk-{n}")),
+                rev: Rev(1),
+                value: Some(b"{".to_vec()),
+            };
+            assert!(!cache.apply(&garbage));
+        }
+        assert_eq!(cache.rejected().len(), REJECTED_KEPT);
+        assert_eq!(
+            cache.rejected().last().unwrap().0 .0,
+            format!("task.m4m.tk-{}", REJECTED_KEPT + 49)
+        );
     }
 
     #[test]

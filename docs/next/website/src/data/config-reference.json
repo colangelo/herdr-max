@@ -1860,7 +1860,7 @@
           "key": "tasks.bus_env",
           "type": "string",
           "default": "\"bus.env\"",
-          "description": "The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it."
+          "description": "The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it, when it starts: a new file is picked up by a restart or a live handoff, not by a config reload."
         }
       ]
     },

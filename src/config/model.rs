@@ -1737,7 +1737,7 @@ pub struct TasksConfig {
     pub host_id: String,
     /// The session that talks to the bus. Other sessions on this machine refuse task writes. Needed with the `kv` backend. Default: unset.
     pub bus_session: String,
-    /// The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it. Default: bus.env.
+    /// The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it, when it starts: a new file is picked up by a restart or a live handoff, not by a config reload. Default: bus.env.
     pub bus_env: String,
 }
 

@@ -10,6 +10,12 @@ pub(crate) const BODY_MAX_CHARS: usize = 4000;
 pub(crate) const RUNS_KEPT: usize = 20;
 pub(crate) const LAST_WRITES_KEPT: usize = 8;
 pub(crate) const OPEN_TASKS_PER_PANE: usize = 50;
+/// A document from the bus may carry more write ids than a writer keeps,
+/// because ones a pending entry depends on stay; this is the hard limit.
+const LAST_WRITES_LIMIT: usize = 64;
+const REFS_LIMIT: usize = 50;
+/// Longest free-form field (labels, names, ids) of a document from the bus.
+const FIELD_MAX_CHARS: usize = 200;
 
 /// Who did something: `human:ac`, a fleet session name, or `worklink`.
 pub(crate) type Actor = String;
@@ -38,6 +44,10 @@ pub(crate) enum TaskStatus {
     Running,
     Done,
     Dropped,
+    /// A status this build does not know, written by a newer one. Shown, never
+    /// written back.
+    #[serde(other)]
+    Unknown,
 }
 
 impl TaskStatus {
@@ -53,6 +63,8 @@ pub(crate) enum Priority {
     #[default]
     Normal,
     High,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +74,8 @@ pub(crate) enum Horizon {
     Next,
     Later,
     Icebox,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A hint at the agent session behind an owner; the server refreshes it when
@@ -86,6 +100,8 @@ pub(crate) enum Owner {
     },
     #[default]
     Unassigned,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A pane a task sits on. Never holds a raw pane id: those change on restore
@@ -115,6 +131,8 @@ pub(crate) enum Client {
     #[default]
     None,
     Aruba,
+    #[serde(other)]
+    Unknown,
 }
 
 impl Client {
@@ -131,6 +149,8 @@ pub(crate) enum Via {
     Api,
     Migration,
     Worklink,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +253,11 @@ pub(crate) enum TaskError {
     PaneFull,
     /// An update names revision 0, which no stored task has.
     BadRevision,
+    /// A document from the bus is bigger than a writer would make it.
+    TooLarge(&'static str),
+    /// The document was written by a newer build, or holds a value this build
+    /// does not know; it is shown but not rewritten.
+    NotRewritable,
     /// The task belongs to another host, which is the only one that writes it.
     OwnedElsewhere {
         owner_host: String,
@@ -257,6 +282,8 @@ impl TaskError {
             Self::RunNotCurrent => "task_run_not_current",
             Self::PaneFull => "task_pane_full",
             Self::BadRevision => "task_bad_revision",
+            Self::TooLarge(_) => "task_record_too_large",
+            Self::NotRewritable => "task_schema_newer",
             Self::OwnedElsewhere { .. } => "task_owned_elsewhere",
             Self::NotBusSession { .. } => "task_not_bus_session",
         }
@@ -346,8 +373,63 @@ impl Task {
             if name.trim().is_empty() || name == "ac" || name.starts_with("human:") {
                 return Err(TaskError::OwnerInvalid);
             }
+            if name.chars().count() > FIELD_MAX_CHARS {
+                return Err(TaskError::TooLarge("owner"));
+            }
+        }
+        self.check_sizes()
+    }
+
+    /// The bounds a document read from the bus must keep, so one writer cannot
+    /// make a record the cache or the panel cannot hold.
+    fn check_sizes(&self) -> Result<(), TaskError> {
+        let too_long = |text: &str| text.chars().count() > FIELD_MAX_CHARS;
+        if self.runs.len() > RUNS_KEPT || self.runs.iter().any(|run| too_long(run)) {
+            return Err(TaskError::TooLarge("runs"));
+        }
+        if self.last_writes.len() > LAST_WRITES_LIMIT {
+            return Err(TaskError::TooLarge("last_writes"));
+        }
+        if self.refs.len() > REFS_LIMIT
+            || self.refs.iter().any(|issue| {
+                too_long(&issue.forge)
+                    || too_long(&issue.forge_id)
+                    || too_long(&issue.host)
+                    || too_long(&issue.project_path)
+            })
+        {
+            return Err(TaskError::TooLarge("refs"));
+        }
+        let long_binding = |binding: &Option<PaneBinding>| {
+            binding.as_ref().is_some_and(|pane| {
+                too_long(&pane.host)
+                    || too_long(&pane.session)
+                    || too_long(&pane.label)
+                    || pane.pane_key.as_deref().is_some_and(too_long)
+            })
+        };
+        if long_binding(&self.pane) || long_binding(&self.related_pane) {
+            return Err(TaskError::TooLarge("pane"));
+        }
+        if self.review.as_deref().is_some_and(too_long)
+            || self.waits_on.as_deref().is_some_and(too_long)
+        {
+            return Err(TaskError::TooLarge("review"));
         }
         Ok(())
+    }
+
+    /// Whether this build may write the document back: it must be of a schema
+    /// this build knows and hold no value it cannot name, or rewriting would
+    /// lose what a newer build put there.
+    pub(crate) fn can_be_rewritten(&self) -> bool {
+        self.schema <= SCHEMA_VERSION
+            && !matches!(self.status, TaskStatus::Unknown)
+            && !matches!(self.priority, Priority::Unknown)
+            && !matches!(self.horizon, Some(Horizon::Unknown))
+            && !matches!(self.owner, Owner::Unknown)
+            && !matches!(self.client, Client::Unknown)
+            && !matches!(self.origin.via, Via::Unknown)
     }
 
     /// Append a run id, keeping the last [`RUNS_KEPT`].
