@@ -13,7 +13,7 @@
   (cargo tree)
 - [x] 1.5 Old session files load, and new optional fields are skipped when empty.
   Test: `session_file_from_2e82664c_loads_unchanged`
-- [ ] 1.6 Ship as a beta, install on mbm5 first, and confirm every pane has a saved
+- [x] 1.6 Ship as a beta, install on mbm5 first, and confirm every pane has a saved
   `pane_key` on both Macs. Proof: `herdr-beta pane list --json` shows them
 
 ## 2. Phase 2: the store and the read-only panel
