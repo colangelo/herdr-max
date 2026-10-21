@@ -360,19 +360,25 @@ impl Task {
     }
 
     /// Note an applied write. Keeps the last [`LAST_WRITES_KEPT`], and never
-    /// drops an id that `needed` says a pending entry still depends on.
+    /// drops an id that `needed` says a pending entry still depends on, nor the
+    /// id just pushed.
     pub(crate) fn record_write(&mut self, write: WriteId, needed: impl Fn(&WriteId) -> bool) {
         if self.last_writes.contains(&write) {
             return;
         }
         self.last_writes.push(write);
+        let newest = self.last_writes.len() - 1;
         let mut excess = self.last_writes.len().saturating_sub(LAST_WRITES_KEPT);
+        let mut index = 0;
         self.last_writes.retain(|kept| {
-            if excess > 0 && !needed(kept) {
+            let here = index;
+            index += 1;
+            // The id just pushed is the one a replay must recognise.
+            if here == newest || excess == 0 || needed(kept) {
+                true
+            } else {
                 excess -= 1;
                 false
-            } else {
-                true
             }
         });
     }
@@ -525,6 +531,29 @@ mod tests {
             LAST_WRITES_KEPT,
             "a replay adds nothing"
         );
+    }
+
+    #[test]
+    fn record_write_never_trims_the_id_it_just_pushed() {
+        let mut task = task();
+        let pinned: Vec<WriteId> = (0..LAST_WRITES_KEPT)
+            .map(|n| WriteId::from_string(format!("pinned{n}")))
+            .collect();
+        for id in &pinned {
+            task.record_write(id.clone(), |_| true);
+        }
+        // Eight queued edits depend on the eight kept ids; a ninth write must
+        // still be recognised when it is replayed.
+        let ninth = WriteId::from_string("ninth".into());
+        task.record_write(ninth.clone(), |kept| pinned.contains(kept));
+        assert!(task.last_writes.contains(&ninth), "{:?}", task.last_writes);
+        assert_eq!(task.last_writes.len(), LAST_WRITES_KEPT + 1);
+        // Once nothing depends on the old ones they go, oldest first.
+        let tenth = WriteId::from_string("tenth".into());
+        task.record_write(tenth.clone(), |_| false);
+        assert_eq!(task.last_writes.len(), LAST_WRITES_KEPT);
+        assert_eq!(task.last_writes.last(), Some(&tenth));
+        assert!(task.last_writes.contains(&ninth));
     }
 
     #[test]
