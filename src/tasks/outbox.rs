@@ -261,6 +261,10 @@ impl Outbox {
             let entry = self.entries.remove(index);
             remove_durably(&self.entry_path(&entry), &self.dir)?;
             let _ = fs::remove_file(self.receipt_path(&entry.write));
+            // The write ahead of it kept a receipt for this entry alone.
+            if let Some(Base::After(ahead)) = &entry.base {
+                let _ = fs::remove_file(self.receipt_path(ahead));
+            }
             doomed.extend(
                 self.entries
                     .iter()
@@ -285,6 +289,38 @@ impl Outbox {
         self.entries[index].conflict = Some(Conflict { theirs_rev, theirs });
         let entry = self.entries[index].clone();
         self.persist(&entry)
+    }
+
+    /// The entry waiting for a decision under `write`, if there is one.
+    pub(crate) fn held(&self, write: &WriteId) -> Option<&Entry> {
+        self.entries
+            .iter()
+            .find(|entry| &entry.write == write && entry.conflict.is_some())
+    }
+
+    /// Let a held entry go again: written as `op` against `base`, with `doc`
+    /// in place of its own when the decision is a merge. The chain queued
+    /// behind it follows once it is taken.
+    pub(crate) fn release(
+        &mut self,
+        write: &WriteId,
+        op: Op,
+        base: Option<Base>,
+        doc: Option<Task>,
+    ) -> io::Result<()> {
+        let Some(index) = self.entries.iter().position(|entry| &entry.write == write) else {
+            return Ok(());
+        };
+        let mut entry = self.entries[index].clone();
+        entry.conflict = None;
+        entry.op = op;
+        entry.base = base;
+        if let Some(doc) = doc {
+            entry.doc = doc;
+        }
+        self.persist(&entry)?;
+        self.entries[index] = entry;
+        Ok(())
     }
 
     /// Make every directory change so far durable.
@@ -668,6 +704,76 @@ mod tests {
         assert_eq!(removed, ["w1", "w2", "w3"]);
         assert_eq!(outbox.len(), 1);
         assert_eq!(outbox.entries()[0].write.as_str(), "w4");
+    }
+
+    #[test]
+    fn a_released_entry_goes_again_on_the_new_base_and_keeps_its_chain() {
+        let scratch = Scratch::new();
+        let mut outbox = Outbox::open(scratch.0.clone()).unwrap();
+        outbox
+            .push(
+                w("w1"),
+                Op::Update,
+                task("tk-a", "one"),
+                Some(Base::Rev(Rev(7))),
+            )
+            .unwrap();
+        outbox
+            .push(
+                w("w2"),
+                Op::Update,
+                task("tk-a", "two"),
+                Some(Base::After(w("w1"))),
+            )
+            .unwrap();
+        outbox
+            .mark_conflict(&w("w1"), Some(Rev(9)), Some(serde_json::json!({})))
+            .unwrap();
+        assert!(outbox.held(&w("w1")).is_some());
+        assert!(outbox.held(&w("w2")).is_none());
+        assert!(outbox.ready().is_empty());
+
+        outbox
+            .release(
+                &w("w1"),
+                Op::Update,
+                Some(Base::Rev(Rev(9))),
+                Some(task("tk-a", "merged")),
+            )
+            .unwrap();
+        assert!(outbox.held(&w("w1")).is_none());
+        let ready = outbox.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].write.as_str(), "w1");
+        assert_eq!(ready[0].doc.title, "merged");
+        drop(outbox);
+
+        let outbox = Outbox::open(scratch.0.clone()).unwrap();
+        assert_eq!(outbox.entries()[0].base, Some(Base::Rev(Rev(9))));
+        assert_eq!(outbox.entries()[0].doc.title, "merged");
+        assert!(outbox.entries()[0].conflict.is_none());
+        assert_eq!(outbox.entries()[1].base, Some(Base::After(w("w1"))));
+    }
+
+    #[test]
+    fn dropping_an_entry_takes_the_receipt_its_base_kept() {
+        let scratch = Scratch::new();
+        let mut outbox = Outbox::open(scratch.0.clone()).unwrap();
+        outbox
+            .push(w("w1"), Op::Create, task("tk-a", "one"), None)
+            .unwrap();
+        outbox
+            .push(
+                w("w2"),
+                Op::Update,
+                task("tk-a", "two"),
+                Some(Base::After(w("w1"))),
+            )
+            .unwrap();
+        outbox.complete(&w("w1"), Rev(1)).unwrap();
+        assert_eq!(outbox.receipt(&w("w1")), Some(Rev(1)));
+        outbox.fail(&w("w2")).unwrap();
+        assert_eq!(outbox.receipt(&w("w1")), None, "nothing depends on it now");
     }
 
     #[test]

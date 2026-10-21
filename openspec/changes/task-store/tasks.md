@@ -32,7 +32,7 @@
   Tests: `lost_ack_replay_is_dropped`, `chained_entries_replay_in_order`
 - [x] 2.7 Outbox flush before a handoff commits.
   Test: `outbox_survives_live_handoff` (throwaway session)
-- [ ] 2.8 Conflicts: `task.conflicts`, `task.resolve_conflict`, cancelled descendants.
+- [x] 2.8 Conflicts: `task.conflicts`, `task.resolve_conflict`, cancelled descendants.
   Tests: `theirs_cancels_descendants`, `second_resolver_gets_stale_revision`
 - [ ] 2.9 Derived status, the 5-minute timer, the run rescan on start and handoff.
   Tests: `status_precedence_table`, `forged_starter_ignored`, `rescan_rebuilds_runs`

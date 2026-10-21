@@ -83,9 +83,93 @@ struct WriteCommand {
     base: Option<Base>,
 }
 
+/// How a held write is to be settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Keep the held write: it is written again on top of the store's version.
+    Mine,
+    /// Take the store's version: the held write is dropped, and so is every
+    /// write queued on top of it.
+    Theirs,
+    /// Write this document instead.
+    Merged(Box<Task>),
+}
+
+/// A write the store refused as a conflict, waiting for a decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeldConflict {
+    pub write: WriteId,
+    pub key: TaskKey,
+    /// What the held write would store.
+    pub mine: Task,
+    /// The store's revision when it refused (`None`: the key was absent).
+    pub theirs_rev: Option<Rev>,
+    pub theirs: Option<serde_json::Value>,
+}
+
+impl HeldConflict {
+    fn from_entry(entry: &Entry) -> Option<Self> {
+        let conflict = entry.conflict.as_ref()?;
+        Some(Self {
+            write: entry.write.clone(),
+            key: entry.key.clone(),
+            mine: entry.doc.clone(),
+            theirs_rev: conflict.theirs_rev,
+            theirs: conflict.theirs.clone(),
+        })
+    }
+
+    /// The store's side as the bytes and revision a conflict outcome carries.
+    fn current(&self) -> Option<(Rev, Vec<u8>)> {
+        let rev = self.theirs_rev?;
+        let bytes = serde_json::to_vec(self.theirs.as_ref()?).ok()?;
+        Some((rev, bytes))
+    }
+}
+
+/// How a request to settle a held write ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolveOutcome {
+    /// The held write is queued again; its own outcome follows.
+    Requeued,
+    /// The store's version stands. These queued writes, which were built on
+    /// the dropped one, came back to their callers as conflicts.
+    Dropped {
+        cancelled: Vec<WriteId>,
+    },
+    /// The conflict is not the one the caller saw (it was settled, or the
+    /// store moved again): what the store holds now, to look at again.
+    Stale {
+        current: Option<(Rev, Vec<u8>)>,
+    },
+    Failed(String),
+}
+
+/// How a request to settle a held write ended.
+#[derive(Debug)]
+pub(crate) struct Resolution {
+    ticket: u64,
+    write: WriteId,
+    key: TaskKey,
+    outcome: ResolveOutcome,
+    /// A write that goes on carries its document, so it counts as pending
+    /// again.
+    requeued: Option<Task>,
+}
+
+struct ResolveCommand {
+    ticket: u64,
+    write: WriteId,
+    key: TaskKey,
+    choice: Choice,
+    /// The store's revision the caller decided against.
+    expected: Rev,
+}
+
 /// Everything the store thread's one channel carries.
 enum Message {
     Write(WriteCommand),
+    Resolve(ResolveCommand),
     Watch(WatchEvent),
     Shutdown,
 }
@@ -105,6 +189,12 @@ pub(crate) enum StoreEvent {
         write: WriteId,
         outcome: WriteOutcome,
     },
+    /// A write is held for a decision (also sent for each one found in the
+    /// outbox at start).
+    Held(Box<HeldConflict>),
+    /// How a request to settle a held write ended. A write that goes on
+    /// carries its document, so it counts as pending again.
+    Resolved(Box<Resolution>),
     /// The store cannot be reached or read right now; the thread keeps trying.
     Degraded(String),
     /// The thread has ended; nothing more will be applied or reported.
@@ -139,6 +229,10 @@ pub(crate) enum SubmitError {
     Refused(TaskError),
     /// Too many writes are waiting for the store.
     Busy,
+    /// The conflict is not the one the caller saw; what the store holds now.
+    Stale {
+        current: Option<(Rev, Vec<u8>)>,
+    },
 }
 
 impl SubmitError {
@@ -148,6 +242,7 @@ impl SubmitError {
             Self::Stopped => "task_store_stopped",
             Self::Refused(err) => err.code(),
             Self::Busy => "task_store_busy",
+            Self::Stale { .. } => "stale_revision",
         }
     }
 }
@@ -182,6 +277,11 @@ pub(crate) struct TaskService {
     failure: Option<String>,
     /// The store's first scan has arrived, so the cache is complete.
     loaded: bool,
+    /// Writes held for a decision, in the order they were refused.
+    conflicts: Vec<HeldConflict>,
+    /// How requests to settle a held write ended, not yet taken.
+    resolutions: Vec<(u64, ResolveOutcome)>,
+    next_ticket: u64,
 }
 
 impl TaskService {
@@ -199,6 +299,9 @@ impl TaskService {
             outcomes: Vec::new(),
             failure: None,
             loaded: false,
+            conflicts: Vec::new(),
+            resolutions: Vec::new(),
+            next_ticket: 1,
         }
     }
 
@@ -308,6 +411,80 @@ impl TaskService {
         self.pending.len()
     }
 
+    /// The writes held for a decision, oldest first.
+    pub(crate) fn conflicts(&self) -> &[HeldConflict] {
+        &self.conflicts
+    }
+
+    /// Settle the write held under `write`. `expected` is the store's revision
+    /// the caller decided against (`Rev(0)` when the key was absent): a caller
+    /// who looked at an older conflict gets `stale_revision` and what the store
+    /// holds now. Answers at once with a ticket; how it ended arrives later as
+    /// a [`StoreEvent::Resolved`], and a write that goes on reports its own
+    /// outcome after that.
+    pub(crate) fn resolve_conflict(
+        &mut self,
+        key: &TaskKey,
+        write: &WriteId,
+        choice: Choice,
+        expected: Rev,
+    ) -> Result<u64, SubmitError> {
+        let held = self
+            .conflicts
+            .iter()
+            .find(|held| &held.write == write && &held.key == key);
+        let Some(held) = held else {
+            return Err(SubmitError::Stale {
+                current: self.cached_bytes(key),
+            });
+        };
+        if held.theirs_rev.unwrap_or(Rev(0)) != expected {
+            return Err(SubmitError::Stale {
+                current: held.current().or_else(|| self.cached_bytes(key)),
+            });
+        }
+        let choice = match choice {
+            Choice::Merged(doc) => {
+                if &doc.key() != key {
+                    return Err(SubmitError::Refused(TaskError::KeyMismatch));
+                }
+                self.check_may_write(&doc)?;
+                let (doc, _) = self.prepare_as(&doc, write.clone())?;
+                Choice::Merged(Box::new(doc))
+            }
+            other => {
+                self.check_may_write(&held.mine)?;
+                other
+            }
+        };
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        let command = ResolveCommand {
+            ticket,
+            write: write.clone(),
+            key: key.clone(),
+            choice,
+            expected,
+        };
+        let commands = self.commands.as_ref().ok_or(SubmitError::Disabled)?;
+        if commands.send(Message::Resolve(command)).is_err() {
+            self.mark_stopped("the task store thread is gone".to_owned());
+            return Err(SubmitError::Stopped);
+        }
+        Ok(ticket)
+    }
+
+    /// How requests to settle a held write ended since the last call.
+    pub(crate) fn take_resolutions(&mut self) -> Vec<(u64, ResolveOutcome)> {
+        std::mem::take(&mut self.resolutions)
+    }
+
+    /// The cached version of a task, as the bytes a store would hold.
+    fn cached_bytes(&self, key: &TaskKey) -> Option<(Rev, Vec<u8>)> {
+        let cached = self.cache.get(key)?;
+        Some((cached.rev, serde_json::to_vec(&cached.task).ok()?))
+    }
+
     /// Queue a create. Answers at once with the write's id; the outcome
     /// arrives later as a [`StoreEvent::Outcome`].
     pub(crate) fn submit_create(&mut self, task: &Task) -> Result<WriteId, SubmitError> {
@@ -348,11 +525,15 @@ impl TaskService {
 
     /// Validate `task`, give it a fresh write id and record the id in its copy.
     fn prepare(&self, task: &Task) -> Result<(Task, WriteId), SubmitError> {
+        self.prepare_as(task, WriteId::generate())
+    }
+
+    /// As [`Self::prepare`], for a write that already has its id.
+    fn prepare_as(&self, task: &Task, write: WriteId) -> Result<(Task, WriteId), SubmitError> {
         task.validate().map_err(SubmitError::Refused)?;
         self.cache
             .check_pane_capacity(task)
             .map_err(SubmitError::Refused)?;
-        let write = WriteId::generate();
         let mut doc = task.clone();
         doc.record_write(write.clone(), |id| self.pending.contains_key(id));
         Ok((doc, write))
@@ -445,6 +626,39 @@ impl TaskService {
                 };
                 self.settle_latest(&key);
                 self.push_outcome(write, outcome);
+                true
+            }
+            StoreEvent::Held(held) => {
+                match self
+                    .conflicts
+                    .iter_mut()
+                    .find(|old| old.write == held.write)
+                {
+                    Some(old) => *old = *held,
+                    None => self.conflicts.push(*held),
+                }
+                true
+            }
+            StoreEvent::Resolved(resolution) => {
+                let Resolution {
+                    ticket,
+                    write,
+                    key,
+                    outcome,
+                    requeued,
+                } = *resolution;
+                if !matches!(
+                    outcome,
+                    ResolveOutcome::Stale { .. } | ResolveOutcome::Failed(_)
+                ) {
+                    self.conflicts.retain(|held| held.write != write);
+                }
+                // A write that goes on is waiting for the store again.
+                if let Some(doc) = requeued {
+                    self.pending.insert(write.clone(), key.clone());
+                    self.latest.insert(key, (write, doc));
+                }
+                self.resolutions.push((ticket, outcome));
                 true
             }
             StoreEvent::Degraded(message) => {
@@ -660,6 +874,17 @@ fn run_store(
     if !waiting.is_empty() && !emit(StoreEvent::Queued(waiting)) {
         return None;
     }
+    // Some of them may be waiting for a decision, from before the restart.
+    let held: Vec<_> = outbox
+        .entries()
+        .iter()
+        .filter_map(HeldConflict::from_entry)
+        .collect();
+    for held in held {
+        if !emit(StoreEvent::Held(Box::new(held))) {
+            return None;
+        }
+    }
 
     // Try the outbox now, then whenever something arrives or a retry is due.
     let mut retry_wait = backoff.initial;
@@ -690,6 +915,13 @@ fn run_store(
                         return None;
                     }
                     continue;
+                }
+            }
+            Some(Message::Resolve(command)) => {
+                for event in resolve(&mut outbox, store.as_mut(), command) {
+                    if !emit(event) {
+                        return None;
+                    }
                 }
             }
             None => {}
@@ -749,6 +981,19 @@ fn pause(
             Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => return true,
             Err(RecvTimeoutError::Timeout) => return false,
             Ok(Message::Watch(_)) => {}
+            Ok(Message::Resolve(command)) => {
+                // Settling a conflict needs the store's current version.
+                let refused = StoreEvent::Resolved(Box::new(Resolution {
+                    ticket: command.ticket,
+                    write: command.write,
+                    key: command.key,
+                    outcome: ResolveOutcome::Failed("the task store is not reachable".to_owned()),
+                    requeued: None,
+                }));
+                if !emit(refused) {
+                    return true;
+                }
+            }
             Ok(Message::Write(command)) => {
                 let outcome = match outbox.as_deref_mut() {
                     Some(outbox) => queue(outbox, command).err(),
@@ -828,12 +1073,14 @@ fn try_entry(outbox: &mut Outbox, store: &mut dyn TaskStore, entry: &Entry) -> A
             Err(_) => Attempt::Retry,
         },
         Err(StoreError::Conflict { current }) => {
-            hold(outbox, entry, current.clone());
-            Attempt::Done(vec![outcome(WriteOutcome::Conflict { current })])
+            let mut events = held_event(outbox, entry, current.clone());
+            events.push(outcome(WriteOutcome::Conflict { current }));
+            Attempt::Done(events)
         }
         Err(StoreError::AlreadyExists { current }) => {
-            hold(outbox, entry, Some(current.clone()));
-            Attempt::Done(vec![outcome(WriteOutcome::Exists { current })])
+            let mut events = held_event(outbox, entry, Some(current.clone()));
+            events.push(outcome(WriteOutcome::Exists { current }));
+            Attempt::Done(events)
         }
         Err(StoreError::Unavailable(_) | StoreError::Indeterminate(_)) => Attempt::Retry,
         Err(StoreError::Io(why)) => {
@@ -853,14 +1100,101 @@ fn try_entry(outbox: &mut Outbox, store: &mut dyn TaskStore, entry: &Entry) -> A
     }
 }
 
-/// Keep an entry the store refused, with the store's version beside it.
-fn hold(outbox: &mut Outbox, entry: &Entry, current: Option<(Rev, Vec<u8>)>) {
+/// Keep an entry the store refused, with the store's version beside it, and
+/// say that it is held.
+fn held_event(
+    outbox: &mut Outbox,
+    entry: &Entry,
+    current: Option<(Rev, Vec<u8>)>,
+) -> Vec<StoreEvent> {
     let (rev, theirs) = match current {
         Some((rev, bytes)) => (Some(rev), serde_json::from_slice(&bytes).ok()),
         None => (None, None),
     };
     if let Err(err) = outbox.mark_conflict(&entry.write, rev, theirs) {
         tracing::warn!(error = %err, "could not record a task conflict");
+    }
+    outbox
+        .held(&entry.write)
+        .and_then(HeldConflict::from_entry)
+        .map(|held| StoreEvent::Held(Box::new(held)))
+        .into_iter()
+        .collect()
+}
+
+/// Settle a held write: compare-and-set against the conflict the caller saw.
+fn resolve(
+    outbox: &mut Outbox,
+    store: &mut dyn TaskStore,
+    command: ResolveCommand,
+) -> Vec<StoreEvent> {
+    let ResolveCommand {
+        ticket,
+        write,
+        key,
+        choice,
+        expected,
+    } = command;
+    let ended = |outcome, requeued| {
+        StoreEvent::Resolved(Box::new(Resolution {
+            ticket,
+            write: write.clone(),
+            key: key.clone(),
+            outcome,
+            requeued,
+        }))
+    };
+    let held = outbox.held(&write).and_then(HeldConflict::from_entry);
+    let Some(held) = held.filter(|held| held.theirs_rev.unwrap_or(Rev(0)) == expected) else {
+        // Settled by someone else, or the store moved on: show what it holds.
+        return match store.get(&super::store::StoreKey::from(&key)) {
+            Ok(current) => vec![ended(ResolveOutcome::Stale { current }, None)],
+            Err(err) => vec![ended(ResolveOutcome::Failed(err.to_string()), None)],
+        };
+    };
+    match choice {
+        Choice::Theirs => {
+            let removed = match outbox.fail(&write) {
+                Ok(removed) => removed,
+                Err(err) => {
+                    return vec![ended(
+                        ResolveOutcome::Failed(format!("cannot drop the held write: {err}")),
+                        None,
+                    )];
+                }
+            };
+            let cancelled: Vec<WriteId> = removed.into_iter().filter(|id| *id != write).collect();
+            let mut events: Vec<StoreEvent> = cancelled
+                .iter()
+                .map(|id| StoreEvent::Outcome {
+                    write: id.clone(),
+                    outcome: WriteOutcome::Conflict {
+                        current: held.current(),
+                    },
+                })
+                .collect();
+            events.push(ended(ResolveOutcome::Dropped { cancelled }, None));
+            events
+        }
+        Choice::Mine | Choice::Merged(_) => {
+            // The store's version is the base; if it was absent, write anew.
+            let (op, base) = match held.theirs_rev {
+                Some(rev) => (Op::Update, Some(Base::Rev(rev))),
+                None => (Op::Create, None),
+            };
+            let doc = match choice {
+                Choice::Merged(doc) => Some(*doc),
+                _ => None,
+            };
+            let queued = doc.clone().unwrap_or(held.mine);
+            match outbox.release(&write, op, base, doc) {
+                Ok(()) => vec![ended(ResolveOutcome::Requeued, Some(queued))],
+                Err(err) => vec![ended(
+                    ResolveOutcome::Failed(format!("cannot release the held write: {err}")),
+                    None,
+                )],
+            }
+        }
     }
 }
 
@@ -1587,6 +1921,254 @@ mod tests {
             1,
             "the held write is still waiting"
         );
+    }
+
+    /// A task created and stored at revision 1, then two edits queued against
+    /// a revision that has moved: the first is held as a conflict, the second
+    /// waits behind it. Returns the held write and the one behind it.
+    fn two_held_edits(
+        service: &mut TaskService,
+        received: &Receiver<StoreEvent>,
+        created: &Task,
+    ) -> (WriteId, WriteId) {
+        service.submit_create(created).unwrap();
+        pump(service, received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        service.take_outcomes();
+        let mut stale = created.clone();
+        stale.title = "stale".into();
+        let first = service.submit_update(&stale, Rev(9)).unwrap();
+        let mut behind = service.current(&created.key()).unwrap().1.clone();
+        behind.title = "behind it".into();
+        let second = service.submit_update(&behind, Rev(9)).unwrap();
+        pump(service, received, Duration::from_secs(5), |service| {
+            !service.conflicts().is_empty() && !service.take_outcomes_peek().is_empty()
+        });
+        service.take_outcomes();
+        (first, second)
+    }
+
+    #[test]
+    fn a_held_write_is_listed_with_the_stores_version() {
+        let (mut service, received) = loaded(FakeStore::new(Duration::ZERO));
+        let created = task("tk-1");
+        let (first, _) = two_held_edits(&mut service, &received, &created);
+        let held = service.conflicts();
+        assert_eq!(held.len(), 1, "only the head of the chain is held");
+        assert_eq!(held[0].write, first);
+        assert_eq!(held[0].key, created.key());
+        assert_eq!(held[0].mine.title, "stale");
+        assert_eq!(held[0].theirs_rev, Some(Rev(1)));
+        assert_eq!(held[0].theirs.as_ref().unwrap()["title"], "a task");
+    }
+
+    #[test]
+    fn theirs_cancels_descendants() {
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let (mut service, received) = loaded(store);
+        let created = task("tk-1");
+        let (first, second) = two_held_edits(&mut service, &received, &created);
+        let key = created.key();
+        assert_eq!(service.pending_count(), 1, "the write behind it waits");
+
+        let ticket = service
+            .resolve_conflict(&key, &first, Choice::Theirs, Rev(1))
+            .unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0 && service.conflicts().is_empty()
+        });
+        assert_eq!(
+            service.take_resolutions(),
+            vec![(
+                ticket,
+                ResolveOutcome::Dropped {
+                    cancelled: vec![second.clone()]
+                }
+            )]
+        );
+        let outcomes = service.take_outcomes();
+        assert_eq!(outcomes.len(), 1, "the write behind it comes back");
+        assert_eq!(outcomes[0].0, second);
+        assert!(
+            matches!(
+                &outcomes[0].1,
+                WriteOutcome::Conflict {
+                    current: Some((Rev(1), _))
+                }
+            ),
+            "as a conflict against the store's version: {:?}",
+            outcomes[0].1
+        );
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["a task"],
+            "neither edit reached the store"
+        );
+        assert!(service
+            .current(&key)
+            .is_some_and(|(_, task)| task.title == "a task"));
+    }
+
+    #[test]
+    fn second_resolver_gets_stale_revision() {
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let (mut service, received) = loaded(store);
+        let created = task("tk-1");
+        let (first, second) = two_held_edits(&mut service, &received, &created);
+        let key = created.key();
+
+        // Two clients answer the same conflict before either result is back.
+        let winner = service
+            .resolve_conflict(&key, &first, Choice::Mine, Rev(1))
+            .unwrap();
+        let loser = service
+            .resolve_conflict(&key, &first, Choice::Theirs, Rev(1))
+            .unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+                && service.resolutions.len() == 2
+                && service
+                    .cache()
+                    .get(&key)
+                    .is_some_and(|cached| cached.rev == Rev(3))
+        });
+        let resolutions = service.take_resolutions();
+        assert_eq!(resolutions[0], (winner, ResolveOutcome::Requeued));
+        match &resolutions[1] {
+            (
+                ticket,
+                ResolveOutcome::Stale {
+                    current: Some((rev, bytes)),
+                },
+            ) => {
+                assert_eq!(*ticket, loser);
+                assert_eq!(*rev, Rev(3), "the refresh is what the store holds now");
+                let doc: Task = serde_json::from_slice(bytes).unwrap();
+                assert_eq!(doc.title, "behind it");
+            }
+            other => panic!("expected a stale answer, got {other:?}"),
+        }
+        // The winner's choice stood: both edits went in, in order.
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["a task", "stale", "behind it"],
+            "mine was written on top of theirs, and the chain followed"
+        );
+        let applied = service.take_outcomes();
+        assert_eq!(
+            applied,
+            vec![
+                (first.clone(), WriteOutcome::Applied { rev: Rev(2) }),
+                (second, WriteOutcome::Applied { rev: Rev(3) }),
+            ]
+        );
+
+        // A third one, once the result is known, is turned away at once.
+        let err = service
+            .resolve_conflict(&key, &first, Choice::Mine, Rev(1))
+            .unwrap_err();
+        assert_eq!(err.code(), "stale_revision");
+        assert!(matches!(
+            err,
+            SubmitError::Stale {
+                current: Some((Rev(3), _))
+            }
+        ));
+    }
+
+    #[test]
+    fn a_caller_who_saw_an_older_revision_is_told_to_look_again() {
+        let (mut service, received) = loaded(FakeStore::new(Duration::ZERO));
+        let created = task("tk-1");
+        let (first, _) = two_held_edits(&mut service, &received, &created);
+        let err = service
+            .resolve_conflict(&created.key(), &first, Choice::Mine, Rev(7))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SubmitError::Stale {
+                current: Some((Rev(1), _))
+            }
+        ));
+        assert_eq!(service.conflicts().len(), 1, "the conflict is untouched");
+    }
+
+    #[test]
+    fn merged_writes_the_given_document_and_a_foreign_one_is_refused() {
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let (mut service, received) = loaded(store);
+        let created = task("tk-1");
+        let (first, _) = two_held_edits(&mut service, &received, &created);
+        let key = created.key();
+
+        let mut elsewhere = created.clone();
+        elsewhere.id = TaskId::new("tk-2").unwrap();
+        let err = service
+            .resolve_conflict(&key, &first, Choice::Merged(Box::new(elsewhere)), Rev(1))
+            .unwrap_err();
+        assert_eq!(err.code(), "task_key_mismatch");
+
+        let mut merged = created.clone();
+        merged.title = "merged by hand".into();
+        service
+            .resolve_conflict(&key, &first, Choice::Merged(Box::new(merged)), Rev(1))
+            .unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+                && service
+                    .cache()
+                    .get(&key)
+                    .is_some_and(|cached| cached.rev == Rev(3))
+        });
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["a task", "merged by hand", "behind it"]
+        );
+        let (_, task) = service.current(&key).unwrap();
+        assert!(
+            task.last_writes.contains(&first),
+            "the merged document carries the write id, so a replay is recognised"
+        );
+    }
+
+    #[test]
+    fn a_held_write_is_still_held_after_a_restart() {
+        let dir = scratch_outbox();
+        let store = FakeStore::new(Duration::ZERO);
+        let (mut old, received) = start_with_options(
+            one_shot(store),
+            StartOptions {
+                outbox_dir: dir.clone(),
+                ..options(test_identity("m4m"))
+            },
+        );
+        pump(&mut old, &received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+        let created = task("tk-1");
+        let (first, _) = two_held_edits(&mut old, &received, &created);
+        assert!(old.quiesce(Duration::from_secs(5)));
+        drop(old);
+
+        // The replacement finds the same store contents and the same outbox.
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.put(&created.key(), &created, Rev(1));
+        let (mut new, received) = start_with_options(
+            one_shot(store),
+            StartOptions {
+                outbox_dir: dir,
+                ..options(test_identity("m4m"))
+            },
+        );
+        pump(&mut new, &received, Duration::from_secs(5), |service| {
+            !service.conflicts().is_empty()
+        });
+        assert_eq!(new.conflicts()[0].write, first);
+        assert_eq!(new.conflicts()[0].theirs_rev, Some(Rev(1)));
     }
 
     #[test]
