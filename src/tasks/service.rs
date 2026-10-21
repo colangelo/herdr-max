@@ -510,6 +510,43 @@ impl TaskService {
         std::mem::take(&mut self.resolutions)
     }
 
+    pub(crate) fn identity(&self) -> Option<&TaskIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// The keys with a write waiting for the store.
+    pub(crate) fn pending_keys(&self) -> HashSet<&TaskKey> {
+        self.pending.values().collect()
+    }
+
+    /// The keys with a write held for a decision.
+    pub(crate) fn conflict_keys(&self) -> HashSet<&TaskKey> {
+        self.conflicts.iter().map(|held| &held.key).collect()
+    }
+
+    /// How the store is doing: `disabled`, `loading`, `ready` or `unavailable`,
+    /// with the reason when there is one.
+    pub(crate) fn state(&self) -> (&'static str, Option<&str>) {
+        match (&self.failure, self.commands.is_some(), self.loaded) {
+            (Some(why), _, _) => ("unavailable", Some(why.as_str())),
+            (None, false, _) => ("disabled", None),
+            (None, true, false) => ("loading", None),
+            (None, true, true) => ("ready", None),
+        }
+    }
+
+    /// Replace the clock the five-minute rule is judged by.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: fn() -> SystemTime) {
+        self.clock = clock;
+        self.status_mark = clock();
+    }
+
+    /// The time the five-minute rule is judged against.
+    pub(crate) fn now(&self) -> SystemTime {
+        (self.clock)()
+    }
+
     /// The run records the server holds.
     pub(crate) fn runs(&self) -> &RunCache {
         &self.runs

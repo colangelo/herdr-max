@@ -251,6 +251,27 @@ pub enum ResponseResult {
     TodoCleared {
         removed: u32,
     },
+    TaskList {
+        tasks: Vec<super::tasks::TaskInfo>,
+        store: super::tasks::TaskStoreInfo,
+    },
+    /// One task. After a write, `write_id` names it and `pending` is true: the
+    /// outcome arrives later as `task.changed`.
+    Task {
+        task: Box<super::tasks::TaskInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        write_id: Option<String>,
+        #[serde(default, skip_serializing_if = "super::is_false")]
+        pending: bool,
+    },
+    TaskConflicts {
+        conflicts: Vec<super::tasks::TaskConflictInfo>,
+    },
+    /// A `task.resolve_conflict` that was taken: how it ended arrives later as
+    /// `task.changed`, under this ticket.
+    TaskResolving {
+        ticket: u64,
+    },
     /// A forced close: the open todos of every pane it closed.
     Closed {
         closed_todos: Vec<super::todos::ClosedPaneTodos>,

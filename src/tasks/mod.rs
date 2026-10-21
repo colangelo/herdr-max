@@ -36,7 +36,7 @@ pub(crate) use model::{
 };
 pub(crate) use runs::{derive, AskRow, Derived, RunCache, RunRecord, RunState, Shown};
 pub(crate) use service::{
-    Backoff, EventContext, StartOptions, StoreEvent, StoreOpener, SubmitError, TaskService,
-    WriteOutcome,
+    Backoff, Choice, EventContext, HeldConflict, ResolveOutcome, StartOptions, StoreEvent,
+    StoreOpener, SubmitError, TaskService, WriteOutcome,
 };
 pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink};

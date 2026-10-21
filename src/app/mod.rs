@@ -125,6 +125,9 @@ pub struct App {
     pub(crate) policy: AppPolicy,
     /// The task store and its cache (fork issue 241).
     pub(crate) tasks: crate::tasks::TaskService,
+    /// When the timer that announces a run crossing its five minutes fires, if
+    /// one is armed.
+    task_status_timer: Option<Instant>,
     /// What the store is started from, kept so a live handoff (unix only) can
     /// stop it and start it again.
     #[cfg(unix)]
@@ -795,6 +798,7 @@ impl App {
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
             tasks,
+            task_status_timer: None,
             #[cfg(unix)]
             task_config: config.tasks.clone(),
             #[cfg(unix)]
