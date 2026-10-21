@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use super::cache::TaskCache;
+use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::{Task, TaskError};
 use super::store::{StoreError, TaskStore, WatchEvent};
@@ -86,6 +87,7 @@ impl SubmitError {
 }
 
 pub(crate) struct TaskService {
+    identity: Option<TaskIdentity>,
     cache: TaskCache,
     commands: Option<Sender<StoreCommand>>,
     /// Writes sent and not yet answered, by write id.
@@ -102,6 +104,7 @@ impl TaskService {
     /// A service with no store: reads are empty and writes are refused.
     pub(crate) fn disabled() -> Self {
         Self {
+            identity: None,
             cache: TaskCache::new(),
             commands: None,
             pending: HashMap::new(),
@@ -111,17 +114,26 @@ impl TaskService {
         }
     }
 
+    /// No store runs, but writes are still judged by `identity`, so a server
+    /// that must not use the bus says why instead of "tasks are off".
+    pub(crate) fn without_store(identity: TaskIdentity) -> Self {
+        let mut service = Self::disabled();
+        service.identity = Some(identity);
+        service
+    }
+
     /// Run `store` on its own thread. `emit` delivers each event to the app
     /// and returns false once the app is gone, which ends the thread.
     pub(crate) fn start(
         store: Box<dyn TaskStore>,
+        identity: TaskIdentity,
         emit: impl Fn(StoreEvent) -> bool + Send + 'static,
     ) -> std::io::Result<Self> {
         let (commands, receiver) = mpsc::channel();
         crate::thread_spawn::spawn_named("herdr-task-store", move || {
             run_store(store, receiver, emit);
         })?;
-        let mut service = Self::disabled();
+        let mut service = Self::without_store(identity);
         service.commands = Some(commands);
         Ok(service)
     }
@@ -150,6 +162,7 @@ impl TaskService {
     /// Queue a create. Answers at once with the write's id; the outcome
     /// arrives later as a [`StoreEvent::Outcome`].
     pub(crate) fn submit_create(&mut self, task: &Task) -> Result<WriteId, SubmitError> {
+        self.check_may_write(task)?;
         task.validate().map_err(SubmitError::Refused)?;
         self.cache
             .check_pane_capacity(task)
@@ -175,6 +188,7 @@ impl TaskService {
         task: &Task,
         expected: Rev,
     ) -> Result<WriteId, SubmitError> {
+        self.check_may_write(task)?;
         task.validate().map_err(SubmitError::Refused)?;
         self.cache
             .check_pane_capacity(task)
@@ -193,6 +207,18 @@ impl TaskService {
             write,
             key,
         )
+    }
+
+    /// A write goes only to the store of the server that owns the task, and
+    /// only from the session that may use the bus. Refused before anything is
+    /// validated or queued.
+    fn check_may_write(&self, task: &Task) -> Result<(), SubmitError> {
+        match &self.identity {
+            Some(identity) => identity
+                .check_write(&task.owner_host)
+                .map_err(SubmitError::Refused),
+            None => Ok(()),
+        }
     }
 
     fn send(
@@ -335,12 +361,15 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::tasks::identity::{test_identity, BackendKind};
     use crate::tasks::ids::{HostId, TaskId};
     use crate::tasks::model::{Origin, Timestamp, Via};
     use crate::tasks::store::{StoreKey, StoreResult, WatchStream};
 
     /// An in-memory store whose writes take `delay`.
     struct SlowStore {
+        /// How many writes reached the store.
+        writes: Arc<std::sync::atomic::AtomicUsize>,
         delay: Duration,
         docs: BTreeMap<String, (Rev, Vec<u8>)>,
         watchers: Vec<Sender<WatchEvent>>,
@@ -349,6 +378,7 @@ mod tests {
     impl SlowStore {
         fn new(delay: Duration) -> Self {
             Self {
+                writes: Arc::default(),
                 delay,
                 docs: BTreeMap::new(),
                 watchers: Vec::new(),
@@ -370,6 +400,8 @@ mod tests {
 
     impl TaskStore for SlowStore {
         fn create(&mut self, key: &TaskKey, doc: &Task, _write: WriteId) -> StoreResult<Rev> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(self.delay);
             if let Some(current) = self.docs.get(&key.to_string()) {
                 return Err(StoreError::AlreadyExists {
@@ -387,6 +419,8 @@ mod tests {
             expected: Rev,
             _write: WriteId,
         ) -> StoreResult<Rev> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(self.delay);
             match self.docs.get(&key.to_string()) {
                 Some((rev, _)) if *rev == expected => {
@@ -438,9 +472,11 @@ mod tests {
     fn start(delay: Duration) -> (TaskService, Receiver<StoreEvent>) {
         let (events, received) = mpsc::channel();
         let events = Mutex::new(events);
-        let service = TaskService::start(Box::new(SlowStore::new(delay)), move |event| {
-            events.lock().unwrap().send(event).is_ok()
-        })
+        let service = TaskService::start(
+            Box::new(SlowStore::new(delay)),
+            test_identity("m4m"),
+            move |event| events.lock().unwrap().send(event).is_ok(),
+        )
         .unwrap();
         (service, received)
     }
@@ -562,7 +598,7 @@ mod tests {
         store.put(&one.key(), &one, Rev(4));
         let (events, received) = mpsc::channel();
         let events = Mutex::new(events);
-        let mut service = TaskService::start(Box::new(store), move |event| {
+        let mut service = TaskService::start(Box::new(store), test_identity("m4m"), move |event| {
             events.lock().unwrap().send(event).is_ok()
         })
         .unwrap();
@@ -578,6 +614,7 @@ mod tests {
         let events = Mutex::new(events);
         let service = TaskService::start(
             Box::new(SlowStore::new(Duration::from_secs(30))),
+            test_identity("m4m"),
             move |event| events.lock().unwrap().send(event).is_ok(),
         )
         .unwrap();
@@ -585,5 +622,93 @@ mod tests {
         drop(service);
         assert!(started.elapsed() < Duration::from_millis(250));
         drop(received);
+    }
+    fn owned_by(host: &str, id: &str) -> Task {
+        Task::new(
+            HostId::new(host).unwrap(),
+            TaskId::new(id).unwrap(),
+            "a task",
+            Origin {
+                host: host.into(),
+                by: "x".into(),
+                via: Via::Cli,
+            },
+            Timestamp("2026-10-21T20:00:00Z".into()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn foreign_task_write_refused_not_queued() {
+        let store = SlowStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        let (events, received) = mpsc::channel();
+        let events = Mutex::new(events);
+        let mut service = TaskService::start(Box::new(store), test_identity("m4m"), move |event| {
+            events.lock().unwrap().send(event).is_ok()
+        })
+        .unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+
+        let theirs = owned_by("ac-mbm5", "tk-1");
+        for result in [
+            service.submit_create(&theirs),
+            service.submit_update(&theirs, Rev(1)),
+        ] {
+            let err = result.unwrap_err();
+            assert_eq!(err.code(), "task_owned_elsewhere");
+            assert_eq!(
+                err,
+                SubmitError::Refused(TaskError::OwnedElsewhere {
+                    owner_host: "ac-mbm5".into()
+                })
+            );
+        }
+        assert_eq!(service.pending_count(), 0, "a refused write is not queued");
+
+        // The own host's task goes through, and only it reaches the store.
+        service.submit_create(&owned_by("m4m", "tk-2")).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn non_bus_session_refuses() {
+        let throwaway = TaskIdentity {
+            session: "throwaway".into(),
+            bus_session: "default".into(),
+            backend: BackendKind::Kv,
+            ..test_identity("m4m")
+        };
+        // No store is started for it, so no credential is read, and the answer
+        // names the bus session rather than saying tasks are off.
+        let mut service = TaskService::without_store(throwaway.clone());
+        let err = service.submit_create(&owned_by("m4m", "tk-1")).unwrap_err();
+        assert_eq!(err.code(), "task_not_bus_session");
+        assert_eq!(
+            err,
+            SubmitError::Refused(TaskError::NotBusSession {
+                bus_session: "default".into()
+            })
+        );
+        assert!(!throwaway.may_use_bus());
+
+        // The bus session itself may use the bus; a throwaway on the file
+        // backend runs its own store and needs none.
+        let bus = TaskIdentity {
+            session: "default".into(),
+            ..throwaway.clone()
+        };
+        assert!(bus.may_use_bus());
+        let own_file = TaskIdentity {
+            backend: BackendKind::File,
+            ..throwaway
+        };
+        assert!(own_file.may_use_bus());
+        assert_eq!(own_file.check_write(&HostId::new("m4m").unwrap()), Ok(()));
     }
 }

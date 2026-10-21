@@ -231,6 +231,14 @@ pub(crate) enum TaskError {
     /// Running to Open needs that the run that ends is still the current one.
     RunNotCurrent,
     PaneFull,
+    /// The task belongs to another host, which is the only one that writes it.
+    OwnedElsewhere {
+        owner_host: String,
+    },
+    /// This server is not the session that talks to the bus.
+    NotBusSession {
+        bus_session: String,
+    },
 }
 
 impl TaskError {
@@ -246,6 +254,8 @@ impl TaskError {
             Self::RunAlreadyActive => "task_run_active",
             Self::RunNotCurrent => "task_run_not_current",
             Self::PaneFull => "task_pane_full",
+            Self::OwnedElsewhere { .. } => "task_owned_elsewhere",
+            Self::NotBusSession { .. } => "task_not_bus_session",
         }
     }
 }

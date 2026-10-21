@@ -26,7 +26,7 @@
   Test: `slow_store_never_blocks_api` (a fake store that sleeps)
 - [x] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
   Test: `kv_backend_conformance` (against a local nats-server, feature-gated)
-- [ ] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
+- [x] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
   Tests: `foreign_task_write_refused_not_queued`, `non_bus_session_refuses`
 - [ ] 2.6 `write_id`, `last_writes`, the outbox and receipts, chained bases, replay.
   Tests: `lost_ack_replay_is_dropped`, `chained_entries_replay_in_order`

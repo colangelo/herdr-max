@@ -209,8 +209,10 @@ fn auto_updates_enabled(background_updates: bool) -> bool {
     background_updates && !cfg!(debug_assertions)
 }
 
-/// Start the task store for a server that saves its session. The `kv` backend
-/// is not built yet, so it leaves tasks off, with a warning.
+/// Start the task store for a server that saves its session. A server that is
+/// not the bus session starts no kv store and so reads no NATS credential; the
+/// `kv` backend is not built into the default build and leaves tasks off, with
+/// a warning.
 fn start_task_service(
     config: &crate::config::TasksConfig,
     policy: &AppPolicy,
@@ -219,26 +221,30 @@ fn start_task_service(
     if !policy.persist_session {
         return crate::tasks::TaskService::disabled();
     }
+    let session = crate::session::active_name();
+    let identity = crate::tasks::TaskIdentity::from_config(config, session.as_deref());
     if config.backend == crate::config::TasksBackend::Kv {
-        tracing::warn!("tasks.backend = \"kv\" is not available in this build; tasks are off");
-        return crate::tasks::TaskService::disabled();
+        if identity.may_use_bus() {
+            tracing::warn!("tasks.backend = \"kv\" is not available in this build; tasks are off");
+        }
+        return crate::tasks::TaskService::without_store(identity);
     }
     let dir = crate::session::data_dir().join("tasks").join("store");
     let store = match crate::tasks::FileStore::open(dir.clone()) {
         Ok(store) => store,
         Err(err) => {
             tracing::warn!(dir = %dir.display(), error = ?err, "cannot open the task store; tasks are off");
-            return crate::tasks::TaskService::disabled();
+            return crate::tasks::TaskService::without_store(identity);
         }
     };
     let tx = event_tx.clone();
-    match crate::tasks::TaskService::start(Box::new(store), move |event| {
+    match crate::tasks::TaskService::start(Box::new(store), identity.clone(), move |event| {
         tx.blocking_send(AppEvent::TaskStore(event)).is_ok()
     }) {
         Ok(service) => service,
         Err(err) => {
             tracing::warn!(error = %err, "cannot start the task store thread; tasks are off");
-            crate::tasks::TaskService::disabled()
+            crate::tasks::TaskService::without_store(identity)
         }
     }
 }

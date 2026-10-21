@@ -12,6 +12,7 @@ mod cache;
 #[cfg(test)]
 mod conformance;
 mod file_store;
+mod identity;
 mod ids;
 #[cfg(feature = "tasks-kv")]
 mod kv_store;
@@ -21,6 +22,7 @@ mod store;
 
 pub(crate) use cache::{CachedTask, TaskCache};
 pub(crate) use file_store::FileStore;
+pub(crate) use identity::{BackendKind, TaskIdentity};
 pub(crate) use ids::{is_valid_host_id, HostId, Rev, TaskId, TaskKey, WriteId};
 #[cfg(feature = "tasks-kv")]
 pub(crate) use kv_store::{KvSettings, KvStore};
