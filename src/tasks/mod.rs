@@ -9,8 +9,12 @@
 #![allow(dead_code, unused_imports)]
 
 mod cache;
+#[cfg(test)]
+mod conformance;
 mod file_store;
 mod ids;
+#[cfg(feature = "tasks-kv")]
+mod kv_store;
 mod model;
 mod service;
 mod store;
@@ -18,6 +22,8 @@ mod store;
 pub(crate) use cache::{CachedTask, TaskCache};
 pub(crate) use file_store::FileStore;
 pub(crate) use ids::{is_valid_host_id, HostId, Rev, TaskId, TaskKey, WriteId};
+#[cfg(feature = "tasks-kv")]
+pub(crate) use kv_store::{KvSettings, KvStore};
 pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,

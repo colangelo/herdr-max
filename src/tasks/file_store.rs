@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
-use super::store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream};
+use super::store::{
+    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchStream,
+};
 
 const EXTENSION: &str = "json";
 
@@ -94,10 +96,6 @@ impl FileStore {
                 .is_ok()
         });
     }
-
-    fn landed_before(current: &[u8], write: &WriteId) -> bool {
-        serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.contains(write))
-    }
 }
 
 fn io_error(err: std::io::Error) -> StoreError {
@@ -120,7 +118,7 @@ impl TaskStore for FileStore {
     fn create(&mut self, key: &TaskKey, doc: &Task, write: WriteId) -> StoreResult<Rev> {
         let name = key.to_string();
         if let Some((rev, current)) = self.read(&name)? {
-            return if Self::landed_before(&current, &write) {
+            return if landed_before(&current, &write) {
                 Ok(rev)
             } else {
                 Err(StoreError::AlreadyExists {
@@ -145,7 +143,7 @@ impl TaskStore for FileStore {
             return Err(StoreError::Conflict { current: None });
         };
         if rev != expected {
-            return if Self::landed_before(&current, &write) {
+            return if landed_before(&current, &write) {
                 Ok(rev)
             } else {
                 Err(StoreError::Conflict {
@@ -286,6 +284,13 @@ mod tests {
             store.update(&missing.key(), &missing, Rev(1), w4),
             Err(StoreError::Conflict { current: None })
         );
+    }
+
+    #[test]
+    fn file_store_meets_the_backend_conformance_cases() {
+        let scratch = Scratch::new();
+        let mut store = FileStore::open(scratch.0.clone()).unwrap();
+        crate::tasks::conformance::run(&mut store);
     }
 
     #[test]

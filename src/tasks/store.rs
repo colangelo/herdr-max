@@ -44,6 +44,13 @@ pub(crate) struct WatchEvent {
 
 pub(crate) type WatchStream = Receiver<WatchEvent>;
 
+/// Whether the document in `current` already holds `write` in its
+/// `last_writes`: an earlier try of the same write landed and only its
+/// acknowledgement was lost.
+pub(crate) fn landed_before(current: &[u8], write: &WriteId) -> bool {
+    serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.contains(write))
+}
+
 pub(crate) trait TaskStore: Send + 'static {
     /// Create `key`. If it already holds a document whose `last_writes`
     /// contains `write`, an earlier try of this same write landed and its

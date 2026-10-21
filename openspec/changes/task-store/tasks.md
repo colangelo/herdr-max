@@ -24,7 +24,7 @@
   Test: `file_store_compare_and_set_conflicts`
 - [x] 2.3 The store task and internal events; API answers from the cache.
   Test: `slow_store_never_blocks_api` (a fake store that sleeps)
-- [ ] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
+- [x] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
   Test: `kv_backend_conformance` (against a local nats-server, feature-gated)
 - [ ] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
   Tests: `foreign_task_write_refused_not_queued`, `non_bus_session_refuses`
