@@ -1728,7 +1728,7 @@ pub struct PaletteConfig {
 }
 
 /// The task store (fork issue 241).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TasksConfig {
     /// Where tasks are kept: `file` (this session's data dir) or `kv` (a NATS JetStream KV bucket; needs the `tasks-kv` build). Default: file.
@@ -1737,6 +1737,19 @@ pub struct TasksConfig {
     pub host_id: String,
     /// The session that talks to the bus. Other sessions on this machine refuse task writes. Needed with the `kv` backend. Default: unset.
     pub bus_session: String,
+    /// The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it, when it starts: a new file is picked up by a restart or a live handoff, not by a config reload. Default: bus.env.
+    pub bus_env: String,
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            backend: TasksBackend::default(),
+            host_id: String::new(),
+            bus_session: String::new(),
+            bus_env: "bus.env".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -1754,7 +1767,7 @@ impl TasksConfig {
     /// checked whenever it is set; the `kv` backend also needs one, and a
     /// `bus_session`.
     pub fn check(&self) -> Result<(), String> {
-        if !self.host_id.is_empty() && !is_valid_host_id(&self.host_id) {
+        if !self.host_id.is_empty() && !crate::tasks::is_valid_host_id(&self.host_id) {
             return Err(format!(
                 "tasks.host_id {:?} must use lowercase letters, digits and '-' (at most 63, not starting with '-')",
                 self.host_id
@@ -1770,15 +1783,6 @@ impl TasksConfig {
         }
         Ok(())
     }
-}
-
-fn is_valid_host_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && !value.starts_with('-')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Sending a message to a session from the command bar.

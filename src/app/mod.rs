@@ -80,6 +80,9 @@ pub(crate) struct AppPolicy {
     pub(crate) persist_session: bool,
     pub(crate) persist_plugin_registry: bool,
     pub(crate) background_updates: bool,
+    /// Leave the task store alone until `assume_handoff_ownership`: the old
+    /// server still holds it while a handoff replacement starts up.
+    pub(crate) defer_task_store: bool,
 }
 
 impl AppPolicy {
@@ -88,6 +91,7 @@ impl AppPolicy {
         persist_session: true,
         persist_plugin_registry: true,
         background_updates: true,
+        defer_task_store: false,
     };
 
     #[cfg(test)]
@@ -96,6 +100,7 @@ impl AppPolicy {
         persist_session: false,
         persist_plugin_registry: false,
         background_updates: false,
+        defer_task_store: false,
     };
 
     #[cfg(unix)]
@@ -104,6 +109,7 @@ impl AppPolicy {
         persist_session: true,
         persist_plugin_registry: true,
         background_updates: true,
+        defer_task_store: true,
     };
 }
 
@@ -117,6 +123,14 @@ pub struct App {
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
     pub(crate) policy: AppPolicy,
+    /// The task store and its cache (fork issue 241).
+    pub(crate) tasks: crate::tasks::TaskService,
+    /// What the store is started from, kept so a live handoff (unix only) can
+    /// stop it and start it again.
+    #[cfg(unix)]
+    pub(crate) task_config: crate::config::TasksConfig,
+    #[cfg(unix)]
+    pub(crate) task_store_dir: std::path::PathBuf,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
@@ -205,6 +219,107 @@ pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
 fn auto_updates_enabled(background_updates: bool) -> bool {
     background_updates && !cfg!(debug_assertions)
+}
+
+/// Start the task store for a server that saves its session. A server that is
+/// not the bus session starts no kv store and so reads no NATS credential. The
+/// `kv` backend reads its credential from `[tasks] bus_env` on the store
+/// thread; without the `tasks-kv` build it says so and runs nothing, and a
+/// missing or unsafe credential file stops it with the reason, rather than
+/// quietly using the file store instead.
+fn start_task_service(
+    config: &crate::config::TasksConfig,
+    store_dir: &std::path::Path,
+    policy: &AppPolicy,
+    event_tx: &mpsc::Sender<AppEvent>,
+) -> crate::tasks::TaskService {
+    if !policy.persist_session {
+        return crate::tasks::TaskService::disabled();
+    }
+    let session = crate::session::active_name();
+    let identity = crate::tasks::TaskIdentity::from_config(config, session.as_deref());
+    let open: Box<
+        dyn FnMut() -> crate::tasks::StoreResult<Box<dyn crate::tasks::TaskStore>> + Send,
+    > = if config.backend == crate::config::TasksBackend::Kv {
+        if !identity.may_use_bus() {
+            return crate::tasks::TaskService::without_store(identity);
+        }
+        match kv_task_store_opener(config, &identity) {
+            Ok(open) => open,
+            Err(reason) => return crate::tasks::TaskService::unavailable(identity, reason),
+        }
+    } else {
+        let dir = store_dir.to_path_buf();
+        Box::new(move || {
+            crate::tasks::FileStore::open(dir.clone())
+                .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
+        })
+    };
+    let tx = event_tx.clone();
+    match crate::tasks::TaskService::start(open, identity.clone(), move |context, event| {
+        deliver_task_event(&tx, context, event)
+    }) {
+        Ok(service) => service,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot start the task store thread; tasks are off");
+            crate::tasks::TaskService::unavailable(
+                identity,
+                format!("cannot start the task store thread: {err}"),
+            )
+        }
+    }
+}
+
+/// Hand a store event to the app. The app drains its channel on its own
+/// schedule, so a full channel is waited out; but once the service is being
+/// stopped the app may be waiting for it, so the event is dropped instead.
+fn deliver_task_event(
+    tx: &mpsc::Sender<AppEvent>,
+    context: crate::tasks::EventContext,
+    event: crate::tasks::StoreEvent,
+) -> bool {
+    let mut message = AppEvent::TaskStore {
+        generation: context.generation,
+        event,
+    };
+    loop {
+        match tx.try_send(message) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(back)) => {
+                if context.stopping() {
+                    return true;
+                }
+                message = back;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+/// Opens the kv store: reads the credential file, then connects. Both happen
+/// on the store thread when the closure runs.
+#[cfg(feature = "tasks-kv")]
+fn kv_task_store_opener(
+    config: &crate::config::TasksConfig,
+    identity: &crate::tasks::TaskIdentity,
+) -> Result<crate::tasks::StoreOpener, String> {
+    let path = crate::config::config_dir().join(&config.bus_env);
+    let host = identity.host.to_string();
+    Ok(Box::new(move || {
+        let env = crate::tasks::load_bus_env(&path).map_err(crate::tasks::StoreError::Io)?;
+        let settings = crate::tasks::KvSettings::from_bus_env(env, &host);
+        crate::tasks::KvStore::connect(&settings)
+            .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
+    }))
+}
+
+#[cfg(not(feature = "tasks-kv"))]
+fn kv_task_store_opener(
+    _config: &crate::config::TasksConfig,
+    _identity: &crate::tasks::TaskIdentity,
+) -> Result<crate::tasks::StoreOpener, String> {
+    Err("tasks.backend = \"kv\" needs a build with the tasks-kv feature".to_owned())
 }
 
 fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
@@ -648,6 +763,12 @@ impl App {
             }
         }
 
+        let task_store_dir = crate::session::data_dir().join("tasks").join("store");
+        let tasks = if policy.defer_task_store {
+            crate::tasks::TaskService::disabled()
+        } else {
+            start_task_service(&config.tasks, &task_store_dir, &policy, &event_tx)
+        };
         let last_focus = state.active.and_then(|idx| {
             state
                 .workspaces
@@ -667,6 +788,11 @@ impl App {
             state,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            tasks,
+            #[cfg(unix)]
+            task_config: config.tasks.clone(),
+            #[cfg(unix)]
+            task_store_dir,
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -812,6 +938,35 @@ impl App {
     #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.terminal_runtimes.assume_handoff_ownership();
+        // The old server has committed and let go of the task store.
+        if self.policy.defer_task_store {
+            self.start_task_store();
+        }
+    }
+
+    /// Start (or restart) the task store from the configuration it was built
+    /// with.
+    #[cfg(unix)]
+    pub(crate) fn start_task_store(&mut self) {
+        // What the old service had not yet reported is carried over, and its
+        // late events are dropped by generation.
+        let carried =
+            std::mem::replace(&mut self.tasks, crate::tasks::TaskService::disabled()).retire();
+        self.tasks = start_task_service(
+            &self.task_config,
+            &self.task_store_dir,
+            &self.policy,
+            &self.event_tx,
+        );
+        self.tasks.adopt(carried);
+    }
+
+    /// Stop the task store for a handoff. False when the replacement must not
+    /// go on: the file store did not let go in time. A bus store that did not
+    /// stop is only logged.
+    #[cfg(unix)]
+    pub(crate) fn quiesce_task_store(&mut self, timeout: Duration) -> bool {
+        self.tasks.quiesce_for_handoff(timeout)
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
@@ -1730,6 +1885,142 @@ mod tests {
 
         assert!(!app.drain_internal_events());
         assert!(!app.git_refresh_in_flight);
+    }
+
+    fn kv_tasks_config(bus_env: &str) -> crate::config::TasksConfig {
+        crate::config::TasksConfig {
+            backend: crate::config::TasksBackend::Kv,
+            host_id: "m4m".into(),
+            bus_session: "default".into(),
+            bus_env: bus_env.into(),
+        }
+    }
+
+    #[cfg(not(feature = "tasks-kv"))]
+    #[test]
+    fn the_kv_backend_without_its_feature_says_so_instead_of_using_the_file_store() {
+        let config = kv_tasks_config("bus.env");
+        let identity = crate::tasks::TaskIdentity::from_config(&config, None);
+        let reason = kv_task_store_opener(&config, &identity).err().unwrap();
+        assert!(reason.contains("tasks-kv"), "{reason}");
+    }
+
+    #[cfg(feature = "tasks-kv")]
+    #[test]
+    fn the_kv_backend_refuses_a_missing_credential_file_with_the_reason() {
+        let missing = std::env::temp_dir().join("herdr-no-such-bus.env");
+        let config = kv_tasks_config(&missing.display().to_string());
+        let identity = crate::tasks::TaskIdentity::from_config(&config, None);
+        let mut open = kv_task_store_opener(&config, &identity).unwrap();
+        match open() {
+            Err(crate::tasks::StoreError::Io(why)) => {
+                assert!(why.contains("bus credential file"), "{why}")
+            }
+            Err(err) => panic!("expected Io, got {err:?}"),
+            Ok(_) => panic!("a missing credential file must not open a store"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_replacement_opens_the_task_store_only_after_the_old_one_let_go() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-handoff-store-{}-{}",
+            std::process::id(),
+            crate::ulid::new_ulid()
+        ));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+
+        // The old server: its store runs on the directory.
+        let mut old = test_app();
+        old.policy.persist_session = true;
+        old.task_store_dir = dir.clone();
+        old.start_task_store();
+        wait_until(|| {
+            old.drain_all_internal_events();
+            old.tasks.is_loaded()
+        });
+
+        // The replacement is built first and does not touch the directory.
+        let mut replacement = test_app();
+        replacement.policy.persist_session = true;
+        replacement.policy.defer_task_store = true;
+        replacement.task_store_dir = dir.clone();
+        assert!(!replacement.tasks.is_running());
+
+        // The old server lets go before it reports "committed"; if the commit
+        // fails it takes the store back.
+        assert!(old.quiesce_task_store(Duration::from_secs(5)));
+        assert!(!old.tasks.is_running());
+        old.start_task_store();
+        assert!(old.tasks.is_running());
+        assert!(old.quiesce_task_store(Duration::from_secs(5)));
+
+        // After the commit the replacement owns the session and opens it.
+        replacement.assume_handoff_ownership();
+        assert!(replacement.tasks.is_running());
+        wait_until(|| {
+            replacement.drain_all_internal_events();
+            replacement.tasks.is_loaded()
+        });
+        assert_eq!(replacement.tasks.failure(), None);
+
+        assert!(replacement.quiesce_task_store(Duration::from_secs(5)));
+        old.policy.persist_session = false;
+        replacement.policy.persist_session = false;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn task_store_events_reach_the_cache_before_the_next_api_request() {
+        use crate::tasks::{
+            HostId, Origin, Rev, StoreEvent, Task, TaskId, Timestamp, Via, WatchEvent,
+        };
+
+        let mut app = test_app();
+        assert_eq!(app.tasks.cache().len(), 0, "a test app runs no store");
+        let task = Task::new(
+            HostId::new("m4m").unwrap(),
+            TaskId::new("tk-1").unwrap(),
+            "from the store",
+            Origin {
+                host: "m4m".into(),
+                by: "x".into(),
+                via: Via::Cli,
+            },
+            Timestamp("2026-10-21T20:00:00Z".into()),
+        )
+        .unwrap();
+        app.event_tx
+            .try_send(AppEvent::TaskStore {
+                generation: app.tasks.generation(),
+                event: StoreEvent::Changed(WatchEvent {
+                    key: crate::tasks::StoreKey::from(&task.key()),
+                    rev: Rev(1),
+                    value: Some(serde_json::to_vec(&task).unwrap()),
+                }),
+            })
+            .unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorkspaceList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+
+        assert!(response.contains("\"result\""), "{response}");
+        assert_eq!(app.tasks.cache().len(), 1);
     }
 
     #[test]

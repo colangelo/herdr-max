@@ -52,12 +52,15 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13.1"
 schemars = { version = "1.2.1", features = ["derive"] }
+# Only for the kv task store, behind the off-by-default `tasks-kv` feature.
+async-nats = { version = "0.50", optional = true, default-features = false, features = ["ring", "kv", "server_2_10"] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
 
 [features]
 # The kv task store (fork issue 241) keeps its NATS client behind this feature.
 # Off by default: upstream, Windows and Linux builds link no NATS crate, and
 # `scripts/test_default_build_has_no_nats.py` keeps it that way.
-tasks-kv = []
+tasks-kv = ["dep:async-nats", "dep:futures-util"]
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }

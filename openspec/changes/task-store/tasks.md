@@ -18,15 +18,15 @@
 
 ## 2. Phase 2: the store and the read-only panel
 
-- [ ] 2.1 `src/tasks/`: `Task`, `TaskKey`, `TaskStore` trait, `TaskCache`. Tests:
+- [x] 2.1 `src/tasks/`: `Task`, `TaskKey`, `TaskStore` trait, `TaskCache`. Tests:
   `task_record_limits`, `status_machine_refuses_bad_moves`
-- [ ] 2.2 The `file` backend under the session data dir, with per-key revisions.
+- [x] 2.2 The `file` backend under the session data dir, with per-key revisions.
   Test: `file_store_compare_and_set_conflicts`
-- [ ] 2.3 The store task and internal events; API answers from the cache.
+- [x] 2.3 The store task and internal events; API answers from the cache.
   Test: `slow_store_never_blocks_api` (a fake store that sleeps)
-- [ ] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
+- [x] 2.4 The `kv` backend behind `tasks-kv`: create, update, watch, scan.
   Test: `kv_backend_conformance` (against a local nats-server, feature-gated)
-- [ ] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
+- [x] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
   Tests: `foreign_task_write_refused_not_queued`, `non_bus_session_refuses`
 - [ ] 2.6 `write_id`, `last_writes`, the outbox and receipts, chained bases, replay.
   Tests: `lost_ack_replay_is_dropped`, `chained_entries_replay_in_order`
