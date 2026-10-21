@@ -8,7 +8,7 @@
   unchanged
 - [x] 1.3 `[tasks] host_id`, `bus_session`, `backend` in config, with validation.
   Test: `tasks_config_rejects_missing_host_id_for_kv`
-- [ ] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
+- [x] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
   that the default build links no NATS crate. Test: `default_build_has_no_nats`
   (cargo tree)
 - [ ] 1.5 Old session files load, and new optional fields are skipped when empty.
