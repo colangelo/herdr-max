@@ -173,6 +173,7 @@ mod tests {
             key: StoreKey::from(&task.key()),
             rev: Rev(rev),
             value: Some(serde_json::to_vec(task).unwrap()),
+            at: None,
         }
     }
 
@@ -207,6 +208,7 @@ mod tests {
             key: StoreKey::from(&one.key()),
             rev: Rev(5),
             value: None,
+            at: None,
         };
         assert!(cache.apply(&gone));
         assert_eq!(cache.len(), 0);
@@ -227,6 +229,7 @@ mod tests {
             key: StoreKey::from(&one.key()),
             rev: Rev(1),
             value: Some(b"{not json".to_vec()),
+            at: None,
         };
         assert!(!cache.apply(&garbage));
         let mut long = one.clone();
@@ -238,6 +241,7 @@ mod tests {
             key: StoreKey("run.worklink.rn-1".into()),
             rev: Rev(1),
             value: Some(b"{}".to_vec()),
+            at: None,
         };
         assert!(!cache.apply(&run));
 
@@ -288,6 +292,7 @@ mod tests {
             key: StoreKey::from(&one.key()),
             rev: Rev(3),
             value: Some(serde_json::to_vec(&json).unwrap()),
+            at: None,
         };
         assert!(cache.apply(&newer), "{:?}", cache.rejected());
         let shown = &cache.get(&one.key()).unwrap().task;
@@ -307,6 +312,7 @@ mod tests {
                 key: StoreKey(format!("task.m4m.tk-{n}")),
                 rev: Rev(1),
                 value: Some(b"{".to_vec()),
+                at: None,
             };
             assert!(!cache.apply(&garbage));
         }

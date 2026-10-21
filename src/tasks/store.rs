@@ -46,12 +46,16 @@ impl std::fmt::Display for StoreError {
 
 pub(crate) type StoreResult<T> = Result<T, StoreError>;
 
-/// A change seen by a watch. `value` is `None` when the key was removed.
+/// A change seen by a watch, or an entry read by a scan. `value` is `None`
+/// when the key was removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchEvent {
     pub key: StoreKey,
     pub rev: Rev,
     pub value: Option<Vec<u8>>,
+    /// When the store took this revision, by the store's own clock, not the
+    /// writer's. `None` when the backend cannot say.
+    pub at: Option<std::time::SystemTime>,
 }
 
 /// Where a backend delivers watch events. Returns false once nobody listens,
@@ -85,8 +89,9 @@ pub(crate) trait TaskStore: Send + 'static {
 
     fn get(&mut self, key: &StoreKey) -> StoreResult<Option<(Rev, Vec<u8>)>>;
 
-    /// Every key that starts with `prefix`, with its revision and document.
-    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>>;
+    /// Every key that starts with `prefix`, as the events a watch would have
+    /// delivered for them (so with a value), in key order.
+    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>>;
 
     /// Report every change under `prefix` from now on to `sink`.
     fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()>;

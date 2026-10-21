@@ -11,6 +11,8 @@ use async_nats::jetstream::kv::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use std::time::SystemTime;
+
 use tokio::runtime::Runtime;
 
 use super::ids::{Rev, TaskKey, WriteId};
@@ -99,11 +101,19 @@ impl KvStore {
     }
 
     fn entry(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>)>> {
+        Ok(self.entry_at(key)?.map(|(rev, value, _)| (rev, value)))
+    }
+
+    /// As [`Self::entry`], with the time the server took the revision.
+    fn entry_at(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>, SystemTime)>> {
         let entry = self
             .runtime
             .block_on(self.bucket.entry(key.to_owned()))
             .map_err(unavailable)?;
-        Ok(entry.and_then(|entry| live(&entry)))
+        Ok(entry.and_then(|entry| {
+            let (rev, value) = live(&entry)?;
+            Some((rev, value, entry.created.into()))
+        }))
     }
 
     fn document(doc: &Task) -> StoreResult<Bytes> {
@@ -199,7 +209,7 @@ impl TaskStore for KvStore {
         self.entry(&key.0)
     }
 
-    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>> {
+    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>> {
         let keys = self.runtime.block_on(async {
             let mut stream = self.bucket.keys().await.map_err(unavailable)?;
             let mut keys = Vec::new();
@@ -213,11 +223,16 @@ impl TaskStore for KvStore {
         })?;
         let mut found = Vec::new();
         for key in keys {
-            if let Some((rev, value)) = self.entry(&key)? {
-                found.push((StoreKey(key), rev, value));
+            if let Some((rev, value, at)) = self.entry_at(&key)? {
+                found.push(WatchEvent {
+                    key: StoreKey(key),
+                    rev,
+                    value: Some(value),
+                    at: Some(at),
+                });
             }
         }
-        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found.sort_by(|left, right| left.key.cmp(&right.key));
         Ok(found)
     }
 
@@ -239,6 +254,7 @@ impl TaskStore for KvStore {
                     key: StoreKey(entry.key.clone()),
                     rev: Rev(entry.revision),
                     value: live(&entry).map(|(_, value)| value),
+                    at: Some(entry.created.into()),
                 };
                 if !sink(event) {
                     break;

@@ -830,15 +830,7 @@ fn run_store(
             return None;
         }
         match store.scan("") {
-            Ok(found) => {
-                let events = found
-                    .into_iter()
-                    .map(|(key, rev, value)| WatchEvent {
-                        key,
-                        rev,
-                        value: Some(value),
-                    })
-                    .collect();
+            Ok(events) => {
                 if !emit(StoreEvent::Loaded(events)) {
                     return None;
                 }
@@ -1310,6 +1302,7 @@ mod tests {
                     key: StoreKey::from(key),
                     rev,
                     value: Some(bytes.clone()),
+                    at: None,
                 })
             });
         }
@@ -1382,7 +1375,7 @@ mod tests {
             Ok(self.docs.get(&key.0).cloned())
         }
 
-        fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>> {
+        fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>> {
             if self
                 .scan_failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -1396,7 +1389,12 @@ mod tests {
                 .docs
                 .iter()
                 .filter(|(key, _)| key.starts_with(prefix))
-                .map(|(key, (rev, bytes))| (StoreKey(key.clone()), *rev, bytes.clone()))
+                .map(|(key, (rev, bytes))| WatchEvent {
+                    key: StoreKey(key.clone()),
+                    rev: *rev,
+                    value: Some(bytes.clone()),
+                    at: None,
+                })
                 .collect())
         }
 

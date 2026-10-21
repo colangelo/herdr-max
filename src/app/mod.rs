@@ -2086,6 +2086,7 @@ mod tests {
                     key: crate::tasks::StoreKey::from(&task.key()),
                     rev: Rev(1),
                     value: Some(serde_json::to_vec(&task).unwrap()),
+                    at: None,
                 }),
             })
             .unwrap();
