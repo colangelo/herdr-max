@@ -240,6 +240,7 @@ fn reply_to_probe(request: ApiRequestMessage) {
                 tokens: Default::default(),
                 agent_session: None,
                 last_input_at_unix: None,
+                pane_key: None,
                 scroll: None,
                 revision: 0,
             },

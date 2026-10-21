@@ -4080,6 +4080,89 @@ mod tests {
         assert!(app.resolve_agent_target(&move_result.pane.pane_id).is_ok());
     }
 
+    #[tokio::test]
+    async fn pane_key_survives_restore_move_and_handoff() {
+        let mut app = app_with_linked_worktree();
+        app.state.workspaces.push(Workspace::test_new("other"));
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let target = app.state.workspaces[1].tabs[0].root_pane;
+        seed_terminal_states(&mut app);
+        let key = app.state.terminals[&source_terminal].pane_key.clone();
+        assert!(crate::ulid::is_ulid(&key), "{key}");
+
+        let pane_info = |app: &App, public_id: &str| {
+            let (ws_idx, pane_id) = app.parse_pane_id(public_id).unwrap();
+            app.pane_metadata(ws_idx, pane_id).unwrap()
+        };
+        let source_public = app.public_pane_id(0, source).unwrap();
+        assert_eq!(
+            pane_info(&app, &source_public).pane_key.as_deref(),
+            Some(key.as_str())
+        );
+
+        // A move to another space gives the pane a new public id, not a new key.
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: app.public_tab_id(1, 0).unwrap(),
+                    target_pane_id: Some(app.public_pane_id(1, target).unwrap()),
+                    split: SplitDirection::Down,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert_eq!(move_result.pane.pane_key.as_deref(), Some(key.as_str()));
+
+        // A live handoff carries the saved snapshot as JSON; a restart reads
+        // it from disk. Both go through the same snapshot, then `restore`.
+        let snapshot = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.last_client_size,
+        );
+        let snapshot: crate::persist::SessionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let (events, _event_rx) = tokio::sync::mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = crate::persist::restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            if cfg!(windows) {
+                "C:\\Windows\\System32\\whoami.exe"
+            } else {
+                "/bin/sh"
+            },
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        let restored_keys: Vec<&str> = workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.values())
+            .map(|pane| terminals[&pane.attached_terminal_id].pane_key.as_str())
+            .collect();
+        assert!(restored_keys.contains(&key.as_str()), "{restored_keys:?}");
+    }
+
     #[test]
     fn api_pane_move_legacy_target_tab_id_survives_source_workspace_removal() {
         let mut app = app_with_linked_worktree();

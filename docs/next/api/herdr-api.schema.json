@@ -961,6 +961,13 @@
             "pane_id": {
               "type": "string"
             },
+            "pane_key": {
+              "description": "A stable id for the pane (a ULID). It stays the same across a restart,\na move to another space and a live handoff, while `pane_id` changes on\na move. Absent from servers that predate it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "pinned": {
               "description": "Pinned agents sit at the top of the agent panel in pin order.",
               "type": "boolean"
@@ -9459,6 +9466,13 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "pane_key": {
+              "description": "A stable id for the pane (a ULID). It stays the same across a restart,\na move to another space and a live handoff, while `pane_id` changes on\na move. Absent from servers that predate it.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "pinned": {
               "description": "Pinned agents sit at the top of the agent panel in pin order.",

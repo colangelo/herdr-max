@@ -154,6 +154,10 @@ pub struct PaneSnapshot {
     /// reports landing. Omitted when the pane never moved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub former_public_ids: Vec<String>,
+    /// The pane's stable key. Absent in sessions saved before it existed; the
+    /// restore then keeps the key the terminal was just given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +486,7 @@ fn capture_tab(
             crate::terminal::pane_last_input_at_ms(terminal, terminal_runtimes.get(&terminal.id))
         });
         let pin_order = terminal.and_then(|terminal| terminal.pin_order);
+        let pane_key = terminal.map(|terminal| terminal.pane_key.clone());
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
         // bottom of the buffer once per capture, only for a Claude record.
@@ -525,6 +530,7 @@ fn capture_tab(
                 last_input_at_ms,
                 pin_order,
                 former_public_ids: Vec::new(),
+                pane_key,
             },
         );
     }
@@ -886,6 +892,7 @@ mod tests {
                 last_input_at_ms: None,
                 pin_order: None,
                 former_public_ids: Vec::new(),
+                pane_key: None,
             },
         );
         panes.insert(
@@ -904,6 +911,7 @@ mod tests {
                 last_input_at_ms: None,
                 pin_order: None,
                 former_public_ids: Vec::new(),
+                pane_key: None,
             },
         );
 
@@ -1751,6 +1759,7 @@ mod tests {
             last_input_at_ms: None,
             pin_order: None,
             former_public_ids: Vec::new(),
+            pane_key: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1784,6 +1793,7 @@ mod tests {
             last_input_at_ms: None,
             pin_order: None,
             former_public_ids: Vec::new(),
+            pane_key: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1874,6 +1884,7 @@ mod tests {
                 last_input_at_ms: None,
                 pin_order: None,
                 former_public_ids: Vec::new(),
+                pane_key: None,
             },
         );
         panes.insert(
@@ -1894,6 +1905,7 @@ mod tests {
                 last_input_at_ms: None,
                 pin_order: None,
                 former_public_ids: Vec::new(),
+                pane_key: None,
             },
         );
 

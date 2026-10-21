@@ -1,6 +1,6 @@
 ## 1. Prerequisites (ship before the freeze)
 
-- [ ] 1.1 `pane_key` on `TerminalState`, saved and restored in `PaneSnapshot`, kept by
+- [x] 1.1 `pane_key` on `TerminalState`, saved and restored in `PaneSnapshot`, kept by
   moves, optional in `PaneInfo`. Test: `pane_key_survives_restore_move_and_handoff`
 - [ ] 1.2 `HERDR_RUN_ID` taken from the `pane.split` and `tab.create` env into
   `PaneSnapshot.run_id`, returned by `pane.get` and `pane.list`, still passed to the
