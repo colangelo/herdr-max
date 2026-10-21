@@ -126,6 +126,8 @@ pub(super) struct ShellHitMap {
     /// bottom-right notification center opens above it.
     pub(super) notification_indicator: Rect,
     pub(super) todo_board: Rect,
+    /// The tab bar's work count, which opens the work panel.
+    pub(super) work_count: Rect,
     pub(super) pane_todos: Vec<(Rect, String)>,
     pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,

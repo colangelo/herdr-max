@@ -384,6 +384,7 @@ impl ClientShellState {
         if mode_bar == Some(layout.tab_bar) {
             self.hits.notification_indicator = Rect::default();
             self.hits.todo_board = Rect::default();
+            self.hits.work_count = Rect::default();
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();
@@ -460,6 +461,9 @@ impl ClientShellState {
                 }
                 if !rect.intersection(self.hits.todo_board).is_empty() {
                     self.hits.todo_board = Rect::default();
+                }
+                if !rect.intersection(self.hits.work_count).is_empty() {
+                    self.hits.work_count = Rect::default();
                 }
                 occlusion.cover(rect);
             }

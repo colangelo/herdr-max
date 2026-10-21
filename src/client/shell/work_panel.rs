@@ -1037,6 +1037,16 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    /// Open the panel, or close it when it is already open: the tab-bar count's
+    /// toggle.
+    pub(super) fn toggle_work_panel(&mut self, outcome: &mut ClientShellInput) {
+        if matches!(self.overlay, Some(ClientShellOverlay::WorkPanel(_))) {
+            self.close_work_panel(outcome);
+            return;
+        }
+        self.open_work_panel(outcome);
+    }
+
     fn close_work_panel(&mut self, outcome: &mut ClientShellInput) {
         self.overlay = None;
         self.mode = ClientShellMode::Terminal;

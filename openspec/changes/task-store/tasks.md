@@ -49,7 +49,7 @@
 - [x] 2.14 `WorkPanel` overlay: four views, `last_sync`, the `open_work_panel` action
   with its help entry. Tests: rendered layouts under `src/client/shell/tests/`,
   `keybind_help_lists_open_work_panel`
-- [ ] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
+- [x] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
 - [ ] 2.16 Oracle: the panel rows equal the forge API's for `uzi-sandbox` (diff test,
   owned with worklink)
 - [ ] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
