@@ -256,7 +256,13 @@ fn start_task_service(
         })
     };
     let tx = event_tx.clone();
-    match crate::tasks::TaskService::start(open, identity.clone(), move |context, event| {
+    let options = crate::tasks::StartOptions {
+        identity: identity.clone(),
+        backoff: crate::tasks::Backoff::default(),
+        // Next to the store, under the session's data dir.
+        outbox_dir: store_dir.with_file_name("outbox"),
+    };
+    match crate::tasks::TaskService::start(open, options, move |context, event| {
         deliver_task_event(&tx, context, event)
     }) {
         Ok(service) => service,
@@ -1970,6 +1976,78 @@ mod tests {
         old.policy.persist_session = false;
         replacement.policy.persist_session = false;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two writes wait in the outbox because the store is held by someone else;
+    /// the old server hands over, and the replacement sends both, in order.
+    #[cfg(unix)]
+    #[test]
+    fn outbox_survives_live_handoff() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-handoff-outbox-{}-{}",
+            std::process::id(),
+            crate::ulid::new_ulid()
+        ));
+        let store_dir = base.join("store");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        let task = |id: &str, title: &str| {
+            let mut task = crate::tasks::Task::new(
+                crate::tasks::HostId::local(),
+                crate::tasks::TaskId::new(id).unwrap(),
+                title,
+                crate::tasks::Origin {
+                    host: "local".into(),
+                    by: "test".into(),
+                    via: crate::tasks::Via::Cli,
+                },
+                crate::tasks::Timestamp("2026-10-21T20:00:00Z".into()),
+            )
+            .unwrap();
+            task.priority = crate::tasks::Priority::High;
+            task
+        };
+
+        // Someone else holds the store, so nothing the old server writes can
+        // land yet; its outbox is its own and opens fine.
+        let holder = crate::tasks::FileStore::open(store_dir.clone()).unwrap();
+        let mut old = test_app();
+        old.policy.persist_session = true;
+        old.task_store_dir = store_dir.clone();
+        old.start_task_store();
+        let first = task("tk-1", "first");
+        old.tasks.submit_create(&first).unwrap();
+        let mut second = first.clone();
+        second.title = "second".into();
+        old.tasks
+            .submit_update(&second, crate::tasks::Rev(1))
+            .unwrap();
+        assert_eq!(old.tasks.pending_count(), 2);
+
+        // The old server lets go before it commits. Both writes are on disk.
+        assert!(old.quiesce_task_store(Duration::from_secs(5)));
+        drop(holder);
+
+        // The replacement opens the same directories after the commit.
+        let mut replacement = test_app();
+        replacement.policy.persist_session = true;
+        replacement.policy.defer_task_store = true;
+        replacement.task_store_dir = store_dir;
+        replacement.assume_handoff_ownership();
+        wait_until(|| {
+            replacement.drain_all_internal_events();
+            replacement.tasks.is_loaded()
+                && replacement.tasks.pending_count() == 0
+                && replacement.tasks.cache().len() == 1
+        });
+        let cached = replacement.tasks.cache().get(&first.key()).unwrap();
+        assert_eq!(cached.task.title, "second", "both writes, in order");
+        assert_eq!(cached.rev, crate::tasks::Rev(2));
+
+        assert!(replacement.quiesce_task_store(Duration::from_secs(5)));
+        old.policy.persist_session = false;
+        replacement.policy.persist_session = false;
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]

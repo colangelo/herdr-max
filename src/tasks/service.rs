@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -20,7 +21,8 @@ use super::cache::TaskCache;
 use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::{Task, TaskError};
-use super::store::{StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
+use super::outbox::{Base, Entry, Op, Outbox};
+use super::store::{landed_before, StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 
 /// Writes that may wait for the store at once. More are refused, so a store
 /// that stopped answering cannot make the server queue without end.
@@ -71,19 +73,14 @@ impl Backoff {
     }
 }
 
-/// A write for the store thread.
-enum WriteCommand {
-    Create {
-        key: TaskKey,
-        doc: Box<Task>,
-        write: WriteId,
-    },
-    Update {
-        key: TaskKey,
-        doc: Box<Task>,
-        expected: Rev,
-        write: WriteId,
-    },
+/// A write for the store thread: it goes into the outbox first.
+struct WriteCommand {
+    write: WriteId,
+    op: Op,
+    doc: Box<Task>,
+    /// What an update is written against: the revision the caller saw, or the
+    /// earlier write it was built on.
+    base: Option<Base>,
 }
 
 /// Everything the store thread's one channel carries.
@@ -100,6 +97,9 @@ pub(crate) enum StoreEvent {
     Loaded(Vec<WatchEvent>),
     /// A change seen by the watch.
     Changed(WatchEvent),
+    /// Writes found waiting in the outbox when the thread started, from an
+    /// earlier run of the server: they count as pending until they settle.
+    Queued(Vec<(WriteId, TaskKey, Box<Task>)>),
     /// How a write ended.
     Outcome {
         write: WriteId,
@@ -152,6 +152,14 @@ impl SubmitError {
     }
 }
 
+/// How to start the service.
+pub(crate) struct StartOptions {
+    pub identity: TaskIdentity,
+    pub backoff: Backoff,
+    /// Where queued writes are kept, durably, until the store has them.
+    pub outbox_dir: PathBuf,
+}
+
 pub(crate) struct TaskService {
     /// Tells events of this service from those of one it replaced.
     generation: u64,
@@ -165,6 +173,9 @@ pub(crate) struct TaskService {
     finished: Option<Receiver<()>>,
     /// Writes sent and not yet answered, by write id.
     pending: HashMap<WriteId, TaskKey>,
+    /// The newest version of each task that has a write pending: what the next
+    /// edit is built on, so two quick edits do not undo each other.
+    latest: HashMap<TaskKey, (WriteId, Task)>,
     /// Outcomes not yet taken, in arrival order.
     outcomes: Vec<(WriteId, WriteOutcome)>,
     /// Why the store is unusable, when it is.
@@ -184,6 +195,7 @@ impl TaskService {
             commands: None,
             finished: None,
             pending: HashMap::new(),
+            latest: HashMap::new(),
             outcomes: Vec::new(),
             failure: None,
             loaded: false,
@@ -205,22 +217,14 @@ impl TaskService {
         service
     }
 
-    /// Build a store with `open` on a new thread and run it there. `open` is
-    /// tried again after a backoff while it answers `Unavailable`; any other
-    /// error ends the thread. `emit` delivers each event to the app and
-    /// returns false once the app is gone, which ends the thread.
+    /// Build a store with `open` on a new thread and run it there, with its
+    /// outbox in `options.outbox_dir`. `open` is tried again after a backoff
+    /// while it answers `Unavailable`; any other error ends the thread. `emit`
+    /// delivers each event to the app and returns false once the app is gone,
+    /// which ends the thread.
     pub(crate) fn start(
         open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
-        identity: TaskIdentity,
-        emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
-    ) -> std::io::Result<Self> {
-        Self::start_with(open, identity, Backoff::default(), emit)
-    }
-
-    pub(crate) fn start_with(
-        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
-        identity: TaskIdentity,
-        backoff: Backoff,
+        options: StartOptions,
         emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
     ) -> std::io::Result<Self> {
         static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -231,6 +235,11 @@ impl TaskService {
         let (sender, receiver) = mpsc::channel();
         let (done_sender, done_receiver) = mpsc::channel();
         let watch_sender = sender.clone();
+        let StartOptions {
+            identity,
+            backoff,
+            outbox_dir,
+        } = options;
         crate::thread_spawn::spawn_named("herdr-task-store", move || {
             let context = EventContext {
                 generation,
@@ -244,6 +253,7 @@ impl TaskService {
                     watch_sender,
                     backoff,
                     &thread_stop_ref,
+                    outbox_dir,
                     &emit,
                 )
             }));
@@ -262,6 +272,19 @@ impl TaskService {
         service.commands = Some(sender);
         service.finished = Some(done_receiver);
         Ok(service)
+    }
+
+    /// The version of a task to build an edit on: the newest one that has a
+    /// write pending, else the cached one with its revision. A second edit made
+    /// while the first is still queued then keeps the first.
+    pub(crate) fn current(&self, key: &TaskKey) -> Option<(Option<Rev>, &Task)> {
+        match self.latest.get(key) {
+            Some((_, task)) => Some((self.cache.get(key).map(|cached| cached.rev), task)),
+            None => self
+                .cache
+                .get(key)
+                .map(|cached| (Some(cached.rev), &cached.task)),
+        }
     }
 
     pub(crate) fn cache(&self) -> &TaskCache {
@@ -290,16 +313,12 @@ impl TaskService {
     pub(crate) fn submit_create(&mut self, task: &Task) -> Result<WriteId, SubmitError> {
         self.check_may_write(task)?;
         let (doc, write) = self.prepare(task)?;
-        let key = doc.key();
-        self.send(
-            WriteCommand::Create {
-                key: key.clone(),
-                doc: Box::new(doc),
-                write: write.clone(),
-            },
+        self.send(WriteCommand {
             write,
-            key,
-        )
+            op: Op::Create,
+            doc: Box::new(doc),
+            base: None,
+        })
     }
 
     /// Queue an update of a task last seen at `expected`.
@@ -313,17 +332,18 @@ impl TaskService {
             return Err(SubmitError::Refused(TaskError::BadRevision));
         }
         let (doc, write) = self.prepare(task)?;
-        let key = doc.key();
-        self.send(
-            WriteCommand::Update {
-                key: key.clone(),
-                doc: Box::new(doc),
-                expected,
-                write: write.clone(),
-            },
+        // An edit made while an earlier one is still queued is built on it,
+        // whatever has been sent since.
+        let base = match self.latest.get(&doc.key()) {
+            Some((ahead, _)) => Base::After(ahead.clone()),
+            None => Base::Rev(expected),
+        };
+        self.send(WriteCommand {
             write,
-            key,
-        )
+            op: Op::Update,
+            doc: Box::new(doc),
+            base: Some(base),
+        })
     }
 
     /// Validate `task`, give it a fresh write id and record the id in its copy.
@@ -356,19 +376,24 @@ impl TaskService {
         }
     }
 
-    fn send(
-        &mut self,
-        command: WriteCommand,
-        write: WriteId,
-        key: TaskKey,
-    ) -> Result<WriteId, SubmitError> {
+    fn send(&mut self, command: WriteCommand) -> Result<WriteId, SubmitError> {
         let commands = self.commands.as_ref().ok_or(SubmitError::Disabled)?;
+        let write = command.write.clone();
+        let doc = (*command.doc).clone();
         if commands.send(Message::Write(command)).is_err() {
             self.mark_stopped("the task store thread is gone".to_owned());
             return Err(SubmitError::Stopped);
         }
-        self.pending.insert(write.clone(), key);
+        self.pending.insert(write.clone(), doc.key());
+        self.latest.insert(doc.key(), (write.clone(), doc));
         Ok(write)
+    }
+
+    /// Forget the newest-version note of a key once nothing is pending for it.
+    fn settle_latest(&mut self, key: &TaskKey) {
+        if !self.pending.values().any(|pending| pending == key) {
+            self.latest.remove(key);
+        }
     }
 
     fn push_outcome(&mut self, write: WriteId, outcome: WriteOutcome) {
@@ -385,6 +410,7 @@ impl TaskService {
         self.failure = Some(reason.clone());
         // One of them may have been in flight when the thread ended: its fate
         // is unknown, and a replay of its write id decides.
+        self.latest.clear();
         let pending: Vec<WriteId> = self.pending.drain().map(|(write, _)| write).collect();
         for write in pending {
             self.push_outcome(write, WriteOutcome::Unknown(reason.clone()));
@@ -404,12 +430,20 @@ impl TaskService {
                 true
             }
             StoreEvent::Changed(event) => self.cache.apply(&event),
+            StoreEvent::Queued(writes) => {
+                for (write, key, doc) in writes {
+                    self.pending.insert(write.clone(), key.clone());
+                    self.latest.insert(key, (write, *doc));
+                }
+                true
+            }
             StoreEvent::Outcome { write, outcome } => {
                 // A write already reported (as unknown, when the thread was
                 // stopped or replaced) is not reported a second time.
-                if self.pending.remove(&write).is_none() {
+                let Some(key) = self.pending.remove(&write) else {
                     return false;
-                }
+                };
+                self.settle_latest(&key);
                 self.push_outcome(write, outcome);
                 true
             }
@@ -422,6 +456,12 @@ impl TaskService {
                 true
             }
         }
+    }
+
+    /// The outcomes that arrived since the last call, without taking them.
+    #[cfg(test)]
+    pub(crate) fn take_outcomes_peek(&self) -> &[(WriteId, WriteOutcome)] {
+        &self.outcomes
     }
 
     /// The outcomes that arrived since the last call, oldest first.
@@ -514,17 +554,39 @@ fn run_store(
     watch_sender: Sender<Message>,
     backoff: Backoff,
     stop: &AtomicBool,
+    outbox_dir: PathBuf,
     emit: &impl Fn(StoreEvent) -> bool,
 ) -> Option<String> {
+    // The outbox is on this machine's disk, so it opens first: writes made
+    // while the store is out of reach are kept in it.
+    let mut wait = backoff.initial;
+    let mut outbox = loop {
+        match Outbox::open(outbox_dir.clone()) {
+            Ok(outbox) => break outbox,
+            // Another server still holds it (a handoff in progress): wait.
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if stop.load(Ordering::SeqCst) || pause(&messages, wait, None, emit) {
+                    return None;
+                }
+                wait = backoff.next(wait);
+            }
+            Err(err) => return Some(format!("cannot open the task outbox: {err}")),
+        }
+    };
+
     // Reach the store, trying again while it is only unreachable.
     let mut wait = backoff.initial;
     let mut store = loop {
         if stop.load(Ordering::SeqCst) {
+            finish(&mut outbox, &messages);
             return None;
         }
         match open() {
             // A stop that came while it was connecting: let go at once.
-            Ok(_) if stop.load(Ordering::SeqCst) => return None,
+            Ok(_) if stop.load(Ordering::SeqCst) => {
+                finish(&mut outbox, &messages);
+                return None;
+            }
             Ok(store) => break store,
             Err(StoreError::Unavailable(why)) => {
                 if !emit(StoreEvent::Degraded(format!(
@@ -532,7 +594,8 @@ fn run_store(
                 ))) {
                     return None;
                 }
-                if pause(&messages, wait, emit) {
+                if pause(&messages, wait, Some(&mut outbox), emit) {
+                    finish(&mut outbox, &messages);
                     return None;
                 }
                 wait = backoff.next(wait);
@@ -549,6 +612,7 @@ fn run_store(
     let mut wait = backoff.initial;
     loop {
         if stop.load(Ordering::SeqCst) {
+            finish(&mut outbox, &messages);
             return None;
         }
         match store.scan("") {
@@ -572,7 +636,8 @@ fn run_store(
                 ))) {
                     return None;
                 }
-                if pause(&messages, wait, emit) {
+                if pause(&messages, wait, Some(&mut outbox), emit) {
+                    finish(&mut outbox, &messages);
                     return None;
                 }
                 wait = backoff.next(wait);
@@ -580,31 +645,101 @@ fn run_store(
         }
     }
 
-    while let Ok(message) = messages.recv() {
+    // Writes left by an earlier run, or queued while the store was away.
+    let waiting: Vec<_> = outbox
+        .entries()
+        .iter()
+        .map(|entry| {
+            (
+                entry.write.clone(),
+                entry.key.clone(),
+                Box::new(entry.doc.clone()),
+            )
+        })
+        .collect();
+    if !waiting.is_empty() && !emit(StoreEvent::Queued(waiting)) {
+        return None;
+    }
+
+    // Try the outbox now, then whenever something arrives or a retry is due.
+    let mut retry_wait = backoff.initial;
+    let mut retry_due = flush(&mut outbox, store.as_mut(), emit);
+    loop {
+        let message = match retry_due {
+            Some(true) => match messages.recv_timeout(retry_wait) {
+                Ok(message) => Some(message),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            _ => match messages.recv() {
+                Ok(message) => Some(message),
+                Err(_) => break,
+            },
+        };
         match message {
-            Message::Shutdown => return None,
-            Message::Watch(event) => {
+            Some(Message::Shutdown) => break,
+            Some(Message::Watch(event)) => {
                 if !emit(StoreEvent::Changed(event)) {
                     return None;
                 }
+                continue;
             }
-            Message::Write(command) => {
-                let (write, outcome) = run_write(store.as_mut(), command);
-                if !emit(StoreEvent::Outcome { write, outcome }) {
-                    return None;
+            Some(Message::Write(command)) => {
+                if let Err(outcome) = queue(&mut outbox, command) {
+                    if !emit(outcome) {
+                        return None;
+                    }
+                    continue;
                 }
             }
+            None => {}
         }
+        let before = outbox.len();
+        retry_due = flush(&mut outbox, store.as_mut(), emit);
+        retry_wait = match retry_due {
+            Some(true) if outbox.len() == before => backoff.next(retry_wait),
+            _ => backoff.initial,
+        };
     }
-    // Every sender is gone: the service was dropped.
+    finish(&mut outbox, &messages);
     None
 }
 
-/// Wait `delay` for a stop. Writes that arrive meanwhile fail at once, since
-/// there is nothing to write to. Returns true when the thread should end.
+/// Before the thread ends: the writes still waiting in the channel go into the
+/// outbox, so the next owner finds them, and the directory entries are made
+/// durable before it reads them.
+fn finish(outbox: &mut Outbox, messages: &Receiver<Message>) {
+    while let Ok(message) = messages.try_recv() {
+        if let Message::Write(command) = message {
+            let _ = queue(outbox, command);
+        }
+    }
+    outbox.sync();
+}
+
+/// Put a write into the outbox. A write that cannot even be saved is refused
+/// at once, as an outcome to report.
+fn queue(outbox: &mut Outbox, command: WriteCommand) -> Result<(), StoreEvent> {
+    let WriteCommand {
+        write,
+        op,
+        doc,
+        base,
+    } = command;
+    outbox
+        .push(write.clone(), op, *doc, base)
+        .map_err(|err| StoreEvent::Outcome {
+            write,
+            outcome: WriteOutcome::Failed(format!("cannot queue the write: {err}")),
+        })
+}
+
+/// Wait `delay` for a stop. Writes that arrive meanwhile go into the outbox
+/// (when there is one open yet). Returns true when the thread should end.
 fn pause(
     messages: &Receiver<Message>,
     delay: Duration,
+    mut outbox: Option<&mut Outbox>,
     emit: &impl Fn(StoreEvent) -> bool,
 ) -> bool {
     let deadline = std::time::Instant::now() + delay;
@@ -615,44 +750,135 @@ fn pause(
             Err(RecvTimeoutError::Timeout) => return false,
             Ok(Message::Watch(_)) => {}
             Ok(Message::Write(command)) => {
-                let outcome = WriteOutcome::Failed("the task store is not connected".to_owned());
-                let write = match command {
-                    WriteCommand::Create { write, .. } | WriteCommand::Update { write, .. } => {
-                        write
-                    }
+                let outcome = match outbox.as_deref_mut() {
+                    Some(outbox) => queue(outbox, command).err(),
+                    None => Some(StoreEvent::Outcome {
+                        write: command.write,
+                        outcome: WriteOutcome::Failed("the task outbox is not open yet".to_owned()),
+                    }),
                 };
-                if !emit(StoreEvent::Outcome { write, outcome }) {
-                    return true;
+                if let Some(outcome) = outcome {
+                    if !emit(outcome) {
+                        return true;
+                    }
                 }
             }
         }
     }
 }
 
-fn run_write(store: &mut dyn TaskStore, command: WriteCommand) -> (WriteId, WriteOutcome) {
-    let (write, result) = match command {
-        WriteCommand::Create { key, doc, write } => {
-            let result = store.create(&key, &doc, write.clone());
-            (write, result)
+/// Send what the outbox holds to the store, the first entry of each key at a
+/// time, until nothing more can go. Returns `Some(true)` when the store could
+/// not be reached and a retry is due, `Some(false)` when only held entries
+/// (conflicts) remain, and `None` when the outbox is empty.
+fn flush(
+    outbox: &mut Outbox,
+    store: &mut dyn TaskStore,
+    emit: &impl Fn(StoreEvent) -> bool,
+) -> Option<bool> {
+    loop {
+        let ready: Vec<Entry> = outbox.ready().into_iter().cloned().collect();
+        if ready.is_empty() {
+            return (outbox.len() > 0).then_some(false);
         }
-        WriteCommand::Update {
-            key,
-            doc,
-            expected,
-            write,
-        } => {
-            let result = store.update(&key, &doc, expected, write.clone());
-            (write, result)
+        let mut progressed = false;
+        for entry in ready {
+            match try_entry(outbox, store, &entry) {
+                Attempt::Done(events) => {
+                    progressed = true;
+                    for event in events {
+                        if !emit(event) {
+                            return None;
+                        }
+                    }
+                }
+                Attempt::Retry => return Some(true),
+            }
         }
+        if !progressed {
+            return Some(false);
+        }
+    }
+}
+
+enum Attempt {
+    /// The entry is settled (or held); what to report.
+    Done(Vec<StoreEvent>),
+    /// The store could not say; try again later.
+    Retry,
+}
+
+fn try_entry(outbox: &mut Outbox, store: &mut dyn TaskStore, entry: &Entry) -> Attempt {
+    let result = match entry.op {
+        Op::Create => store.create(&entry.key, &entry.doc, entry.write.clone()),
+        Op::Update => match expected_rev(outbox, store, entry) {
+            Ok(expected) => store.update(&entry.key, &entry.doc, expected, entry.write.clone()),
+            Err(err) => Err(err),
+        },
     };
-    let outcome = match result {
-        Ok(rev) => WriteOutcome::Applied { rev },
-        Err(StoreError::Conflict { current }) => WriteOutcome::Conflict { current },
-        Err(StoreError::AlreadyExists { current }) => WriteOutcome::Exists { current },
-        Err(StoreError::Unavailable(why) | StoreError::Io(why)) => WriteOutcome::Failed(why),
-        Err(StoreError::Indeterminate(why)) => WriteOutcome::Unknown(why),
+    let outcome = |outcome| StoreEvent::Outcome {
+        write: entry.write.clone(),
+        outcome,
     };
-    (write, outcome)
+    match result {
+        Ok(rev) => match outbox.complete(&entry.write, rev) {
+            Ok(()) => Attempt::Done(vec![outcome(WriteOutcome::Applied { rev })]),
+            // The store has it but the outbox could not record that: try again,
+            // and the write id will be recognised.
+            Err(_) => Attempt::Retry,
+        },
+        Err(StoreError::Conflict { current }) => {
+            hold(outbox, entry, current.clone());
+            Attempt::Done(vec![outcome(WriteOutcome::Conflict { current })])
+        }
+        Err(StoreError::AlreadyExists { current }) => {
+            hold(outbox, entry, Some(current.clone()));
+            Attempt::Done(vec![outcome(WriteOutcome::Exists { current })])
+        }
+        Err(StoreError::Unavailable(_) | StoreError::Indeterminate(_)) => Attempt::Retry,
+        Err(StoreError::Io(why)) => {
+            let removed = outbox
+                .fail(&entry.write)
+                .unwrap_or_else(|_| vec![entry.write.clone()]);
+            Attempt::Done(
+                removed
+                    .into_iter()
+                    .map(|write| StoreEvent::Outcome {
+                        write,
+                        outcome: WriteOutcome::Failed(why.clone()),
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// Keep an entry the store refused, with the store's version beside it.
+fn hold(outbox: &mut Outbox, entry: &Entry, current: Option<(Rev, Vec<u8>)>) {
+    let (rev, theirs) = match current {
+        Some((rev, bytes)) => (Some(rev), serde_json::from_slice(&bytes).ok()),
+        None => (None, None),
+    };
+    if let Err(err) = outbox.mark_conflict(&entry.write, rev, theirs) {
+        tracing::warn!(error = %err, "could not record a task conflict");
+    }
+}
+
+/// The revision to write an update against. Its own, or the one a write ahead
+/// of it in the outbox produced (its receipt). If that receipt is gone, the
+/// store itself says whether that write landed.
+fn expected_rev(outbox: &Outbox, store: &mut dyn TaskStore, entry: &Entry) -> StoreResult<Rev> {
+    if let Some(rev) = outbox.expected_rev(entry) {
+        return Ok(rev);
+    }
+    let Some(Base::After(ahead)) = &entry.base else {
+        return Err(StoreError::Conflict { current: None });
+    };
+    let current = store.get(&super::store::StoreKey::from(&entry.key))?;
+    match current {
+        Some((rev, bytes)) if landed_before(&bytes, ahead) => Ok(rev),
+        current => Err(StoreError::Conflict { current }),
+    }
 }
 
 #[cfg(test)]
@@ -667,6 +893,40 @@ mod tests {
     use crate::tasks::ids::{HostId, TaskId};
     use crate::tasks::model::{Origin, Timestamp, Via};
     use crate::tasks::store::StoreKey;
+    use std::path::PathBuf;
+
+    /// Outbox directories made by this test, removed when its thread ends.
+    struct Cleanup(Vec<PathBuf>);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for dir in &self.0 {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    thread_local! {
+        static CLEANUP: std::cell::RefCell<Cleanup> = const { std::cell::RefCell::new(Cleanup(Vec::new())) };
+    }
+
+    fn scratch_outbox() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-service-outbox-{}-{}",
+            std::process::id(),
+            crate::ulid::new_ulid()
+        ));
+        CLEANUP.with(|cleanup| cleanup.borrow_mut().0.push(dir.clone()));
+        dir
+    }
+
+    fn options(identity: TaskIdentity) -> StartOptions {
+        StartOptions {
+            identity,
+            backoff: FAST,
+            outbox_dir: scratch_outbox(),
+        }
+    }
 
     const FAST: Backoff = Backoff {
         initial: Duration::from_millis(10),
@@ -681,7 +941,11 @@ mod tests {
         released: Arc<AtomicBool>,
         delay: Duration,
         panic_on_write: bool,
-        indeterminate: bool,
+        indeterminate: Arc<AtomicBool>,
+        /// Apply the next write but answer that its publish timed out.
+        lose_ack_once: Arc<AtomicBool>,
+        /// The titles of the documents written, in the order they were applied.
+        log: Arc<Mutex<Vec<String>>>,
         scan_failures: Arc<AtomicUsize>,
         docs: BTreeMap<String, (Rev, Vec<u8>)>,
         sinks: Vec<WatchSink>,
@@ -694,7 +958,9 @@ mod tests {
                 released: Arc::default(),
                 delay,
                 panic_on_write: false,
-                indeterminate: false,
+                indeterminate: Arc::default(),
+                lose_ack_once: Arc::default(),
+                log: Arc::default(),
                 scan_failures: Arc::default(),
                 docs: BTreeMap::new(),
                 sinks: Vec::new(),
@@ -702,6 +968,7 @@ mod tests {
         }
 
         fn put(&mut self, key: &TaskKey, doc: &Task, rev: Rev) {
+            self.log.lock().unwrap().push(doc.title.clone());
             let bytes = serde_json::to_vec(doc).unwrap();
             self.docs.insert(key.to_string(), (rev, bytes.clone()));
             self.sinks.retain(|sink| {
@@ -713,11 +980,20 @@ mod tests {
             });
         }
 
+        fn maybe_lose_ack(&self) -> StoreResult<()> {
+            if self.lose_ack_once.swap(false, Ordering::SeqCst) {
+                return Err(StoreError::Indeterminate(
+                    "the acknowledgement was lost".into(),
+                ));
+            }
+            Ok(())
+        }
+
         fn before_write(&self) -> StoreResult<()> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             assert!(!self.panic_on_write, "the store broke");
             std::thread::sleep(self.delay);
-            if self.indeterminate {
+            if self.indeterminate.load(Ordering::SeqCst) {
                 return Err(StoreError::Indeterminate("the publish timed out".into()));
             }
             Ok(())
@@ -731,14 +1007,18 @@ mod tests {
     }
 
     impl TaskStore for FakeStore {
-        fn create(&mut self, key: &TaskKey, doc: &Task, _write: WriteId) -> StoreResult<Rev> {
+        fn create(&mut self, key: &TaskKey, doc: &Task, write: WriteId) -> StoreResult<Rev> {
             self.before_write()?;
             if let Some(current) = self.docs.get(&key.to_string()) {
+                if landed_before(&current.1, &write) {
+                    return Ok(current.0);
+                }
                 return Err(StoreError::AlreadyExists {
                     current: current.clone(),
                 });
             }
             self.put(key, doc, Rev(1));
+            self.maybe_lose_ack()?;
             Ok(Rev(1))
         }
 
@@ -747,15 +1027,17 @@ mod tests {
             key: &TaskKey,
             doc: &Task,
             expected: Rev,
-            _write: WriteId,
+            write: WriteId,
         ) -> StoreResult<Rev> {
             self.before_write()?;
             match self.docs.get(&key.to_string()) {
                 Some((rev, _)) if *rev == expected => {
                     let next = Rev(rev.0 + 1);
                     self.put(key, doc, next);
+                    self.maybe_lose_ack()?;
                     Ok(next)
                 }
+                Some((rev, bytes)) if landed_before(bytes, &write) => Ok(*rev),
                 current => Err(StoreError::Conflict {
                     current: current.cloned(),
                 }),
@@ -827,9 +1109,16 @@ mod tests {
         open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
         identity: TaskIdentity,
     ) -> (TaskService, Receiver<StoreEvent>) {
+        start_with_options(open, options(identity))
+    }
+
+    fn start_with_options(
+        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
+        options: StartOptions,
+    ) -> (TaskService, Receiver<StoreEvent>) {
         let (events, received) = mpsc::channel();
         let events = Mutex::new(events);
-        let service = TaskService::start_with(open, identity, FAST, move |_, event| {
+        let service = TaskService::start(open, options, move |_, event| {
             events.lock().unwrap().send(event).is_ok()
         })
         .unwrap();
@@ -899,170 +1188,6 @@ mod tests {
         let cached = service.cache().get(&one.key()).unwrap();
         assert_eq!(cached.rev, Rev(1));
         assert_eq!(cached.task.title, "a task");
-    }
-
-    #[test]
-    fn a_publish_that_may_have_landed_is_unknown_not_failed() {
-        let mut store = FakeStore::new(Duration::ZERO);
-        store.indeterminate = true;
-        let (mut service, received) = loaded(store);
-        let write = service.submit_create(&task("tk-1")).unwrap();
-        pump(&mut service, &received, Duration::from_secs(5), |service| {
-            service.pending_count() == 0
-        });
-        assert_eq!(
-            service.take_outcomes(),
-            vec![(write, WriteOutcome::Unknown("the publish timed out".into()))]
-        );
-    }
-
-    #[test]
-    fn a_store_that_stops_answering_cannot_make_the_queue_grow_without_end() {
-        let (mut service, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
-        for n in 0..MAX_PENDING_WRITES {
-            service
-                .submit_create(&task(&format!("tk-{n}")))
-                .unwrap_or_else(|err| panic!("write {n}: {err:?}"));
-        }
-        let err = service.submit_create(&task("tk-over")).unwrap_err();
-        assert_eq!(err, SubmitError::Busy);
-        assert_eq!(err.code(), "task_store_busy");
-        assert_eq!(service.pending_count(), MAX_PENDING_WRITES);
-    }
-
-    #[test]
-    fn a_task_this_build_cannot_rewrite_is_refused() {
-        let (mut service, _received) = loaded(FakeStore::new(Duration::ZERO));
-        let mut newer = task("tk-1");
-        newer.schema = 2;
-        let err = service.submit_update(&newer, Rev(1)).unwrap_err();
-        assert_eq!(err.code(), "task_schema_newer");
-        let mut odd = task("tk-2");
-        odd.status = crate::tasks::TaskStatus::Unknown;
-        assert_eq!(
-            service.submit_update(&odd, Rev(1)).unwrap_err().code(),
-            "task_schema_newer"
-        );
-        assert_eq!(service.pending_count(), 0);
-    }
-
-    #[test]
-    fn a_late_applied_outcome_for_a_write_already_reported_unknown_is_ignored() {
-        let (mut service, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
-        let write = service.submit_create(&task("tk-1")).unwrap();
-        // The thread is reported gone while the write's own answer is still
-        // on its way; the answer then arrives.
-        service.apply(StoreEvent::Stopped("gone".into()));
-        let changed = service.apply(StoreEvent::Outcome {
-            write: write.clone(),
-            outcome: WriteOutcome::Applied { rev: Rev(1) },
-        });
-        assert!(!changed);
-        assert_eq!(
-            service.take_outcomes(),
-            vec![(write, WriteOutcome::Unknown("gone".into()))],
-            "one report per write, not Unknown and then Applied"
-        );
-    }
-
-    #[test]
-    fn a_restarted_service_carries_over_what_the_old_one_never_reported() {
-        let (mut old, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
-        let in_flight = old.submit_create(&task("tk-1")).unwrap();
-        let (mut other, _other_received) = loaded(FakeStore::new(Duration::ZERO));
-        assert_ne!(old.generation(), other.generation());
-
-        let carried = old.retire();
-        assert_eq!(
-            carried,
-            vec![(
-                in_flight.clone(),
-                WriteOutcome::Unknown("the task store was restarted".into())
-            )]
-        );
-        other.adopt(carried);
-        assert_eq!(other.take_outcomes().len(), 1);
-        // The old thread's late answer is for no write of the new service.
-        assert!(!other.apply(StoreEvent::Outcome {
-            write: in_flight,
-            outcome: WriteOutcome::Applied { rev: Rev(1) },
-        }));
-        assert!(other.take_outcomes().is_empty());
-    }
-
-    #[test]
-    fn a_bus_store_that_will_not_stop_does_not_block_a_handoff_but_a_file_store_does() {
-        let bus = TaskIdentity {
-            backend: BackendKind::Kv,
-            bus_session: "default".into(),
-            ..test_identity("m4m")
-        };
-        let (mut service, _received) =
-            start_with_opener(one_shot(FakeStore::new(Duration::from_secs(3))), bus);
-        pump_loaded(&mut service, &_received);
-        service.submit_create(&task("tk-1")).unwrap();
-        assert!(!service.needs_exclusive_release());
-        assert!(service.quiesce_for_handoff(Duration::from_millis(200)));
-
-        let (mut service, received) = start_with_store(FakeStore::new(Duration::from_secs(3)));
-        pump_loaded(&mut service, &received);
-        service.submit_create(&task("tk-1")).unwrap();
-        assert!(service.needs_exclusive_release());
-        assert!(!service.quiesce_for_handoff(Duration::from_millis(200)));
-    }
-
-    fn pump_loaded(service: &mut TaskService, received: &Receiver<StoreEvent>) {
-        pump(service, received, Duration::from_secs(5), |service| {
-            service.is_loaded()
-        });
-    }
-
-    #[test]
-    fn quiesce_does_not_wait_for_a_retry_backoff() {
-        let (events, _received) = mpsc::channel();
-        let events = Mutex::new(events);
-        let slow = Backoff {
-            initial: Duration::from_secs(30),
-            max: Duration::from_secs(30),
-        };
-        let mut service = TaskService::start_with(
-            || Err(StoreError::Unavailable("down".into())),
-            test_identity("m4m"),
-            slow,
-            move |_, event| events.lock().unwrap().send(event).is_ok(),
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        let started = Instant::now();
-        assert!(service.quiesce(Duration::from_secs(5)));
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn quiesce_returns_even_when_the_app_stops_draining_events() {
-        // The app thread waits in quiesce, so it cannot drain its channel; a
-        // store thread that waits for room in it must give up when told to stop.
-        let (mut service, _unused) = start_with_opener_and_emit(
-            one_shot(FakeStore::new(Duration::ZERO)),
-            |context, _event| {
-                while !context.stopping() {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                true
-            },
-        );
-        std::thread::sleep(Duration::from_millis(100));
-        let started = Instant::now();
-        assert!(service.quiesce(Duration::from_secs(5)));
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    fn start_with_opener_and_emit(
-        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
-        emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
-    ) -> (TaskService, ()) {
-        let service = TaskService::start_with(open, test_identity("m4m"), FAST, emit).unwrap();
-        (service, ())
     }
 
     #[test]
@@ -1244,10 +1369,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_store_is_retried_and_writes_meanwhile_fail_fast() {
+    fn an_unreachable_store_is_retried_and_writes_meanwhile_wait_in_the_outbox() {
         let tries = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&tries);
-        let mut store = Some(FakeStore::new(Duration::ZERO));
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let mut store = Some(store);
         let (mut service, received) = start_with_opener(
             move || {
                 if counted.fetch_add(1, Ordering::SeqCst) < 3 {
@@ -1258,28 +1385,234 @@ mod tests {
             test_identity("m4m"),
         );
 
-        // While it cannot connect the service says why, and refuses to pretend.
+        // While it cannot connect the service says why, and takes writes.
         pump(&mut service, &received, Duration::from_secs(5), |service| {
             service.failure().is_some()
         });
         assert!(service.failure().unwrap().contains("not reachable"));
         let write = service.submit_create(&task("tk-1")).unwrap();
+        assert_eq!(service.pending_count(), 1);
+
+        // Once the store answers, the queued write goes in, and the failure clears.
         pump(&mut service, &received, Duration::from_secs(5), |service| {
             service.pending_count() == 0
         });
-        let outcomes = service.take_outcomes();
-        assert_eq!(outcomes[0].0, write);
-        assert!(
-            matches!(&outcomes[0].1, WriteOutcome::Failed(why) if why.contains("not connected")),
-            "{outcomes:?}"
+        assert_eq!(
+            service.take_outcomes(),
+            vec![(write, WriteOutcome::Applied { rev: Rev(1) })]
         );
+        assert_eq!(service.failure(), None);
+        assert_eq!(log.lock().unwrap().len(), 1);
+        assert!(tries.load(Ordering::SeqCst) >= 4);
+    }
 
-        // Once the store answers, it loads and the failure clears.
+    #[test]
+    fn lost_ack_replay_is_dropped() {
+        // The store takes the write, then its answer is lost. The write is
+        // sent again with the same id; the store recognises it and the task is
+        // changed once, not twice.
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let lose = Arc::clone(&store.lose_ack_once);
+        let (mut service, received) = loaded(store);
+        let one = task("tk-1");
+        service.submit_create(&one).unwrap();
         pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        service.take_outcomes();
+
+        let mut edited = one.clone();
+        edited.title = "edited".into();
+        lose.store(true, Ordering::SeqCst);
+        let write = service.submit_update(&edited, Rev(1)).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        assert_eq!(
+            service.take_outcomes(),
+            vec![(write, WriteOutcome::Applied { rev: Rev(2) })],
+            "one outcome, at the revision the first try produced"
+        );
+        assert_eq!(*log.lock().unwrap(), ["a task", "edited"], "applied once");
+    }
+
+    #[test]
+    fn chained_entries_replay_in_order() {
+        // The store is down while three edits of one task are made; each is
+        // built on the one before. When it comes back they go in, in order,
+        // each against the revision the previous one produced.
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let up = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&up);
+        let mut store = Some(store);
+        let (mut service, received) = start_with_opener(
+            move || {
+                if !gate.load(Ordering::SeqCst) {
+                    return Err(StoreError::Unavailable("down".into()));
+                }
+                Ok(Box::new(store.take().unwrap()) as Box<dyn TaskStore>)
+            },
+            test_identity("m4m"),
+        );
+        let created = task("tk-1");
+        let w1 = service.submit_create(&created).unwrap();
+        let key = created.key();
+        let mut second = service.current(&key).unwrap().1.clone();
+        second.title = "second".into();
+        let w2 = service.submit_update(&second, Rev(1)).unwrap();
+        let mut third = service.current(&key).unwrap().1.clone();
+        assert_eq!(
+            third.title, "second",
+            "the next edit builds on the queued one"
+        );
+        third.title = "third".into();
+        let w3 = service.submit_update(&third, Rev(1)).unwrap();
+
+        up.store(true, Ordering::SeqCst);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        assert_eq!(
+            service.take_outcomes(),
+            vec![
+                (w1, WriteOutcome::Applied { rev: Rev(1) }),
+                (w2, WriteOutcome::Applied { rev: Rev(2) }),
+                (w3, WriteOutcome::Applied { rev: Rev(3) }),
+            ]
+        );
+        assert_eq!(*log.lock().unwrap(), ["a task", "second", "third"]);
+    }
+
+    #[test]
+    fn a_queued_write_survives_a_handoff_of_the_service() {
+        // The old server's store is down, so two writes wait in the outbox. It
+        // hands over: the replacement reads the same outbox and sends both, in
+        // order, when its own store answers.
+        let dir = scratch_outbox();
+        let (mut old, _old_received) = start_with_options(
+            || Err(StoreError::Unavailable("down".into())),
+            StartOptions {
+                outbox_dir: dir.clone(),
+                ..options(test_identity("m4m"))
+            },
+        );
+        let one = task("tk-1");
+        let w1 = old.submit_create(&one).unwrap();
+        let mut edited = one.clone();
+        edited.title = "edited".into();
+        let w2 = old.submit_update(&edited, Rev(1)).unwrap();
+        assert!(
+            old.quiesce(Duration::from_secs(5)),
+            "the old server lets go"
+        );
+        drop(old);
+
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let (mut new, received) = start_with_options(
+            one_shot(store),
+            StartOptions {
+                outbox_dir: dir.clone(),
+                ..options(test_identity("m4m"))
+            },
+        );
+        pump(&mut new, &received, Duration::from_secs(5), |service| {
             service.is_loaded()
         });
-        assert_eq!(service.failure(), None);
-        assert!(tries.load(Ordering::SeqCst) >= 4);
+        // What it found waiting counts as pending until it settles.
+        pump(&mut new, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0 && service.cache().len() == 1
+        });
+        assert_eq!(*log.lock().unwrap(), ["a task", "edited"], "both, in order");
+        let _ = (w1, w2);
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| entry.path().extension().is_none_or(|ext| ext != "json")),
+            "the outbox is empty once the store has them"
+        );
+    }
+
+    #[test]
+    fn a_conflict_holds_the_chain_behind_it_and_the_rest_goes_on() {
+        let store = FakeStore::new(Duration::ZERO);
+        let log = Arc::clone(&store.log);
+        let (mut service, received) = loaded(store);
+        let one = task("tk-1");
+        service.submit_create(&one).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        service.take_outcomes();
+        let applied_before = log.lock().unwrap().len();
+
+        // Two edits made against a revision that has moved, then an unrelated one.
+        let mut stale = one.clone();
+        stale.title = "stale".into();
+        let first = service.submit_update(&stale, Rev(9)).unwrap();
+        let mut behind = stale.clone();
+        behind.title = "behind it".into();
+        let second = service.submit_update(&behind, Rev(9)).unwrap();
+        let other = task("tk-2");
+        let third = service.submit_create(&other).unwrap();
+
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.take_outcomes_peek().len() >= 2
+        });
+        let outcomes = service.take_outcomes();
+        let reported: Vec<&WriteId> = outcomes.iter().map(|(write, _)| write).collect();
+        assert!(reported.contains(&&first) && reported.contains(&&third));
+        assert!(
+            !reported.contains(&&second),
+            "the chain behind a conflict waits"
+        );
+        assert!(matches!(
+            outcomes
+                .iter()
+                .find(|(write, _)| *write == first)
+                .unwrap()
+                .1,
+            WriteOutcome::Conflict { .. }
+        ));
+        assert_eq!(
+            log.lock().unwrap().len(),
+            applied_before + 1,
+            "only the unrelated create reached the store"
+        );
+        assert_eq!(
+            service.pending_count(),
+            1,
+            "the held write is still waiting"
+        );
+    }
+
+    #[test]
+    fn a_publish_that_may_have_landed_is_retried_not_reported() {
+        let store = FakeStore::new(Duration::ZERO);
+        let flag = Arc::clone(&store.indeterminate);
+        flag.store(true, Ordering::SeqCst);
+        let (mut service, received) = loaded(store);
+        let write = service.submit_create(&task("tk-1")).unwrap();
+        // Told nothing yet: the write id settles it when the store answers.
+        let quiet = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < quiet {
+            if let Ok(event) = received.recv_timeout(Duration::from_millis(20)) {
+                service.apply(event);
+            }
+        }
+        assert_eq!(service.pending_count(), 1);
+        assert!(service.take_outcomes().is_empty());
+        flag.store(false, Ordering::SeqCst);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+        });
+        assert_eq!(
+            service.take_outcomes(),
+            vec![(write, WriteOutcome::Applied { rev: Rev(1) })]
+        );
     }
 
     #[test]

@@ -28,9 +28,9 @@
   Test: `kv_backend_conformance` (against a local nats-server, feature-gated)
 - [x] 2.5 `owner_host`, `task_owned_elsewhere`, `task_not_bus_session`.
   Tests: `foreign_task_write_refused_not_queued`, `non_bus_session_refuses`
-- [ ] 2.6 `write_id`, `last_writes`, the outbox and receipts, chained bases, replay.
+- [x] 2.6 `write_id`, `last_writes`, the outbox and receipts, chained bases, replay.
   Tests: `lost_ack_replay_is_dropped`, `chained_entries_replay_in_order`
-- [ ] 2.7 Outbox flush before a handoff commits.
+- [x] 2.7 Outbox flush before a handoff commits.
   Test: `outbox_survives_live_handoff` (throwaway session)
 - [ ] 2.8 Conflicts: `task.conflicts`, `task.resolve_conflict`, cancelled descendants.
   Tests: `theirs_cancels_descendants`, `second_resolver_gets_stale_revision`
