@@ -19,6 +19,7 @@ use super::store::{
 };
 
 const EXTENSION: &str = "json";
+const LOCK_FILE: &str = ".lock";
 
 /// What a key's file holds: the revision and the document.
 #[derive(Serialize, Deserialize)]
@@ -30,24 +31,51 @@ struct Stored {
 pub(crate) struct FileStore {
     dir: PathBuf,
     watchers: Vec<(String, WatchSink)>,
+    /// Holds the directory's lock for as long as the store lives.
+    _lock: fs::File,
 }
 
 impl FileStore {
-    /// Open the store in `dir`, creating it if needed.
+    /// Open the store in `dir`, creating it if needed. Only one store may hold
+    /// a directory: a second one (another server, or the old server of a live
+    /// handoff that has not let go yet) is `Unavailable`, which the store task
+    /// retries.
     pub(crate) fn open(dir: PathBuf) -> StoreResult<Self> {
         fs::create_dir_all(&dir).map_err(io_error)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK_FILE))
+            .map_err(io_error)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(StoreError::Unavailable(format!(
+                    "another herdr server holds the task store in {}",
+                    dir.display()
+                )));
+            }
+            Err(fs::TryLockError::Error(err)) => return Err(io_error(err)),
+        }
+        clear_stale_temp_files(&dir);
         Ok(Self {
             dir,
             watchers: Vec::new(),
+            _lock: lock,
         })
     }
 
     /// The file of a key, or `None` for a key that is not a safe file name.
     fn path_for(&self, key: &str) -> Option<PathBuf> {
+        // Lowercase only: on a case-insensitive disk two keys that differ in
+        // case would share one file.
         let safe = !key.is_empty()
             && !key.starts_with('.')
             && key.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'=')
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.' | b'=')
             });
         safe.then(|| self.dir.join(format!("{key}.{EXTENSION}")))
     }
@@ -66,12 +94,16 @@ impl FileStore {
         let value = serde_json::to_value(value).map_err(|err| StoreError::Io(err.to_string()))?;
         let bytes = serde_json::to_vec(&Stored { rev: rev.0, value })
             .map_err(|err| StoreError::Io(err.to_string()))?;
-        let temp = path.with_extension(format!("{EXTENSION}.tmp"));
+        let temp = self.dir.join(format!(
+            "{key}.{EXTENSION}.{}.tmp",
+            crate::ulid::new_ulid().to_ascii_lowercase()
+        ));
         let mut file = fs::File::create(&temp).map_err(io_error)?;
         file.write_all(&bytes).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         drop(file);
         fs::rename(&temp, &path).map_err(io_error)?;
+        sync_dir(&self.dir);
         self.notify(key, rev);
         Ok(())
     }
@@ -95,20 +127,56 @@ impl FileStore {
     }
 }
 
+/// Make the rename itself durable: the directory entry is what a crash loses.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Err(err) = fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+        tracing::warn!(error = %err, "could not sync the task store directory");
+    }
+}
+
+/// Windows cannot open a directory to sync it; the rename is journalled.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
+
+/// Remove what a writer that crashed before its rename left behind.
+fn clear_stale_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tmp") {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn io_error(err: std::io::Error) -> StoreError {
     StoreError::Io(err.to_string())
 }
 
+/// Read one key's file. A file that does not parse is renamed to
+/// `<name>.corrupt`, so it stays for a person to look at, and the key reads as
+/// absent instead of failing for good.
 fn read_file(path: &Path) -> StoreResult<Option<(Rev, Vec<u8>)>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(io_error(err)),
     };
-    let stored: Stored = serde_json::from_slice(&bytes)
-        .map_err(|err| StoreError::Io(format!("{}: {err}", path.display())))?;
-    let value = serde_json::to_vec(&stored.value).map_err(|err| StoreError::Io(err.to_string()))?;
-    Ok(Some((Rev(stored.rev), value)))
+    let parsed = serde_json::from_slice::<Stored>(&bytes)
+        .ok()
+        .and_then(|stored| {
+            let value = serde_json::to_vec(&stored.value).ok()?;
+            Some((Rev(stored.rev), value))
+        });
+    if parsed.is_none() {
+        let aside = path.with_extension(format!("{EXTENSION}.corrupt"));
+        tracing::warn!(file = %path.display(), aside = %aside.display(), "setting aside a corrupt task file");
+        fs::rename(path, &aside).map_err(io_error)?;
+    }
+    Ok(parsed)
 }
 
 impl TaskStore for FileStore {
@@ -381,6 +449,68 @@ mod tests {
         fs::write(scratch.0.join("task.m4m.tk-broken.json"), b"{nope").unwrap();
         let found = store.scan("task.").unwrap();
         assert_eq!(found.len(), 1);
-        assert!(store.get(&StoreKey("task.m4m.tk-broken".into())).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_file_is_set_aside_and_the_key_reads_as_absent() {
+        let scratch = Scratch::new();
+        let mut store = FileStore::open(scratch.0.clone()).unwrap();
+        let path = scratch.0.join("task.m4m.tk-bad.json");
+        fs::write(&path, b"{nope").unwrap();
+
+        // The key reads as absent, the damaged bytes are kept for a person to
+        // look at, and the key can be created again.
+        let key = StoreKey("task.m4m.tk-bad".into());
+        assert_eq!(store.get(&key).unwrap(), None);
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read(scratch.0.join("task.m4m.tk-bad.json.corrupt")).unwrap(),
+            b"{nope"
+        );
+        let task = task("tk-bad");
+        let write = WriteId::generate();
+        assert_eq!(
+            store.create(&task.key(), &with_write(task.clone(), &write), write),
+            Ok(Rev(1))
+        );
+        assert_eq!(
+            store.scan("task.").unwrap().len(),
+            1,
+            "the aside file is not a key"
+        );
+    }
+
+    #[test]
+    fn a_second_store_on_one_directory_is_refused_while_the_first_lives() {
+        let scratch = Scratch::new();
+        let first = FileStore::open(scratch.0.clone()).unwrap();
+        match FileStore::open(scratch.0.clone()) {
+            Err(StoreError::Unavailable(why)) => assert!(why.contains("another"), "{why}"),
+            Err(err) => panic!("expected Unavailable, got {err:?}"),
+            Ok(_) => panic!("two stores on one directory"),
+        }
+        drop(first);
+        assert!(FileStore::open(scratch.0.clone()).is_ok());
+    }
+
+    #[test]
+    fn temp_files_left_by_a_crashed_writer_are_cleared_on_open() {
+        let scratch = Scratch::new();
+        fs::create_dir_all(&scratch.0).unwrap();
+        let stale = scratch.0.join("task.m4m.tk-1.json.01hz.tmp");
+        fs::write(&stale, b"half a document").unwrap();
+        let mut store = FileStore::open(scratch.0.clone()).unwrap();
+        assert!(!stale.exists());
+        assert!(store.scan("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_key_with_uppercase_letters_is_not_a_usable_file_name() {
+        // On a case-insensitive disk it would be the same file as its
+        // lowercase twin.
+        let scratch = Scratch::new();
+        let mut store = FileStore::open(scratch.0.clone()).unwrap();
+        assert_eq!(store.get(&StoreKey("task.m4m.TK-1".into())).unwrap(), None);
+        assert!(store.path_for("task.m4m.TK-1").is_none());
     }
 }
