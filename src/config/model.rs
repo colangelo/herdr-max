@@ -747,6 +747,9 @@ pub struct KeysConfig {
     pub add_pane_todo: BindingConfig,
     /// Open the session-wide todo board. Unbound by default.
     pub open_todo_board: BindingConfig,
+    /// Open the work panel: forge issues, what needs a decision, what is in flight and
+    /// the tasks of the agents. Unbound by default.
+    pub open_work_panel: BindingConfig,
     /// Open the command bar: every herdr command with its shortcut, and send a message to a
     /// session. Default: "prefix+:".
     pub command_palette: BindingConfig,
@@ -937,6 +940,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     open_todo_board: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    open_work_panel: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     command_palette: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_panes: Option<BindingConfig>,
@@ -1126,6 +1131,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_pane_todos);
         apply_field!(add_pane_todo);
         apply_field!(open_todo_board);
+        apply_field!(open_work_panel);
         apply_field!(command_palette);
         apply_field!(display_panes);
         apply_field!(previous_workspace);
@@ -1255,6 +1261,7 @@ impl KeysConfig {
         copy_effective_action_field!(open_pane_todos, keybinds.open_pane_todos);
         copy_effective_action_field!(add_pane_todo, keybinds.add_pane_todo);
         copy_effective_action_field!(open_todo_board, keybinds.open_todo_board);
+        copy_effective_action_field!(open_work_panel, keybinds.open_work_panel);
         copy_effective_action_field!(command_palette, keybinds.command_palette);
         copy_effective_action_field!(display_panes, keybinds.display_panes);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
@@ -1943,6 +1950,7 @@ impl Default for KeysConfig {
             open_pane_todos: BindingConfig::one("prefix+ctrl+t"),
             add_pane_todo: BindingConfig::empty(),
             open_todo_board: BindingConfig::empty(),
+            open_work_panel: BindingConfig::empty(),
             command_palette: BindingConfig::one("prefix+:"),
             display_panes: BindingConfig::one("prefix+i"),
             previous_workspace: BindingConfig::empty(),

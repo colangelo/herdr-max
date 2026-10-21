@@ -46,7 +46,7 @@
   each issue row carries its full `IssueRef` and `mirror_rev` (the KV revision its watch saw;
   contracts v0.9 OP-01, OP-06).
   Test: `issue_rows_equal_mirror_records`
-- [ ] 2.14 `WorkPanel` overlay: four views, `last_sync`, the `open_work_panel` action
+- [x] 2.14 `WorkPanel` overlay: four views, `last_sync`, the `open_work_panel` action
   with its help entry. Tests: rendered layouts under `src/client/shell/tests/`,
   `keybind_help_lists_open_work_panel`
 - [ ] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`

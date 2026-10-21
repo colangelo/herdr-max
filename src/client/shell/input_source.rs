@@ -15,6 +15,7 @@ impl ClientShellState {
                     | ClientShellOverlay::TodoPanel(_)
                     | ClientShellOverlay::TodoBoard(_)
                     | ClientShellOverlay::MovePicker(_)
+                    | ClientShellOverlay::WorkPanel(_)
                     | ClientShellOverlay::Palette(_)
             );
         }

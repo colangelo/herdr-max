@@ -287,6 +287,7 @@ mod startup_overlays;
 mod todo_board;
 mod todo_overlays;
 mod tui_look;
+mod work_panel;
 
 #[test]
 fn resize_summary_survives_composition_with_connected_version() {

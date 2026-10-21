@@ -550,6 +550,9 @@ impl ClientShellState {
                 return self.route_move_picker_key(key, outcome)
             }
             Some(ClientShellOverlay::Palette(_)) => return self.route_palette_key(key, outcome),
+            Some(ClientShellOverlay::WorkPanel(_)) => {
+                return self.route_work_panel_key(key, outcome)
+            }
             _ => {}
         }
 

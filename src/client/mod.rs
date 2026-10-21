@@ -2399,6 +2399,7 @@ async fn run_client_loop(
                         shell.tick_todo_editor(&mut outcome);
                         shell.tick_move_picker(&mut outcome);
                         shell.tick_todo_board(&mut outcome);
+                        shell.tick_work_panel(&mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;

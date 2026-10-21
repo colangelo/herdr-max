@@ -415,6 +415,11 @@ pub(crate) fn command_table(
                     "session todo board",
                 ),
                 act(
+                    KeybindAction::OpenWorkPanel,
+                    binding_label(&keybinds.open_work_panel),
+                    "work panel",
+                ),
+                act(
                     KeybindAction::CopyMode,
                     binding_label(&keybinds.copy_mode),
                     "copy mode",

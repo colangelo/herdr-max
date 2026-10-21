@@ -656,6 +656,12 @@
           "description": "Open the session-wide todo board. Unbound by default."
         },
         {
+          "key": "keys.open_work_panel",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the work panel: forge issues, what needs a decision, what is in flight and the tasks of the agents. Unbound by default."
+        },
+        {
           "key": "keys.command_palette",
           "type": "keybinding",
           "default": "\"prefix+:\"",
