@@ -229,7 +229,10 @@ impl HeadlessServer {
         // the old server goes on and takes its store back.
         let commit_result = if !self.app.quiesce_task_store(TASK_STORE_QUIESCE_TIMEOUT) {
             Err(io::Error::other("the task store did not stop in time"))
-        } else if std::env::var_os("HERDR_TEST_HANDOFF_COMMIT_FAIL").is_some() {
+        } else if cfg!(debug_assertions)
+            && std::env::var_os("HERDR_TEST_HANDOFF_COMMIT_FAIL").is_some()
+        {
+            // Test-only fault injection; release builds never read it.
             Err(io::Error::other("test handoff commit failure"))
         } else {
             crate::server::handoff::report_committed(&mut stream)
