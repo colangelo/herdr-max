@@ -69,10 +69,6 @@
 - [ ] 3.6 `TaskConflict` overlay with `m`, `t`, `e` and `Esc`.
   Tests: rendered layout, `conflict_overlay_resolves_through_server`
 - [ ] 3.7 Per action, the crash and replay tests of plan § 6, with worklink
-- [ ] 3.9 `signing-keys.toml` loading (`[tasks] signing_keys`) and P-256 verification
-  per design D12, against `tests/fixtures/signing.json` copied from ac/worklink#14.
-  Tests: `signing_vectors_verify`, `signing_vectors_negative_cases_refused`,
-  `fixture_matches_worklink_copy` (sha256)
 - [ ] 3.8 Done and not-doing keys on ac's own rows: the server runs
   `asks.py task-answer <key> done|not-doing [--take-back] --fingerprint <fp shown> --via herdr
   --client <id>` on its own Mac, with a FIXED environment (PATH, HOME and only what asks.py
@@ -80,6 +76,10 @@
   herdr's read-only `herdr-<host>` credential, and no `GESTORE_ASKS_*` (asks.py:115-125) that a
   pane or test could have leaked in; herdr never holds the relay credential (#241 comment
   24885, contracts v0.8 § 2.5). Test: `ask_answer_child_env_is_fixed`
+- [ ] 3.9 `signing-keys.toml` loading (`[tasks] signing_keys`) and P-256 verification
+  per design D12, against `tests/fixtures/signing.json` copied from ac/worklink#14.
+  Tests: `signing_vectors_verify`, `signing_vectors_negative_cases_refused`,
+  `fixture_matches_worklink_copy` (sha256)
 
 ## 4. Phase 5: todos become tasks
 
