@@ -1,6 +1,9 @@
 use super::*;
 
 const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long the old server waits for its task store to let go before it gives
+/// up the handoff.
+const TASK_STORE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) fn wait_for_live_handoff_response_write(
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
@@ -221,7 +224,16 @@ impl HeadlessServer {
                 "handoff replacement server did not become ready: {err}"
             )));
         }
-        if let Err(err) = crate::server::handoff::report_committed(&mut stream) {
+        // The replacement opens the task store only after it hears "committed",
+        // so the old server lets go of it first. If that, or the commit, fails
+        // the old server goes on and takes its store back.
+        let commit_result = if self.app.quiesce_task_store(TASK_STORE_QUIESCE_TIMEOUT) {
+            crate::server::handoff::report_committed(&mut stream)
+        } else {
+            Err(io::Error::other("the task store did not stop in time"))
+        };
+        if let Err(err) = commit_result {
+            self.app.start_task_store();
             crate::server::handoff::cleanup_failed_import_child(import_pid);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {

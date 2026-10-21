@@ -1728,7 +1728,7 @@ pub struct PaletteConfig {
 }
 
 /// The task store (fork issue 241).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TasksConfig {
     /// Where tasks are kept: `file` (this session's data dir) or `kv` (a NATS JetStream KV bucket; needs the `tasks-kv` build). Default: file.

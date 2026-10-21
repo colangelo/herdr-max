@@ -80,6 +80,9 @@ pub(crate) struct AppPolicy {
     pub(crate) persist_session: bool,
     pub(crate) persist_plugin_registry: bool,
     pub(crate) background_updates: bool,
+    /// Leave the task store alone until `assume_handoff_ownership`: the old
+    /// server still holds it while a handoff replacement starts up.
+    pub(crate) defer_task_store: bool,
 }
 
 impl AppPolicy {
@@ -88,6 +91,7 @@ impl AppPolicy {
         persist_session: true,
         persist_plugin_registry: true,
         background_updates: true,
+        defer_task_store: false,
     };
 
     #[cfg(test)]
@@ -96,6 +100,7 @@ impl AppPolicy {
         persist_session: false,
         persist_plugin_registry: false,
         background_updates: false,
+        defer_task_store: false,
     };
 
     #[cfg(unix)]
@@ -104,6 +109,7 @@ impl AppPolicy {
         persist_session: true,
         persist_plugin_registry: true,
         background_updates: true,
+        defer_task_store: true,
     };
 }
 
@@ -119,6 +125,12 @@ pub struct App {
     pub(crate) policy: AppPolicy,
     /// The task store and its cache (fork issue 241).
     pub(crate) tasks: crate::tasks::TaskService,
+    /// What the store is started from, kept so a live handoff (unix only) can
+    /// stop it and start it again.
+    #[cfg(unix)]
+    pub(crate) task_config: crate::config::TasksConfig,
+    #[cfg(unix)]
+    pub(crate) task_store_dir: std::path::PathBuf,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
@@ -217,6 +229,7 @@ fn auto_updates_enabled(background_updates: bool) -> bool {
 /// quietly using the file store instead.
 fn start_task_service(
     config: &crate::config::TasksConfig,
+    store_dir: &std::path::Path,
     policy: &AppPolicy,
     event_tx: &mpsc::Sender<AppEvent>,
 ) -> crate::tasks::TaskService {
@@ -236,7 +249,7 @@ fn start_task_service(
             Err(reason) => return crate::tasks::TaskService::unavailable(identity, reason),
         }
     } else {
-        let dir = crate::session::data_dir().join("tasks").join("store");
+        let dir = store_dir.to_path_buf();
         Box::new(move || {
             crate::tasks::FileStore::open(dir.clone())
                 .map(|store| Box::new(store) as Box<dyn crate::tasks::TaskStore>)
@@ -723,7 +736,12 @@ impl App {
             }
         }
 
-        let tasks = start_task_service(&config.tasks, &policy, &event_tx);
+        let task_store_dir = crate::session::data_dir().join("tasks").join("store");
+        let tasks = if policy.defer_task_store {
+            crate::tasks::TaskService::disabled()
+        } else {
+            start_task_service(&config.tasks, &task_store_dir, &policy, &event_tx)
+        };
         let last_focus = state.active.and_then(|idx| {
             state
                 .workspaces
@@ -744,6 +762,10 @@ impl App {
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
             tasks,
+            #[cfg(unix)]
+            task_config: config.tasks.clone(),
+            #[cfg(unix)]
+            task_store_dir,
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -889,6 +911,29 @@ impl App {
     #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.terminal_runtimes.assume_handoff_ownership();
+        // The old server has committed and let go of the task store.
+        if self.policy.defer_task_store {
+            self.start_task_store();
+        }
+    }
+
+    /// Start (or restart) the task store from the configuration it was built
+    /// with.
+    #[cfg(unix)]
+    pub(crate) fn start_task_store(&mut self) {
+        self.tasks = start_task_service(
+            &self.task_config,
+            &self.task_store_dir,
+            &self.policy,
+            &self.event_tx,
+        );
+    }
+
+    /// Stop the task store and wait for it to let go, so a handoff
+    /// replacement can open it. False when it did not stop in time.
+    #[cfg(unix)]
+    pub(crate) fn quiesce_task_store(&mut self, timeout: Duration) -> bool {
+        self.tasks.quiesce(timeout)
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
@@ -1840,6 +1885,66 @@ mod tests {
             }
             Err(err) => panic!("expected Io, got {err:?}"),
             Ok(_) => panic!("a missing credential file must not open a store"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_handoff_replacement_opens_the_task_store_only_after_the_old_one_let_go() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-handoff-store-{}-{}",
+            std::process::id(),
+            crate::ulid::new_ulid()
+        ));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+
+        // The old server: its store runs on the directory.
+        let mut old = test_app();
+        old.policy.persist_session = true;
+        old.task_store_dir = dir.clone();
+        old.start_task_store();
+        wait_until(|| {
+            old.drain_all_internal_events();
+            old.tasks.is_loaded()
+        });
+
+        // The replacement is built first and does not touch the directory.
+        let mut replacement = test_app();
+        replacement.policy.persist_session = true;
+        replacement.policy.defer_task_store = true;
+        replacement.task_store_dir = dir.clone();
+        assert!(!replacement.tasks.is_running());
+
+        // The old server lets go before it reports "committed"; if the commit
+        // fails it takes the store back.
+        assert!(old.quiesce_task_store(Duration::from_secs(5)));
+        assert!(!old.tasks.is_running());
+        old.start_task_store();
+        assert!(old.tasks.is_running());
+        assert!(old.quiesce_task_store(Duration::from_secs(5)));
+
+        // After the commit the replacement owns the session and opens it.
+        replacement.assume_handoff_ownership();
+        assert!(replacement.tasks.is_running());
+        wait_until(|| {
+            replacement.drain_all_internal_events();
+            replacement.tasks.is_loaded()
+        });
+        assert_eq!(replacement.tasks.failure(), None);
+
+        assert!(replacement.quiesce_task_store(Duration::from_secs(5)));
+        old.policy.persist_session = false;
+        replacement.policy.persist_session = false;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
