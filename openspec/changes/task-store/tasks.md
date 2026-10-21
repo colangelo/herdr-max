@@ -34,7 +34,7 @@
   Test: `outbox_survives_live_handoff` (throwaway session)
 - [x] 2.8 Conflicts: `task.conflicts`, `task.resolve_conflict`, cancelled descendants.
   Tests: `theirs_cancels_descendants`, `second_resolver_gets_stale_revision`
-- [ ] 2.9 Derived status, the 5-minute timer, the run rescan on start and handoff.
+- [x] 2.9 Derived status, the 5-minute timer, the run rescan on start and handoff.
   Tests: `status_precedence_table`, `forged_starter_ignored`, `rescan_rebuilds_runs`
 - [ ] 2.10 `task.*` methods, `task.changed`, client-shell advertisement with frozen
   digests. Test: the digest list in `client_commands.rs` gains the `task.*` entries

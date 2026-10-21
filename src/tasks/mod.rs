@@ -19,6 +19,7 @@ mod ids;
 mod kv_store;
 mod model;
 mod outbox;
+mod runs;
 mod service;
 mod store;
 
@@ -33,6 +34,7 @@ pub(crate) use model::{
     Actor, Client, Closed, Horizon, IssueRef, LegacyTodo, MoveContext, Moving, Origin, Owner,
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
+pub(crate) use runs::{derive, AskRow, Derived, RunCache, RunRecord, RunState, Shown};
 pub(crate) use service::{
     Backoff, EventContext, StartOptions, StoreEvent, StoreOpener, SubmitError, TaskService,
     WriteOutcome,
