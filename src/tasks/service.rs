@@ -260,6 +260,21 @@ pub(crate) struct StartOptions {
     pub outbox_dir: PathBuf,
 }
 
+/// What a pane shows of its tasks, kept up to date as the cache changes so a
+/// frame or a snapshot never scans the tasks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PaneTaskCounts {
+    /// Open tasks bound to the pane.
+    pub open: u32,
+    /// Writes for those tasks waiting for the store.
+    pub pending: u32,
+    /// Writes for those tasks held for a decision.
+    pub conflicts: u32,
+    /// Changes whenever any of the three does, or a task of the pane changes,
+    /// so a client holding the tasks knows to read them again.
+    pub revision: u64,
+}
+
 pub(crate) struct TaskService {
     /// Tells events of this service from those of one it replaced.
     generation: u64,
@@ -282,6 +297,10 @@ pub(crate) struct TaskService {
     failure: Option<String>,
     /// The store's first scan has arrived, so the cache is complete.
     loaded: bool,
+    /// The counts each pane shows, by the pane's stable `pane_key`.
+    pane_counts: HashMap<String, PaneTaskCounts>,
+    /// The cache revision each pane's counts were last taken at.
+    pane_cache_rev: HashMap<String, u64>,
     /// The run records, beside the tasks.
     runs: RunCache,
     /// Writes this server made on its own (rebuilding `runs`, the move to
@@ -317,6 +336,8 @@ impl TaskService {
             outcomes: Vec::new(),
             failure: None,
             loaded: false,
+            pane_counts: HashMap::new(),
+            pane_cache_rev: HashMap::new(),
             runs: RunCache::new(),
             auto_writes: HashMap::new(),
             status_mark: SystemTime::now(),
@@ -785,6 +806,79 @@ impl TaskService {
     /// Take what the store thread reported. Returns whether anything a reader
     /// can see changed.
     pub(crate) fn apply(&mut self, event: StoreEvent) -> bool {
+        let changed = self.apply_event(event);
+        if changed {
+            self.refresh_pane_counts();
+        }
+        changed
+    }
+
+    /// The counts a pane shows, if it has any tasks, open or waiting.
+    pub(crate) fn pane_counts(&self, pane_key: &str) -> Option<PaneTaskCounts> {
+        self.pane_counts.get(pane_key).copied()
+    }
+
+    /// Count, per pane, the open tasks bound to it and the writes waiting or
+    /// held for them. The version a task will have once its write lands is the
+    /// one counted. Panes whose numbers did not change keep their revision.
+    fn refresh_pane_counts(&mut self) {
+        let host = self.identity.as_ref().map(|identity| &identity.host);
+        let mut counts: HashMap<String, PaneTaskCounts> = HashMap::new();
+        let bound = |task: &Task| -> Option<String> {
+            let pane = task.pane.as_ref()?;
+            (host.is_none_or(|host| host.as_str() == pane.host))
+                .then(|| pane.pane_key.clone())
+                .flatten()
+        };
+        // A task with a write pending counts as that write will leave it.
+        let mut seen: HashSet<&TaskKey> = HashSet::new();
+        for (key, (_, task)) in &self.latest {
+            seen.insert(key);
+            if let Some(pane_key) = bound(task) {
+                let entry = counts.entry(pane_key).or_default();
+                entry.pending += 1;
+                if !task.status.is_closed() {
+                    entry.open += 1;
+                }
+            }
+        }
+        for (key, cached) in self.cache.iter() {
+            if seen.contains(key) {
+                continue;
+            }
+            if let Some(pane_key) = bound(&cached.task) {
+                let entry = counts.entry(pane_key).or_default();
+                if !cached.task.status.is_closed() {
+                    entry.open += 1;
+                }
+            }
+        }
+        for held in &self.conflicts {
+            if let Some(pane_key) = bound(&held.mine) {
+                counts.entry(pane_key).or_default().conflicts += 1;
+            }
+        }
+        // A cache change moves the revision of the panes it touches.
+        let global = self.cache.revision();
+        for (pane_key, entry) in &mut counts {
+            let before = self.pane_counts.get(pane_key);
+            entry.revision = match before {
+                Some(old)
+                    if (old.open, old.pending, old.conflicts)
+                        == (entry.open, entry.pending, entry.conflicts)
+                        && self.pane_cache_rev.get(pane_key) == Some(&global) =>
+                {
+                    old.revision
+                }
+                Some(old) => old.revision + 1,
+                None => 1,
+            };
+        }
+        self.pane_cache_rev = counts.keys().map(|key| (key.clone(), global)).collect();
+        self.pane_counts = counts;
+    }
+
+    fn apply_event(&mut self, event: StoreEvent) -> bool {
         match event {
             StoreEvent::Loaded(events) => {
                 self.loaded = true;

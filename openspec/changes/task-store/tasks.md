@@ -38,7 +38,7 @@
   Tests: `status_precedence_table`, `forged_starter_ignored`, `rescan_rebuilds_runs`
 - [x] 2.10 `task.*` methods, `task.changed`, client-shell advertisement with frozen
   digests. Test: the digest list in `client_commands.rs` gains the `task.*` entries
-- [ ] 2.11 `pane_tasks` resource fact. Test: `older_client_ignores_pane_tasks`
+- [x] 2.11 `pane_tasks` resource fact. Test: `older_client_ignores_pane_tasks`
 - [ ] 2.12 CLI `herdr-beta task add|list|show|update|done|drop|reopen|bind`, with
   `--json`, the outcome wait, and the `todo.*` fallback.
   Test: `cli_falls_back_when_task_methods_missing`
