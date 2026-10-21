@@ -229,6 +229,37 @@ move if the destination does not.
   reports the states of § 3.2 through `intent.changed`.
 - The helper's client side lives in `src/platform/macos.rs`. Other platforms
   return "confirmations off".
+- Key and signature format, agreed with worklink (ac/worklink
+  `docs/contracts/infra.md` WL-8.0-07, 76cbecc):
+  - ECDSA P-256 with SHA-256, the curve a Secure Enclave key supports. The
+    signature is ASN.1 DER (X9.62), as `SecKeyCreateSignature` returns it,
+    base64 (standard alphabet), sent as `{envelope, signature}`.
+  - Public keys are SPKI PEM. The key id `confirmed.key` is `sha256:` plus the
+    lowercase hex SHA-256 of the SPKI DER, so it certifies itself.
+  - The envelope is RFC 8785 (JCS) canonical JSON: integers only, timestamps as
+    RFC 3339 UTC strings, ASCII object keys, and no control characters in values
+    (the helper refuses them). The binding is the lowercase hex SHA-256 of the JCS
+    of `{kind, target, payload, schema_rev, observed}`.
+  - Public keys live in one file, `signing-keys.toml`, identical byte for byte in
+    worklink's config and each herdr server's. Each `[[key]]` has `host` (the
+    stable host id, `confirmed.host`), `id`, `alg = "ecdsa-p256-sha256"`,
+    `public_key`, `added_at` and an optional `revoked_at`. A host may have several
+    keys, for rotation.
+  - herdr reads `[tasks] signing_keys` (default `signing-keys.toml`, relative to
+    herdr's config dir). A missing or unparsable file turns confirmations off; it
+    never accepts unsigned intents.
+  - The verifier refuses an unknown id, a host mismatch, a recomputed id that
+    does not match, and a revoked key. Revocation is judged by the verifier's
+    clock, not by `confirmed.at`, which a stolen key could backdate. Writes
+    already applied stay.
+  - The helper (most likely Swift) makes the bytes; herdr (Rust) and worklink
+    (Go) only verify. Verification adds the RustCrypto `p256`/`ecdsa` crates
+    behind an off-by-default feature, next to the existing `sha2` and `base64`.
+  - Shared test vectors are the oracle: `test-vectors/signing.json` in
+    ac/worklink (ac/worklink#14), copied byte for byte to
+    `tests/fixtures/signing.json` here. It holds envelopes with their exact JCS
+    bytes, binding hashes, a fixed test key and its signatures, plus negative
+    cases. CI compares the two copies' SHA-256.
 
 ### D13. Todo migration (§ 2.6)
 

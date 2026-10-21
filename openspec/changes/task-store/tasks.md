@@ -69,6 +69,10 @@
 - [ ] 3.6 `TaskConflict` overlay with `m`, `t`, `e` and `Esc`.
   Tests: rendered layout, `conflict_overlay_resolves_through_server`
 - [ ] 3.7 Per action, the crash and replay tests of plan § 6, with worklink
+- [ ] 3.9 `signing-keys.toml` loading (`[tasks] signing_keys`) and P-256 verification
+  per design D12, against `tests/fixtures/signing.json` copied from ac/worklink#14.
+  Tests: `signing_vectors_verify`, `signing_vectors_negative_cases_refused`,
+  `fixture_matches_worklink_copy` (sha256)
 - [ ] 3.8 Done and not-doing keys on ac's own rows: the server runs
   `asks.py task-answer <key> done|not-doing [--take-back] --fingerprint <fp shown> --via herdr
   --client <id>` on its own Mac, with a FIXED environment (PATH, HOME and only what asks.py
