@@ -253,6 +253,8 @@ pub(crate) enum TaskError {
     PaneFull,
     /// An update names revision 0, which no stored task has.
     BadRevision,
+    /// A document offered for a task is for a different task.
+    KeyMismatch,
     /// A document from the bus is bigger than a writer would make it.
     TooLarge(&'static str),
     /// The document was written by a newer build, or holds a value this build
@@ -282,6 +284,7 @@ impl TaskError {
             Self::RunNotCurrent => "task_run_not_current",
             Self::PaneFull => "task_pane_full",
             Self::BadRevision => "task_bad_revision",
+            Self::KeyMismatch => "task_key_mismatch",
             Self::TooLarge(_) => "task_record_too_large",
             Self::NotRewritable => "task_schema_newer",
             Self::OwnedElsewhere { .. } => "task_owned_elsewhere",

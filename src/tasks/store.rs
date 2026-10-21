@@ -26,8 +26,12 @@ pub(crate) enum StoreError {
     AlreadyExists { current: (Rev, Vec<u8>) },
     /// The backend cannot be reached now; the write belongs in the outbox.
     Unavailable(String),
-    /// A local read or write failed, or the request was refused as invalid.
+    /// A local read or write failed, perhaps for now (a full disk, an I/O
+    /// error): the write stays in the outbox and is tried again.
     Io(String),
+    /// The request itself is refused for good (a bad key, a document that
+    /// cannot be written): trying again would change nothing.
+    Refused(String),
     /// The write was sent but its fate is unknown (a timed-out publish may
     /// have been stored). Neither applied nor failed: replaying the write id
     /// finds out.
@@ -39,19 +43,26 @@ impl std::fmt::Display for StoreError {
         match self {
             Self::Conflict { .. } => f.write_str("the revision moved"),
             Self::AlreadyExists { .. } => f.write_str("the key already exists"),
-            Self::Unavailable(why) | Self::Io(why) | Self::Indeterminate(why) => f.write_str(why),
+            Self::Unavailable(why)
+            | Self::Io(why)
+            | Self::Refused(why)
+            | Self::Indeterminate(why) => f.write_str(why),
         }
     }
 }
 
 pub(crate) type StoreResult<T> = Result<T, StoreError>;
 
-/// A change seen by a watch. `value` is `None` when the key was removed.
+/// A change seen by a watch, or an entry read by a scan. `value` is `None`
+/// when the key was removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WatchEvent {
     pub key: StoreKey,
     pub rev: Rev,
     pub value: Option<Vec<u8>>,
+    /// When the store took this revision, by the store's own clock, not the
+    /// writer's. `None` when the backend cannot say.
+    pub at: Option<std::time::SystemTime>,
 }
 
 /// Where a backend delivers watch events. Returns false once nobody listens,
@@ -63,6 +74,13 @@ pub(crate) type WatchSink = Box<dyn Fn(WatchEvent) -> bool + Send + 'static>;
 /// acknowledgement was lost.
 pub(crate) fn landed_before(current: &[u8], write: &WriteId) -> bool {
     serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.contains(write))
+}
+
+/// Whether `write` is the newest write the document in `current` holds. A
+/// write that is only somewhere in `last_writes` may have been followed by a
+/// foreign one, whose changes a replay on top of it would overwrite.
+pub(crate) fn landed_last(current: &[u8], write: &WriteId) -> bool {
+    serde_json::from_slice::<Task>(current).is_ok_and(|task| task.last_writes.last() == Some(write))
 }
 
 pub(crate) trait TaskStore: Send + 'static {
@@ -85,8 +103,9 @@ pub(crate) trait TaskStore: Send + 'static {
 
     fn get(&mut self, key: &StoreKey) -> StoreResult<Option<(Rev, Vec<u8>)>>;
 
-    /// Every key that starts with `prefix`, with its revision and document.
-    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>>;
+    /// Every key that starts with `prefix`, as the events a watch would have
+    /// delivered for them (so with a value), in key order.
+    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>>;
 
     /// Report every change under `prefix` from now on to `sink`.
     fn watch(&mut self, prefix: &str, sink: WatchSink) -> StoreResult<()>;

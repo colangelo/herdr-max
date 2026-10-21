@@ -90,10 +90,11 @@ impl FileStore {
     fn write(&mut self, key: &str, rev: Rev, value: &Task) -> StoreResult<()> {
         let path = self
             .path_for(key)
-            .ok_or_else(|| StoreError::Io(format!("not a usable key: {key}")))?;
-        let value = serde_json::to_value(value).map_err(|err| StoreError::Io(err.to_string()))?;
+            .ok_or_else(|| StoreError::Refused(format!("not a usable key: {key}")))?;
+        let value =
+            serde_json::to_value(value).map_err(|err| StoreError::Refused(err.to_string()))?;
         let bytes = serde_json::to_vec(&Stored { rev: rev.0, value })
-            .map_err(|err| StoreError::Io(err.to_string()))?;
+            .map_err(|err| StoreError::Refused(err.to_string()))?;
         let temp = self.dir.join(format!(
             "{key}.{EXTENSION}.{}.tmp",
             crate::ulid::new_ulid().to_ascii_lowercase()
@@ -114,6 +115,7 @@ impl FileStore {
         let Ok(Some((_, value))) = self.read(key) else {
             return;
         };
+        let at = self.path_for(key).and_then(|path| file_time(&path));
         self.watchers.retain(|(prefix, sink)| {
             if !key.starts_with(prefix.as_str()) {
                 return true;
@@ -122,6 +124,7 @@ impl FileStore {
                 key: StoreKey(key.to_owned()),
                 rev,
                 value: Some(value.clone()),
+                at,
             })
         });
     }
@@ -159,6 +162,11 @@ fn io_error(err: std::io::Error) -> StoreError {
 /// Read one key's file. A file that does not parse is renamed to
 /// `<name>.corrupt`, so it stays for a person to look at, and the key reads as
 /// absent instead of failing for good.
+/// When the file was last written: the store's own clock for the entry.
+fn file_time(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
 fn read_file(path: &Path) -> StoreResult<Option<(Rev, Vec<u8>)>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -225,7 +233,7 @@ impl TaskStore for FileStore {
         self.read(&key.0)
     }
 
-    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>> {
+    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>> {
         let mut found = Vec::new();
         for entry in fs::read_dir(&self.dir).map_err(io_error)? {
             let path = entry.map_err(io_error)?.path();
@@ -239,13 +247,18 @@ impl TaskStore for FileStore {
                 continue;
             }
             match read_file(&path) {
-                Ok(Some((rev, value))) => found.push((StoreKey(key.to_owned()), rev, value)),
+                Ok(Some((rev, value))) => found.push(WatchEvent {
+                    key: StoreKey(key.to_owned()),
+                    rev,
+                    value: Some(value),
+                    at: file_time(&path),
+                }),
                 Ok(None) => {}
                 // One damaged file must not hide the rest.
                 Err(err) => tracing::warn!(key, error = ?err, "skipping an unreadable task file"),
             }
         }
-        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found.sort_by(|left, right| left.key.cmp(&right.key));
         Ok(found)
     }
 
@@ -391,9 +404,13 @@ mod tests {
         }
         let mut store = FileStore::open(scratch.0.clone()).unwrap();
         let all = store.scan("task.").unwrap();
-        let keys: Vec<&str> = all.iter().map(|(key, _, _)| key.0.as_str()).collect();
+        let keys: Vec<&str> = all.iter().map(|event| event.key.0.as_str()).collect();
         assert_eq!(keys, ["task.m4m.tk-a", "task.m4m.tk-b"]);
-        assert!(all.iter().all(|(_, rev, _)| *rev == Rev(1)));
+        assert!(all.iter().all(|event| event.rev == Rev(1)));
+        assert!(
+            all.iter().all(|event| event.at.is_some()),
+            "an entry carries the time the store took it"
+        );
         assert!(store.scan("run.").unwrap().is_empty());
         assert_eq!(store.get(&StoreKey("nope".into())).unwrap(), None);
         assert_eq!(store.get(&StoreKey("../escape".into())).unwrap(), None);

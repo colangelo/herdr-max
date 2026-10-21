@@ -18,6 +18,7 @@ mod ids;
 #[cfg(feature = "tasks-kv")]
 mod kv_store;
 mod model;
+mod outbox;
 mod service;
 mod store;
 
@@ -33,6 +34,7 @@ pub(crate) use model::{
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
 pub(crate) use service::{
-    Backoff, EventContext, StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
+    Backoff, EventContext, StartOptions, StoreEvent, StoreOpener, SubmitError, TaskService,
+    WriteOutcome,
 };
 pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink};

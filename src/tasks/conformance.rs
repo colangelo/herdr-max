@@ -117,7 +117,7 @@ pub(super) fn run(store: &mut dyn TaskStore) {
         .scan("task.")
         .unwrap()
         .into_iter()
-        .map(|(key, _, _)| key.0)
+        .map(|event| event.key.0)
         .collect();
     assert_eq!(keys, ["task.m4m.tk-conf-1", "task.m4m.tk-conf-2"]);
     assert!(store.scan("run.").unwrap().is_empty());

@@ -11,6 +11,8 @@ use async_nats::jetstream::kv::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use std::time::SystemTime;
+
 use tokio::runtime::Runtime;
 
 use super::ids::{Rev, TaskKey, WriteId};
@@ -99,17 +101,25 @@ impl KvStore {
     }
 
     fn entry(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>)>> {
+        Ok(self.entry_at(key)?.map(|(rev, value, _)| (rev, value)))
+    }
+
+    /// As [`Self::entry`], with the time the server took the revision.
+    fn entry_at(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>, SystemTime)>> {
         let entry = self
             .runtime
             .block_on(self.bucket.entry(key.to_owned()))
             .map_err(unavailable)?;
-        Ok(entry.and_then(|entry| live(&entry)))
+        Ok(entry.and_then(|entry| {
+            let (rev, value) = live(&entry)?;
+            Some((rev, value, entry.created.into()))
+        }))
     }
 
     fn document(doc: &Task) -> StoreResult<Bytes> {
         serde_json::to_vec(doc)
             .map(Bytes::from)
-            .map_err(|err| StoreError::Io(err.to_string()))
+            .map_err(|err| StoreError::Refused(err.to_string()))
     }
 }
 
@@ -123,7 +133,7 @@ fn unavailable(err: impl std::fmt::Display) -> StoreError {
 /// been stored all the same, so only a bad key is a plain failure.
 fn create_error(kind: CreateErrorKind, why: String) -> StoreError {
     match kind {
-        CreateErrorKind::InvalidKey => StoreError::Io(why),
+        CreateErrorKind::InvalidKey => StoreError::Refused(why),
         CreateErrorKind::AlreadyExists
         | CreateErrorKind::Publish
         | CreateErrorKind::Ack
@@ -134,7 +144,7 @@ fn create_error(kind: CreateErrorKind, why: String) -> StoreError {
 /// What a failed update means; see [`create_error`].
 fn update_error(kind: UpdateErrorKind, why: String) -> StoreError {
     match kind {
-        UpdateErrorKind::InvalidKey => StoreError::Io(why),
+        UpdateErrorKind::InvalidKey => StoreError::Refused(why),
         UpdateErrorKind::WrongLastRevision | UpdateErrorKind::TimedOut | UpdateErrorKind::Other => {
             StoreError::Indeterminate(why)
         }
@@ -199,7 +209,7 @@ impl TaskStore for KvStore {
         self.entry(&key.0)
     }
 
-    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<(StoreKey, Rev, Vec<u8>)>> {
+    fn scan(&mut self, prefix: &str) -> StoreResult<Vec<WatchEvent>> {
         let keys = self.runtime.block_on(async {
             let mut stream = self.bucket.keys().await.map_err(unavailable)?;
             let mut keys = Vec::new();
@@ -213,11 +223,16 @@ impl TaskStore for KvStore {
         })?;
         let mut found = Vec::new();
         for key in keys {
-            if let Some((rev, value)) = self.entry(&key)? {
-                found.push((StoreKey(key), rev, value));
+            if let Some((rev, value, at)) = self.entry_at(&key)? {
+                found.push(WatchEvent {
+                    key: StoreKey(key),
+                    rev,
+                    value: Some(value),
+                    at: Some(at),
+                });
             }
         }
-        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found.sort_by(|left, right| left.key.cmp(&right.key));
         Ok(found)
     }
 
@@ -239,6 +254,7 @@ impl TaskStore for KvStore {
                     key: StoreKey(entry.key.clone()),
                     rev: Rev(entry.revision),
                     value: live(&entry).map(|(_, value)| value),
+                    at: Some(entry.created.into()),
                 };
                 if !sink(event) {
                     break;
@@ -452,7 +468,7 @@ mod tests {
         }
         assert!(matches!(
             create_error(CreateErrorKind::InvalidKey, "x".into()),
-            StoreError::Io(_)
+            StoreError::Refused(_)
         ));
         for kind in [UpdateErrorKind::TimedOut, UpdateErrorKind::Other] {
             assert!(matches!(
@@ -462,7 +478,7 @@ mod tests {
         }
         assert!(matches!(
             update_error(UpdateErrorKind::InvalidKey, "x".into()),
-            StoreError::Io(_)
+            StoreError::Refused(_)
         ));
     }
 }
