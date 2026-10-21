@@ -6,7 +6,7 @@
   `PaneSnapshot.run_id`, returned by `pane.get` and `pane.list`, still passed to the
   shell. Tests: `run_id_from_env_is_kept_across_restore`, plus the existing digest test
   unchanged
-- [ ] 1.3 `[tasks] host_id`, `bus_session`, `backend` in config, with validation.
+- [x] 1.3 `[tasks] host_id`, `bus_session`, `backend` in config, with validation.
   Test: `tasks_config_rejects_missing_host_id_for_kv`
 - [ ] 1.4 A `tasks-kv` cargo feature skeleton, off by default, and a `just` check
   that the default build links no NATS crate. Test: `default_build_has_no_nats`

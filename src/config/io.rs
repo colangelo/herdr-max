@@ -14,6 +14,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "remote",
     "server",
     "session",
+    "tasks",
     "terminal",
     "theme",
     "ui",
@@ -510,6 +511,21 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut invalid_sections,
         |section| config.palette = section,
     );
+    load_live_section(
+        table,
+        "tasks",
+        "tasks config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.tasks = section,
+    );
+    if let Err(message) = config.tasks.check() {
+        diagnostics.push(format!(
+            "invalid tasks config: {message}; using the default file store"
+        ));
+        invalid_sections.push("tasks".to_string());
+        config.tasks = Default::default();
+    }
 
     diagnostics.extend(config.theme.diagnostics());
 
@@ -954,6 +970,7 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::TasksBackend;
     use super::*;
 
     // Fork issue 133: one value this build does not know costs that key only.
@@ -1083,6 +1100,56 @@ agent_panel_sort = \"priority\"
         assert!(!updated.contains("[ui.toast]\nenabled = true"));
         assert!(updated.contains("delivery = \"herdr\""));
         assert!(updated.contains("[ui.sound]\nenabled = true"));
+    }
+
+    #[test]
+    fn tasks_config_defaults_to_the_file_backend() {
+        let loaded = load_live_config_from_str("").unwrap();
+        assert_eq!(loaded.config.tasks.backend, TasksBackend::File);
+        assert_eq!(loaded.config.tasks.host_id, "");
+        assert_eq!(loaded.config.tasks.bus_session, "");
+        assert!(loaded.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn tasks_config_reads_the_kv_settings() {
+        let loaded = load_live_config_from_str(
+            "[tasks]\nbackend = \"kv\"\nhost_id = \"ac-mbm5\"\nbus_session = \"main\"\n",
+        )
+        .unwrap();
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.config.tasks.backend, TasksBackend::Kv);
+        assert_eq!(loaded.config.tasks.host_id, "ac-mbm5");
+        assert_eq!(loaded.config.tasks.bus_session, "main");
+    }
+
+    #[test]
+    fn tasks_config_rejects_missing_host_id_for_kv() {
+        for body in [
+            "backend = \"kv\"\nbus_session = \"main\"\n",
+            "backend = \"kv\"\nhost_id = \"m4m\"\n",
+            "backend = \"kv\"\nhost_id = \"M4M.local\"\nbus_session = \"main\"\n",
+        ] {
+            let loaded = load_live_config_from_str(&format!("[tasks]\n{body}")).unwrap();
+            assert_eq!(
+                loaded.config.tasks.backend,
+                TasksBackend::File,
+                "an unusable kv setup falls back to the file store: {body}"
+            );
+            assert!(
+                loaded.diagnostics.iter().any(|line| line.contains("tasks")),
+                "{body}: {:?}",
+                loaded.diagnostics
+            );
+            assert!(loaded.invalid_sections.contains(&"tasks".to_string()));
+        }
+    }
+
+    #[test]
+    fn tasks_config_checks_a_host_id_even_for_the_file_backend() {
+        let loaded = load_live_config_from_str("[tasks]\nhost_id = \"has space\"\n").unwrap();
+        assert!(loaded.config.tasks.host_id.is_empty());
+        assert!(loaded.invalid_sections.contains(&"tasks".to_string()));
     }
 
     #[test]

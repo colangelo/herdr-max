@@ -676,6 +676,7 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agents: AgentsConfig,
     pub palette: PaletteConfig,
+    pub tasks: TasksConfig,
 }
 
 #[derive(Debug)]
@@ -1724,6 +1725,60 @@ impl Default for RemoteConfig {
 #[serde(default)]
 pub struct PaletteConfig {
     pub send: PaletteSendConfig,
+}
+
+/// The task store (fork issue 241).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TasksConfig {
+    /// Where tasks are kept: `file` (this session's data dir) or `kv` (a NATS JetStream KV bucket; needs the `tasks-kv` build). Default: file.
+    pub backend: TasksBackend,
+    /// A stable name for this machine, written once, such as `m4m` or `ac-mbm5`. It is the owner part of every task key, so it never follows the live hostname. Lowercase letters, digits and `-`. Default: unset.
+    pub host_id: String,
+    /// The session that talks to the bus. Other sessions on this machine refuse task writes. Needed with the `kv` backend. Default: unset.
+    pub bus_session: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TasksBackend {
+    /// One JSON document per task under the session's data dir.
+    #[default]
+    File,
+    /// A NATS JetStream KV bucket shared by both Macs.
+    Kv,
+}
+
+impl TasksConfig {
+    /// Why these settings cannot be used, if they cannot. A `host_id` is
+    /// checked whenever it is set; the `kv` backend also needs one, and a
+    /// `bus_session`.
+    pub fn check(&self) -> Result<(), String> {
+        if !self.host_id.is_empty() && !is_valid_host_id(&self.host_id) {
+            return Err(format!(
+                "tasks.host_id {:?} must use lowercase letters, digits and '-' (at most 63, not starting with '-')",
+                self.host_id
+            ));
+        }
+        if self.backend == TasksBackend::Kv {
+            if self.host_id.is_empty() {
+                return Err("tasks.backend = \"kv\" needs tasks.host_id".to_string());
+            }
+            if self.bus_session.is_empty() {
+                return Err("tasks.backend = \"kv\" needs tasks.bus_session".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_valid_host_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Sending a message to a session from the command bar.
