@@ -83,6 +83,12 @@ pub enum AppEvent {
         generation: u64,
         event: crate::tasks::StoreEvent,
     },
+    /// A run of a task crossed its five minutes: its shown status changed with
+    /// the clock alone (fork issue 241).
+    TaskStatusDue {
+        /// Which task service the timer was armed for.
+        generation: u64,
+    },
     /// A pane's child process exited.
     PaneDied {
         pane_id: PaneId,

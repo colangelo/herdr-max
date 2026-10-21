@@ -293,6 +293,39 @@ impl TaskError {
     }
 }
 
+impl TaskError {
+    /// A sentence for the person or agent who asked.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::TitleEmpty => "the title is empty".to_owned(),
+            Self::TitleNotOneLine => "the title must be one line".to_owned(),
+            Self::TitleTooLong => format!("the title is longer than {TITLE_MAX_CHARS} characters"),
+            Self::BodyTooLong => format!("the body is longer than {BODY_MAX_CHARS} characters"),
+            Self::OwnerInvalid => "the owner is not a valid session name".to_owned(),
+            Self::BadStatusMove { from, to } => {
+                format!("a task cannot go from {from:?} to {to:?}")
+            }
+            Self::RunAlreadyActive => "another run of this task is running".to_owned(),
+            Self::RunNotCurrent => "the run that ends is not the task's current one".to_owned(),
+            Self::PaneFull => {
+                format!("that pane already has {OPEN_TASKS_PER_PANE} open tasks")
+            }
+            Self::BadRevision => "revision 0 names no stored task".to_owned(),
+            Self::KeyMismatch => "the document is for a different task".to_owned(),
+            Self::TooLarge(what) => format!("the {what} of the task is too large"),
+            Self::NotRewritable => {
+                "the task was written by a newer herdr; it is shown but not changed".to_owned()
+            }
+            Self::OwnedElsewhere { owner_host } => {
+                format!("this task belongs to {owner_host}; change it there")
+            }
+            Self::NotBusSession { bus_session } => {
+                format!("only the session {bus_session} writes tasks")
+            }
+        }
+    }
+}
+
 /// What a status move needs to know, and what it records.
 pub(crate) struct MoveContext {
     /// Another run of this task is `running` (blocks Open to Running).

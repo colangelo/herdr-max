@@ -12,6 +12,7 @@ pub(super) mod responses;
 mod session;
 mod sync_pair;
 mod tabs;
+mod tasks;
 mod todos;
 mod workspaces;
 mod worktrees;
@@ -62,7 +63,18 @@ impl App {
             }
             AppEvent::TaskStore { generation, event } => {
                 if generation == self.tasks.generation() {
-                    self.tasks.apply(event);
+                    let changed = self.tasks.apply(event);
+                    self.publish_task_changes(changed);
+                    // The next deadline only moves when a run record came in.
+                    if self.tasks.take_runs_changed() {
+                        self.arm_task_status_timer();
+                    }
+                }
+                false
+            }
+            AppEvent::TaskStatusDue { generation } => {
+                if generation == self.tasks.generation() {
+                    self.task_status_timer_fired();
                 }
                 false
             }
@@ -1366,6 +1378,39 @@ impl App {
             }
             Method::TodoClear(params) => {
                 return self.handle_todo_clear(request.id, params);
+            }
+            Method::TaskList(params) => {
+                return self.handle_task_list(request.id, params);
+            }
+            Method::TaskShow(params) => {
+                return self.handle_task_show(request.id, params);
+            }
+            Method::TaskAdd(params) => {
+                return self.handle_task_add(request.id, params);
+            }
+            Method::TaskUpdate(params) => {
+                return self.handle_task_update(request.id, params);
+            }
+            Method::TaskDone(params) => {
+                return self.handle_task_done(request.id, params);
+            }
+            Method::TaskDrop(params) => {
+                return self.handle_task_drop(request.id, params);
+            }
+            Method::TaskReopen(params) => {
+                return self.handle_task_reopen(request.id, params);
+            }
+            Method::TaskBind(params) => {
+                return self.handle_task_bind(request.id, params);
+            }
+            Method::TaskWriteStatus(params) => {
+                return self.handle_task_write_status(request.id, params);
+            }
+            Method::TaskConflicts(_) => {
+                return self.handle_task_conflicts(request.id);
+            }
+            Method::TaskResolveConflict(params) => {
+                return self.handle_task_resolve_conflict(request.id, params);
             }
             Method::ClientWindowTitleSet(_) | Method::ClientWindowTitleClear(_) => {
                 return responses::encode_success(

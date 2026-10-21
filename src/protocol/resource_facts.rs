@@ -16,6 +16,10 @@ pub struct ClientShellResourceFacts {
     pub workspace_heads: Option<BTreeMap<String, ClientWorkspaceHead>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_todos: Option<BTreeMap<String, ClientPaneTodoSummary>>,
+    /// The tasks of each pane that has any (fork issue 241). An endpoint
+    /// from before this fact ignores it; a pane with none is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_tasks: Option<BTreeMap<String, ClientPaneTaskSummary>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_activity: Option<BTreeMap<String, bool>>,
     /// Background items (shells, monitors, agents, MCP tasks) an agent's
@@ -53,6 +57,23 @@ pub struct ClientPaneTodoSummary {
     pub highest_priority: Option<String>,
     /// Changes whenever any todo of the pane changes, so a client holding the
     /// full list knows to fetch it again. Older endpoints send none (0).
+    #[serde(default)]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneTaskSummary {
+    /// Open tasks bound to the pane.
+    #[serde(default)]
+    pub open: usize,
+    /// Writes for them waiting for the store ("pending sync").
+    #[serde(default)]
+    pub pending: usize,
+    /// Writes for them held for a decision.
+    #[serde(default)]
+    pub conflicts: usize,
+    /// Changes whenever any of the three does or a task of the pane changes,
+    /// so a client holding the tasks knows to read them again.
     #[serde(default)]
     pub revision: u64,
 }
@@ -103,6 +124,7 @@ impl ClientShellResourceFacts {
             pane_names: map(get("pane_names")),
             workspace_heads: map(get("workspace_heads")),
             pane_todos: map(get("pane_todos")),
+            pane_tasks: map(get("pane_tasks")),
             background_activity: map(get("background_activity")),
             background_count: map(get("background_count")),
             tab_sync: map(get("tab_sync")),
@@ -140,6 +162,89 @@ mod tests {
         );
         assert!(facts.notifications.is_none());
         assert!(ClientShellResourceFacts::decode(&serde_json::json!(false)).is_none());
+    }
+
+    #[test]
+    fn older_client_ignores_pane_tasks() {
+        // A client from before the fact decodes what it knows and skips the
+        // key it does not: modelled by the decoder meeting facts it has no
+        // field for (`future_feature`), and by the new fact being absent from
+        // the JSON of a server that has no tasks.
+        let with_tasks = serde_json::json!({
+            "pane_todos": {"pane": {"total": 1, "open": 1}},
+            "pane_tasks": {"pane": {"open": 2, "pending": 1, "conflicts": 0, "revision": 5,
+                                    "future_field": true}},
+        });
+        let facts = ClientShellResourceFacts::decode(&with_tasks).unwrap();
+        assert_eq!(
+            facts.pane_tasks.unwrap()["pane"],
+            ClientPaneTaskSummary {
+                open: 2,
+                pending: 1,
+                conflicts: 0,
+                revision: 5
+            }
+        );
+        assert_eq!(facts.pane_todos.unwrap()["pane"].open, 1);
+
+        // A malformed fact costs nothing else, and a missing one is just None.
+        let damaged = ClientShellResourceFacts::decode(&serde_json::json!({
+            "pane_todos": {"pane": {"total": 1, "open": 1}},
+            "pane_tasks": "wrong type",
+        }))
+        .unwrap();
+        assert!(damaged.pane_tasks.is_none());
+        assert_eq!(damaged.pane_todos.unwrap()["pane"].open, 1);
+        let old = ClientShellResourceFacts::decode(&serde_json::json!({
+            "pane_todos": {"pane": {"total": 1, "open": 1}},
+        }))
+        .unwrap();
+        assert!(old.pane_tasks.is_none());
+
+        // An endpoint from before the fact: a copy of the struct as it was,
+        // which does not know `pane_tasks`, reads what the new server sends.
+        #[derive(Debug, Default, Deserialize)]
+        struct BeforeTasks {
+            #[serde(default)]
+            pane_todos: Option<BTreeMap<String, ClientPaneTodoSummary>>,
+            #[serde(default)]
+            workspace_pins: Option<BTreeMap<String, u64>>,
+        }
+        let new_server = serde_json::to_value(ClientShellResourceFacts {
+            pane_todos: Some(
+                [(
+                    "pane".to_owned(),
+                    ClientPaneTodoSummary {
+                        total: 1,
+                        open: 1,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+            ),
+            pane_tasks: Some(
+                [(
+                    "pane".to_owned(),
+                    ClientPaneTaskSummary {
+                        open: 3,
+                        pending: 1,
+                        conflicts: 0,
+                        revision: 9,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(new_server.get("pane_tasks").is_some());
+        let old: BeforeTasks = serde_json::from_value(new_server).unwrap();
+        assert_eq!(old.pane_todos.unwrap()["pane"].open, 1);
+        assert!(old.workspace_pins.is_none());
+
+        // A server with no tasks writes the same JSON an older server did.
+        let json = serde_json::to_value(ClientShellResourceFacts::default()).unwrap();
+        assert!(json.get("pane_tasks").is_none());
     }
 
     #[test]

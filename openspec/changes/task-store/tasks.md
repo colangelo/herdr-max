@@ -34,12 +34,12 @@
   Test: `outbox_survives_live_handoff` (throwaway session)
 - [x] 2.8 Conflicts: `task.conflicts`, `task.resolve_conflict`, cancelled descendants.
   Tests: `theirs_cancels_descendants`, `second_resolver_gets_stale_revision`
-- [ ] 2.9 Derived status, the 5-minute timer, the run rescan on start and handoff.
+- [x] 2.9 Derived status, the 5-minute timer, the run rescan on start and handoff.
   Tests: `status_precedence_table`, `forged_starter_ignored`, `rescan_rebuilds_runs`
-- [ ] 2.10 `task.*` methods, `task.changed`, client-shell advertisement with frozen
+- [x] 2.10 `task.*` methods, `task.changed`, client-shell advertisement with frozen
   digests. Test: the digest list in `client_commands.rs` gains the `task.*` entries
-- [ ] 2.11 `pane_tasks` resource fact. Test: `older_client_ignores_pane_tasks`
-- [ ] 2.12 CLI `herdr-beta task add|list|show|update|done|drop|reopen|bind`, with
+- [x] 2.11 `pane_tasks` resource fact. Test: `older_client_ignores_pane_tasks`
+- [x] 2.12 CLI `herdr-beta task add|list|show|update|done|drop|reopen|bind`, with
   `--json`, the outcome wait, and the `todo.*` fallback.
   Test: `cli_falls_back_when_task_methods_missing`
 - [ ] 2.13 `issue.list` and `ask.list`, read by the server from `ISSUES` and `ASKS`;

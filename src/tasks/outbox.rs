@@ -63,6 +63,11 @@ pub(crate) struct Entry {
     /// decision, and so does everything queued behind it for the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<Conflict>,
+    /// Made by the server itself (rebuilding `runs`, the move to Running), not
+    /// by a person: if the store refuses it as a conflict it is dropped, not
+    /// held for a decision, since the next run record makes it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
     #[serde(skip)]
     seq: u64,
 }
@@ -199,6 +204,18 @@ impl Outbox {
         doc: Task,
         base: Option<Base>,
     ) -> io::Result<()> {
+        self.push_as(write, op, doc, base, false)
+    }
+
+    /// As [`Self::push`]; `auto` marks a write the server made on its own.
+    pub(crate) fn push_as(
+        &mut self,
+        write: WriteId,
+        op: Op,
+        doc: Task,
+        base: Option<Base>,
+        auto: bool,
+    ) -> io::Result<()> {
         let key = doc.key();
         let entry = Entry {
             write,
@@ -207,6 +224,7 @@ impl Outbox {
             doc,
             base,
             conflict: None,
+            auto,
             seq: self.next_seq,
         };
         self.persist(&entry)?;
@@ -300,6 +318,27 @@ impl Outbox {
             removed.push(entry.write);
         }
         Ok(removed)
+    }
+
+    /// Drop one entry and leave the ones queued behind it where they are.
+    /// Returns what was behind it (the entries that named it as their base),
+    /// so the caller can decide about them.
+    pub(crate) fn remove_head(&mut self, write: &WriteId) -> io::Result<Vec<Entry>> {
+        let Some(index) = self.entries.iter().position(|entry| &entry.write == write) else {
+            return Ok(Vec::new());
+        };
+        let entry = self.entries.remove(index);
+        remove_durably(&self.entry_path(&entry), &self.dir)?;
+        let _ = fs::remove_file(self.receipt_path(&entry.write));
+        if let Some(Base::After(ahead)) = &entry.base {
+            let _ = fs::remove_file(self.receipt_path(ahead));
+        }
+        Ok(self
+            .entries
+            .iter()
+            .filter(|other| other.base.as_ref() == Some(&Base::After(write.clone())))
+            .cloned()
+            .collect())
     }
 
     /// Remember that the store holds a newer version, and hold the entry.

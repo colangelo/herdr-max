@@ -10,12 +10,18 @@ use crate::api::schema::Request;
 thread_local! {
     static REQUESTS: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
     static RESULT: RefCell<Value> = RefCell::new(json!({"ok": true}));
+    /// Whole responses to give first, oldest first, before the default result.
+    static QUEUED: RefCell<std::collections::VecDeque<Value>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
 }
 
 pub(super) fn capture_request(request: &Request) -> Option<Value> {
     REQUESTS.with_borrow_mut(|requests| {
         let requests = requests.as_mut()?;
         requests.push(serde_json::to_value(&request.method).expect("serialize captured method"));
+        if let Some(queued) = QUEUED.with_borrow_mut(|queued| queued.pop_front()) {
+            return Some(queued);
+        }
         Some(json!({"id": request.id, "result": RESULT.with_borrow(Clone::clone)}))
     })
 }
@@ -35,7 +41,17 @@ impl Capture {
         RESULT.with_borrow_mut(|current| *current = result);
     }
 
-    fn take(&self) -> Vec<Value> {
+    /// Answer the next unanswered request with this whole response.
+    pub(super) fn queue_response(&self, response: Value) {
+        QUEUED.with_borrow_mut(|queued| queued.push_back(response));
+    }
+
+    /// What every request after the queued ones is answered with.
+    pub(super) fn set_default(&self, result: Value) {
+        self.respond_with(result);
+    }
+
+    pub(super) fn take(&self) -> Vec<Value> {
         REQUESTS
             .with_borrow_mut(|requests| std::mem::take(requests.as_mut().expect("capture active")))
     }
@@ -45,6 +61,7 @@ impl Drop for Capture {
     fn drop(&mut self) {
         REQUESTS.with_borrow_mut(|requests| *requests = None);
         RESULT.with_borrow_mut(|result| *result = json!({"ok": true}));
+        QUEUED.with_borrow_mut(std::collections::VecDeque::clear);
     }
 }
 
@@ -97,6 +114,17 @@ fn fork_methods_are_in_the_operations_table() {
         "pane.sync_pair",
         "plugin.popup.close",
         "tab.sync",
+        "task.add",
+        "task.bind",
+        "task.conflicts",
+        "task.done",
+        "task.drop",
+        "task.list",
+        "task.reopen",
+        "task.resolve_conflict",
+        "task.show",
+        "task.update",
+        "task.write_status",
         "todo.add",
         "todo.clear",
         "todo.list",

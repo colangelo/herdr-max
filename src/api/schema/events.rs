@@ -86,6 +86,8 @@ pub enum Subscription {
     NotificationPosted {},
     #[serde(rename = "todo.changed")]
     TodoChanged {},
+    #[serde(rename = "task.changed")]
+    TaskChanged {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -224,6 +226,7 @@ pub enum EventKind {
     LayoutUpdated,
     NotificationPosted,
     TodoChanged,
+    TaskChanged,
 }
 
 impl EventKind {
@@ -257,6 +260,7 @@ impl EventKind {
             EventKind::LayoutUpdated => "layout.updated",
             EventKind::NotificationPosted => "notification.posted",
             EventKind::TodoChanged => "todo.changed",
+            EventKind::TaskChanged => "task.changed",
         }
     }
 }
@@ -291,6 +295,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::LayoutUpdated,
     EventKind::NotificationPosted,
     EventKind::TodoChanged,
+    EventKind::TaskChanged,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -571,5 +576,22 @@ pub enum EventData {
     /// and consumers see one shape.
     TodoChanged {
         pane_id: String,
+    },
+    /// The task store changed. A change someone made names the task (`key`)
+    /// and the store `revision` of the cache; a write that ended carries its
+    /// `write_id` and `outcome`; a settled conflict carries its `ticket` and
+    /// `resolution`. The tasks themselves are read back with `task.list`.
+    TaskChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        write_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<super::tasks::TaskOutcomeInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<super::tasks::TaskResolutionInfo>,
     },
 }

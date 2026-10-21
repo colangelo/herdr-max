@@ -14,6 +14,7 @@ pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod tasks;
 pub mod todos;
 pub mod workspaces;
 pub mod worktrees;
@@ -31,6 +32,7 @@ pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use tasks::*;
 pub use todos::*;
 pub use workspaces::*;
 pub use worktrees::*;
@@ -183,6 +185,20 @@ operations::define_operations! {
     // an older server answers "unknown method" instead of a plain respawn that
     // stops the agent (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
     PaneRespawnAgent(PaneRespawnParams) => "pane.respawn_agent", true, false;
+    // Fork: the task store (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/241).
+    // New names beside `todo.*`, which keep their meaning until they retire.
+    TaskList(TaskListParams) => "task.list", false, true;
+    TaskShow(TaskTarget) => "task.show", false, true;
+    TaskAdd(TaskAddParams) => "task.add", false, true;
+    TaskUpdate(TaskUpdateParams) => "task.update", false, true;
+    TaskDone(TaskMoveStatusParams) => "task.done", false, true;
+    TaskDrop(TaskMoveStatusParams) => "task.drop", false, true;
+    TaskReopen(TaskMoveStatusParams) => "task.reopen", false, true;
+    TaskBind(TaskBindParams) => "task.bind", false, true;
+    TaskConflicts(EmptyParams) => "task.conflicts", false, true;
+    // Not advertised to the client shell: the CLI polls it for a write's outcome.
+    TaskWriteStatus(TaskWriteStatusParams) => "task.write_status", false, false;
+    TaskResolveConflict(TaskResolveConflictParams) => "task.resolve_conflict", false, true;
 }
 
 #[cfg(test)]

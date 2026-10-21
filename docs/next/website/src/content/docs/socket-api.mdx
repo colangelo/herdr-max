@@ -100,6 +100,7 @@ Raw socket method names use dot notation:
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
 | Notification | `notification.show`, `notification.list`, `notification.mark_seen`, `notification.clear` |
 | Todo | `todo.list`, `todo.add`, `todo.update`, `todo.remove`, `todo.clear` |
+| Task | `task.list`, `task.show`, `task.add`, `task.update`, `task.done`, `task.drop`, `task.reopen`, `task.bind`, `task.conflicts`, `task.resolve_conflict`, `task.write_status` |
 | Client | `client.list`, `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
@@ -560,6 +561,44 @@ Remove one todo, or clear a pane's list; `done_only` keeps the outstanding ones:
 
 Every call that changes a pane's list emits `todo.changed` for that pane; a
 clear that removed nothing changes nothing and emits nothing.
+
+### Tasks
+
+Tasks are the shared counterpart of todos: a task belongs to a host (`owner_host`), is
+kept in the task store (a directory under the session's data dir by default), and
+can name an agent session as its owner and a pane it sits on. The server answers
+every `task.*` call from memory and never waits on the store. A write
+(`task.add`, `task.update`, `task.done`, `task.drop`, `task.reopen`, `task.bind`)
+answers at once with the task as sent, its `write_id` and `"pending": true`;
+how it ended arrives later as `task.changed` with that `write_id` and an
+`outcome` of `applied`, `conflict`, `exists`, `failed` or `unknown`.
+
+```json
+{"id":"req_t1","method":"task.add","params":{"title":"write the store","by":"herdr-wrk","via":"cli","pane_id":"w1:p2"}}
+{"id":"req_t1","result":{"type":"task","task":{"key":"task.m4m.tk-01j...","status":"open","shown":"open","rev":0,"pending":true},"write_id":"01j...","pending":true}}
+{"id":"req_t2","method":"task.update","params":{"key":"task.m4m.tk-01j...","expected_rev":1,"title":"write the store and its tests"}}
+```
+
+An edit carries the `expected_rev` it read. If the revision has moved, the
+outcome is `conflict` with the store's version, and the write is held until
+someone settles it: `task.conflicts` lists the held writes, and
+`task.resolve_conflict {key, write_id, choice, doc?, expected_rev}` settles one
+with `mine` (written again on top of the store's version), `theirs` (dropped,
+and every write queued on it comes back as a conflict) or `merged` (`doc`
+applied on top of the held version). A resolver who looked at an older conflict
+gets `stale_revision`. `task.done`, `task.drop` and `task.reopen` take an
+optional `expected_rev`; without one they are checked against the version the
+server holds.
+
+`task.write_status {write_id}` answers whether a write is still waiting for the store (and whether it is saved on disk) or how it ended, for a caller that prefers asking to subscribing; the server remembers the last thousand outcomes.
+
+`shown` is the status a reader should display: the stored `status`, changed by
+the task's run records and by the asks row it waits on (`waiting`,
+`run_unknown`). A server answers `task_owned_elsewhere` for a task whose
+`owner_host` is another host, and `task_not_bus_session` when its session may not
+write tasks; neither write is queued. `task.list` leaves closed tasks out unless
+`include_closed` is set, and carries a `store` object with the store's state and
+how many writes are waiting or held.
 
 ### Clients
 
@@ -1147,6 +1186,8 @@ entry is appended to the server's notification log. The event carries the same
 Todo subscriptions include `todo.changed`, emitted once per `todo.*` call that
 changed a pane's list. The event carries only the affected `pane_id`; read the
 list back with `todo.list` so consumers always see one shape.
+
+Task subscriptions include `task.changed`, emitted when the task cache changes, when a write ends (with its `write_id` and `outcome`), and when a conflict is settled (with its `ticket` and `resolution`). Read the tasks back with `task.list`.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
 

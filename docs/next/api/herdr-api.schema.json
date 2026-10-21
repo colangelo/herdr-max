@@ -791,6 +791,65 @@
                 "pane_id"
               ],
               "type": "object"
+            },
+            {
+              "description": "The task store changed. A change someone made names the task (`key`)\nand the store `revision` of the cache; a write that ended carries its\n`write_id` and `outcome`; a settled conflict carries its `ticket` and\n`resolution`. The tasks themselves are read back with `task.list`.",
+              "properties": {
+                "key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/TaskOutcomeInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolution": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/TaskResolutionInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ticket": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "task_changed",
+                  "type": "string"
+                },
+                "write_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "revision"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -823,7 +882,8 @@
             "pane_agent_status_changed",
             "layout_updated",
             "notification_posted",
-            "todo_changed"
+            "todo_changed",
+            "task_changed"
           ],
           "type": "string"
         },
@@ -1253,6 +1313,471 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "TaskClosedInfo": {
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "by"
+          ],
+          "type": "object"
+        },
+        "TaskInfo": {
+          "description": "One task as the API shows it.",
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "closed": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/TaskClosedInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conflict": {
+              "description": "A write for this task is held for a decision.",
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "created_by": {
+              "description": "Who made it, and through what (`cli`, `tui`, `api`, ...).",
+              "type": "string"
+            },
+            "created_via": {
+              "type": "string"
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "key": {
+              "description": "`task.<owner_host>.<id>`.",
+              "type": "string"
+            },
+            "moved_from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "moved_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "The agent session that owns the task; absent when nobody does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner_host": {
+              "type": "string"
+            },
+            "pane": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/TaskPaneInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pending": {
+              "description": "A write for this task is waiting for the store.",
+              "type": "boolean"
+            },
+            "priority": {
+              "$ref": "#/schemas/event/$defs/TaskPriorityInfo"
+            },
+            "refs": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/TaskIssueRefInfo"
+              },
+              "type": "array"
+            },
+            "related_pane": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/TaskPaneInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rev": {
+              "description": "The store's revision of this version; the `expected_rev` of an edit.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "review": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "shown": {
+              "$ref": "#/schemas/event/$defs/TaskShownInfo"
+            },
+            "status": {
+              "$ref": "#/schemas/event/$defs/TaskStatusInfo"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "waits_on": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waits_on_missing": {
+              "description": "`waits_on` names an asks row that no longer exists.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key",
+            "id",
+            "owner_host",
+            "rev",
+            "title",
+            "status",
+            "shown",
+            "priority",
+            "created_by",
+            "created_via",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "TaskIssueRefInfo": {
+          "description": "A forge issue a task refers to.",
+          "properties": {
+            "forge": {
+              "type": "string"
+            },
+            "forge_id": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "forge_id",
+            "host",
+            "project_id",
+            "project_path",
+            "number"
+          ],
+          "type": "object"
+        },
+        "TaskOutcomeInfo": {
+          "description": "How a write ended, in `task.changed`.",
+          "oneOf": [
+            {
+              "properties": {
+                "rev": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "applied",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "rev"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The revision moved: what the store holds now.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "conflict",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A create found the key held.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "exists",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The write may or may not have been applied.",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TaskPaneInfo": {
+          "description": "A pane a task sits on. `pane_id` is the public id while the pane still\nresolves on this server, and absent once it is gone or on another host.",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "session",
+            "label"
+          ],
+          "type": "object"
+        },
+        "TaskPriorityInfo": {
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskResolutionInfo": {
+          "description": "How a `task.resolve_conflict` ended, in `task.changed`.",
+          "oneOf": [
+            {
+              "description": "The held write was queued again; its own outcome follows.",
+              "properties": {
+                "status": {
+                  "const": "requeued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The store's version stands; these queued writes came back as conflicts.",
+              "properties": {
+                "cancelled": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "const": "dropped",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "cancelled"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Someone settled it first, or the store moved again.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "stale",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TaskShownInfo": {
+          "description": "The status a reader shows: the stored one, as run records and the asks row\na task waits on change it. `run_unknown` is a run that is unknown or stuck\nin `starting`, never shown as running.",
+          "enum": [
+            "open",
+            "running",
+            "waiting",
+            "run_unknown",
+            "done",
+            "dropped",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskStatusInfo": {
+          "description": "The status a task stores.",
+          "enum": [
+            "open",
+            "running",
+            "done",
+            "dropped",
+            "unknown"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {
@@ -4869,6 +5394,18 @@
                 "type"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "task.changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -4995,6 +5532,396 @@
           },
           "required": [
             "tab_id"
+          ],
+          "type": "object"
+        },
+        "TaskAddParams": {
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "by": {
+              "description": "Who is asking (`human:ac`, an agent session name); recorded as the\ntask's origin.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "The agent session that owns it; none means nobody.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "description": "A pane on this server to bind the task to.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TaskPriorityInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "refs": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/TaskIssueRefInfo"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            },
+            "via": {
+              "description": "Through what (`cli`, `tui`, `api`); `api` when left out.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waits_on": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "TaskBindParams": {
+          "description": "Params for `task.bind`: put a task on a pane of this server, or take it off.",
+          "properties": {
+            "clear": {
+              "description": "Remove the binding; wins over `pane_id`.",
+              "type": "boolean"
+            },
+            "expected_rev": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "related": {
+              "description": "Bind the related pane (shown by label only) instead of the task's own.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key",
+            "expected_rev"
+          ],
+          "type": "object"
+        },
+        "TaskConflictChoice": {
+          "enum": [
+            "mine",
+            "theirs",
+            "merged",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskFields": {
+          "description": "The editable fields of a task. A field left out keeps its value; an empty\nstring clears `body`, `horizon`, `owner`, `waits_on` and `review`.",
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TaskPriorityInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "review": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waits_on": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "TaskIssueRefInfo": {
+          "description": "A forge issue a task refers to.",
+          "properties": {
+            "forge": {
+              "type": "string"
+            },
+            "forge_id": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "forge_id",
+            "host",
+            "project_id",
+            "project_path",
+            "number"
+          ],
+          "type": "object"
+        },
+        "TaskListParams": {
+          "description": "Params for `task.list`. Closed tasks are left out unless asked for.",
+          "properties": {
+            "include_closed": {
+              "type": "boolean"
+            },
+            "owner": {
+              "description": "Only the tasks of this agent session.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "description": "Only the tasks bound to this pane.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "TaskMoveStatusParams": {
+          "description": "Params for `task.done`, `task.drop` and `task.reopen`. Without\n`expected_rev` the move is checked against the version the server holds.",
+          "properties": {
+            "by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_rev": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "TaskPriorityInfo": {
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskResolveConflictParams": {
+          "description": "Params for `task.resolve_conflict`. `expected_rev` is the store's revision\nthe caller saw in `task.conflicts` (`theirs_rev`): a resolver who looked at\nan older conflict gets `stale_revision`. For `merged`, `doc` is applied on\ntop of the held version.",
+          "properties": {
+            "choice": {
+              "$ref": "#/schemas/request/$defs/TaskConflictChoice"
+            },
+            "doc": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TaskFields"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expected_rev": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "key": {
+              "type": "string"
+            },
+            "write_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "write_id",
+            "choice",
+            "expected_rev"
+          ],
+          "type": "object"
+        },
+        "TaskTarget": {
+          "properties": {
+            "key": {
+              "description": "`task.<owner_host>.<id>`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "TaskUpdateParams": {
+          "description": "Params for `task.update`. `expected_rev` is the revision the caller read: a\nstale edit comes back as a conflict, never applied over a newer version.",
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_rev": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "owner": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "priority": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/TaskPriorityInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "review": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waits_on": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key",
+            "expected_rev"
+          ],
+          "type": "object"
+        },
+        "TaskWriteStatusParams": {
+          "description": "Params for `task.write_status`: how a write fared, for a caller (the CLI)\nthat waits for its outcome by asking again.",
+          "properties": {
+            "write_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "write_id"
           ],
           "type": "object"
         },
@@ -7522,6 +8449,182 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.show",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskUpdateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.done",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskMoveStatusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.drop",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskMoveStatusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.reopen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskMoveStatusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.bind",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskBindParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.conflicts",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.write_status",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskWriteStatusParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "task.resolve_conflict",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/TaskResolveConflictParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -8891,6 +9994,65 @@
                 "pane_id"
               ],
               "type": "object"
+            },
+            {
+              "description": "The task store changed. A change someone made names the task (`key`)\nand the store `revision` of the cache; a write that ended carries its\n`write_id` and `outcome`; a settled conflict carries its `ticket` and\n`resolution`. The tasks themselves are read back with `task.list`.",
+              "properties": {
+                "key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskOutcomeInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolution": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskResolutionInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ticket": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "task_changed",
+                  "type": "string"
+                },
+                "write_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "revision"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -8938,7 +10100,8 @@
             "pane_agent_status_changed",
             "layout_updated",
             "notification_posted",
-            "todo_changed"
+            "todo_changed",
+            "task_changed"
           ],
           "type": "string"
         },
@@ -11814,6 +12977,128 @@
               "type": "object"
             },
             {
+              "properties": {
+                "store": {
+                  "$ref": "#/schemas/success_response/$defs/TaskStoreInfo"
+                },
+                "tasks": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "task_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tasks",
+                "store"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "One task. After a write, `write_id` names it and `pending` is true: the\noutcome arrives later as `task.changed`.",
+              "properties": {
+                "pending": {
+                  "type": "boolean"
+                },
+                "task": {
+                  "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                },
+                "type": {
+                  "const": "task",
+                  "type": "string"
+                },
+                "write_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "How a write fared: waiting for the store (and whether it is saved on\ndisk yet), or ended with an outcome.",
+              "properties": {
+                "outcome": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskOutcomeInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "pending": {
+                  "type": "boolean"
+                },
+                "saved": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "task_write",
+                  "type": "string"
+                },
+                "write_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "write_id",
+                "pending",
+                "saved"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "conflicts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/TaskConflictInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "task_conflicts",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "conflicts"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A `task.resolve_conflict` that was taken: how it ended arrives later as\n`task.changed`, under this ticket.",
+              "properties": {
+                "ticket": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "task_resolving",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "ticket"
+              ],
+              "type": "object"
+            },
+            {
               "description": "A forced close: the open todos of every pane it closed.",
               "properties": {
                 "closed_todos": {
@@ -12505,6 +13790,543 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "TaskClosedInfo": {
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "at",
+            "by"
+          ],
+          "type": "object"
+        },
+        "TaskConflictInfo": {
+          "description": "A write refused as a conflict, waiting for a decision.",
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "mine": {
+              "$ref": "#/schemas/success_response/$defs/TaskInfo",
+              "description": "What the held write would store."
+            },
+            "theirs": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The store's version, when it can be read as a task."
+            },
+            "theirs_rev": {
+              "description": "The store's revision when it refused: the `expected_rev` to resolve with\n(`0` when the key was absent).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "write_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "write_id",
+            "key",
+            "mine",
+            "theirs_rev"
+          ],
+          "type": "object"
+        },
+        "TaskInfo": {
+          "description": "One task as the API shows it.",
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "client": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "closed": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TaskClosedInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "conflict": {
+              "description": "A write for this task is held for a decision.",
+              "type": "boolean"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "created_by": {
+              "description": "Who made it, and through what (`cli`, `tui`, `api`, ...).",
+              "type": "string"
+            },
+            "created_via": {
+              "type": "string"
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "key": {
+              "description": "`task.<owner_host>.<id>`.",
+              "type": "string"
+            },
+            "moved_from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "moved_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner": {
+              "description": "The agent session that owns the task; absent when nobody does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner_host": {
+              "type": "string"
+            },
+            "pane": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TaskPaneInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pending": {
+              "description": "A write for this task is waiting for the store.",
+              "type": "boolean"
+            },
+            "priority": {
+              "$ref": "#/schemas/success_response/$defs/TaskPriorityInfo"
+            },
+            "refs": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/TaskIssueRefInfo"
+              },
+              "type": "array"
+            },
+            "related_pane": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/TaskPaneInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rev": {
+              "description": "The store's revision of this version; the `expected_rev` of an edit.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "review": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "shown": {
+              "$ref": "#/schemas/success_response/$defs/TaskShownInfo"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/TaskStatusInfo"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "waits_on": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waits_on_missing": {
+              "description": "`waits_on` names an asks row that no longer exists.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "key",
+            "id",
+            "owner_host",
+            "rev",
+            "title",
+            "status",
+            "shown",
+            "priority",
+            "created_by",
+            "created_via",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "TaskIssueRefInfo": {
+          "description": "A forge issue a task refers to.",
+          "properties": {
+            "forge": {
+              "type": "string"
+            },
+            "forge_id": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "forge_id",
+            "host",
+            "project_id",
+            "project_path",
+            "number"
+          ],
+          "type": "object"
+        },
+        "TaskOutcomeInfo": {
+          "description": "How a write ended, in `task.changed`.",
+          "oneOf": [
+            {
+              "properties": {
+                "rev": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "applied",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "rev"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The revision moved: what the store holds now.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "conflict",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A create found the key held.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "exists",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The write may or may not have been applied.",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TaskPaneInfo": {
+          "description": "A pane a task sits on. `pane_id` is the public id while the pane still\nresolves on this server, and absent once it is gone or on another host.",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "session",
+            "label"
+          ],
+          "type": "object"
+        },
+        "TaskPriorityInfo": {
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskResolutionInfo": {
+          "description": "How a `task.resolve_conflict` ended, in `task.changed`.",
+          "oneOf": [
+            {
+              "description": "The held write was queued again; its own outcome follows.",
+              "properties": {
+                "status": {
+                  "const": "requeued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The store's version stands; these queued writes came back as conflicts.",
+              "properties": {
+                "cancelled": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "const": "dropped",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "cancelled"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Someone settled it first, or the store moved again.",
+              "properties": {
+                "current": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/TaskInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "status": {
+                  "const": "stale",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "status": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "message"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "TaskShownInfo": {
+          "description": "The status a reader shows: the stored one, as run records and the asks row\na task waits on change it. `run_unknown` is a run that is unknown or stuck\nin `starting`, never shown as running.",
+          "enum": [
+            "open",
+            "running",
+            "waiting",
+            "run_unknown",
+            "done",
+            "dropped",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskStatusInfo": {
+          "description": "The status a task stores.",
+          "enum": [
+            "open",
+            "running",
+            "done",
+            "dropped",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TaskStoreInfo": {
+          "description": "How the store is doing, so a client can say \"pending sync\" or \"not synced\".",
+          "properties": {
+            "conflicts": {
+              "description": "Writes held for a decision.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pending": {
+              "description": "Writes waiting for the store.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "description": "`disabled`, `loading`, `ready` or `unavailable`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "pending",
+            "conflicts"
           ],
           "type": "object"
         },

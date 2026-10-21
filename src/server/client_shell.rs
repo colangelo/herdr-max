@@ -304,6 +304,7 @@ fn resource_facts(
     let mut pane_names = BTreeMap::new();
     let mut pane_pins = BTreeMap::new();
     let mut pane_todos = BTreeMap::new();
+    let mut pane_tasks = BTreeMap::new();
     let mut background_activity = BTreeMap::new();
     let mut background_count = BTreeMap::new();
     for public in &snapshot.panes {
@@ -335,6 +336,19 @@ fn resource_facts(
                 revision: terminal.todo_revision(),
             },
         );
+        // Only panes that have tasks, and only what was counted when the cache
+        // last changed: nothing here scans the tasks.
+        if let Some(counts) = app.tasks.pane_counts(&terminal.pane_key) {
+            pane_tasks.insert(
+                public.pane_id.clone(),
+                protocol::ClientPaneTaskSummary {
+                    open: counts.open as usize,
+                    pending: counts.pending as usize,
+                    conflicts: counts.conflicts as usize,
+                    revision: counts.revision,
+                },
+            );
+        }
         background_activity.insert(public.pane_id.clone(), terminal.background_work());
         if terminal.background_count() > 0 {
             background_count.insert(public.pane_id.clone(), terminal.background_count());
@@ -374,6 +388,7 @@ fn resource_facts(
         pane_names: Some(pane_names),
         workspace_heads: Some(workspace_heads),
         pane_todos: Some(pane_todos),
+        pane_tasks: (!pane_tasks.is_empty()).then_some(pane_tasks),
         background_activity: Some(background_activity),
         background_count: Some(background_count),
         tab_sync: Some(tab_sync),
@@ -772,6 +787,99 @@ mod tests {
         let (shell, _) = snapshot_with_completions(&app, "boot", 1, None, None);
         let facts = shell.resource_facts.expect("optional facts");
         assert_eq!(facts.macos_services_lost, Some(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pane_tasks_fact_counts_the_tasks_bound_to_each_pane_and_leaves_the_rest_out() {
+        use crate::tasks::{
+            HostId, Origin, PaneBinding, Rev, StoreEvent, StoreKey, Task, TaskId, Timestamp, Via,
+            WatchEvent,
+        };
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("one");
+        workspace.test_add_tab(None);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let mut keys: Vec<String> = app
+            .state
+            .terminals
+            .values()
+            .map(|terminal| terminal.pane_key.clone())
+            .collect();
+        keys.sort();
+        let bound_key = keys[0].clone();
+
+        let mut put = |id: &str, closed: bool| {
+            let mut task = Task::new(
+                HostId::local(),
+                TaskId::new(id).unwrap(),
+                "a task",
+                Origin {
+                    host: "local".into(),
+                    by: "x".into(),
+                    via: Via::Cli,
+                },
+                Timestamp("2026-10-21T20:00:00Z".into()),
+            )
+            .unwrap();
+            task.pane = Some(PaneBinding {
+                host: "local".into(),
+                session: "default".into(),
+                pane_key: Some(bound_key.clone()),
+                label: "p".into(),
+            });
+            if closed {
+                task.status = crate::tasks::TaskStatus::Done;
+            }
+            app.tasks.apply(StoreEvent::Changed(WatchEvent {
+                key: StoreKey::from(&task.key()),
+                rev: Rev(1),
+                value: Some(serde_json::to_vec(&task).unwrap()),
+                at: None,
+            }));
+        };
+        put("tk-open-1", false);
+        put("tk-open-2", false);
+        put("tk-done", true);
+
+        let (shell, _) = snapshot_with_completions(&app, "boot", 1, None, None);
+        let facts = shell.resource_facts.expect("optional facts");
+        let tasks = facts.pane_tasks.expect("one pane has tasks");
+        assert_eq!(tasks.len(), 1, "only the pane that has tasks is listed");
+        let pane = shell
+            .panes
+            .iter()
+            .find(|pane| {
+                let (_, id) = app.parse_pane_id(&pane.pane_id).unwrap();
+                app.state.pane_terminal(id).unwrap().pane_key == bound_key
+            })
+            .unwrap();
+        let counts = &tasks[&pane.pane_id];
+        assert_eq!((counts.open, counts.pending, counts.conflicts), (2, 0, 0));
+        assert!(counts.revision > 0);
+
+        // A server with no tasks sends no such fact at all.
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut quiet = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        quiet.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        quiet.state.active = Some(0);
+        quiet.state.ensure_test_terminals();
+        let (shell, _) = snapshot_with_completions(&quiet, "boot", 1, None, None);
+        assert!(shell.resource_facts.unwrap().pane_tasks.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

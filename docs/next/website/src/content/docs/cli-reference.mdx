@@ -168,6 +168,24 @@ The todo text comes first and the pane is a flag: `herdr todo add "x" --pane w1:
 
 Todos belong to the pane and follow it: they ride the session snapshot across server restarts and `herdr update --handoff`, and links are remapped to the restored pane ids. A link whose target did not come back keeps its label and stops resolving instead of pointing at some other pane.
 
+
+## Tasks
+
+```bash
+herdr task add <title> [--body TEXT] [--priority high|normal|low] [--horizon now|next|later|icebox] [--owner SESSION] [--waits-on ROW] [--pane ID|--current] [--by NAME] [--json] [--no-wait] [--wait-ms MS]
+herdr task list [--pane ID|--current] [--owner SESSION] [--closed] [--json]
+herdr task show <key> [--json]
+herdr task update <key> [--title TEXT] [--body TEXT] [--priority P] [--horizon H] [--owner SESSION] [--waits-on ROW] [--review TEXT] [--rev N] [--json]
+herdr task done|drop|reopen <key> [--reason TEXT] [--rev N] [--by NAME] [--json]
+herdr task bind <key> [--pane ID|--current|--clear] [--related] [--rev N] [--json]
+```
+
+Tasks are the shared counterpart of todos: they live in the task store (see the `[tasks]` config), belong to a host, can name an agent session as their owner, and can sit on a pane. A task key looks like `task.m4m.tk-01j...`. `task add` puts the task on the calling pane (`HERDR_PANE_ID`) unless you pass `--pane`; `task list` shows every pane's tasks unless you narrow it with `--pane` or `--current`, and leaves done and dropped tasks out unless you pass `--closed`.
+
+A write is taken at once and kept on disk before the store has it. The command then waits up to three seconds (`--wait-ms`, or `--no-wait`) for the store to take it and prints `saved (revision N)`. If the store has not answered by then, it prints `pending sync` and exits 0: the write is not lost. A write the store refused because the task changed under you exits 1 with `conflict`. `update` and `bind` read the task first and write against that revision; pass `--rev` to write against one you read earlier. With `--json` the answer of the write carries an `outcome` and `synced` field once the wait is over.
+
+Against a server that has no task store (an older one), `add`, `list`, `done`, `reopen` and `drop` use that pane's todos instead, name the todo by its number, and say so on stderr. The other verbs report that the server cannot do them.
+
 ## Sessions
 
 ```bash

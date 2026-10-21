@@ -163,6 +163,7 @@ impl ActiveSubscription {
                 Ok(event_subscription(EventKind::NotificationPosted))
             }
             Subscription::TodoChanged {} => Ok(event_subscription(EventKind::TodoChanged)),
+            Subscription::TaskChanged {} => Ok(event_subscription(EventKind::TaskChanged)),
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,

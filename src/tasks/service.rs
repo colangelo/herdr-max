@@ -15,13 +15,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::cache::TaskCache;
 use super::identity::TaskIdentity;
 use super::ids::{Rev, TaskKey, WriteId};
-use super::model::{Task, TaskError};
+use super::model::{MoveContext, Task, TaskError, TaskStatus, Timestamp, RUNS_KEPT};
 use super::outbox::{Base, Entry, Op, Outbox};
+use super::runs::{derive, AskRow, Derived, RunCache, RunState};
 use super::store::{landed_last, StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 
 /// Writes that may wait for the store at once. More are refused, so a store
@@ -81,6 +82,8 @@ struct WriteCommand {
     /// What an update is written against: the revision the caller saw, or the
     /// earlier write it was built on.
     base: Option<Base>,
+    /// Made by the server itself; see [`Entry::auto`].
+    auto: bool,
 }
 
 /// How a held write is to be settled.
@@ -257,6 +260,21 @@ pub(crate) struct StartOptions {
     pub outbox_dir: PathBuf,
 }
 
+/// What a pane shows of its tasks, kept up to date as the cache changes so a
+/// frame or a snapshot never scans the tasks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PaneTaskCounts {
+    /// Open tasks bound to the pane.
+    pub open: u32,
+    /// Writes for those tasks waiting for the store.
+    pub pending: u32,
+    /// Writes for those tasks held for a decision.
+    pub conflicts: u32,
+    /// Changes whenever any of the three does, or a task of the pane changes,
+    /// so a client holding the tasks knows to read them again.
+    pub revision: u64,
+}
+
 pub(crate) struct TaskService {
     /// Tells events of this service from those of one it replaced.
     generation: u64,
@@ -275,10 +293,29 @@ pub(crate) struct TaskService {
     latest: HashMap<TaskKey, (WriteId, Task)>,
     /// Outcomes not yet taken, in arrival order.
     outcomes: Vec<(WriteId, WriteOutcome)>,
+    /// The last few outcomes by write id, kept after they were taken so a
+    /// caller that asks later still learns how its write ended.
+    recent: HashMap<WriteId, WriteOutcome>,
+    recent_order: std::collections::VecDeque<WriteId>,
     /// Why the store is unusable, when it is.
     failure: Option<String>,
     /// The store's first scan has arrived, so the cache is complete.
     loaded: bool,
+    /// The counts each pane shows, by the pane's stable `pane_key`.
+    pane_counts: HashMap<String, PaneTaskCounts>,
+    /// What each pane's counts were taken from, to tell a change from none.
+    pane_sigs: HashMap<String, u64>,
+    pane_counts_changed: bool,
+    runs_changed: bool,
+    /// The run records, beside the tasks.
+    runs: RunCache,
+    /// Writes this server made on its own (rebuilding `runs`, the move to
+    /// Running), with the revision each was built on. Their outcomes are not
+    /// reported to anyone.
+    auto_writes: HashMap<WriteId, (TaskKey, Rev)>,
+    /// The time up to which the five-minute rule has been looked at.
+    status_mark: SystemTime,
+    clock: fn() -> SystemTime,
     /// Writes known to be on disk in the outbox (a subset of `pending`).
     saved: HashSet<WriteId>,
     /// Writes held for a decision, in the order they were refused.
@@ -303,8 +340,18 @@ impl TaskService {
             pending: HashMap::new(),
             latest: HashMap::new(),
             outcomes: Vec::new(),
+            recent: HashMap::new(),
+            recent_order: std::collections::VecDeque::new(),
             failure: None,
             loaded: false,
+            pane_counts: HashMap::new(),
+            pane_sigs: HashMap::new(),
+            pane_counts_changed: false,
+            runs_changed: false,
+            runs: RunCache::new(),
+            auto_writes: HashMap::new(),
+            status_mark: SystemTime::now(),
+            clock: SystemTime::now,
             saved: HashSet::new(),
             conflicts: Vec::new(),
             open_tickets: HashSet::new(),
@@ -425,6 +472,16 @@ impl TaskService {
         self.saved.contains(write)
     }
 
+    /// How a write ended, if it did lately.
+    pub(crate) fn recent_outcome(&self, write: &WriteId) -> Option<&WriteOutcome> {
+        self.recent.get(write)
+    }
+
+    /// Whether the write is still waiting for the store.
+    pub(crate) fn is_pending_write(&self, write: &WriteId) -> bool {
+        self.pending.contains_key(write)
+    }
+
     /// The writes held for a decision, oldest first.
     pub(crate) fn conflicts(&self) -> &[HeldConflict] {
         &self.conflicts
@@ -494,6 +551,152 @@ impl TaskService {
         std::mem::take(&mut self.resolutions)
     }
 
+    pub(crate) fn identity(&self) -> Option<&TaskIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// The keys with a write waiting for the store.
+    pub(crate) fn pending_keys(&self) -> HashSet<&TaskKey> {
+        self.pending.values().collect()
+    }
+
+    /// The keys with a write held for a decision.
+    pub(crate) fn conflict_keys(&self) -> HashSet<&TaskKey> {
+        self.conflicts.iter().map(|held| &held.key).collect()
+    }
+
+    /// How the store is doing: `disabled`, `loading`, `ready` or `unavailable`,
+    /// with the reason when there is one.
+    pub(crate) fn state(&self) -> (&'static str, Option<&str>) {
+        match (&self.failure, self.commands.is_some(), self.loaded) {
+            (Some(why), _, _) => ("unavailable", Some(why.as_str())),
+            (None, false, _) => ("disabled", None),
+            (None, true, false) => ("loading", None),
+            (None, true, true) => ("ready", None),
+        }
+    }
+
+    /// Replace the clock the five-minute rule is judged by.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: fn() -> SystemTime) {
+        self.clock = clock;
+        self.status_mark = clock();
+    }
+
+    /// The time the five-minute rule is judged against.
+    pub(crate) fn now(&self) -> SystemTime {
+        (self.clock)()
+    }
+
+    /// The run records the server holds.
+    pub(crate) fn runs(&self) -> &RunCache {
+        &self.runs
+    }
+
+    /// What a reader shows for a task: its stored status, as the run records
+    /// and the asks row it waits on change it. `ask` says how a row looks.
+    pub(crate) fn shown_status(
+        &self,
+        key: &TaskKey,
+        ask: impl Fn(&str) -> AskRow,
+    ) -> Option<Derived> {
+        let cached = self.cache.get(key)?;
+        Some(derive(&cached.task, &self.runs, ask, (self.clock)()))
+    }
+
+    /// How long until a run crosses the five minutes and a task's shown status
+    /// changes with the clock alone, for the timer that announces it.
+    pub(crate) fn next_status_deadline(&self) -> Option<Duration> {
+        let now = (self.clock)();
+        let deadline = self.runs.next_expiry(now)?;
+        Some(deadline.duration_since(now).unwrap_or_default())
+    }
+
+    /// The tasks whose shown status changed with the clock alone since the last
+    /// call: a run crossed the five minutes. Call it when the timer fires.
+    pub(crate) fn due_status_changes(&mut self) -> Vec<TaskKey> {
+        let now = (self.clock)();
+        let due = self.runs.expired_between(self.status_mark, now);
+        self.status_mark = now;
+        due
+    }
+
+    /// Bring every task this server owns in line with its run records.
+    fn reconcile_all(&mut self, now: SystemTime) {
+        let Some(identity) = &self.identity else {
+            return;
+        };
+        let keys: Vec<TaskKey> = self
+            .cache
+            .iter()
+            .filter(|(key, _)| key.host == identity.host)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            self.reconcile_task(&key, now);
+        }
+    }
+
+    /// The owner derives `runs` and the move to Running from the run records
+    /// (contracts § 2.4). Rebuilds `task.runs` from the records of allowed
+    /// starters, and moves an open task to Running while a run is live. Writes
+    /// only what differs, so it settles after one pass.
+    fn reconcile_task(&mut self, key: &TaskKey, now: SystemTime) -> Option<WriteId> {
+        if !self.loaded || self.commands.is_none() || self.latest.contains_key(key) {
+            return None;
+        }
+        let identity = self.identity.as_ref()?;
+        if key.host != identity.host {
+            return None;
+        }
+        let by = format!("herdr-{}", identity.host);
+        let cached = self.cache.get(key)?;
+        let (rev, task) = (cached.rev, &cached.task);
+        if task.status.is_closed() || task.moving.is_some() || !task.can_be_rewritten() {
+            return None;
+        }
+        let runs: Vec<_> = self.runs.runs_of(task).collect();
+        let mut wanted: Vec<String> = runs.iter().map(|run| run.record.id.clone()).collect();
+        wanted.drain(..wanted.len().saturating_sub(RUNS_KEPT));
+        let live = runs.iter().filter(|run| run.is_live(now)).count();
+        // A run that is unknown or stuck may still be executing: it is shown,
+        // and nothing moves the task because of it.
+        let unsure = runs.iter().any(|run| {
+            run.record.state == RunState::Unknown
+                || (run.record.state == RunState::Starting && !run.is_live(now))
+        });
+        // The newest run ended without finishing the task.
+        let newest_ended = runs.last().is_some_and(|run| {
+            matches!(
+                run.record.state,
+                RunState::Done | RunState::Failed | RunState::Stopped
+            )
+        });
+        let mut updated = task.clone();
+        let mut changed = wanted != task.runs;
+        updated.runs = wanted;
+        let ctx = MoveContext {
+            other_run_running: live > 1,
+            run_is_current: true,
+            by,
+            reason: None,
+            at: Timestamp::now(),
+        };
+        if task.status == TaskStatus::Open && live > 0 {
+            changed |= updated.move_status(TaskStatus::Running, &ctx).is_ok();
+        } else if task.status == TaskStatus::Running && live == 0 && !unsure && newest_ended {
+            // Contracts § 2.3: Running to Open, the run ends without finishing
+            // the task and is still the task's current one.
+            changed |= updated.move_status(TaskStatus::Open, &ctx).is_ok();
+        }
+        if !changed {
+            return None;
+        }
+        let write = self.submit_update_as(&updated, rev, true).ok()?;
+        self.auto_writes.insert(write.clone(), (key.clone(), rev));
+        Some(write)
+    }
+
     /// The cached version of a task, as the bytes a store would hold.
     fn cached_bytes(&self, key: &TaskKey) -> Option<(Rev, Vec<u8>)> {
         let cached = self.cache.get(key)?;
@@ -510,6 +713,7 @@ impl TaskService {
             op: Op::Create,
             doc: Box::new(doc),
             base: None,
+            auto: false,
         })
     }
 
@@ -518,6 +722,15 @@ impl TaskService {
         &mut self,
         task: &Task,
         expected: Rev,
+    ) -> Result<WriteId, SubmitError> {
+        self.submit_update_as(task, expected, false)
+    }
+
+    fn submit_update_as(
+        &mut self,
+        task: &Task,
+        expected: Rev,
+        auto: bool,
     ) -> Result<WriteId, SubmitError> {
         self.check_may_write(task)?;
         if expected == Rev(0) {
@@ -535,6 +748,7 @@ impl TaskService {
             op: Op::Update,
             doc: Box::new(doc),
             base: Some(base),
+            auto,
         })
     }
 
@@ -583,6 +797,8 @@ impl TaskService {
         }
         self.pending.insert(write.clone(), doc.key());
         self.latest.insert(doc.key(), (write.clone(), doc));
+        // The pane shows a write as pending from the moment it is taken.
+        self.refresh_pane_counts();
         Ok(write)
     }
 
@@ -594,6 +810,14 @@ impl TaskService {
     }
 
     fn push_outcome(&mut self, write: WriteId, outcome: WriteOutcome) {
+        if self.recent.insert(write.clone(), outcome.clone()).is_none() {
+            self.recent_order.push_back(write.clone());
+            if self.recent_order.len() > MAX_OUTCOMES {
+                if let Some(old) = self.recent_order.pop_front() {
+                    self.recent.remove(&old);
+                }
+            }
+        }
         self.outcomes.push((write, outcome));
         if self.outcomes.len() > MAX_OUTCOMES {
             let excess = self.outcomes.len() - MAX_OUTCOMES;
@@ -611,7 +835,9 @@ impl TaskService {
         self.saved.clear();
         let pending: Vec<WriteId> = self.pending.drain().map(|(write, _)| write).collect();
         for write in pending {
-            self.push_outcome(write, WriteOutcome::Unknown(reason.clone()));
+            if self.auto_writes.remove(&write).is_none() {
+                self.push_outcome(write, WriteOutcome::Unknown(reason.clone()));
+            }
         }
         // Nobody is left to answer a request to settle a held write.
         let mut tickets: Vec<u64> = self.open_tickets.drain().collect();
@@ -625,16 +851,128 @@ impl TaskService {
     /// Take what the store thread reported. Returns whether anything a reader
     /// can see changed.
     pub(crate) fn apply(&mut self, event: StoreEvent) -> bool {
+        let changed = self.apply_event(event);
+        if changed {
+            self.refresh_pane_counts();
+        }
+        changed
+    }
+
+    /// The counts a pane shows, if it has any tasks, open or waiting.
+    pub(crate) fn pane_counts(&self, pane_key: &str) -> Option<PaneTaskCounts> {
+        self.pane_counts.get(pane_key).copied()
+    }
+
+    /// Count, per pane, the open tasks bound to it and the writes waiting or
+    /// held for them. The version a task will have once its write lands is the
+    /// one counted. Panes whose numbers did not change keep their revision.
+    fn refresh_pane_counts(&mut self) {
+        let host = self.identity.as_ref().map(|identity| &identity.host);
+        let mut counts: HashMap<String, PaneTaskCounts> = HashMap::new();
+        let bound = |task: &Task| -> Option<String> {
+            let pane = task.pane.as_ref()?;
+            (host.is_none_or(|host| host.as_str() == pane.host))
+                .then(|| pane.pane_key.clone())
+                .flatten()
+        };
+        // What changed a pane's tasks without changing a count: the revisions of
+        // the tasks bound to it.
+        let mut sigs: HashMap<String, u64> = HashMap::new();
+        // A task with a write pending counts as that write will leave it.
+        let mut seen: HashSet<&TaskKey> = HashSet::new();
+        for (key, (_, task)) in &self.latest {
+            seen.insert(key);
+            if let Some(pane_key) = bound(task) {
+                *sigs.entry(pane_key.clone()).or_default() +=
+                    self.cache.get(key).map_or(0, |cached| cached.rev.0 + 1);
+                let entry = counts.entry(pane_key).or_default();
+                entry.pending += 1;
+                if !task.status.is_closed() {
+                    entry.open += 1;
+                }
+            }
+        }
+        for (key, cached) in self.cache.iter() {
+            if seen.contains(key) {
+                continue;
+            }
+            if let Some(pane_key) = bound(&cached.task) {
+                *sigs.entry(pane_key.clone()).or_default() += cached.rev.0 + 1;
+                let entry = counts.entry(pane_key).or_default();
+                if !cached.task.status.is_closed() {
+                    entry.open += 1;
+                }
+            }
+        }
+        for held in &self.conflicts {
+            if let Some(pane_key) = bound(&held.mine) {
+                counts.entry(pane_key).or_default().conflicts += 1;
+            }
+        }
+        // A pane's revision moves only when that pane's numbers or tasks did.
+        for (pane_key, entry) in &mut counts {
+            entry.revision = match self.pane_counts.get(pane_key) {
+                Some(old)
+                    if (old.open, old.pending, old.conflicts)
+                        == (entry.open, entry.pending, entry.conflicts)
+                        && self.pane_sigs.get(pane_key) == sigs.get(pane_key) =>
+                {
+                    old.revision
+                }
+                Some(old) => old.revision + 1,
+                None => 1,
+            };
+        }
+        if counts != self.pane_counts {
+            self.pane_counts_changed = true;
+        }
+        self.pane_sigs = sigs;
+        self.pane_counts = counts;
+    }
+
+    /// Whether any pane's counts changed since the last call: the sidebar must
+    /// be told.
+    pub(crate) fn take_pane_counts_changed(&mut self) -> bool {
+        std::mem::take(&mut self.pane_counts_changed)
+    }
+
+    /// Whether a run record came in since the last call: the next deadline of
+    /// the five-minute rule may have moved.
+    pub(crate) fn take_runs_changed(&mut self) -> bool {
+        std::mem::take(&mut self.runs_changed)
+    }
+
+    fn apply_event(&mut self, event: StoreEvent) -> bool {
         match event {
             StoreEvent::Loaded(events) => {
                 self.loaded = true;
                 self.failure = None;
+                let now = (self.clock)();
                 for event in &events {
                     self.cache.apply(event);
+                    self.runs_changed |= !self.runs.apply(event, now).is_empty();
                 }
+                // On start and after a handoff the run records may have moved
+                // while nobody was watching: rebuild what they decide.
+                self.reconcile_all(now);
                 true
             }
-            StoreEvent::Changed(event) => self.cache.apply(&event),
+            StoreEvent::Changed(event) => {
+                let now = (self.clock)();
+                let task_changed = self.cache.apply(&event);
+                let runs_of = self.runs.apply(&event, now);
+                let any_run = !runs_of.is_empty();
+                self.runs_changed |= any_run;
+                for key in runs_of {
+                    self.reconcile_task(&key, now);
+                }
+                if task_changed {
+                    if let Ok(key) = event.key.0.parse::<TaskKey>() {
+                        self.reconcile_task(&key, now);
+                    }
+                }
+                task_changed || any_run
+            }
             StoreEvent::Queued(writes) => {
                 for (write, key, doc) in writes {
                     self.saved.insert(write.clone());
@@ -658,6 +996,21 @@ impl TaskService {
                     return false;
                 };
                 self.settle_latest(&key);
+                if let Some((_, built_on)) = self.auto_writes.remove(&write) {
+                    // Nobody asked for it, so nobody is told. A refusal because
+                    // the task moved on is made again on the new version.
+                    if let WriteOutcome::Failed(why) = &outcome {
+                        tracing::warn!(%key, %why, "a task update made by the server failed");
+                    }
+                    let moved_on = self
+                        .cache
+                        .get(&key)
+                        .is_some_and(|cached| cached.rev > built_on);
+                    if matches!(outcome, WriteOutcome::Conflict { .. }) && moved_on {
+                        self.reconcile_task(&key, (self.clock)());
+                    }
+                    return true;
+                }
                 self.push_outcome(write, outcome);
                 true
             }
@@ -770,12 +1123,17 @@ impl TaskService {
         self.saved.clear();
         let pending: Vec<WriteId> = self.pending.drain().map(|(write, _)| write).collect();
         let mut carried = std::mem::take(&mut self.outcomes);
-        carried.extend(pending.into_iter().map(|write| {
-            (
-                write,
-                WriteOutcome::Unknown("the task store was restarted".to_owned()),
-            )
-        }));
+        carried.extend(
+            pending
+                .into_iter()
+                .filter(|write| !self.auto_writes.contains_key(write))
+                .map(|write| {
+                    (
+                        write,
+                        WriteOutcome::Unknown("the task store was restarted".to_owned()),
+                    )
+                }),
+        );
         carried
     }
 
@@ -1016,9 +1374,10 @@ fn queue(outbox: &mut Outbox, command: WriteCommand) -> Result<(), StoreEvent> {
         op,
         doc,
         base,
+        auto,
     } = command;
     outbox
-        .push(write.clone(), op, *doc, base)
+        .push_as(write.clone(), op, *doc, base, auto)
         .map_err(|err| StoreEvent::Outcome {
             write,
             outcome: WriteOutcome::Failed(format!("cannot queue the write: {err}")),
@@ -1150,6 +1509,28 @@ fn try_entry(outbox: &mut Outbox, store: &mut dyn TaskStore, entry: &Entry) -> A
             // and the write id will be recognised.
             Err(_) => Attempt::Retry,
         },
+        // A write the server made on its own is not worth a person's decision:
+        // it is dropped and made again from the new version.
+        // Only that write goes. A person's edit queued behind it was built on
+        // the version the store has since moved past, so it is held for a
+        // decision, with the store's version beside it: it is never dropped.
+        Err(StoreError::Conflict { current }) if entry.auto => {
+            let behind = outbox
+                .remove_head(&entry.write)
+                .unwrap_or_else(|_| Vec::new());
+            let conflict = |write: WriteId| StoreEvent::Outcome {
+                write,
+                outcome: WriteOutcome::Conflict {
+                    current: current.clone(),
+                },
+            };
+            let mut events = vec![conflict(entry.write.clone())];
+            for held in behind {
+                events.extend(held_event(outbox, &held, current.clone()));
+                events.push(conflict(held.write.clone()));
+            }
+            Attempt::Done(events)
+        }
         Err(StoreError::Conflict { current }) => {
             let mut events = held_event(outbox, entry, current.clone());
             events.push(outcome(WriteOutcome::Conflict { current }));
@@ -1402,6 +1783,12 @@ mod tests {
                     at: None,
                 })
             });
+        }
+
+        /// A document under any key, such as a run record.
+        fn put_raw(&mut self, key: &str, value: &serde_json::Value, rev: Rev) {
+            self.docs
+                .insert(key.to_owned(), (rev, serde_json::to_vec(value).unwrap()));
         }
 
         fn maybe_lose_ack(&self) -> StoreResult<()> {
@@ -2346,6 +2733,7 @@ mod tests {
                 op: Op::Create,
                 doc: Box::new(one.clone()),
                 base: None,
+                auto: false,
             }))
             .unwrap();
         sender
@@ -2475,6 +2863,381 @@ mod tests {
         doc.last_writes = vec![foreign, ahead];
         store.put(&one.key(), &doc, Rev(3));
         assert_eq!(expected_rev(&outbox, &mut store, &entry), Ok(Rev(3)));
+    }
+
+    fn run_record(id: &str, task: &Task, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "task": task.key().to_string(),
+            "engine": "claude_code",
+            "state": state,
+        })
+    }
+
+    #[test]
+    fn rescan_rebuilds_runs() {
+        // The server starts (or a handoff finishes) and finds run records that
+        // were written while nobody watched: a finished run, a live one, and
+        // one forged by another Mac's credential.
+        let one = task("tk-1");
+        let mut store = FakeStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        store.put(&one.key(), &one, Rev(1));
+        store.put_raw("run.m4m.rn-01", &run_record("rn-01", &one, "done"), Rev(1));
+        store.put_raw(
+            "run.worklink.rn-02",
+            &run_record("rn-02", &one, "running"),
+            Rev(1),
+        );
+        store.put_raw(
+            "run.ac-mbm5.rn-03",
+            &run_record("rn-03", &one, "running"),
+            Rev(1),
+        );
+        let (mut service, received) = start_with_store(store);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service
+                .cache()
+                .get(&one.key())
+                .is_some_and(|cached| cached.rev == Rev(2))
+        });
+        let cached = &service.cache().get(&one.key()).unwrap().task;
+        assert_eq!(
+            cached.runs,
+            ["rn-01", "rn-02"],
+            "the records of the owner and of worklink, not the forged one"
+        );
+        assert_eq!(cached.status, TaskStatus::Running, "a live run started it");
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "one write, once");
+        assert!(
+            service.take_outcomes().is_empty(),
+            "nobody asked for it, nobody is told"
+        );
+        assert_eq!(service.pending_count(), 0);
+
+        // It settles: nothing more is written, however long it listens.
+        let quiet = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < quiet {
+            if let Ok(event) = received.recv_timeout(Duration::from_millis(20)) {
+                service.apply(event);
+            }
+        }
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_new_run_record_is_followed_while_the_server_watches() {
+        let one = task("tk-1");
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.put(&one.key(), &one, Rev(1));
+        let (mut service, received) = start_with_store(store);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+        assert_eq!(service.cache().get(&one.key()).unwrap().task.runs.len(), 0);
+
+        // A run record arrives through the watch, as the starter writes it.
+        let record = run_record("rn-09", &one, "starting");
+        service.apply(StoreEvent::Changed(WatchEvent {
+            key: StoreKey("run.m4m.rn-09".into()),
+            rev: Rev(1),
+            value: Some(serde_json::to_vec(&record).unwrap()),
+            at: Some(SystemTime::now()),
+        }));
+        assert_eq!(service.pending_count(), 1, "the rebuild is on its way");
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service
+                .cache()
+                .get(&one.key())
+                .is_some_and(|cached| cached.rev == Rev(2))
+        });
+        let cached = &service.cache().get(&one.key()).unwrap().task;
+        assert_eq!(cached.runs, ["rn-09"]);
+        assert_eq!(cached.status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn the_five_minutes_are_announced_by_the_service_clock() {
+        thread_local! {
+            static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(2_000_000_000) };
+        }
+        fn clock() -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(NOW.with(std::cell::Cell::get))
+        }
+        let one = task("tk-1");
+        let (mut service, _received) = loaded(FakeStore::new(Duration::ZERO));
+        service.clock = clock;
+        service.status_mark = clock();
+        service.cache.apply(&WatchEvent {
+            key: StoreKey::from(&one.key()),
+            rev: Rev(1),
+            value: Some(serde_json::to_vec(&one).unwrap()),
+            at: None,
+        });
+        let started = clock();
+        service.runs.apply(
+            &WatchEvent {
+                key: StoreKey("run.m4m.rn-01".into()),
+                rev: Rev(1),
+                value: Some(serde_json::to_vec(&run_record("rn-01", &one, "starting")).unwrap()),
+                at: Some(started),
+            },
+            started,
+        );
+        let shown = |service: &TaskService| {
+            service
+                .shown_status(&one.key(), |_| AskRow::Closed)
+                .unwrap()
+                .status
+        };
+        assert_eq!(shown(&service), crate::tasks::Shown::Running);
+        assert_eq!(
+            service.next_status_deadline(),
+            Some(Duration::from_secs(300))
+        );
+        assert!(service.due_status_changes().is_empty());
+
+        NOW.with(|now| now.set(now.get() + 301));
+        assert_eq!(shown(&service), crate::tasks::Shown::RunUnknown);
+        assert_eq!(service.due_status_changes(), vec![one.key()]);
+        assert!(service.due_status_changes().is_empty(), "announced once");
+        assert_eq!(service.next_status_deadline(), None);
+    }
+
+    #[test]
+    fn a_conflict_on_a_write_the_server_made_is_dropped_not_held() {
+        let outbox_dir = scratch_outbox();
+        let mut outbox = Outbox::open(outbox_dir).unwrap();
+        let one = task("tk-1");
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.put(&one.key(), &one, Rev(5));
+        let write = WriteId::generate();
+        outbox
+            .push_as(
+                write.clone(),
+                Op::Update,
+                one.clone(),
+                Some(Base::Rev(Rev(1))),
+                true,
+            )
+            .unwrap();
+        let entry = outbox.entries()[0].clone();
+        let Attempt::Done(events) = try_entry(&mut outbox, &mut store, &entry) else {
+            panic!("expected the entry to be settled");
+        };
+        assert_eq!(outbox.len(), 0, "dropped, not kept for a decision");
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, StoreEvent::Held(_))));
+        assert!(matches!(
+            events.as_slice(),
+            [StoreEvent::Outcome {
+                outcome: WriteOutcome::Conflict { .. },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_conflict_on_an_auto_write_holds_the_persons_edit_behind_it_and_never_drops_it() {
+        let outbox_dir = scratch_outbox();
+        let mut outbox = Outbox::open(outbox_dir).unwrap();
+        let one = task("tk-1");
+        let mut store = FakeStore::new(Duration::ZERO);
+        store.put(&one.key(), &one, Rev(5));
+        // The server rebuilt `runs` (auto); meanwhile a person edited the same
+        // task, built on that rebuilt version.
+        let auto = WriteId::generate();
+        let edit = WriteId::generate();
+        let later = WriteId::generate();
+        outbox
+            .push_as(
+                auto.clone(),
+                Op::Update,
+                one.clone(),
+                Some(Base::Rev(Rev(1))),
+                true,
+            )
+            .unwrap();
+        let mut edited = one.clone();
+        edited.title = "the person's edit".into();
+        outbox
+            .push(
+                edit.clone(),
+                Op::Update,
+                edited.clone(),
+                Some(Base::After(auto.clone())),
+            )
+            .unwrap();
+        outbox
+            .push(
+                later.clone(),
+                Op::Update,
+                edited,
+                Some(Base::After(edit.clone())),
+            )
+            .unwrap();
+        let entry = outbox.entries()[0].clone();
+
+        let Attempt::Done(events) = try_entry(&mut outbox, &mut store, &entry) else {
+            panic!("settled");
+        };
+        assert!(
+            outbox.entries().iter().all(|e| e.write != auto),
+            "only the server's own write goes"
+        );
+        let held: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Held(held) => Some(held.write.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(held, vec![edit.clone()], "the edit is held for a decision");
+        let reported: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Outcome { write, outcome } => {
+                    assert!(matches!(outcome, WriteOutcome::Conflict { .. }));
+                    Some(write.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, vec![auto, edit.clone()]);
+        // The edit after it keeps waiting behind the held one.
+        assert!(outbox.entries().iter().any(|e| e.write == later));
+        assert!(outbox.held(&edit).is_some());
+    }
+
+    #[test]
+    fn a_task_whose_run_ended_without_finishing_it_goes_back_to_open() {
+        let one = task("tk-1");
+        let mut running = one.clone();
+        running.status = TaskStatus::Running;
+        running.runs = vec!["rn-01".into()];
+        let mut store = FakeStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        store.put(&running.key(), &running, Rev(1));
+        store.put_raw("run.m4m.rn-01", &run_record("rn-01", &one, "done"), Rev(1));
+        let (mut service, received) = start_with_store(store);
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service
+                .cache()
+                .get(&one.key())
+                .is_some_and(|cached| cached.rev == Rev(2))
+        });
+        let cached = &service.cache().get(&one.key()).unwrap().task;
+        assert_eq!(cached.status, TaskStatus::Open);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+
+        // A run that is unknown may still be executing: nothing moves.
+        let mut store = FakeStore::new(Duration::ZERO);
+        let writes = Arc::clone(&store.writes);
+        store.put(&running.key(), &running, Rev(1));
+        store.put_raw(
+            "run.m4m.rn-01",
+            &run_record("rn-01", &one, "unknown"),
+            Rev(1),
+        );
+        let (mut service, received) = loaded(store);
+        let quiet = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < quiet {
+            if let Ok(event) = received.recv_timeout(Duration::from_millis(20)) {
+                service.apply(event);
+            }
+        }
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service.cache().get(&one.key()).unwrap().task.status,
+            TaskStatus::Running
+        );
+    }
+
+    #[test]
+    fn a_panes_counts_follow_a_write_at_once_and_its_revision_moves_only_for_that_pane() {
+        use crate::tasks::model::PaneBinding;
+        let bind = |mut task: Task, pane_key: &str| {
+            task.pane = Some(PaneBinding {
+                host: "m4m".into(),
+                session: "default".into(),
+                pane_key: Some(pane_key.into()),
+                label: "p".into(),
+            });
+            task
+        };
+        let (mut service, received) = loaded(FakeStore::new(Duration::ZERO));
+        service
+            .submit_create(&bind(task("tk-a"), "pane-a"))
+            .unwrap();
+        // Counted as soon as the write is taken, before any event from the store.
+        let counts = service.pane_counts("pane-a").expect("counted at once");
+        assert_eq!((counts.open, counts.pending), (1, 1));
+        assert!(service.take_pane_counts_changed());
+        assert!(!service.take_pane_counts_changed(), "told once");
+        service
+            .submit_create(&bind(task("tk-b"), "pane-b"))
+            .unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+                && service.cache().len() == 2
+                && service
+                    .pane_counts("pane-a")
+                    .is_some_and(|c| c.pending == 0)
+        });
+        let a_before = service.pane_counts("pane-a").unwrap();
+        let b_before = service.pane_counts("pane-b").unwrap();
+
+        // Changing pane-b's task moves pane-b's revision and not pane-a's.
+        let mut edited = service
+            .current(&bind(task("tk-b"), "pane-b").key())
+            .unwrap()
+            .1
+            .clone();
+        edited.title = "edited".into();
+        service.submit_update(&edited, Rev(1)).unwrap();
+        pump(&mut service, &received, Duration::from_secs(5), |service| {
+            service.pending_count() == 0
+                && service
+                    .pane_counts("pane-b")
+                    .is_some_and(|c| c.pending == 0)
+                && service
+                    .cache()
+                    .get(&edited.key())
+                    .is_some_and(|cached| cached.rev == Rev(2))
+        });
+        assert_eq!(service.pane_counts("pane-a").unwrap(), a_before);
+        assert!(service.pane_counts("pane-b").unwrap().revision > b_before.revision);
+    }
+
+    #[test]
+    fn held_writes_count_toward_the_cap_on_waiting_writes() {
+        // The store is down, so every write stays pending; some more are held
+        // as conflicts. Together they are what the outbox holds.
+        let (mut service, _received) = start_with_opener(
+            || Err(StoreError::Unavailable("down".into())),
+            test_identity("m4m"),
+        );
+        let held = MAX_PENDING_WRITES - 56;
+        for index in 0..held {
+            let doc = task(&format!("tk-held-{index}"));
+            service.apply(StoreEvent::Held(Box::new(HeldConflict {
+                write: WriteId::generate(),
+                key: doc.key(),
+                mine: doc,
+                theirs_rev: Some(Rev(1)),
+                theirs: None,
+            })));
+        }
+        assert_eq!(service.conflicts().len(), held);
+        for index in 0..56 {
+            service
+                .submit_create(&task(&format!("tk-wait-{index}")))
+                .unwrap();
+        }
+        let refused = service.submit_create(&task("tk-one-too-many")).unwrap_err();
+        assert_eq!(refused, SubmitError::Busy);
+        assert_eq!(refused.code(), "task_store_busy");
     }
 
     /// A store that applies a write and then says its answer was lost.

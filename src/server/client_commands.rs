@@ -391,6 +391,57 @@ mod tests {
                 "{method} changed shape"
             );
         }
+        // Fork (herdr-max): the task methods are additive, advertised so the
+        // client shell's work panel can read and change tasks (fork issue 241).
+        // `task.move` is not here: it comes with its own method name later.
+        for (method, digest) in [
+            (
+                "task.add",
+                "0b6acc7c0efcaee07ed659ad207b3e9eb167631496cdb423360c3dd412d11a66",
+            ),
+            (
+                "task.bind",
+                "80deeb34ad6a7576e1e420b25b7df8fa795bd6369cf136b8de14b73b92e7d9da",
+            ),
+            (
+                "task.conflicts",
+                "be1fdd12795c0f70e2da5cef057c4d168ffd36f5e461b25a55e393092debde88",
+            ),
+            (
+                "task.done",
+                "cc653577f11745cc586aa9395bb60d28b77dc17d599c8eb604c5f1c38e6d3665",
+            ),
+            (
+                "task.drop",
+                "048cb8258008c6b96c6d164648580d8b917aa0ff79b94960809383e63ef851ad",
+            ),
+            (
+                "task.list",
+                "da992a1591aad9e57eb62e0313a9e36d3ff8abf87f3d538274213aad19253c49",
+            ),
+            (
+                "task.reopen",
+                "67940c6b171cc9cb68922ff10910a56b204c6373607c66aca408861449e67882",
+            ),
+            (
+                "task.resolve_conflict",
+                "4aa8856cedd75ad3c9c67193171cdb0a2978c3ca2d0dd114449e8b19d0481aa3",
+            ),
+            (
+                "task.show",
+                "8254cd49ab3b499fedc23a579605eabeb53b5f7e936c9f0d8089a92a44803787",
+            ),
+            (
+                "task.update",
+                "3151c912d504e47069afc6c80e4779f6017a0cd0189b7948d9d25369fbc32a9b",
+            ),
+        ] {
+            assert_eq!(
+                actual.remove(method).as_deref(),
+                Some(digest),
+                "{method} changed shape"
+            );
+        }
         // Fork (herdr-max): `agent.message` is additive, advertised so the command
         // bar can send a message to a session (fork issue 182).
         assert_eq!(

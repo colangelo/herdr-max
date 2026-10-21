@@ -192,6 +192,7 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            EventData::TaskChanged { .. } => empty_plugin_context(correlation_id),
             EventData::NotificationPosted { notification } => notification
                 .pane_id
                 .as_ref()
