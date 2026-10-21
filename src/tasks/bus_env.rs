@@ -27,7 +27,7 @@ pub(crate) struct BusEnv {
 impl fmt::Debug for BusEnv {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BusEnv")
-            .field("url", &self.url)
+            .field("url", &redact_url(&self.url))
             .field("user", &self.user)
             .field("password", &"<hidden>")
             .field("js_domain", &self.js_domain)
@@ -37,9 +37,36 @@ impl fmt::Debug for BusEnv {
     }
 }
 
+/// A URL with any `user:password@` part hidden, for logs and `Debug`.
+pub(crate) fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let shown = match rest[..authority_end].rfind('@') {
+        Some(at) => format!("<hidden>{}", &rest[at..]),
+        None => rest.to_owned(),
+    };
+    match scheme {
+        Some(scheme) => format!("{scheme}://{shown}"),
+        None => shown,
+    }
+}
+
+/// Open the credential file without waiting on it: a FIFO or a device named
+/// here must not hang the store thread, and is refused by the checks after.
+fn open_without_blocking(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    options.open(path)
+}
+
 /// Read and check the credential file at `path`.
 pub(crate) fn load(path: &Path) -> Result<BusEnv, String> {
-    let mut file = std::fs::File::open(path).map_err(|err| {
+    let mut file = open_without_blocking(path).map_err(|err| {
         format!(
             "cannot read the bus credential file {}: {err}",
             path.display()
@@ -180,6 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn a_url_loses_its_userinfo_before_it_is_shown() {
+        assert_eq!(
+            redact_url("nats://herdr:hunter2@bus.example:4222"),
+            "nats://<hidden>@bus.example:4222"
+        );
+        assert_eq!(redact_url("herdr:hunter2@bus:4222"), "<hidden>@bus:4222");
+        assert_eq!(redact_url("nats://bus:4222"), "nats://bus:4222");
+        assert_eq!(redact_url("nats://bus:4222/x@y"), "nats://bus:4222/x@y");
+        let env =
+            parse("NATS_URL=nats://u:hunter2@bus:4222\nNATS_USER=u\nNATS_PASSWORD=p\n").unwrap();
+        assert!(!format!("{env:?}").contains("hunter2"));
+    }
+
+    #[test]
     fn the_password_never_shows_in_debug_output() {
         let env = parse("NATS_URL=x\nNATS_USER=u\nNATS_PASSWORD=hunter2\n").unwrap();
         assert!(!format!("{env:?}").contains("hunter2"));
@@ -224,6 +265,25 @@ mod tests {
                 assert!(err.contains("readable by others"), "{mode:o}: {err}");
                 assert!(!err.contains("hunter2"), "{err}");
             }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn a_fifo_is_refused_without_hanging() {
+            let dir = scratch("fifo");
+            let path = dir.join("bus.env");
+            let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            // SAFETY: c_path is a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let probe = path.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(load(&probe));
+            });
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("loading a FIFO must not block");
+            assert!(result.unwrap_err().contains("not a regular file"));
             std::fs::remove_dir_all(dir).unwrap();
         }
 

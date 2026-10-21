@@ -60,8 +60,10 @@ impl App {
                 self.handle_api_worktree_read_finished(*result);
                 changes_workspace
             }
-            AppEvent::TaskStore(event) => {
-                self.tasks.apply(event);
+            AppEvent::TaskStore { generation, event } => {
+                if generation == self.tasks.generation() {
+                    self.tasks.apply(event);
+                }
                 false
             }
             ev @ AppEvent::TerminalBell { .. } => {

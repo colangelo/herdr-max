@@ -36,7 +36,7 @@ pub(crate) struct KvSettings {
 impl std::fmt::Debug for KvSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KvSettings")
-            .field("url", &self.url)
+            .field("url", &super::bus_env::redact_url(&self.url))
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| "<hidden>"))
             .field("domain", &self.domain)
@@ -291,6 +291,10 @@ mod tests {
             let child = match command.spawn() {
                 Ok(child) => child,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    assert!(
+                        std::env::var_os("HERDR_REQUIRE_NATS").is_none(),
+                        "HERDR_REQUIRE_NATS is set but nats-server is not on PATH"
+                    );
                     eprintln!("skipped: nats-server is not on PATH");
                     let _ = std::fs::remove_dir_all(&dir);
                     return None;

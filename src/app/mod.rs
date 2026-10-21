@@ -256,8 +256,8 @@ fn start_task_service(
         })
     };
     let tx = event_tx.clone();
-    match crate::tasks::TaskService::start(open, identity.clone(), move |event| {
-        tx.blocking_send(AppEvent::TaskStore(event)).is_ok()
+    match crate::tasks::TaskService::start(open, identity.clone(), move |context, event| {
+        deliver_task_event(&tx, context, event)
     }) {
         Ok(service) => service,
         Err(err) => {
@@ -266,6 +266,33 @@ fn start_task_service(
                 identity,
                 format!("cannot start the task store thread: {err}"),
             )
+        }
+    }
+}
+
+/// Hand a store event to the app. The app drains its channel on its own
+/// schedule, so a full channel is waited out; but once the service is being
+/// stopped the app may be waiting for it, so the event is dropped instead.
+fn deliver_task_event(
+    tx: &mpsc::Sender<AppEvent>,
+    context: crate::tasks::EventContext,
+    event: crate::tasks::StoreEvent,
+) -> bool {
+    let mut message = AppEvent::TaskStore {
+        generation: context.generation,
+        event,
+    };
+    loop {
+        match tx.try_send(message) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(back)) => {
+                if context.stopping() {
+                    return true;
+                }
+                message = back;
+                std::thread::sleep(Duration::from_millis(2));
+            }
         }
     }
 }
@@ -921,19 +948,25 @@ impl App {
     /// with.
     #[cfg(unix)]
     pub(crate) fn start_task_store(&mut self) {
+        // What the old service had not yet reported is carried over, and its
+        // late events are dropped by generation.
+        let carried =
+            std::mem::replace(&mut self.tasks, crate::tasks::TaskService::disabled()).retire();
         self.tasks = start_task_service(
             &self.task_config,
             &self.task_store_dir,
             &self.policy,
             &self.event_tx,
         );
+        self.tasks.adopt(carried);
     }
 
-    /// Stop the task store and wait for it to let go, so a handoff
-    /// replacement can open it. False when it did not stop in time.
+    /// Stop the task store for a handoff. False when the replacement must not
+    /// go on: the file store did not let go in time. A bus store that did not
+    /// stop is only logged.
     #[cfg(unix)]
     pub(crate) fn quiesce_task_store(&mut self, timeout: Duration) -> bool {
-        self.tasks.quiesce(timeout)
+        self.tasks.quiesce_for_handoff(timeout)
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
@@ -1969,11 +2002,14 @@ mod tests {
         )
         .unwrap();
         app.event_tx
-            .try_send(AppEvent::TaskStore(StoreEvent::Changed(WatchEvent {
-                key: crate::tasks::StoreKey::from(&task.key()),
-                rev: Rev(1),
-                value: Some(serde_json::to_vec(&task).unwrap()),
-            })))
+            .try_send(AppEvent::TaskStore {
+                generation: app.tasks.generation(),
+                event: StoreEvent::Changed(WatchEvent {
+                    key: crate::tasks::StoreKey::from(&task.key()),
+                    rev: Rev(1),
+                    value: Some(serde_json::to_vec(&task).unwrap()),
+                }),
+            })
             .unwrap();
 
         let response = app.handle_api_request(crate::api::schema::Request {

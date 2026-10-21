@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::TaskCache;
@@ -25,6 +27,23 @@ use super::store::{StoreError, StoreResult, TaskStore, WatchEvent, WatchSink};
 const MAX_PENDING_WRITES: usize = 256;
 /// Outcomes kept for the API to take; the oldest go first.
 const MAX_OUTCOMES: usize = 1024;
+
+/// Which service an event came from, and whether that service is being
+/// stopped. A sender that has to wait (a full channel) drops the event instead
+/// once `stopping` is set, so stopping the service can never deadlock on it.
+#[derive(Debug, Clone)]
+pub(crate) struct EventContext {
+    pub generation: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl EventContext {
+    /// Whether the service has been asked to stop. Read it again on every turn
+    /// of a wait: it can change while the sender is blocked.
+    pub(crate) fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
 
 /// Builds the backend. Runs on the store thread, and is tried again after a
 /// backoff while it answers `Unavailable`.
@@ -134,6 +153,11 @@ impl SubmitError {
 }
 
 pub(crate) struct TaskService {
+    /// Tells events of this service from those of one it replaced.
+    generation: u64,
+    /// Set when the service is asked to stop; the thread looks at it between
+    /// steps.
+    stop: Arc<AtomicBool>,
     identity: Option<TaskIdentity>,
     cache: TaskCache,
     commands: Option<Sender<Message>>,
@@ -153,6 +177,8 @@ impl TaskService {
     /// A service with no store: reads are empty and writes are refused.
     pub(crate) fn disabled() -> Self {
         Self {
+            generation: 0,
+            stop: Arc::default(),
             identity: None,
             cache: TaskCache::new(),
             commands: None,
@@ -186,7 +212,7 @@ impl TaskService {
     pub(crate) fn start(
         open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
         identity: TaskIdentity,
-        emit: impl Fn(StoreEvent) -> bool + Send + 'static,
+        emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::start_with(open, identity, Backoff::default(), emit)
     }
@@ -195,14 +221,31 @@ impl TaskService {
         open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
         identity: TaskIdentity,
         backoff: Backoff,
-        emit: impl Fn(StoreEvent) -> bool + Send + 'static,
+        emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
     ) -> std::io::Result<Self> {
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_stop_ref = Arc::clone(&stop);
         let (sender, receiver) = mpsc::channel();
         let (done_sender, done_receiver) = mpsc::channel();
         let watch_sender = sender.clone();
         crate::thread_spawn::spawn_named("herdr-task-store", move || {
+            let context = EventContext {
+                generation,
+                stop: thread_stop,
+            };
+            let emit = move |event| emit(context.clone(), event);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                run_store(open, receiver, watch_sender, backoff, &emit)
+                run_store(
+                    open,
+                    receiver,
+                    watch_sender,
+                    backoff,
+                    &thread_stop_ref,
+                    &emit,
+                )
             }));
             let reason = match result {
                 Ok(reason) => reason,
@@ -214,6 +257,8 @@ impl TaskService {
             let _ = done_sender.send(());
         })?;
         let mut service = Self::without_store(identity);
+        service.generation = generation;
+        service.stop = stop;
         service.commands = Some(sender);
         service.finished = Some(done_receiver);
         Ok(service)
@@ -360,9 +405,13 @@ impl TaskService {
             }
             StoreEvent::Changed(event) => self.cache.apply(&event),
             StoreEvent::Outcome { write, outcome } => {
-                let known = self.pending.remove(&write).is_some();
+                // A write already reported (as unknown, when the thread was
+                // stopped or replaced) is not reported a second time.
+                if self.pending.remove(&write).is_none() {
+                    return false;
+                }
                 self.push_outcome(write, outcome);
-                known
+                true
             }
             StoreEvent::Degraded(message) => {
                 self.failure = Some(message);
@@ -380,10 +429,24 @@ impl TaskService {
         std::mem::take(&mut self.outcomes)
     }
 
+    /// Which service the events of this one are tagged with.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether a live handoff must wait for this store to let go. Only the
+    /// file store needs it (its directory lock); the bus store is protected by
+    /// compare-and-set, so the replacement may connect at once.
+    pub(crate) fn needs_exclusive_release(&self) -> bool {
+        self.identity
+            .as_ref()
+            .is_some_and(|identity| identity.backend == super::identity::BackendKind::File)
+    }
+
     /// Stop taking writes, let the thread finish what is queued, and wait for
     /// it to let go of the store. Returns whether it did within `timeout`.
-    /// For a handoff: the replacement may open the store only after this.
     pub(crate) fn quiesce(&mut self, timeout: Duration) -> bool {
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Message::Shutdown);
         }
@@ -392,11 +455,52 @@ impl TaskService {
             None => true,
         }
     }
+
+    /// [`Self::quiesce`] for a live handoff: whether the handoff may go on.
+    /// A store that must be released (the file one) and was not stops it; a
+    /// bus store that did not stop in time is only logged, since a write it
+    /// has in flight settles by compare-and-set and the replacement's rescan.
+    pub(crate) fn quiesce_for_handoff(&mut self, timeout: Duration) -> bool {
+        let released = self.quiesce(timeout);
+        if !released && !self.needs_exclusive_release() {
+            tracing::warn!("the task store did not stop in time; the handoff goes on");
+            return true;
+        }
+        released
+    }
+
+    /// End this service for good, and hand back what its owner has not yet
+    /// been told: outcomes not taken, and every write still pending, now
+    /// unknown (its thread may have been cut off mid-write). The next service
+    /// takes them over with [`Self::adopt`].
+    pub(crate) fn retire(mut self) -> Vec<(WriteId, WriteOutcome)> {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.send(Message::Shutdown);
+        }
+        let pending: Vec<WriteId> = self.pending.drain().map(|(write, _)| write).collect();
+        let mut carried = std::mem::take(&mut self.outcomes);
+        carried.extend(pending.into_iter().map(|write| {
+            (
+                write,
+                WriteOutcome::Unknown("the task store was restarted".to_owned()),
+            )
+        }));
+        carried
+    }
+
+    /// Take over what a retired service left unreported.
+    pub(crate) fn adopt(&mut self, carried: Vec<(WriteId, WriteOutcome)>) {
+        for (write, outcome) in carried {
+            self.push_outcome(write, outcome);
+        }
+    }
 }
 
 impl Drop for TaskService {
     fn drop(&mut self) {
         // Do not wait for the thread: a slow store must not hold up a quit.
+        self.stop.store(true, Ordering::SeqCst);
         if let Some(commands) = &self.commands {
             let _ = commands.send(Message::Shutdown);
         }
@@ -409,12 +513,18 @@ fn run_store(
     messages: Receiver<Message>,
     watch_sender: Sender<Message>,
     backoff: Backoff,
+    stop: &AtomicBool,
     emit: &impl Fn(StoreEvent) -> bool,
 ) -> Option<String> {
     // Reach the store, trying again while it is only unreachable.
     let mut wait = backoff.initial;
     let mut store = loop {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
         match open() {
+            // A stop that came while it was connecting: let go at once.
+            Ok(_) if stop.load(Ordering::SeqCst) => return None,
             Ok(store) => break store,
             Err(StoreError::Unavailable(why)) => {
                 if !emit(StoreEvent::Degraded(format!(
@@ -438,6 +548,9 @@ fn run_store(
     }
     let mut wait = backoff.initial;
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
         match store.scan("") {
             Ok(found) => {
                 let events = found
@@ -716,7 +829,7 @@ mod tests {
     ) -> (TaskService, Receiver<StoreEvent>) {
         let (events, received) = mpsc::channel();
         let events = Mutex::new(events);
-        let service = TaskService::start_with(open, identity, FAST, move |event| {
+        let service = TaskService::start_with(open, identity, FAST, move |_, event| {
             events.lock().unwrap().send(event).is_ok()
         })
         .unwrap();
@@ -831,6 +944,125 @@ mod tests {
             "task_schema_newer"
         );
         assert_eq!(service.pending_count(), 0);
+    }
+
+    #[test]
+    fn a_late_applied_outcome_for_a_write_already_reported_unknown_is_ignored() {
+        let (mut service, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
+        let write = service.submit_create(&task("tk-1")).unwrap();
+        // The thread is reported gone while the write's own answer is still
+        // on its way; the answer then arrives.
+        service.apply(StoreEvent::Stopped("gone".into()));
+        let changed = service.apply(StoreEvent::Outcome {
+            write: write.clone(),
+            outcome: WriteOutcome::Applied { rev: Rev(1) },
+        });
+        assert!(!changed);
+        assert_eq!(
+            service.take_outcomes(),
+            vec![(write, WriteOutcome::Unknown("gone".into()))],
+            "one report per write, not Unknown and then Applied"
+        );
+    }
+
+    #[test]
+    fn a_restarted_service_carries_over_what_the_old_one_never_reported() {
+        let (mut old, _received) = loaded(FakeStore::new(Duration::from_secs(60)));
+        let in_flight = old.submit_create(&task("tk-1")).unwrap();
+        let (mut other, _other_received) = loaded(FakeStore::new(Duration::ZERO));
+        assert_ne!(old.generation(), other.generation());
+
+        let carried = old.retire();
+        assert_eq!(
+            carried,
+            vec![(
+                in_flight.clone(),
+                WriteOutcome::Unknown("the task store was restarted".into())
+            )]
+        );
+        other.adopt(carried);
+        assert_eq!(other.take_outcomes().len(), 1);
+        // The old thread's late answer is for no write of the new service.
+        assert!(!other.apply(StoreEvent::Outcome {
+            write: in_flight,
+            outcome: WriteOutcome::Applied { rev: Rev(1) },
+        }));
+        assert!(other.take_outcomes().is_empty());
+    }
+
+    #[test]
+    fn a_bus_store_that_will_not_stop_does_not_block_a_handoff_but_a_file_store_does() {
+        let bus = TaskIdentity {
+            backend: BackendKind::Kv,
+            bus_session: "default".into(),
+            ..test_identity("m4m")
+        };
+        let (mut service, _received) =
+            start_with_opener(one_shot(FakeStore::new(Duration::from_secs(3))), bus);
+        pump_loaded(&mut service, &_received);
+        service.submit_create(&task("tk-1")).unwrap();
+        assert!(!service.needs_exclusive_release());
+        assert!(service.quiesce_for_handoff(Duration::from_millis(200)));
+
+        let (mut service, received) = start_with_store(FakeStore::new(Duration::from_secs(3)));
+        pump_loaded(&mut service, &received);
+        service.submit_create(&task("tk-1")).unwrap();
+        assert!(service.needs_exclusive_release());
+        assert!(!service.quiesce_for_handoff(Duration::from_millis(200)));
+    }
+
+    fn pump_loaded(service: &mut TaskService, received: &Receiver<StoreEvent>) {
+        pump(service, received, Duration::from_secs(5), |service| {
+            service.is_loaded()
+        });
+    }
+
+    #[test]
+    fn quiesce_does_not_wait_for_a_retry_backoff() {
+        let (events, _received) = mpsc::channel();
+        let events = Mutex::new(events);
+        let slow = Backoff {
+            initial: Duration::from_secs(30),
+            max: Duration::from_secs(30),
+        };
+        let mut service = TaskService::start_with(
+            || Err(StoreError::Unavailable("down".into())),
+            test_identity("m4m"),
+            slow,
+            move |_, event| events.lock().unwrap().send(event).is_ok(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(service.quiesce(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn quiesce_returns_even_when_the_app_stops_draining_events() {
+        // The app thread waits in quiesce, so it cannot drain its channel; a
+        // store thread that waits for room in it must give up when told to stop.
+        let (mut service, _unused) = start_with_opener_and_emit(
+            one_shot(FakeStore::new(Duration::ZERO)),
+            |context, _event| {
+                while !context.stopping() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                true
+            },
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        assert!(service.quiesce(Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    fn start_with_opener_and_emit(
+        open: impl FnMut() -> StoreResult<Box<dyn TaskStore>> + Send + 'static,
+        emit: impl Fn(EventContext, StoreEvent) -> bool + Send + 'static,
+    ) -> (TaskService, ()) {
+        let service = TaskService::start_with(open, test_identity("m4m"), FAST, emit).unwrap();
+        (service, ())
     }
 
     #[test]

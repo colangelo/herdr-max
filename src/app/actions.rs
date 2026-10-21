@@ -1419,7 +1419,7 @@ impl AppState {
             }
             AppEvent::WorktreeRuntimeRestoreFailed { .. } => Vec::new(),
             // The task store feeds the app's task service, not this state.
-            AppEvent::TaskStore(_) => Vec::new(),
+            AppEvent::TaskStore { .. } => Vec::new(),
             AppEvent::UpdateReady {
                 version,
                 install_command,

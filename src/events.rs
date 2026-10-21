@@ -77,7 +77,12 @@ pub(crate) struct WorktreeReadData {
 #[derive(Debug)]
 pub enum AppEvent {
     /// The task store thread reported (fork issue 241).
-    TaskStore(crate::tasks::StoreEvent),
+    TaskStore {
+        /// Which task service sent it; events of one that was replaced are
+        /// dropped.
+        generation: u64,
+        event: crate::tasks::StoreEvent,
+    },
     /// A pane's child process exited.
     PaneDied {
         pane_id: PaneId,

@@ -227,10 +227,12 @@ impl HeadlessServer {
         // The replacement opens the task store only after it hears "committed",
         // so the old server lets go of it first. If that, or the commit, fails
         // the old server goes on and takes its store back.
-        let commit_result = if self.app.quiesce_task_store(TASK_STORE_QUIESCE_TIMEOUT) {
-            crate::server::handoff::report_committed(&mut stream)
-        } else {
+        let commit_result = if !self.app.quiesce_task_store(TASK_STORE_QUIESCE_TIMEOUT) {
             Err(io::Error::other("the task store did not stop in time"))
+        } else if std::env::var_os("HERDR_TEST_HANDOFF_COMMIT_FAIL").is_some() {
+            Err(io::Error::other("test handoff commit failure"))
+        } else {
+            crate::server::handoff::report_committed(&mut stream)
         };
         if let Err(err) = commit_result {
             self.app.start_task_store();

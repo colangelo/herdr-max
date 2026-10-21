@@ -33,6 +33,6 @@ pub(crate) use model::{
     PaneBinding, Priority, SessionRef, Task, TaskError, TaskStatus, Timestamp, Via,
 };
 pub(crate) use service::{
-    Backoff, StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
+    Backoff, EventContext, StoreEvent, StoreOpener, SubmitError, TaskService, WriteOutcome,
 };
 pub(crate) use store::{StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink};
