@@ -52,7 +52,7 @@
 - [x] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
 - [ ] 2.16 Oracle: the panel rows equal the forge API's for `uzi-sandbox` (diff test,
   owned with worklink)
-- [ ] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
+- [x] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
 
 ## 3. Phase 3: actions one by one
 
