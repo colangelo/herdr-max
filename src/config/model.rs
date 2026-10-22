@@ -1746,6 +1746,8 @@ pub struct TasksConfig {
     pub bus_session: String,
     /// The file that holds the bus credential (`NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, optional `NATS_JS_DOMAIN`), relative to herdr's config dir or absolute. It must be a file of your user that no one else can read. Only the bus session reads it, when it starts: a new file is picked up by a restart or a live handoff, not by a config reload. Default: bus.env.
     pub bus_env: String,
+    /// Which account is ac on each forge, as `forge_id = "account"` (for example `gitea-lab = "ac"`). An issue assigned to that account is marked as ac's in the work panel and counts as needing ac. A config reload picks changes up. Default: empty.
+    pub forge_accounts: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for TasksConfig {
@@ -1755,6 +1757,7 @@ impl Default for TasksConfig {
             host_id: String::new(),
             bus_session: String::new(),
             bus_env: "bus.env".to_owned(),
+            forge_accounts: std::collections::BTreeMap::new(),
         }
     }
 }

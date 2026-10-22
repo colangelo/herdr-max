@@ -609,7 +609,7 @@ the forge issues worklink mirrors (`ISSUES`) and ac's rows from the gestore
 answers from memory. They need the `kv` backend; on the file backend `mirror`
 says `"not available with this backend"` and the lists are empty.
 
-`issue.list {project?, state?, limit?, offset?}` leaves out closed issues unless `state` is
+`issue.list {project?, state?, limit?, offset?, pane?, closed_since?}` leaves out closed issues unless `state` is
 `closed` or `all`; `project` is a numeric project id or a path (`ac/worklink`).
 Each issue carries its whole `ref` (`forge`, `forge_id`, `host`, `project_id`,
 `project_path`, `number`), `mirror_rev` (the bucket revision the server's watch
@@ -619,6 +619,22 @@ saw for that row), and the forge's fields: `title`, `state`, `labels`,
 is no body and no comment. `projects` lists each project with how its last sync
 went (`status`, `last_ok`, `last_attempt`, `error_class`); a project with issues
 and no sync row is `"synced": false`, which a panel shows as "not synced".
+
+`pane` narrows the list to the repo that pane works in. The server reads the git
+remote of the pane's folder (`internal` first, then `origin`; a linked worktree
+reads its main repo's config), on a thread of its own and never in the app loop,
+and remembers the answer for a minute. The answer carries `repo`:
+`status` is `found` (with `host`, `path` as `owner/repo`, and `mirrored` when a
+project of that path is mirrored), `resolving` (the remote is being read; the
+list is empty, ask again) or `no_remote` (the pane is not in a git repo, or no
+remote names a forge repo; the list is empty). An unknown pane is a
+`pane_not_found` error. `closed_since` (RFC 3339) keeps a closed issue only when
+it was touched at or after that time and leaves open issues alone, so
+`{"pane": ..., "state": "all", "closed_since": ...}` lists a repo's open issues
+and the ones closed in the last days. An issue carries `"mine": true` when one of
+its assignees is ac's account on its forge, set by `[tasks.forge_accounts]`
+(`forge_id = "account"`, for example `gitea-lab = "ac"`); the mapping itself is
+never sent.
 
 `ask.list {kind?, include_closed?, limit?, offset?}` returns rows whose `kind` is `task` unless
 `kind` names another (`any` for every kind), without closed or dropped rows

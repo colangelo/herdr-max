@@ -1009,6 +1009,7 @@ impl ClientShellState {
                 return (repaint, Vec::new());
             }
             kind @ (PendingEndpointKind::WorkIssues { .. }
+            | PendingEndpointKind::WorkRepoIssues
             | PendingEndpointKind::WorkTasks
             | PendingEndpointKind::WorkAsks) => {
                 let mut outcome = ClientShellInput::default();

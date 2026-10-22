@@ -723,7 +723,8 @@ pub(super) enum ClientShellOverlay {
     TodoBoard(super::todo_board::ClientTodoBoardOverlay),
     MovePicker(super::move_picker::ClientMovePickerOverlay),
     Palette(super::palette::ClientPaletteOverlay),
-    WorkPanel(super::work_panel::ClientWorkPanelOverlay),
+    /// Boxed: its feeds make it the largest overlay by far.
+    WorkPanel(Box<super::work_panel::ClientWorkPanelOverlay>),
 }
 
 impl ClientShellOverlay {
@@ -828,6 +829,8 @@ pub(super) enum PendingEndpointKind {
     WorkIssues {
         offset: u32,
     },
+    /// The pane's repo's issues, for "this repo".
+    WorkRepoIssues,
     WorkTasks,
     WorkAsks,
     TodoMutation {

@@ -401,7 +401,7 @@ mod tests {
             ),
             (
                 "issue.list",
-                "a9b086aa85e98fc663a142da6f56810399ed4b50b822c525065d8df991bcc289",
+                "4a66ca8291367cb5844109e226b4a4ed0a38bb58fe56845aa5635ad8e8f48054",
             ),
             (
                 "task.add",

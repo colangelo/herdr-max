@@ -128,6 +128,29 @@ pub(super) fn read_config_with_user_paths(
     )
 }
 
+/// Every `remote.<name>.url` that applies to the repo behind `info`, in the
+/// order git reads its config files (user files first, then the repo's own).
+/// A linked worktree reads its main repo's config.
+pub(super) fn read_remote_urls(info: &GitWorktreeInfo) -> Vec<(String, String)> {
+    let mut reader = ConfigReader::default();
+    let mut remote_urls = Vec::new();
+    let paths = git_user_config_paths()
+        .into_iter()
+        .chain(std::iter::once(info.git_common_dir.join("config")));
+    for path in paths {
+        let mut include_stack = Vec::new();
+        collect_remote_urls(
+            &path,
+            info,
+            "",
+            &mut remote_urls,
+            &mut include_stack,
+            &mut reader,
+        );
+    }
+    remote_urls
+}
+
 fn git_user_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(xdg_config_home) = crate::config::path_env("XDG_CONFIG_HOME") {

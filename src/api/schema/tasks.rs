@@ -357,6 +357,15 @@ pub struct IssueListParams {
     /// Skip this many first, in key order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
+    /// Only the issues of the repo this pane works in. The server reads the
+    /// pane's git remote (`internal`, then `origin`; a worktree resolves to
+    /// its main repo) and answers `repo` with how that went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// Closed issues count only when touched at or after this time (RFC 3339).
+    /// Open issues are not affected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_since: Option<String>,
 }
 
 /// Params for `ask.list`: ac's rows in the asks bucket.
@@ -417,6 +426,26 @@ pub struct IssueInfo {
     /// Present (true) when the title was cut.
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub truncated: bool,
+    /// Present (true) when an assignee is ac's account on this forge
+    /// (`[tasks.forge_accounts]`). The client never sees the mapping.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub mine: bool,
+}
+
+/// Which repo `issue.list {pane}` read for the pane, and how that went.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IssueRepoInfo {
+    /// `found`, `resolving` (the remote is being read; ask again) or
+    /// `no_remote` (the pane is not in a git repo, or no remote names a repo).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// `owner/repo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Whether a project of that path is mirrored at all.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub mirrored: bool,
 }
 
 /// How the last sync of one project went. A project with no sync row is

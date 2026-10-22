@@ -53,6 +53,12 @@
 - [ ] 2.16 Oracle: the panel rows equal the forge API's for `uzi-sandbox` (diff test,
   owned with worklink)
 - [x] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
+- [x] 2.18 Panel data the client lacked: `issue.list {pane, closed_since}` (the server
+  reads the pane's git remote off the app loop, `internal` then `origin`, a worktree
+  resolves to its main repo), `mine` from `[tasks.forge_accounts]`, the needs-me
+  chip as the badge. Tests: `issue_list_for_a_pane_shows_that_repos_issues_once_its_remote_is_read`,
+  `closed_since_keeps_old_closed_issues_out_and_leaves_open_ones_alone`,
+  `an_issue_assigned_to_acs_forge_account_is_marked_mine`
 
 ## 3. Phase 3: actions one by one
 

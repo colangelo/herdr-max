@@ -6,12 +6,13 @@ use std::collections::BTreeMap;
 
 use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
-    AskInfo, AskListParams, IssueInfo, IssueListParams, IssueProjectInfo, IssueRefInfo, MirrorInfo,
-    ResponseResult,
+    AskInfo, AskListParams, IssueInfo, IssueListParams, IssueProjectInfo, IssueRefInfo,
+    IssueRepoInfo, MirrorInfo, ResponseResult,
 };
 use crate::app::App;
 use crate::tasks::{
-    AskCache, AskRecord, IssueCache, IssueRecord, IssueRow, IssueState, Mirror, MirrorStatus, Rev,
+    AskCache, AskRecord, IssueCache, IssueRecord, IssueRow, IssueState, Mirror, MirrorStatus,
+    RepoRemote, RepoState, Rev,
 };
 
 fn mirror_info(status: MirrorStatus) -> MirrorInfo {
@@ -64,6 +65,7 @@ pub(crate) fn issue_info(key: &str, row: &IssueRow) -> IssueInfo {
         source_rev,
         last_sync,
         truncated,
+        mine: false,
     }
 }
 
@@ -145,17 +147,58 @@ fn window(limit: Option<u32>, offset: Option<u32>) -> (usize, usize) {
     (limit, offset.map_or(0, |offset| offset as usize))
 }
 
+/// Whether one of `assignees` is ac's account on this issue's forge.
+fn is_mine(issue: &IssueRecord, accounts: &std::collections::BTreeMap<String, String>) -> bool {
+    accounts
+        .get(&issue.issue_ref.forge_id)
+        .is_some_and(|account| {
+            issue
+                .assignees
+                .iter()
+                .any(|assignee| assignee.eq_ignore_ascii_case(account))
+        })
+}
+
+fn parse_time(stamp: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// What `issue.list` was asked to narrow to beyond the plain params.
+#[derive(Default)]
+pub(crate) struct IssueScope<'a> {
+    /// The repo of the pane named in the request: `Found` keeps only that
+    /// repo's issues; any other state keeps none.
+    pub(crate) repo: Option<&'a RepoState>,
+    /// `forge_id` to ac's account there.
+    pub(crate) accounts: Option<&'a std::collections::BTreeMap<String, String>>,
+}
+
 /// The page asked for and how many issues match in all. Rows are already in
 /// key order, so nothing is sorted, and only the page is copied.
 pub(crate) fn list_issues(
     cache: &IssueCache,
     params: &IssueListParams,
+    scope: &IssueScope<'_>,
 ) -> Result<(Vec<IssueInfo>, usize), String> {
     let wanted = match params.state.as_deref() {
         None | Some("open") => Some(IssueState::Open),
         Some("closed") => Some(IssueState::Closed),
         Some("all") => None,
         Some(other) => return Err(format!("state must be open, closed or all, not {other}")),
+    };
+    let closed_since = match params.closed_since.as_deref() {
+        None => None,
+        Some(stamp) => Some(parse_time(stamp).ok_or_else(|| {
+            format!(
+                "closed_since must be an RFC 3339 time such as 2026-10-15T00:00:00Z, not {stamp}"
+            )
+        })?),
+    };
+    let repo = match scope.repo {
+        None => None,
+        Some(RepoState::Found(repo)) => Some(repo),
+        // Not known (yet): there is no repo to show issues of.
+        Some(RepoState::Resolving | RepoState::NoRemote) => return Ok((Vec::new(), 0)),
     };
     let (limit, offset) = window(params.limit, params.offset);
     let mut total = 0;
@@ -164,18 +207,55 @@ pub(crate) fn list_issues(
         if wanted.is_some_and(|state| row.record.state != state) {
             continue;
         }
+        let r = &row.record.issue_ref;
         if let Some(project) = params.project.as_deref() {
-            let r = &row.record.issue_ref;
             if r.project_path != project && r.project_id.to_string() != project {
                 continue;
             }
         }
+        if repo.is_some_and(|repo| !repo.is(&r.host, &r.project_path)) {
+            continue;
+        }
+        if let Some(since) = closed_since {
+            let touched = row.record.updated_at.as_deref().and_then(parse_time);
+            if row.record.state == IssueState::Closed && touched.is_none_or(|t| t < since) {
+                continue;
+            }
+        }
         if total >= offset && page.len() < limit {
-            page.push(issue_info(&row.name, row));
+            let mut info = issue_info(&row.name, row);
+            info.mine = scope.accounts.is_some_and(|a| is_mine(&row.record, a));
+            page.push(info);
         }
         total += 1;
     }
     Ok((page, total))
+}
+
+/// How reading the pane's repo went, and whether that repo is mirrored.
+pub(crate) fn repo_info(cache: &IssueCache, state: &RepoState) -> IssueRepoInfo {
+    match state {
+        RepoState::Resolving => IssueRepoInfo {
+            status: "resolving".to_owned(),
+            host: None,
+            path: None,
+            mirrored: false,
+        },
+        RepoState::NoRemote => IssueRepoInfo {
+            status: "no_remote".to_owned(),
+            host: None,
+            path: None,
+            mirrored: false,
+        },
+        RepoState::Found(RepoRemote { host, path }) => IssueRepoInfo {
+            status: "found".to_owned(),
+            host: Some(host.clone()),
+            path: Some(path.clone()),
+            mirrored: cache
+                .projects()
+                .any(|(_, count)| count.project_path.eq_ignore_ascii_case(path)),
+        },
+    }
 }
 
 pub(crate) fn list_asks(cache: &AskCache, params: &AskListParams) -> (Vec<AskInfo>, usize) {
@@ -200,9 +280,26 @@ pub(crate) fn list_asks(cache: &AskCache, params: &AskListParams) -> (Vec<AskInf
 
 impl App {
     pub(super) fn handle_issue_list(&mut self, id: String, params: IssueListParams) -> String {
-        let (issues, total) = match list_issues(self.tasks.issues(), &params) {
+        let repo = match params.pane.as_deref() {
+            None => None,
+            Some(pane) => match self.pane_repo(pane) {
+                Some(state) => Some(state),
+                None => {
+                    return encode_error(
+                        id,
+                        "pane_not_found",
+                        format!("pane {pane} does not exist"),
+                    )
+                }
+            },
+        };
+        let scope = IssueScope {
+            repo: repo.as_ref(),
+            accounts: Some(&self.task_config.forge_accounts),
+        };
+        let (issues, total) = match list_issues(self.tasks.issues(), &params, &scope) {
             Ok(page) => page,
-            Err(message) => return encode_error(id, "invalid_issue_state", message),
+            Err(message) => return encode_error(id, "invalid_issue_list", message),
         };
         encode_success(
             id,
@@ -211,6 +308,20 @@ impl App {
                 total: total as u64,
                 projects: project_infos(self.tasks.issues()),
                 mirror: mirror_info(self.tasks.mirror_status(Mirror::Issues)),
+                repo: repo
+                    .as_ref()
+                    .map(|state| repo_info(self.tasks.issues(), state)),
+            },
+        )
+    }
+
+    /// The repo of `pane`'s folder, read off this thread (`None`: no such pane).
+    fn pane_repo(&self, pane: &str) -> Option<RepoState> {
+        let (ws_idx, pane_id) = self.parse_pane_id(pane)?;
+        Some(
+            match self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id) {
+                Some(cwd) => self.repo_resolver.lookup(&cwd),
+                None => RepoState::NoRemote,
             },
         )
     }
@@ -597,7 +708,7 @@ mod tests {
                 ..IssueListParams::default()
             }),
         );
-        assert_eq!(bad["error"]["code"], "invalid_issue_state");
+        assert_eq!(bad["error"]["code"], "invalid_issue_list");
 
         // No sync row yet: the project is listed, not synced.
         let project = &open["result"]["projects"][0];
@@ -847,5 +958,147 @@ mod tests {
             moved(&mut app, "gestore-lab.a1", 11, "closed"),
             "waiting ends"
         );
+    }
+
+    fn with_pane(app: &mut App) -> String {
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("work")];
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        app.public_pane_id(0, pane).unwrap()
+    }
+
+    fn for_pane(pane: &str, state: &str) -> Method {
+        Method::IssueList(IssueListParams {
+            pane: Some(pane.into()),
+            state: Some(state.into()),
+            ..IssueListParams::default()
+        })
+    }
+
+    fn resolved(app: &mut App, pane: &str, state: &str) -> serde_json::Value {
+        for _ in 0..200 {
+            let answer = call(app, for_pane(pane, state));
+            if answer["result"]["repo"]["status"] != "resolving" {
+                return answer;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the pane's remote was never read");
+    }
+
+    fn remote(host: &str, path: &str) -> crate::tasks::RepoRemote {
+        crate::tasks::RepoRemote {
+            host: host.into(),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn issue_list_for_a_pane_shows_that_repos_issues_once_its_remote_is_read() {
+        let (mut app, _) = mirrored_issues();
+        let pane = with_pane(&mut app);
+        app.repo_resolver = crate::tasks::RepoResolver::with_resolver(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            Some(remote("gitea.example", "AC/Worklink"))
+        });
+        // The first answer does not wait for the read.
+        let first = call(&mut app, for_pane(&pane, "all"));
+        assert_eq!(first["result"]["repo"]["status"], "resolving");
+        assert_eq!(first["result"]["total"], 0);
+        assert!(first["result"]["issues"].as_array().unwrap().is_empty());
+        let done = resolved(&mut app, &pane, "all");
+        let repo = &done["result"]["repo"];
+        assert_eq!(repo["status"], "found");
+        assert_eq!(repo["host"], "gitea.example");
+        assert_eq!(repo["path"], "AC/Worklink");
+        assert_eq!(repo["mirrored"], true, "case does not matter");
+        assert_eq!(done["result"]["issues"].as_array().unwrap().len(), 3);
+        assert_eq!(done["result"]["total"], 3);
+    }
+
+    #[test]
+    fn issue_list_for_a_pane_in_another_repo_or_none_shows_nothing_and_says_why() {
+        let (mut app, _) = mirrored_issues();
+        let pane = with_pane(&mut app);
+        // Another forge host with the same path is another repo.
+        app.repo_resolver = crate::tasks::RepoResolver::with_resolver(|_| {
+            Some(remote("github.com", "ac/worklink"))
+        });
+        let other_host = resolved(&mut app, &pane, "all");
+        assert_eq!(other_host["result"]["repo"]["status"], "found");
+        assert!(other_host["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        app.repo_resolver = crate::tasks::RepoResolver::with_resolver(|_| {
+            Some(remote("gitea.example", "ac/other"))
+        });
+        let other = resolved(&mut app, &pane, "all");
+        assert!(
+            other["result"]["repo"].get("mirrored").is_none(),
+            "false is left out"
+        );
+        assert!(other["result"]["issues"].as_array().unwrap().is_empty());
+        app.repo_resolver = crate::tasks::RepoResolver::with_resolver(|_| None);
+        let none = resolved(&mut app, &pane, "all");
+        assert_eq!(none["result"]["repo"]["status"], "no_remote");
+        assert!(none["result"]["issues"].as_array().unwrap().is_empty());
+        // Without a pane the answer has no repo and nothing is narrowed.
+        let plain = call(&mut app, Method::IssueList(all()));
+        assert!(plain["result"].get("repo").is_none());
+        assert_eq!(plain["result"]["issues"].as_array().unwrap().len(), 3);
+        let missing = call(&mut app, for_pane("w_nope:p_nope", "all"));
+        assert_eq!(missing["error"]["code"], "pane_not_found");
+    }
+
+    #[test]
+    fn closed_since_keeps_old_closed_issues_out_and_leaves_open_ones_alone() {
+        let (mut app, _) = mirrored_issues();
+        let mut since = |stamp: &str| {
+            call(
+                &mut app,
+                Method::IssueList(IssueListParams {
+                    state: Some("all".into()),
+                    closed_since: Some(stamp.into()),
+                    ..IssueListParams::default()
+                }),
+            )
+        };
+        // The closed issue was last touched at 2026-10-21T11:00:00Z.
+        assert_eq!(since("2026-10-21T00:00:00Z")["result"]["total"], 3);
+        let later = since("2026-10-22T00:00:00+02:00");
+        assert_eq!(later["result"]["total"], 2, "only the closed one drops");
+        assert!(later["result"]["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["state"] == "open"));
+        let bad = since("last week");
+        assert_eq!(bad["error"]["code"], "invalid_issue_list");
+    }
+
+    #[test]
+    fn an_issue_assigned_to_acs_forge_account_is_marked_mine() {
+        let (mut app, _) = mirrored_issues();
+        let mine = |app: &mut App| -> Vec<bool> {
+            let answer = call(app, Method::IssueList(all()));
+            answer["result"]["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|issue| issue.get("mine").is_some_and(|m| m == true))
+                .collect()
+        };
+        assert_eq!(mine(&mut app), [false, false, false], "no mapping, no mark");
+        app.task_config
+            .forge_accounts
+            .insert("gitea-lab".into(), "AC".into());
+        assert_eq!(mine(&mut app), [false, true, false], "case does not matter");
+        // The mapping is per forge: another forge's account is not ac's here.
+        app.task_config.forge_accounts.clear();
+        app.task_config
+            .forge_accounts
+            .insert("github-main".into(), "ac".into());
+        assert_eq!(mine(&mut app), [false, false, false]);
     }
 }

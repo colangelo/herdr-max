@@ -5,9 +5,9 @@
 use super::super::work_panel::{ClientWorkPanelOverlay, Feed, WorkPanelLayout, WorkRow, WorkView};
 use super::*;
 use crate::api::schema::{
-    AskInfo, IssueInfo, IssueProjectInfo, IssueRefInfo, Method, MirrorInfo, ResponseResult,
-    TaskInfo, TaskIssueRefInfo, TaskPaneInfo, TaskPriorityInfo, TaskShownInfo, TaskStatusInfo,
-    TaskStoreInfo,
+    AskInfo, IssueInfo, IssueProjectInfo, IssueRefInfo, IssueRepoInfo, Method, MirrorInfo,
+    ResponseResult, TaskInfo, TaskIssueRefInfo, TaskPaneInfo, TaskPriorityInfo, TaskShownInfo,
+    TaskStatusInfo, TaskStoreInfo,
 };
 use crate::input::KeybindAction;
 
@@ -57,6 +57,7 @@ fn issue(project: &str, number: u64, title: &str, labels: &[&str], updated: &str
         source_rev: None,
         last_sync: None,
         truncated: false,
+        mine: false,
     }
 }
 
@@ -170,6 +171,28 @@ struct Answers {
     tasks: Vec<TaskInfo>,
     asks: Vec<AskInfo>,
     store: &'static str,
+    /// What the server says it read for the pane: `found` for worklink.
+    repo: IssueRepoInfo,
+    /// Closed issues of the pane's repo; sent only when `closed_since` is set.
+    closed: Vec<IssueInfo>,
+}
+
+fn repo_found(path: &str, mirrored: bool) -> IssueRepoInfo {
+    IssueRepoInfo {
+        status: "found".into(),
+        host: Some("gitea.example".into()),
+        path: Some(path.into()),
+        mirrored,
+    }
+}
+
+fn repo_status(status: &str) -> IssueRepoInfo {
+    IssueRepoInfo {
+        status: status.into(),
+        host: None,
+        path: None,
+        mirrored: false,
+    }
 }
 
 fn answers() -> Answers {
@@ -232,6 +255,8 @@ fn answers() -> Answers {
             "herdr-max #241",
         )],
         store: "ready",
+        repo: repo_found("ac/worklink", true),
+        closed: Vec::new(),
     }
 }
 
@@ -239,11 +264,35 @@ fn answer(sent: Vec<(String, Method)>, a: &Answers) -> Vec<(String, ResponseResu
     sent.into_iter()
         .map(|(id, method)| {
             let result = match method {
+                // Like the server: with a pane, only the pane's repo's issues,
+                // and the closed ones only when asked for.
+                Method::IssueList(params) if params.pane.is_some() => {
+                    let mut issues: Vec<IssueInfo> = match a.repo.path.as_deref() {
+                        Some(path) if a.repo.status == "found" => a
+                            .issues
+                            .iter()
+                            .filter(|issue| issue.issue_ref.project_path == path)
+                            .cloned()
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    if params.closed_since.is_some() && a.repo.status == "found" {
+                        issues.extend(a.closed.iter().cloned());
+                    }
+                    ResponseResult::IssueList {
+                        total: issues.len() as u64,
+                        issues,
+                        projects: a.projects.clone(),
+                        mirror: loaded(),
+                        repo: Some(a.repo.clone()),
+                    }
+                }
                 Method::IssueList(_) => ResponseResult::IssueList {
                     issues: a.issues.clone(),
                     total: a.issues.len() as u64,
                     projects: a.projects.clone(),
                     mirror: loaded(),
+                    repo: None,
                 },
                 Method::TaskList(_) => ResponseResult::TaskList {
                     tasks: a.tasks.clone(),
@@ -261,13 +310,8 @@ fn answer(sent: Vec<(String, Method)>, a: &Answers) -> Vec<(String, ResponseResu
         .collect()
 }
 
-fn state_with(folder: Option<&str>) -> ClientShellState {
-    let mut snapshot = super::snapshot();
-    if let Some(folder) = folder {
-        for pane in &mut snapshot.panes {
-            pane.foreground_cwd = Some(folder.to_owned());
-        }
-    }
+fn state_with() -> ClientShellState {
+    let snapshot = super::snapshot();
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot));
     state.set_pane_surface(surface());
@@ -279,7 +323,7 @@ fn state_with(folder: Option<&str>) -> ClientShellState {
 fn open_with(state: &mut ClientShellState, a: &Answers) {
     let outcome = bind(state, KeybindAction::OpenWorkPanel);
     let sent = requests(&outcome);
-    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent.len(), 4, "{sent:?}");
     for (id, result) in answer(sent, a) {
         state.handle_endpoint_result("boot-1", &id, Ok(result));
     }
@@ -300,7 +344,7 @@ fn refresh_with(state: &mut ClientShellState, a: &Answers) {
 }
 
 fn sample() -> ClientShellState {
-    let mut state = state_with(Some("/Users/ac/dev/worktrees/worklink"));
+    let mut state = state_with();
     open_with(&mut state, &answers());
     state
 }
@@ -372,13 +416,10 @@ fn titles(state: &ClientShellState) -> Vec<String> {
             WorkRow::Heading { text, count } => format!("# {text} {count}"),
             WorkRow::Note(text) => format!("note: {text}"),
             WorkRow::Problem(text) => format!("problem: {text}"),
-            WorkRow::Issue(i) => format!(
-                "issue {}",
-                panel.issues.data().unwrap().issues[*i].issue_ref.number
-            ),
+            WorkRow::Issue(i) => format!("issue {}", panel.issue_at(*i).unwrap().issue_ref.number),
             WorkRow::IssueWhy(i, why) => format!(
                 "issue {} [{why}]",
-                panel.issues.data().unwrap().issues[*i].issue_ref.number
+                panel.issue_at(*i).unwrap().issue_ref.number
             ),
             WorkRow::Task(i) => format!("task {}", panel.tasks.data().unwrap().tasks[*i].title),
             WorkRow::Ask(i) => format!("ask {}", panel.asks.data().unwrap().asks[*i].key),
@@ -391,21 +432,28 @@ fn selected_key(state: &ClientShellState) -> Option<String> {
 }
 
 #[test]
-fn opening_the_panel_asks_the_server_for_the_three_lists() {
-    let mut state = state_with(None);
+fn opening_the_panel_asks_the_server_for_its_lists() {
+    let mut state = state_with();
     let sent = requests(&bind(&mut state, KeybindAction::OpenWorkPanel));
     let names: Vec<_> = sent
         .iter()
         .map(|(_, method)| crate::api::api_method_name(method).to_owned())
         .collect();
-    assert_eq!(names, ["issue.list", "task.list", "ask.list"]);
+    assert_eq!(names, ["issue.list", "issue.list", "task.list", "ask.list"]);
     // Open issues, a page at a time; every kind of ask, for the reasons.
     assert!(matches!(
         &sent[0].1,
         Method::IssueList(p) if p.state.as_deref() == Some("open") && p.limit == Some(500)
     ));
+    // The pane's repo, read by the server from the pane's git remote.
     assert!(matches!(
-        &sent[2].1,
+        &sent[1].1,
+        Method::IssueList(p) if p.pane.as_deref() == Some("pane_1")
+            && p.state.as_deref() == Some("open")
+            && p.closed_since.is_none()
+    ));
+    assert!(matches!(
+        &sent[3].1,
         Method::AskList(p) if p.kind.as_deref() == Some("any")
     ));
 }
@@ -431,33 +479,97 @@ fn this_repo_orders_by_horizon_and_shows_the_sync_line_in_utc() {
 }
 
 #[test]
-fn this_repo_with_no_match_says_so_and_shows_every_project() {
-    let mut state = state_with(Some("/tmp/unrelated"));
-    open_with(&mut state, &answers());
+fn this_repo_is_what_the_server_resolved_not_a_folder_guess() {
+    // The pane's remote names the herdr-max repo, whatever the folder is called.
+    let mut a = answers();
+    a.repo = repo_found("ac/herdr-max", false);
+    let mut state = state_with();
+    open_with(&mut state, &a);
     let rows = titles(&state);
     assert!(
-        rows[0].starts_with("note: no project matches this pane's folder"),
+        rows[0].starts_with("note: ac/herdr-max is not mirrored"),
         "{rows:?}"
     );
     assert!(rows.contains(&"# ac/herdr-max 1".to_owned()), "{rows:?}");
-    let text = boxed(&mut state).join("\n");
-    assert!(text.contains("ac/herdr-max not synced"), "{text}");
-    // A folder that merely sits above the pane (a project called dev) is not it.
-    let mut a = answers();
-    a.issues.push(issue(
-        "ac/dev",
-        5,
-        "the dev project",
-        &[],
-        "2026-10-21T08:00:00Z",
-    ));
-    let mut state = state_with(Some("/Users/ac/dev/worktrees/herdr/issue-241-task-store"));
-    open_with(&mut state, &a);
     assert!(
-        titles(&state)[0].starts_with("note: no project matches"),
-        "{:?}",
-        titles(&state)
+        !rows.iter().any(|row| row.contains("ac/worklink")),
+        "{rows:?}"
     );
+}
+
+#[test]
+fn this_repo_says_why_when_the_pane_has_no_repo_or_it_is_still_being_read() {
+    let mut a = answers();
+    a.repo = repo_status("no_remote");
+    let mut state = state_with();
+    open_with(&mut state, &a);
+    let rows = titles(&state);
+    assert!(
+        rows[0].starts_with("note: this pane is not in a git repo with a remote"),
+        "{rows:?}"
+    );
+    assert_eq!(rows.len(), 1, "no other project is shown in its place");
+    a.repo = repo_status("resolving");
+    refresh_with(&mut state, &a);
+    assert_eq!(titles(&state), ["note: reading this pane's git remote…"]);
+    // The other views do not wait for it.
+    key(&mut state, crossterm::event::KeyCode::Tab);
+    assert_eq!(panel(&state).view, WorkView::NeedsMe);
+    assert!(titles(&state).iter().any(|row| row.contains("issue 2")));
+}
+
+#[test]
+fn w_adds_the_issues_closed_in_the_last_seven_days_and_sends_the_cutoff() {
+    let mut a = answers();
+    let mut closed = issue(
+        "ac/worklink",
+        7,
+        "old rename bug",
+        &[],
+        "2026-10-20T09:00:00Z",
+    );
+    closed.state = "closed".into();
+    a.closed = vec![closed];
+    let mut state = state_with();
+    open_with(&mut state, &a);
+    assert!(!titles(&state)
+        .iter()
+        .any(|row| row.contains("old rename bug")));
+    let mut outcome = ClientShellInput::default();
+    state.route_work_panel_key(
+        &crate::input::TerminalKey::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::empty(),
+        ),
+        &mut outcome,
+    );
+    let sent = requests(&outcome);
+    let repo_ask = sent
+        .iter()
+        .find_map(|(_, m)| match m {
+            Method::IssueList(p) if p.pane.is_some() => Some(p.clone()),
+            _ => None,
+        })
+        .expect("the repo list is asked for again");
+    assert_eq!(repo_ask.state.as_deref(), Some("all"));
+    let cutoff = repo_ask.closed_since.expect("a cutoff");
+    assert!(cutoff.ends_with('Z') && cutoff.len() >= 20, "{cutoff}");
+    for (id, result) in answer(sent, &a) {
+        state.handle_endpoint_result("boot-1", &id, Ok(result));
+    }
+    state.compose(W, H).unwrap();
+    let rows = titles(&state);
+    let text = boxed(&mut state).join("\n");
+    assert!(rows.contains(&"issue 7".to_owned()), "{rows:?}");
+    assert!(text.contains("closed"), "the closed state is drawn: {text}");
+    assert!(
+        text.contains("also the issues closed in the last 7 days"),
+        "{text}"
+    );
+    // Closed after open within the project.
+    let open = rows.iter().position(|row| row == "issue 1").unwrap();
+    let shut = rows.iter().position(|row| row == "issue 7").unwrap();
+    assert!(open < shut, "{rows:?}");
 }
 
 #[test]
@@ -502,7 +614,7 @@ fn needs_me_shows_the_reason_on_each_row_in_the_plans_order() {
         "decision",
         "https://gitea.example/ac/worklink/issues/3",
     )];
-    let mut state = state_with(None);
+    let mut state = state_with();
     open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('2'));
     assert_eq!(
@@ -520,6 +632,48 @@ fn needs_me_shows_the_reason_on_each_row_in_the_plans_order() {
     let text = boxed(&mut state).join("\n");
     assert!(text.contains("run unknown"), "{text}");
     assert_eq!(panel(&state).counts[1], 3, "the count is the badge");
+}
+
+#[test]
+fn an_issue_marked_mine_needs_me_and_the_needs_me_chip_is_the_badge() {
+    let mut a = answers();
+    a.tasks.clear();
+    a.asks.clear();
+    // #1 has no needs label; the server marked it as ac's. #2 needs a decision.
+    a.issues[0].mine = true;
+    let mut state = state_with();
+    open_with(&mut state, &a);
+    // The badge is drawn while another view is open, in yellow and bold.
+    assert_eq!(panel(&state).view, WorkView::ThisRepo);
+    let (chip, _) = layout(&state)
+        .tabs
+        .iter()
+        .find(|(_, view)| *view == WorkView::NeedsMe)
+        .cloned()
+        .unwrap();
+    let p = state.config.palette.clone();
+    let frame = state.compose(W, H).unwrap();
+    let cell = &frame.cells[usize::from(chip.y) * usize::from(W) + usize::from(chip.x)];
+    assert_eq!(cell.fg, crate::protocol::color_to_u32(p.yellow));
+    assert!(boxed(&mut state).join("\n").contains("2 needs me 2"));
+    key(&mut state, crossterm::event::KeyCode::Char('2'));
+    assert_eq!(
+        titles(&state),
+        [
+            "# assigned to you 0",
+            "issue 1 [assigned to you]",
+            "# needs a decision 0",
+            "issue 2 [needs a decision]",
+        ],
+        "the assignment comes before a decision, as the plan orders them"
+    );
+    // With nothing waiting the chip goes back to dim.
+    a.issues[0].mine = false;
+    a.issues[1].labels.clear();
+    refresh_with(&mut state, &a);
+    let frame = state.compose(W, H).unwrap();
+    let cell = &frame.cells[usize::from(chip.y) * usize::from(W) + usize::from(chip.x)];
+    assert_ne!(cell.fg, crate::protocol::color_to_u32(p.yellow));
 }
 
 #[test]
@@ -551,7 +705,7 @@ fn in_flight_has_issues_with_a_run_or_the_label_then_tasks_without_an_issue() {
             "wrk",
         ),
     ];
-    let mut state = state_with(None);
+    let mut state = state_with();
     open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('3'));
     assert_eq!(
@@ -572,7 +726,7 @@ fn my_tasks_lists_mine_first_then_the_agents_open_tasks_by_owner() {
     let mut a = answers();
     a.asks
         .push(ask("gestore-lab.d2", "not a task", "open", "decision", ""));
-    let mut state = state_with(None);
+    let mut state = state_with();
     open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('4'));
     assert_eq!(
@@ -604,7 +758,7 @@ fn a_task_store_that_is_not_ready_is_said_not_shown_as_no_tasks() {
         a.tasks.clear();
         a.asks.clear();
         a.store = state_name;
-        let mut state = state_with(None);
+        let mut state = state_with();
         open_with(&mut state, &a);
         key(&mut state, crossterm::event::KeyCode::Char('4'));
         let rows = titles(&state);
@@ -617,7 +771,7 @@ fn a_task_store_that_is_not_ready_is_said_not_shown_as_no_tasks() {
     let mut a = answers();
     a.tasks.clear();
     a.asks.clear();
-    let mut state = state_with(None);
+    let mut state = state_with();
     open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('4'));
     assert_eq!(titles(&state), ["note: no tasks"]);
@@ -682,7 +836,7 @@ fn a_failed_poll_keeps_the_last_answer_and_marks_it_stale() {
 
 #[test]
 fn issues_are_fetched_a_page_at_a_time_until_the_total() {
-    let mut state = state_with(None);
+    let mut state = state_with();
     let outcome = bind(&mut state, KeybindAction::OpenWorkPanel);
     let sent = requests(&outcome);
     let page = |from: u64, count: u64| -> Vec<IssueInfo> {
@@ -700,7 +854,7 @@ fn issues_are_fetched_a_page_at_a_time_until_the_total() {
     };
     let (issue_id, _) = sent
         .iter()
-        .find(|(_, m)| matches!(m, Method::IssueList(_)))
+        .find(|(_, m)| matches!(m, Method::IssueList(p) if p.pane.is_none()))
         .cloned()
         .unwrap();
     let (_, first) = state.handle_endpoint_result(
@@ -711,6 +865,7 @@ fn issues_are_fetched_a_page_at_a_time_until_the_total() {
             total: 620,
             projects: Vec::new(),
             mirror: loaded(),
+            repo: None,
         }),
     );
     let next = first
@@ -737,6 +892,7 @@ fn issues_are_fetched_a_page_at_a_time_until_the_total() {
             total: 620,
             projects: Vec::new(),
             mirror: loaded(),
+            repo: None,
         }),
     );
     assert_eq!(panel(&state).issues.data().unwrap().issues.len(), 620);
@@ -791,7 +947,7 @@ fn the_selection_skips_headings_and_notes() {
 
 #[test]
 fn a_server_without_the_work_methods_is_said_to_lack_them() {
-    let mut state = state_with(None);
+    let mut state = state_with();
     // The server advertises task.* but not the work methods.
     state.set_endpoint_methods(Some(vec!["task.list".to_owned(), "task.show".to_owned()]));
     let sent = requests(&bind(&mut state, KeybindAction::OpenWorkPanel));
@@ -812,7 +968,7 @@ fn a_server_without_the_work_methods_is_said_to_lack_them() {
 
 #[test]
 fn a_mirror_that_is_not_read_yet_says_why_instead_of_showing_an_empty_list() {
-    let mut state = state_with(None);
+    let mut state = state_with();
     let outcome = bind(&mut state, KeybindAction::OpenWorkPanel);
     for (id, method) in requests(&outcome) {
         if let Method::IssueList(_) = method {
@@ -827,6 +983,7 @@ fn a_mirror_that_is_not_read_yet_says_why_instead_of_showing_an_empty_list() {
                         loaded: false,
                         detail: Some("not available with this backend".into()),
                     },
+                    repo: Some(repo_found("ac/worklink", true)),
                 }),
             );
         }
@@ -850,7 +1007,7 @@ fn refresh_asks_again_and_close_leaves_the_terminal() {
         ),
         &mut outcome,
     );
-    assert_eq!(requests(&outcome).len(), 3);
+    assert_eq!(requests(&outcome).len(), 4);
     key(&mut state, crossterm::event::KeyCode::Esc);
     assert!(state.overlay.is_none());
     assert_eq!(state.mode, ClientShellMode::Terminal);
@@ -867,7 +1024,7 @@ fn the_panel_polls_but_not_while_a_request_is_on_its_way() {
     }
     let mut due = ClientShellInput::default();
     state.tick_work_panel(&mut due);
-    assert_eq!(requests(&due).len(), 3);
+    assert_eq!(requests(&due).len(), 4);
     let mut busy = ClientShellInput::default();
     if let Some(ClientShellOverlay::WorkPanel(panel)) = state.overlay.as_mut() {
         panel.last_fetch = std::time::Instant::now() - std::time::Duration::from_secs(60);
@@ -923,7 +1080,7 @@ fn the_footer_is_a_key_bar_without_buttons_and_failures_are_red() {
     let mut a = answers();
     a.projects[0].status = Some("error".into());
     a.projects[0].error_class = Some("auth".into());
-    let mut state = state_with(Some("/Users/ac/dev/worktrees/worklink"));
+    let mut state = state_with();
     open_with(&mut state, &a);
     let p = state.config.palette.clone();
     let layout = layout(&state);

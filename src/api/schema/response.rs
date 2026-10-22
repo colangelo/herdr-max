@@ -282,6 +282,9 @@ pub enum ResponseResult {
         total: u64,
         projects: Vec<super::tasks::IssueProjectInfo>,
         mirror: super::tasks::MirrorInfo,
+        /// Present when the request named a `pane`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<super::tasks::IssueRepoInfo>,
     },
     AskList {
         asks: Vec<super::tasks::AskInfo>,

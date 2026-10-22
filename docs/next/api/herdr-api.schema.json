@@ -3059,6 +3059,13 @@
         "IssueListParams": {
           "description": "Params for `issue.list`: the forge issues worklink mirrors.",
           "properties": {
+            "closed_since": {
+              "description": "Closed issues count only when touched at or after this time (RFC 3339).\nOpen issues are not affected.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "limit": {
               "description": "At most this many issues (500 when absent, 2000 at most).",
               "format": "uint32",
@@ -3074,6 +3081,13 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "pane": {
+              "description": "Only the issues of the repo this pane works in. The server reads the\npane's git remote (`internal`, then `origin`; a worktree resolves to\nits main repo) and answers `repo` with how that went.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -10527,6 +10541,10 @@
                 "null"
               ]
             },
+            "mine": {
+              "description": "Present (true) when an assignee is ac's account on this forge\n(`[tasks.forge_accounts]`). The client never sees the mapping.",
+              "type": "boolean"
+            },
             "mirror_rev": {
               "description": "The revision of the row that the server's watch saw.",
               "format": "uint64",
@@ -10678,6 +10696,36 @@
             "project_id",
             "project_path",
             "number"
+          ],
+          "type": "object"
+        },
+        "IssueRepoInfo": {
+          "description": "Which repo `issue.list {pane}` read for the pane, and how that went.",
+          "properties": {
+            "host": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mirrored": {
+              "description": "Whether a project of that path is mirrored at all.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "`owner/repo`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`found`, `resolving` (the remote is being read; ask again) or\n`no_remote` (the pane is not in a git repo, or no remote names a repo).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
           ],
           "type": "object"
         },
@@ -13505,6 +13553,17 @@
                     "$ref": "#/schemas/success_response/$defs/IssueProjectInfo"
                   },
                   "type": "array"
+                },
+                "repo": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/IssueRepoInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Present when the request named a `pane`."
                 },
                 "total": {
                   "description": "How many issues match, before `limit` and `offset`.",

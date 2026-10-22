@@ -22,7 +22,6 @@ mod tab;
 use self::git::git_status_cache_key_for_space;
 #[cfg(test)]
 pub(crate) use self::tab::SYNC_GRACE;
-pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_detached_head,
@@ -30,6 +29,10 @@ pub use self::{
         GitStatusCacheEntry, GitStatusRefreshDemand,
     },
     tab::{NewPane, Tab},
+};
+pub(crate) use self::{
+    git::{git_remote_urls, git_status_snapshot_for_cwd_with_demand},
+    tab::MovedPane,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

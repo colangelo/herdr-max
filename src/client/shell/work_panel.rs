@@ -19,9 +19,10 @@
 //! - *My tasks*: ac's own task rows from `ask.list`, then every open task by
 //!   owner and pane.
 //!
-//! Left for the data that does not reach the client yet: the pane's git
-//! remote, ac's forge account (`[tasks.forge_accounts]`), the toggle for issues
-//! closed in the last seven days, and ac's intents (Phase 3).
+//! "This repo" is the server's answer: `issue.list {pane}` reads the pane's
+//! git remote and keeps that repo's issues; `w` adds the issues closed in the
+//! last seven days. "Assigned to ac" is the server's `mine` mark, from
+//! `[tasks.forge_accounts]`. Left for Phase 3: ac's intents.
 //!
 //! The panel keeps the last answer it got and marks it stale when a later ask
 //! fails, rather than blanking the view. Everything it shows is computed when
@@ -34,8 +35,8 @@ use super::render::put_text;
 use super::todo_panel::{contrast, render_panel_shell};
 use super::*;
 use crate::api::schema::{
-    AskInfo, AskListParams, IssueInfo, IssueListParams, IssueProjectInfo, Method, MirrorInfo,
-    ResponseResult, TaskInfo, TaskListParams, TaskShownInfo, TaskStoreInfo,
+    AskInfo, AskListParams, IssueInfo, IssueListParams, IssueProjectInfo, IssueRepoInfo, Method,
+    MirrorInfo, ResponseResult, TaskInfo, TaskListParams, TaskShownInfo, TaskStoreInfo,
 };
 use crate::ui::text::{display_width as width_of, truncate_end};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -55,9 +56,11 @@ const POLL: Duration = Duration::from_secs(5);
 /// Issues are fetched this many at a time, up to `MAX_PAGES` pages.
 const PAGE: u32 = 500;
 const MAX_PAGES: usize = 8;
-/// Which issues the panel fetches. Closed ones are not shown in any view; this
-/// is the one place to change that.
+/// Which issues the panel fetches for the views that cross projects. Closed
+/// ones are only in "this repo", with the `w` toggle.
 const ISSUE_STATE: &str = "open";
+/// How far back "this repo" looks for closed issues when `w` is on.
+const CLOSED_DAYS: i64 = 7;
 /// A project whose last good sync is older than this is marked stale.
 const STALE_SYNC_SECS: i64 = 3600;
 const LACKS_METHODS: &str = "this server does not have the work methods; update and restart it";
@@ -99,22 +102,8 @@ impl WorkView {
 
 // -- the rules that pick rows: one function each --------------------------------------
 //
-// From the plan (v5 § 4). What needs data the client does not have yet is
-// left as a stated hook: the pane's git remote, ac's forge account, the
-// closed-in-7-days toggle, ac's intents (Phase 3).
-
-/// Whether `issue` belongs to the repo the focused pane is in. The plan says
-/// the pane's git remote; the snapshot has none, so the folder name stands in.
-fn is_this_repo(folders: &[String], issue: &IssueInfo) -> bool {
-    let name = issue
-        .issue_ref
-        .project_path
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_lowercase();
-    !name.is_empty() && folders.contains(&name)
-}
+// From the plan (v5 § 4). "This repo" is decided by the server (the pane's git
+// remote); what is left as a stated hook is ac's intents (Phase 3).
 
 /// `now`, `next`, `later`, `icebox`, then none.
 fn horizon_rank(issue: &IssueInfo) -> u8 {
@@ -156,9 +145,9 @@ fn issue_key_of(issue: &IssueInfo) -> (&str, u64, u64) {
 
 /// Why `issue` needs ac, best reason first (`None`: it does not). Reasons
 /// (2) a run on one of its tasks is unknown, (3) an open ask points at it,
+/// (4) it is assigned to ac's account on its forge (the server's `mine`),
 /// (5) it needs a decision or a design and is not marked not mine. Reason (1),
-/// a stale intent, is for Phase 3, and (4), assigned to ac's forge account,
-/// waits for the `[tasks.forge_accounts]` setting to reach the client.
+/// a stale intent, is for Phase 3.
 fn needs_me_reason(
     issue: &IssueInfo,
     tasks_on: &[&TaskInfo],
@@ -177,13 +166,16 @@ fn needs_me_reason(
     {
         return Some((1, "ask open"));
     }
+    if issue.mine {
+        return Some((2, "assigned to you"));
+    }
     if !not_mine(issue)
         && issue
             .labels
             .iter()
             .any(|label| label == "needs/decision" || label == "needs/design")
     {
-        return Some((2, "needs a decision"));
+        return Some((3, "needs a decision"));
     }
     None
 }
@@ -258,6 +250,8 @@ pub(super) struct IssuesData {
     pub(super) total: u64,
     pub(super) projects: Vec<IssueProjectInfo>,
     pub(super) mirror: Option<MirrorInfo>,
+    /// How the server read the pane's repo (only in the "this repo" feed).
+    pub(super) repo: Option<IssueRepoInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -303,10 +297,14 @@ impl WorkRow {
 pub(super) struct ClientWorkPanelOverlay {
     pub(super) boot_id: String,
     pub(super) view: WorkView,
-    /// The two folder names closest to the focused pane's directory,
-    /// lowercase: its own and its parent's.
-    pub(super) folders: Vec<String>,
+    /// The pane the panel was opened from; the server reads its git remote.
+    pub(super) pane_id: Option<String>,
+    /// Whether "this repo" also shows issues closed in the last seven days.
+    pub(super) week: bool,
     pub(super) issues: Feed<IssuesData>,
+    /// The issues of the pane's repo, for "this repo". Its rows come after the
+    /// `issues` rows in the index `WorkRow::Issue` carries.
+    pub(super) repo: Feed<IssuesData>,
     pub(super) tasks: Feed<TasksData>,
     pub(super) asks: Feed<AsksData>,
     /// Issue pages collected so far, until the last one arrives.
@@ -326,12 +324,14 @@ pub(super) struct ClientWorkPanelOverlay {
 }
 
 impl ClientWorkPanelOverlay {
-    pub(super) fn new(boot_id: String, folders: Vec<String>) -> Self {
+    pub(super) fn new(boot_id: String, pane_id: Option<String>) -> Self {
         Self {
             boot_id,
             view: WorkView::ThisRepo,
-            folders,
+            pane_id,
+            week: false,
             issues: Feed::Waiting,
+            repo: Feed::Waiting,
             tasks: Feed::Waiting,
             asks: Feed::Waiting,
             issue_stage: None,
@@ -353,11 +353,19 @@ impl ClientWorkPanelOverlay {
         self.row_key(row)
     }
 
+    /// The issue a row's index names: the cross-project issues first, then
+    /// the pane's repo's.
+    pub(super) fn issue_at(&self, index: usize) -> Option<&IssueInfo> {
+        let main = self.issues.data().map_or(0, |data| data.issues.len());
+        match index.checked_sub(main) {
+            None => self.issues.data()?.issues.get(index),
+            Some(rest) => self.repo.data()?.issues.get(rest),
+        }
+    }
+
     fn row_key(&self, row: &WorkRow) -> Option<String> {
         match row {
-            WorkRow::Issue(i) | WorkRow::IssueWhy(i, _) => {
-                Some(self.issues.data()?.issues.get(*i)?.key.clone())
-            }
+            WorkRow::Issue(i) | WorkRow::IssueWhy(i, _) => Some(self.issue_at(*i)?.key.clone()),
             WorkRow::Task(i) => Some(self.tasks.data()?.tasks.get(*i)?.key.clone()),
             WorkRow::Ask(i) => Some(self.asks.data()?.asks.get(*i)?.key.clone()),
             _ => None,
@@ -491,6 +499,79 @@ impl ClientWorkPanelOverlay {
         false
     }
 
+    /// What to say before the rows of "this repo". Returns true when there is
+    /// nothing to show under it.
+    fn repo_notes(&self, rows: &mut Vec<WorkRow>) -> bool {
+        match &self.repo {
+            Feed::Waiting => {
+                rows.push(WorkRow::Note("loading…".to_owned()));
+                return true;
+            }
+            Feed::Failed(why) => {
+                rows.push(WorkRow::Problem(why.clone()));
+                return true;
+            }
+            Feed::Stale(_, why) => rows.push(WorkRow::Problem(format!(
+                "stale — the last ask failed ({why}); showing the last answer"
+            ))),
+            Feed::Ready(_) => {}
+        }
+        let Some(data) = self.repo.data() else {
+            return true;
+        };
+        match data.repo.as_ref() {
+            Some(repo) if repo.status == "resolving" => {
+                rows.push(WorkRow::Note("reading this pane's git remote…".to_owned()));
+                return true;
+            }
+            Some(repo) if repo.status == "no_remote" => {
+                rows.push(WorkRow::Note(
+                    "this pane is not in a git repo with a remote (internal or origin) that \
+                     names a forge repo, so there is no repo to show; the other views still work"
+                        .to_owned(),
+                ));
+                return true;
+            }
+            Some(repo) => {
+                if !repo.mirrored {
+                    rows.push(WorkRow::Note(format!(
+                        "{} is not mirrored: no project of that path has synced yet",
+                        repo.path.as_deref().unwrap_or("this repo")
+                    )));
+                }
+            }
+            None => {
+                rows.push(WorkRow::Note(
+                    "the server did not say which repo this pane is in".to_owned(),
+                ));
+                return true;
+            }
+        }
+        if let Some(MirrorInfo {
+            loaded: false,
+            detail,
+        }) = &data.mirror
+        {
+            rows.push(WorkRow::Note(format!(
+                "issues not read yet: {}",
+                detail.as_deref().unwrap_or("waiting for the bus")
+            )));
+        }
+        if self.week {
+            rows.push(WorkRow::Note(
+                "also the issues closed in the last 7 days".to_owned(),
+            ));
+        }
+        if data.total > data.issues.len() as u64 {
+            rows.push(WorkRow::Note(format!(
+                "showing {} of {} issues",
+                data.issues.len(),
+                data.total
+            )));
+        }
+        false
+    }
+
     /// What to say before the rows of a view that reads tasks.
     fn task_notes(&self, rows: &mut Vec<WorkRow>) -> bool {
         match &self.tasks {
@@ -533,29 +614,28 @@ impl ClientWorkPanelOverlay {
         let mut rows = Vec::new();
         match view {
             WorkView::ThisRepo => {
-                if self.issue_notes(&mut rows) {
+                if self.repo_notes(&mut rows) {
                     return rows;
                 }
-                let mut issues = self.issues_shown();
-                let here: Vec<_> = issues
-                    .iter()
-                    .copied()
-                    .filter(|(_, issue)| is_this_repo(&self.folders, issue))
-                    .collect();
-                if here.is_empty() {
-                    if !issues.is_empty() {
-                        rows.push(WorkRow::Note(
-                            "no project matches this pane's folder (this pane's repo is not \
-                             mirrored, or its git remote is not known here); every project is shown"
-                                .to_owned(),
-                        ));
-                    }
-                } else {
-                    issues = here;
+                let main = self.issues.data().map_or(0, |data| data.issues.len());
+                if let Some(data) = self.repo.data() {
+                    let issues = data
+                        .issues
+                        .iter()
+                        .enumerate()
+                        .map(|(index, issue)| (main + index, issue))
+                        .collect();
+                    push_issue_groups(&mut rows, issues);
                 }
-                push_issue_groups(&mut rows, issues);
                 if !rows.iter().any(WorkRow::selectable) {
-                    rows.push(WorkRow::Note("no open issues".to_owned()));
+                    rows.push(WorkRow::Note(
+                        if self.week {
+                            "no open issues, and none closed in the last 7 days"
+                        } else {
+                            "no open issues"
+                        }
+                        .to_owned(),
+                    ));
                 }
             }
             WorkView::NeedsMe => {
@@ -777,13 +857,16 @@ impl ClientWorkPanelOverlay {
     /// problem (a sync that fails, or one that is old). With no issue row to
     /// go by, every project the server knows.
     fn sync_summary(&self, now: SystemTime) -> (String, bool) {
-        let Some(data) = self.issues.data() else {
-            return (String::new(), self.issues.problem().is_some());
+        let Some(data) = self.issues.data().or_else(|| self.repo.data()) else {
+            return (
+                String::new(),
+                self.issues.problem().is_some() || self.repo.problem().is_some(),
+            );
         };
         let mut seen: Vec<(&str, u64)> = Vec::new();
         for row in &self.rows {
             if let WorkRow::Issue(index) | WorkRow::IssueWhy(index, _) = row {
-                if let Some(issue) = data.issues.get(*index) {
+                if let Some(issue) = self.issue_at(*index) {
                     let id = (
                         issue.issue_ref.forge_id.as_str(),
                         issue.issue_ref.project_id,
@@ -804,7 +887,7 @@ impl ClientWorkPanelOverlay {
         if seen.is_empty() {
             return ("no project synced yet".to_owned(), false);
         }
-        let mut alarm = self.issues.problem().is_some();
+        let mut alarm = self.issues.problem().is_some() || self.repo.problem().is_some();
         let parts: Vec<String> = seen
             .into_iter()
             .map(|(forge_id, project_id)| {
@@ -901,11 +984,13 @@ fn push_issue_groups(rows: &mut Vec<WorkRow>, mut issues: Vec<(usize, &IssueInfo
     issues.sort_by(|a, b| {
         (
             &a.1.issue_ref.project_path,
+            a.1.state != "open",
             horizon_rank(a.1),
             std::cmp::Reverse(&a.1.updated_at),
         )
             .cmp(&(
                 &b.1.issue_ref.project_path,
+                b.1.state != "open",
                 horizon_rank(b.1),
                 std::cmp::Reverse(&b.1.updated_at),
             ))
@@ -1051,7 +1136,7 @@ fn row_parts(
 ) -> Option<((&'static str, Color), String, String)> {
     match row {
         WorkRow::Issue(index) | WorkRow::IssueWhy(index, _) => {
-            let issue = panel.issues.data()?.issues.get(*index)?;
+            let issue = panel.issue_at(*index)?;
             let mark = if issue.state == "open" {
                 ("☐", p.text)
             } else {
@@ -1112,11 +1197,8 @@ fn row_parts(
 
 fn detail_text(panel: &ClientWorkPanelOverlay) -> String {
     match panel.rows.get(panel.selected) {
-        Some(WorkRow::Issue(index) | WorkRow::IssueWhy(index, _)) => panel
-            .issues
-            .data()
-            .and_then(|data| data.issues.get(*index))
-            .map_or(String::new(), |issue| {
+        Some(WorkRow::Issue(index) | WorkRow::IssueWhy(index, _)) => {
+            panel.issue_at(*index).map_or(String::new(), |issue| {
                 let r = &issue.issue_ref;
                 format!(
                     "{} {}#{}  {}",
@@ -1125,7 +1207,8 @@ fn detail_text(panel: &ClientWorkPanelOverlay) -> String {
                     r.number,
                     issue.web_url.as_deref().unwrap_or("")
                 )
-            }),
+            })
+        }
         Some(WorkRow::Task(index)) => panel
             .tasks
             .data()
@@ -1213,16 +1296,14 @@ fn render_row(
 
 /// The key bar: `key label` pairs, the key in bold accent, the label dim, two
 /// spaces apart; pairs that do not fit are dropped from the right.
-fn render_key_bar(b: &mut Buffer, row: Rect, p: &Palette) {
-    const KEYS: [(&str, &str); 5] = [
-        ("1-4", "view"),
-        ("tab", "next"),
-        ("j/k", "move"),
-        ("r", "refresh"),
-        ("esc", "close"),
-    ];
+fn render_key_bar(b: &mut Buffer, row: Rect, p: &Palette, view: WorkView, week: bool) {
+    let mut keys = vec![("1-4", "view"), ("tab", "next"), ("j/k", "move")];
+    if view == WorkView::ThisRepo {
+        keys.push(("w", if week { "hide closed" } else { "closed 7d" }));
+    }
+    keys.extend([("r", "refresh"), ("esc", "close")]);
     let mut x = row.x + 1;
-    for (key, label) in KEYS {
+    for (key, label) in keys {
         let need = (width_of(key) + 1 + width_of(label)) as u16;
         if x + need > row.right() {
             break;
@@ -1309,6 +1390,12 @@ pub(super) fn render_work_panel(
                 .fg(contrast(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
+        } else if *view == WorkView::NeedsMe && panel.counts[view.index()] > 0 {
+            // The badge: something waits on ac, whichever view is open.
+            Style::default()
+                .fg(p.yellow)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             panel_style(p.overlay0)
         };
@@ -1367,7 +1454,7 @@ pub(super) fn render_work_panel(
         );
     }
     if let Some(footer) = layout.footer_row {
-        render_key_bar(b, footer, p);
+        render_key_bar(b, footer, p, panel.view, panel.week);
     }
     Some(layout)
 }
@@ -1375,15 +1462,6 @@ pub(super) fn render_work_panel(
 // -- input and requests -------------------------------------------------------------
 
 /// The two folder names nearest the end of `path`, lowercase, the deepest first.
-fn folders_of(path: &str) -> Vec<String> {
-    path.split('/')
-        .rev()
-        .filter(|part| !part.is_empty())
-        .take(2)
-        .map(str::to_lowercase)
-        .collect()
-}
-
 impl ClientShellState {
     fn work_panel_mut(&mut self) -> Option<&mut ClientWorkPanelOverlay> {
         match self.overlay.as_mut() {
@@ -1396,16 +1474,8 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
         };
-        let folders = snapshot
-            .focused_pane_id
-            .as_deref()
-            .and_then(|id| snapshot.panes.iter().find(|pane| pane.pane_id == id))
-            .and_then(|pane| pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()))
-            .map(folders_of)
-            .unwrap_or_default();
-        self.overlay = Some(ClientShellOverlay::WorkPanel(ClientWorkPanelOverlay::new(
-            snapshot.boot_id.clone(),
-            folders,
+        self.overlay = Some(ClientShellOverlay::WorkPanel(Box::new(
+            ClientWorkPanelOverlay::new(snapshot.boot_id.clone(), snapshot.focused_pane_id.clone()),
         )));
         self.request_work_panel(outcome);
         outcome.repaint = true;
@@ -1433,6 +1503,29 @@ impl ClientShellState {
             state: Some(ISSUE_STATE.to_owned()),
             limit: Some(PAGE),
             offset: (offset > 0).then_some(offset),
+            pane: None,
+            closed_since: None,
+        })
+    }
+
+    /// The issues of `pane`'s repo: the open ones, and with `week` the ones
+    /// closed in the last seven days too. One page; the server reads the git
+    /// remote.
+    fn repo_issue_request(pane: &str, week: bool) -> Method {
+        let closed_since = week
+            .then(|| {
+                (time::OffsetDateTime::now_utc() - time::Duration::days(CLOSED_DAYS))
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .flatten();
+        Method::IssueList(IssueListParams {
+            project: None,
+            state: Some(if week { "all" } else { "open" }.to_owned()),
+            limit: Some(PAGE),
+            offset: None,
+            pane: Some(pane.to_owned()),
+            closed_since,
         })
     }
 
@@ -1476,6 +1569,20 @@ impl ClientShellState {
             PendingEndpointKind::WorkIssues { offset: 0 },
             outcome,
         );
+        let repo_ask = self
+            .work_panel_mut()
+            .map(|panel| (panel.pane_id.clone(), panel.week));
+        match repo_ask {
+            Some((Some(pane), week)) => self.ask_work_source(
+                Self::repo_issue_request(&pane, week),
+                PendingEndpointKind::WorkRepoIssues,
+                outcome,
+            ),
+            _ => self.work_feed_failed(
+                &PendingEndpointKind::WorkRepoIssues,
+                "there is no focused pane to read a git remote from".to_owned(),
+            ),
+        }
         self.ask_work_source(
             Method::TaskList(TaskListParams::default()),
             PendingEndpointKind::WorkTasks,
@@ -1504,6 +1611,7 @@ impl ClientShellState {
                 panel.issue_stage = None;
                 panel.issues.fail(why);
             }
+            PendingEndpointKind::WorkRepoIssues => panel.repo.fail(why),
             PendingEndpointKind::WorkTasks => panel.tasks.fail(why),
             PendingEndpointKind::WorkAsks => panel.asks.fail(why),
             _ => {}
@@ -1530,6 +1638,7 @@ impl ClientShellState {
                     total,
                     projects,
                     mirror,
+                    repo: _,
                 }),
             ) => {
                 // The first page starts the collection over.
@@ -1549,6 +1658,24 @@ impl ClientShellState {
                 } else if let Some(done) = panel.issue_stage.take() {
                     panel.issues = Feed::Ready(done);
                 }
+            }
+            (
+                PendingEndpointKind::WorkRepoIssues,
+                Ok(ResponseResult::IssueList {
+                    issues,
+                    total,
+                    projects,
+                    mirror,
+                    repo,
+                }),
+            ) => {
+                panel.repo = Feed::Ready(IssuesData {
+                    issues,
+                    total,
+                    projects,
+                    mirror: Some(mirror),
+                    repo,
+                })
             }
             (PendingEndpointKind::WorkTasks, Ok(ResponseResult::TaskList { tasks, store })) => {
                 panel.tasks = Feed::Ready(TasksData { tasks, store })
@@ -1642,6 +1769,11 @@ impl ClientShellState {
                 self.close_work_panel(outcome)
             }
             KeyCode::Char('r') if modifiers.is_empty() => {
+                panel.in_flight = 0;
+                self.request_work_panel(outcome);
+            }
+            KeyCode::Char('w') if modifiers.is_empty() => {
+                panel.week = !panel.week;
                 panel.in_flight = 0;
                 self.request_work_panel(outcome);
             }
