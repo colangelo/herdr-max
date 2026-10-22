@@ -38,6 +38,32 @@ fn todos(snapshot: &ClientShellSnapshot) -> Option<TodoDisplaySummary> {
     }
     Some(summary)
 }
+/// What the tasks bound to panes add up to: the open ones, the writes waiting
+/// for the store and the writes held for a decision. `None` when the server
+/// sends no task facts (tasks are off, or it is an older server).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct WorkSummary {
+    pub(super) open: usize,
+    pub(super) pending: usize,
+    pub(super) conflicts: usize,
+}
+
+fn work(snapshot: &ClientShellSnapshot) -> Option<WorkSummary> {
+    let mut summary = WorkSummary::default();
+    for fact in snapshot
+        .resource_facts
+        .as_ref()?
+        .pane_tasks
+        .as_ref()?
+        .values()
+    {
+        summary.open = summary.open.saturating_add(fact.open);
+        summary.pending = summary.pending.saturating_add(fact.pending);
+        summary.conflicts = summary.conflicts.saturating_add(fact.conflicts);
+    }
+    Some(summary)
+}
+
 fn paint_notification(buffer: &mut Buffer, rect: Rect, unread: usize, p: &Palette, floating: bool) {
     let style = if unread > 0 {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
@@ -101,6 +127,27 @@ pub(super) fn paint_bar(
             remaining.width -= width;
         }
     }
+    // The work count sits left of the todo count: yellow while a write is held
+    // for a decision (it needs a look), accent while writes wait for the store.
+    if let Some(summary) = work(snapshot) {
+        let text = label('ω', summary.open);
+        let width = display_width(&text).min(remaining.width);
+        let rect = Rect::new(remaining.right() - width, remaining.y, width, 1);
+        if width > 0 {
+            let style = if summary.conflicts > 0 {
+                Style::default()
+                    .fg(config.palette.yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if summary.pending > 0 {
+                Style::default().fg(config.palette.accent)
+            } else {
+                Style::default().fg(config.palette.overlay1)
+            };
+            buffer.set_stringn(rect.x, rect.y, text, usize::from(rect.width), style);
+            hits.work_count = rect;
+            remaining.width -= width;
+        }
+    }
     remaining
 }
 pub(super) fn paint_floating(
@@ -157,6 +204,13 @@ impl ClientShellState {
             && super::contains(self.hits.todo_board, point)
         {
             self.toggle_todo_board(outcome);
+            return true;
+        }
+        if chrome_mode
+            && matches!(self.overlay, None | Some(ClientShellOverlay::WorkPanel(_)))
+            && super::contains(self.hits.work_count, point)
+        {
+            self.toggle_work_panel(outcome);
             return true;
         }
         let panel_covers = self
@@ -278,5 +332,93 @@ mod tests {
         assert_eq!(rect.bottom(), area.bottom());
         snapshot.resource_facts = None;
         assert!(paint_floating(&mut buffer, &snapshot, &config, &mut hits).is_none());
+    }
+
+    fn with_pane_tasks(open: usize, pending: usize, conflicts: usize) -> ClientShellSnapshot {
+        let mut snapshot = super::super::tests::snapshot();
+        snapshot.resource_facts = Some(crate::protocol::ClientShellResourceFacts {
+            pane_todos: Some(Default::default()),
+            pane_tasks: Some(
+                [
+                    (
+                        "pane_1".to_owned(),
+                        crate::protocol::ClientPaneTaskSummary {
+                            open,
+                            pending,
+                            conflicts,
+                            revision: 1,
+                        },
+                    ),
+                    (
+                        "pane_2".to_owned(),
+                        crate::protocol::ClientPaneTaskSummary {
+                            open: 2,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        snapshot
+    }
+
+    #[test]
+    fn tab_bar_work_count_from_pane_tasks() {
+        let config = ClientShellConfig::from_config(&Config::default());
+        let area = Rect::new(0, 0, 40, 1);
+        let paint = |snapshot: &ClientShellSnapshot| {
+            let mut buffer = Buffer::empty(area);
+            let mut hits = ShellHitMap::default();
+            let content = paint_bar(&mut buffer, area, snapshot, &config, &mut hits);
+            (buffer, hits, content)
+        };
+
+        // The count adds up every pane's open tasks and sits left of the todos.
+        let (buffer, hits, content) = paint(&with_pane_tasks(3, 0, 0));
+        let text: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(text.contains(" ω 5 "), "{text:?}");
+        assert_eq!(hits.work_count.right(), hits.todo_board.x);
+        assert_eq!(content.right(), hits.work_count.x);
+        assert_eq!(
+            buffer[(hits.work_count.x + 1, 0)].fg,
+            config.palette.overlay1
+        );
+
+        // Writes waiting for the store show in the accent; a held write in yellow.
+        let (buffer, hits, _) = paint(&with_pane_tasks(3, 1, 0));
+        assert_eq!(buffer[(hits.work_count.x + 1, 0)].fg, config.palette.accent);
+        let (buffer, hits, _) = paint(&with_pane_tasks(3, 1, 1));
+        assert_eq!(buffer[(hits.work_count.x + 1, 0)].fg, config.palette.yellow);
+
+        // A server that sends no task facts gets no count, and the todos stay.
+        let mut older = with_pane_tasks(3, 0, 0);
+        older.resource_facts.as_mut().unwrap().pane_tasks = None;
+        let (_, hits, _) = paint(&older);
+        assert!(hits.work_count.is_empty());
+        assert!(!hits.todo_board.is_empty());
+    }
+
+    #[test]
+    fn clicking_the_work_count_opens_and_closes_the_work_panel() {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(with_pane_tasks(1, 0, 0)));
+        state.set_pane_surface(super::super::tests::surface());
+        state.compose(120, 30).unwrap();
+        let rect = state.hits.work_count;
+        assert!(!rect.is_empty(), "the bar draws the count");
+        let click = |state: &mut ClientShellState| {
+            let mut outcome = ClientShellInput::default();
+            assert!(state.toggle_indicator_panel_at((rect.x + 1, rect.y), &mut outcome));
+        };
+        click(&mut state);
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::WorkPanel(_))
+        ));
+        state.compose(120, 30).unwrap();
+        click(&mut state);
+        assert!(state.overlay.is_none(), "a second click closes it");
     }
 }

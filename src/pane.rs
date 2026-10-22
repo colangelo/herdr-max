@@ -4524,6 +4524,14 @@ impl PaneRuntime {
         crate::platform::pane_process_cwd(pid)
     }
 
+    /// The directory `cwd` would answer from what the pane already knows (the
+    /// shell's own report, or what detection last resolved). Two locks and a
+    /// clone: no process lookup, so it is fit for a poll.
+    pub fn cached_cwd(&self) -> Option<std::path::PathBuf> {
+        let reported = self.reported_cwd.lock().ok().and_then(|cwd| cwd.clone());
+        reported.or_else(|| self.resolved_cwd.lock().ok().and_then(|cwd| cwd.clone()))
+    }
+
     pub fn cwd_for_persistence(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
         let exited = self.cwd_process_exited.load(Ordering::Acquire);

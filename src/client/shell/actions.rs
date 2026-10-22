@@ -233,6 +233,10 @@ impl ClientShellState {
                     self.open_todo_board(outcome);
                     return;
                 }
+                if action == crate::input::KeybindAction::OpenWorkPanel {
+                    self.open_work_panel(outcome);
+                    return;
+                }
                 if action == crate::input::KeybindAction::CommandPalette {
                     self.open_palette(outcome);
                     return;
@@ -1003,6 +1007,14 @@ impl ClientShellState {
             } => {
                 let repaint = self.handle_todo_list_result(&pane_id, revision, panes, result);
                 return (repaint, Vec::new());
+            }
+            kind @ (PendingEndpointKind::WorkIssues { .. }
+            | PendingEndpointKind::WorkRepoIssues
+            | PendingEndpointKind::WorkTasks
+            | PendingEndpointKind::WorkAsks) => {
+                let mut outcome = ClientShellInput::default();
+                let repaint = self.handle_work_panel_result(kind, result, &mut outcome);
+                return (repaint || outcome.repaint, outcome.actions);
             }
             PendingEndpointKind::TodoBoardList { key } => {
                 let mut outcome = ClientShellInput::default();

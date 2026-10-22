@@ -396,6 +396,14 @@ mod tests {
         // `task.move` is not here: it comes with its own method name later.
         for (method, digest) in [
             (
+                "ask.list",
+                "819cff50eadf473b50e1c279757ca1dbf00da988a912e7d8c4261be3e3d4113c",
+            ),
+            (
+                "issue.list",
+                "4a66ca8291367cb5844109e226b4a4ed0a38bb58fe56845aa5635ad8e8f48054",
+            ),
+            (
                 "task.add",
                 "0b6acc7c0efcaee07ed659ad207b3e9eb167631496cdb423360c3dd412d11a66",
             ),

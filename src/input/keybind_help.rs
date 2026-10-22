@@ -415,6 +415,11 @@ pub(crate) fn command_table(
                     "session todo board",
                 ),
                 act(
+                    KeybindAction::OpenWorkPanel,
+                    binding_label(&keybinds.open_work_panel),
+                    "work panel",
+                ),
+                act(
                     KeybindAction::CopyMode,
                     binding_label(&keybinds.copy_mode),
                     "copy mode",
@@ -609,6 +614,16 @@ pub(crate) fn command_table(
             entry("c", "clear done"),
             entry("/", "search todos"),
             entry("esc / q", "close board"),
+        ],
+    ));
+    groups.push((
+        "work panel",
+        vec![
+            entry("1-4 / tab / shift+tab", "switch view"),
+            entry("up / down / j / k", "previous / next row"),
+            entry("pgup / pgdn", "half page up / down"),
+            entry("r", "ask the server again"),
+            entry("esc / q", "close panel"),
         ],
     ));
     groups.push((
@@ -825,6 +840,7 @@ mod tests {
                 "move pane picker",
                 "command palette",
                 "todo board",
+                "work panel",
                 "todo edit modal",
             ]
         );

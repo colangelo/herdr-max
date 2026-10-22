@@ -133,6 +133,8 @@ pub struct App {
     /// stop it and start it again.
     #[cfg(unix)]
     pub(crate) task_config: crate::config::TasksConfig,
+    /// Reads a pane's git remote off the app loop, for `issue.list {pane}`.
+    pub(crate) repo_resolver: crate::tasks::RepoResolver,
     #[cfg(unix)]
     pub(crate) task_store_dir: std::path::PathBuf,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
@@ -803,6 +805,7 @@ impl App {
             task_timer_deadline: None,
             #[cfg(unix)]
             task_config: config.tasks.clone(),
+            repo_resolver: crate::tasks::RepoResolver::default(),
             #[cfg(unix)]
             task_store_dir,
             event_tx,
@@ -1080,6 +1083,10 @@ impl App {
         let mut diagnostics = load_diagnostics.to_vec();
         let invalid_section =
             |section: &str| invalid_sections.iter().any(|invalid| invalid == section);
+
+        if !invalid_section("tasks") {
+            self.task_config.forge_accounts = config.tasks.forge_accounts.clone();
+        }
 
         if !invalid_section("keys") {
             match config.live_keybinds_with_diagnostics() {
@@ -1905,6 +1912,7 @@ mod tests {
             host_id: "m4m".into(),
             bus_session: "default".into(),
             bus_env: bus_env.into(),
+            forge_accounts: Default::default(),
         }
     }
 
@@ -2612,6 +2620,31 @@ mod tests {
         let report = app.apply_live_config(&config, &[], &["session".into()], false);
         assert!(report.diagnostics.is_empty());
         assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn reload_config_picks_up_forge_accounts_and_an_invalid_tasks_section_keeps_them() {
+        let mut app = test_app();
+        assert!(app.task_config.forge_accounts.is_empty());
+        let mut config = Config::default();
+        config
+            .tasks
+            .forge_accounts
+            .insert("gitea-lab".into(), "ac".into());
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.task_config
+                .forge_accounts
+                .get("gitea-lab")
+                .map(String::as_str),
+            Some("ac")
+        );
+        // A tasks section that did not parse keeps what was there.
+        config.tasks.forge_accounts.clear();
+        app.apply_live_config(&config, &[], &["tasks".into()], false);
+        assert_eq!(app.task_config.forge_accounts.len(), 1);
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(app.task_config.forge_accounts.is_empty());
     }
 
     #[test]

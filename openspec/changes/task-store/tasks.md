@@ -42,17 +42,23 @@
 - [x] 2.12 CLI `herdr-beta task add|list|show|update|done|drop|reopen|bind`, with
   `--json`, the outcome wait, and the `todo.*` fallback.
   Test: `cli_falls_back_when_task_methods_missing`
-- [ ] 2.13 `issue.list` and `ask.list`, read by the server from `ISSUES` and `ASKS`;
+- [x] 2.13 `issue.list` and `ask.list`, read by the server from `ISSUES` and `ASKS`;
   each issue row carries its full `IssueRef` and `mirror_rev` (the KV revision its watch saw;
   contracts v0.9 OP-01, OP-06).
   Test: `issue_rows_equal_mirror_records`
-- [ ] 2.14 `WorkPanel` overlay: four views, `last_sync`, the `open_work_panel` action
+- [x] 2.14 `WorkPanel` overlay: four views, `last_sync`, the `open_work_panel` action
   with its help entry. Tests: rendered layouts under `src/client/shell/tests/`,
   `keybind_help_lists_open_work_panel`
-- [ ] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
+- [x] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
 - [ ] 2.16 Oracle: the panel rows equal the forge API's for `uzi-sandbox` (diff test,
   owned with worklink)
-- [ ] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
+- [x] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
+- [x] 2.18 Panel data the client lacked: `issue.list {pane, closed_since}` (the server
+  reads the pane's git remote off the app loop, `internal` then `origin`, a worktree
+  resolves to its main repo), `mine` from `[tasks.forge_accounts]`, the needs-me
+  chip as the badge. Tests: `issue_list_for_a_pane_shows_that_repos_issues_once_its_remote_is_read`,
+  `closed_since_keeps_old_closed_issues_out_and_leaves_open_ones_alone`,
+  `an_issue_assigned_to_acs_forge_account_is_marked_mine`
 
 ## 3. Phase 3: actions one by one
 

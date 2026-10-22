@@ -14,6 +14,7 @@ mod sync_pair;
 mod tabs;
 mod tasks;
 mod todos;
+mod work;
 mod workspaces;
 mod worktrees;
 
@@ -1408,6 +1409,12 @@ impl App {
             }
             Method::TaskConflicts(_) => {
                 return self.handle_task_conflicts(request.id);
+            }
+            Method::IssueList(params) => {
+                return self.handle_issue_list(request.id, params);
+            }
+            Method::AskList(params) => {
+                return self.handle_ask_list(request.id, params);
             }
             Method::TaskResolveConflict(params) => {
                 return self.handle_task_resolve_conflict(request.id, params);

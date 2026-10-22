@@ -18,7 +18,8 @@ use tokio::runtime::Runtime;
 use super::ids::{Rev, TaskKey, WriteId};
 use super::model::Task;
 use super::store::{
-    landed_before, StoreError, StoreKey, StoreResult, TaskStore, WatchEvent, WatchSink,
+    landed_before, Mirror, MirrorEvent, MirrorSink, StoreError, StoreKey, StoreResult, TaskStore,
+    WatchEvent, WatchSink,
 };
 
 /// Where and as whom to connect.
@@ -30,6 +31,9 @@ pub(crate) struct KvSettings {
     /// The JetStream domain (`hub` in the fleet), when there is one.
     pub domain: Option<String>,
     pub bucket: String,
+    /// Worklink's issue mirror and the asks, which are read, never written.
+    pub issues_bucket: String,
+    pub asks_bucket: String,
     /// The prefix of reply inboxes. The fleet's herdr users may only receive
     /// replies on `_INBOX_herdr_<host>`.
     pub inbox_prefix: Option<String>,
@@ -43,6 +47,8 @@ impl std::fmt::Debug for KvSettings {
             .field("password", &self.password.as_ref().map(|_| "<hidden>"))
             .field("domain", &self.domain)
             .field("bucket", &self.bucket)
+            .field("issues_bucket", &self.issues_bucket)
+            .field("asks_bucket", &self.asks_bucket)
             .field("inbox_prefix", &self.inbox_prefix)
             .finish()
     }
@@ -57,6 +63,8 @@ impl KvSettings {
             password: Some(env.password),
             domain: env.js_domain,
             bucket: env.bucket,
+            issues_bucket: env.issues_bucket,
+            asks_bucket: env.asks_bucket,
             inbox_prefix: Some(
                 env.inbox_prefix
                     .unwrap_or_else(|| format!("_INBOX_herdr_{host_id}")),
@@ -68,6 +76,9 @@ impl KvSettings {
 pub(crate) struct KvStore {
     runtime: Runtime,
     bucket: Bucket,
+    context: async_nats::jetstream::Context,
+    issues_bucket: String,
+    asks_bucket: String,
 }
 
 impl KvStore {
@@ -79,7 +90,7 @@ impl KvStore {
             .enable_all()
             .build()
             .map_err(|err| StoreError::Io(err.to_string()))?;
-        let bucket = runtime.block_on(async {
+        let (bucket, context) = runtime.block_on(async {
             let mut options = async_nats::ConnectOptions::new();
             if let (Some(user), Some(password)) = (&settings.user, &settings.password) {
                 options = options.user_and_password(user.clone(), password.clone());
@@ -92,12 +103,19 @@ impl KvStore {
                 Some(domain) => async_nats::jetstream::with_domain(client, domain),
                 None => async_nats::jetstream::new(client),
             };
-            context
+            let bucket = context
                 .get_key_value(&settings.bucket)
                 .await
-                .map_err(unavailable)
+                .map_err(unavailable)?;
+            Ok::<_, StoreError>((bucket, context))
         })?;
-        Ok(Self { runtime, bucket })
+        Ok(Self {
+            runtime,
+            bucket,
+            context,
+            issues_bucket: settings.issues_bucket.clone(),
+            asks_bucket: settings.asks_bucket.clone(),
+        })
     }
 
     fn entry(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>)>> {
@@ -263,6 +281,74 @@ impl TaskStore for KvStore {
         });
         Ok(())
     }
+
+    fn mirror(&mut self, which: Mirror, sink: MirrorSink) -> StoreResult<bool> {
+        let name = match which {
+            Mirror::Issues => self.issues_bucket.clone(),
+            Mirror::Asks => self.asks_bucket.clone(),
+        };
+        let context = self.context.clone();
+        // An ordered consumer that starts at the last value of every key and
+        // then follows the changes: no scan, no key list, nothing that waits
+        // for one answer per key. (No durable consumer; the server may be
+        // configured to refuse one.)
+        let (empty, mut watch) = self.runtime.block_on(async {
+            let bucket = context.get_key_value(&name).await.map_err(unavailable)?;
+            let empty = bucket.status().await.map_err(unavailable)?.values() == 0;
+            let watch = bucket.watch_with_history(">").await.map_err(unavailable)?;
+            Ok::<_, StoreError>((empty, watch))
+        })?;
+        self.runtime.spawn(async move {
+            // An empty bucket sends no entry to say the start is over.
+            if empty && !sink(MirrorEvent::Current) {
+                return;
+            }
+            let mut told = empty;
+            let mut failures = 0u32;
+            loop {
+                let item = match watch.next().await {
+                    Some(item) => item,
+                    None => {
+                        let _ = sink(MirrorEvent::Lost("the watch ended".to_owned()));
+                        return;
+                    }
+                };
+                let entry = match item {
+                    Ok(entry) => {
+                        failures = 0;
+                        entry
+                    }
+                    Err(err) => {
+                        // The consumer re-creates itself on most errors; a run
+                        // of them means it cannot.
+                        failures += 1;
+                        if failures >= 10 {
+                            let _ = sink(MirrorEvent::Lost(format!("the watch failed: {err}")));
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                let current = entry.seen_current;
+                let event = WatchEvent {
+                    key: StoreKey(entry.key.clone()),
+                    rev: Rev(entry.revision),
+                    value: live(&entry).map(|(_, value)| value),
+                    at: Some(entry.created.into()),
+                };
+                if !sink(MirrorEvent::Entry(event)) {
+                    return;
+                }
+                if current && !told {
+                    told = true;
+                    if !sink(MirrorEvent::Current) {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
@@ -387,6 +473,8 @@ mod tests {
             password: None,
             domain: None,
             bucket: "TASKS".into(),
+            issues_bucket: "ISSUES".into(),
+            asks_bucket: "ASKS".into(),
             inbox_prefix: None,
         }
     }
@@ -402,6 +490,103 @@ mod tests {
         crate::tasks::conformance::run(&mut store);
     }
 
+    /// Make `name` on the throwaway server and put `entries` in it.
+    fn fill_bucket(server: &Server, name: &str, entries: &[(&str, &str)]) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            let kv = async_nats::jetstream::new(client)
+                .create_key_value(async_nats::jetstream::kv::Config {
+                    bucket: name.into(),
+                    history: 3,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            for (key, value) in entries {
+                kv.put(*key, value.to_string().into()).await.unwrap();
+            }
+        });
+    }
+
+    fn events_until_current(received: &std::sync::mpsc::Receiver<MirrorEvent>) -> Vec<WatchEvent> {
+        let mut entries = Vec::new();
+        loop {
+            match received.recv_timeout(Duration::from_secs(10)).unwrap() {
+                MirrorEvent::Entry(event) => entries.push(event),
+                MirrorEvent::Current => return entries,
+                MirrorEvent::Lost(why) => panic!("the watch was lost: {why}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_mirror_delivers_every_last_value_then_current_then_the_changes() {
+        let Some(server) = Server::start(None) else {
+            return;
+        };
+        server.create_bucket(None);
+        // `a` was written twice; only its last value is delivered. `gone` is
+        // deleted, and the delete marker is delivered as an absent value.
+        fill_bucket(
+            &server,
+            "ASKS",
+            &[
+                ("g.a", "{\"status\":\"open\"}"),
+                ("g.a", "{\"status\":\"answered\"}"),
+            ],
+        );
+        fill_bucket(&server, "ISSUES", &[]);
+        let mut store = KvStore::connect(&settings(&server.url)).unwrap();
+
+        let (sink_tx, received) = std::sync::mpsc::channel();
+        let sink_tx = std::sync::Mutex::new(sink_tx);
+        assert!(store
+            .mirror(
+                Mirror::Asks,
+                Box::new(move |event| sink_tx.lock().unwrap().send(event).is_ok())
+            )
+            .unwrap());
+        let start = events_until_current(&received);
+        assert_eq!(start.len(), 1, "{start:?}");
+        assert_eq!(start[0].key.0, "g.a");
+        assert_eq!(
+            start[0].value.as_deref(),
+            Some(&b"{\"status\":\"answered\"}"[..])
+        );
+
+        // An empty bucket says it is current without any entry.
+        let (empty_tx, empty_rx) = std::sync::mpsc::channel();
+        let empty_tx = std::sync::Mutex::new(empty_tx);
+        assert!(store
+            .mirror(
+                Mirror::Issues,
+                Box::new(move |event| empty_tx.lock().unwrap().send(event).is_ok())
+            )
+            .unwrap());
+        assert!(events_until_current(&empty_rx).is_empty());
+
+        // Then the changes: a put, and a delete as an absent value.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            let kv = async_nats::jetstream::new(client)
+                .get_key_value("ASKS")
+                .await
+                .unwrap();
+            kv.put("g.b", "{\"status\":\"open\"}".into()).await.unwrap();
+            kv.delete("g.a").await.unwrap();
+        });
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            match received.recv_timeout(Duration::from_secs(10)).unwrap() {
+                MirrorEvent::Entry(event) => seen.push((event.key.0, event.value.is_some())),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(seen, [("g.b".to_owned(), true), ("g.a".to_owned(), false)]);
+    }
+
     #[test]
     fn kv_connects_with_the_user_password_and_inbox_from_a_bus_env_file() {
         let Some(server) = Server::start(Some(("herdr-m4m", "hunter2"))) else {
@@ -414,6 +599,8 @@ mod tests {
             password: "hunter2".into(),
             js_domain: None,
             bucket: "TASKS".into(),
+            issues_bucket: "ISSUES".into(),
+            asks_bucket: "ASKS".into(),
             inbox_prefix: None,
         };
         let settings = KvSettings::from_bus_env(env.clone(), "m4m");

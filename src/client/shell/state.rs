@@ -126,6 +126,8 @@ pub(super) struct ShellHitMap {
     /// bottom-right notification center opens above it.
     pub(super) notification_indicator: Rect,
     pub(super) todo_board: Rect,
+    /// The tab bar's work count, which opens the work panel.
+    pub(super) work_count: Rect,
     pub(super) pane_todos: Vec<(Rect, String)>,
     pub(super) overflow_edges: Vec<(Rect, bool, bool, usize)>,
     pub(super) machines: Vec<MachineHit>,
@@ -166,6 +168,7 @@ pub(super) struct ShellHitMap {
     pub(super) move_picker: Option<super::move_picker::MovePickerLayout>,
     pub(super) palette: Option<super::palette::PaletteLayout>,
     pub(super) todo_board_layout: Option<super::todo_board::TodoBoardLayout>,
+    pub(super) work_panel: Option<super::work_panel::WorkPanelLayout>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
@@ -353,6 +356,7 @@ pub(super) enum ClientShellOverlayKind {
     TodoBoard,
     MovePicker,
     Palette,
+    WorkPanel,
 }
 
 #[derive(Debug)]
@@ -719,6 +723,8 @@ pub(super) enum ClientShellOverlay {
     TodoBoard(super::todo_board::ClientTodoBoardOverlay),
     MovePicker(super::move_picker::ClientMovePickerOverlay),
     Palette(super::palette::ClientPaletteOverlay),
+    /// Boxed: its feeds make it the largest overlay by far.
+    WorkPanel(Box<super::work_panel::ClientWorkPanelOverlay>),
 }
 
 impl ClientShellOverlay {
@@ -743,6 +749,7 @@ impl ClientShellOverlay {
             Self::TodoBoard(_) => ClientShellOverlayKind::TodoBoard,
             Self::MovePicker(_) => ClientShellOverlayKind::MovePicker,
             Self::Palette(_) => ClientShellOverlayKind::Palette,
+            Self::WorkPanel(_) => ClientShellOverlayKind::WorkPanel,
         }
     }
 }
@@ -818,6 +825,14 @@ pub(super) enum PendingEndpointKind {
     TodoBoardList {
         key: u64,
     },
+    /// The work panel's three lists: `issue.list`, `task.list`, `ask.list`.
+    WorkIssues {
+        offset: u32,
+    },
+    /// The pane's repo's issues, for "this repo".
+    WorkRepoIssues,
+    WorkTasks,
+    WorkAsks,
     TodoMutation {
         pane_id: String,
     },

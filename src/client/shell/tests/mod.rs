@@ -96,7 +96,7 @@ fn worktree_list_result(open_workspace_id: Option<&str>) -> crate::api::schema::
     }
 }
 
-fn surface() -> PaneSurfaceFrame {
+pub(super) fn surface() -> PaneSurfaceFrame {
     let surface_buffer = Buffer::with_lines(["LIVE", "PANE"]);
     PaneSurfaceFrame {
         boot_id: "boot-1".into(),
@@ -287,6 +287,7 @@ mod startup_overlays;
 mod todo_board;
 mod todo_overlays;
 mod tui_look;
+mod work_panel;
 
 #[test]
 fn resize_summary_survives_composition_with_connected_version() {

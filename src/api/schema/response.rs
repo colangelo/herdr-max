@@ -276,6 +276,22 @@ pub enum ResponseResult {
     TaskConflicts {
         conflicts: Vec<super::tasks::TaskConflictInfo>,
     },
+    IssueList {
+        issues: Vec<super::tasks::IssueInfo>,
+        /// How many issues match, before `limit` and `offset`.
+        total: u64,
+        projects: Vec<super::tasks::IssueProjectInfo>,
+        mirror: super::tasks::MirrorInfo,
+        /// Present when the request named a `pane`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<super::tasks::IssueRepoInfo>,
+    },
+    AskList {
+        asks: Vec<super::tasks::AskInfo>,
+        /// How many rows match, before `limit` and `offset`.
+        total: u64,
+        mirror: super::tasks::MirrorInfo,
+    },
     /// A `task.resolve_conflict` that was taken: how it ended arrives later as
     /// `task.changed`, under this ticket.
     TaskResolving {

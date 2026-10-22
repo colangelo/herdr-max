@@ -310,3 +310,4 @@ fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
 
 #[cfg(test)]
 mod tests;
+mod work_panel;

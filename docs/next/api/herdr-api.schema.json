@@ -2521,6 +2521,41 @@
             }
           ]
         },
+        "AskListParams": {
+          "description": "Params for `ask.list`: ac's rows in the asks bucket.",
+          "properties": {
+            "include_closed": {
+              "description": "Rows that are closed or dropped too.",
+              "type": "boolean"
+            },
+            "kind": {
+              "description": "Only rows of this kind. `task` when absent; `any` for every kind.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "description": "At most this many rows (500 when absent, 2000 at most).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "description": "Skip this many first, in key order.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "ClientShellSurfaceSetParams": {
           "description": "Updates whether the requesting client shell receives and controls pane presentation.",
           "properties": {
@@ -3019,6 +3054,58 @@
           "required": [
             "target"
           ],
+          "type": "object"
+        },
+        "IssueListParams": {
+          "description": "Params for `issue.list`: the forge issues worklink mirrors.",
+          "properties": {
+            "closed_since": {
+              "description": "Closed issues count only when touched at or after this time (RFC 3339).\nOpen issues are not affected.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "limit": {
+              "description": "At most this many issues (500 when absent, 2000 at most).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "description": "Skip this many first, in key order.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane": {
+              "description": "Only the issues of the repo this pane works in. The server reads the\npane's git remote (`internal`, then `origin`; a worktree resolves to\nits main repo) and answers `repo` with how that went.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project": {
+              "description": "Only this project: its numeric id, or its path (`ac/worklink`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "description": "`open` (the default), `closed` or `all`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "LayoutApplyParams": {
@@ -8625,6 +8712,38 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "issue.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/IssueListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "ask.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AskListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -9199,6 +9318,102 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "AskInfo": {
+          "description": "One row of the asks bucket (the fields this server shows).",
+          "properties": {
+            "answer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "answered_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "filed_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "horizon": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "how": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "description": "The row's key: `<gestore>.<id>`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "rev": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`open`, `answered`, `closed` or `dropped`.",
+              "type": "string"
+            },
+            "superseded_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "updated_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "where": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key",
+            "rev",
+            "status"
+          ],
+          "type": "object"
         },
         "BlockedReason": {
           "description": "Why an agent is blocked, as far as herdr can tell (fork issue 137). A\nmanifest rule names it with `blocked_reason`; a blocked state from a rule\nthat names none, or from a hook report, is `Other`.",
@@ -10289,6 +10504,231 @@
           ],
           "type": "object"
         },
+        "IssueInfo": {
+          "description": "One mirrored issue, as worklink wrote it. No body, no comments.",
+          "properties": {
+            "assignees": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "description": "The row's key: `issue.<forge>.<forge_id>.<project_id>.<number>`.",
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "last_sync": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mine": {
+              "description": "Present (true) when an assignee is ac's account on this forge\n(`[tasks.forge_accounts]`). The client never sees the mapping.",
+              "type": "boolean"
+            },
+            "mirror_rev": {
+              "description": "The revision of the row that the server's watch saw.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ref": {
+              "$ref": "#/schemas/success_response/$defs/IssueRefInfo"
+            },
+            "source_rev": {
+              "description": "The forge's own revision marker."
+            },
+            "state": {
+              "description": "`open`, `closed` or `unknown`.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Present (true) when the title was cut.",
+              "type": "boolean"
+            },
+            "updated_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "web_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "key",
+            "ref",
+            "mirror_rev",
+            "title",
+            "state",
+            "labels",
+            "assignees"
+          ],
+          "type": "object"
+        },
+        "IssueProjectInfo": {
+          "description": "How the last sync of one project went. A project with no sync row is\n`synced: false`: the panel says \"not synced\".",
+          "properties": {
+            "error_class": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forge": {
+              "type": "string"
+            },
+            "forge_id": {
+              "type": "string"
+            },
+            "issues_open": {
+              "default": 0,
+              "description": "How many of the project's issues are open, and how many there are.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "issues_total": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last_attempt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_ok": {
+              "description": "When the sync last succeeded: the panel's last-sync line.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`ok` or `error`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "synced": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "forge",
+            "forge_id",
+            "project_id",
+            "synced"
+          ],
+          "type": "object"
+        },
+        "IssueRefInfo": {
+          "description": "An issue's place on its forge.",
+          "properties": {
+            "forge": {
+              "type": "string"
+            },
+            "forge_id": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "project_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "forge",
+            "forge_id",
+            "host",
+            "project_id",
+            "project_path",
+            "number"
+          ],
+          "type": "object"
+        },
+        "IssueRepoInfo": {
+          "description": "Which repo `issue.list {pane}` read for the pane, and how that went.",
+          "properties": {
+            "host": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mirrored": {
+              "description": "Whether a project of that path is mirrored at all.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "`owner/repo`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "description": "`found`, `resolving` (the remote is being read; ask again) or\n`no_remote` (the pane is not in a git repo, or no remote names a repo).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
         "LayoutDescription": {
           "properties": {
             "focused_pane_id": {
@@ -10409,6 +10849,24 @@
           "required": [
             "context",
             "reachable"
+          ],
+          "type": "object"
+        },
+        "MirrorInfo": {
+          "description": "Whether the server has read a bucket, and why not when it has not.",
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "loaded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "loaded"
           ],
           "type": "object"
         },
@@ -13076,6 +13534,84 @@
               "required": [
                 "type",
                 "conflicts"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "issues": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/IssueInfo"
+                  },
+                  "type": "array"
+                },
+                "mirror": {
+                  "$ref": "#/schemas/success_response/$defs/MirrorInfo"
+                },
+                "projects": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/IssueProjectInfo"
+                  },
+                  "type": "array"
+                },
+                "repo": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/IssueRepoInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Present when the request named a `pane`."
+                },
+                "total": {
+                  "description": "How many issues match, before `limit` and `offset`.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "issue_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "issues",
+                "total",
+                "projects",
+                "mirror"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "asks": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AskInfo"
+                  },
+                  "type": "array"
+                },
+                "mirror": {
+                  "$ref": "#/schemas/success_response/$defs/MirrorInfo"
+                },
+                "total": {
+                  "description": "How many rows match, before `limit` and `offset`.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "ask_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "asks",
+                "total",
+                "mirror"
               ],
               "type": "object"
             },

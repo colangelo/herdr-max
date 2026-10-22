@@ -384,6 +384,7 @@ impl ClientShellState {
         if mode_bar == Some(layout.tab_bar) {
             self.hits.notification_indicator = Rect::default();
             self.hits.todo_board = Rect::default();
+            self.hits.work_count = Rect::default();
             self.hits.tabs.clear();
             self.hits.new_tab = Rect::default();
             self.hits.tab_scroll_left = Rect::default();
@@ -460,6 +461,9 @@ impl ClientShellState {
                 }
                 if !rect.intersection(self.hits.todo_board).is_empty() {
                     self.hits.todo_board = Rect::default();
+                }
+                if !rect.intersection(self.hits.work_count).is_empty() {
+                    self.hits.work_count = Rect::default();
                 }
                 occlusion.cover(rect);
             }
@@ -876,6 +880,17 @@ impl ClientShellState {
                 }
                 self.hits.move_picker = rendered.map(|(layout, _)| layout);
                 cursor
+            } else if let ClientShellOverlay::WorkPanel(panel) = overlay {
+                let rendered = super::work_panel::render_work_panel(
+                    &mut composed,
+                    panel,
+                    &self.config.palette,
+                );
+                if let Some(layout) = rendered.as_ref() {
+                    occlusion.cover(layout.outer);
+                }
+                self.hits.work_panel = rendered;
+                None
             } else if let ClientShellOverlay::Palette(palette) = overlay {
                 let rendered = super::palette::render_palette(&mut composed, palette, &self.config);
                 let cursor = rendered.as_ref().and_then(|(_, cursor)| cursor.clone());
