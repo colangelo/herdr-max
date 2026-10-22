@@ -899,7 +899,9 @@ impl ClientWorkPanelOverlay {
                     .and_then(|p| p.project_path.clone())
                     .unwrap_or_else(|| project_id.to_string());
                 match project {
-                    Some(p) if p.synced && p.status.as_deref() == Some("error") => {
+                    Some(p)
+                        if p.synced && p.status.as_deref().is_some_and(|status| status != "ok") =>
+                    {
                         alarm = true;
                         let when = p.last_ok.as_deref().map_or("never".to_owned(), sync_time);
                         format!(

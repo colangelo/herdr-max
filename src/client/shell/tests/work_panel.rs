@@ -1105,7 +1105,7 @@ fn the_footer_is_a_key_bar_without_buttons_and_failures_are_red() {
     assert!(text.contains("esc close"), "{text}");
     // A sync that fails is drawn in red, not dim.
     let mut a = answers();
-    a.projects[0].status = Some("error".into());
+    a.projects[0].status = Some("failing".into());
     a.projects[0].error_class = Some("auth".into());
     let mut state = state_with();
     open_with(&mut state, &a);

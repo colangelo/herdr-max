@@ -10645,7 +10645,7 @@
               ]
             },
             "status": {
-              "description": "`ok` or `error`.",
+              "description": "`ok` or `failing`.",
               "type": [
                 "string",
                 "null"

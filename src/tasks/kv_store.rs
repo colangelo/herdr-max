@@ -98,7 +98,11 @@ impl KvStore {
             if let Some(prefix) = &settings.inbox_prefix {
                 options = options.custom_inbox_prefix(prefix);
             }
-            let client = options.connect(&settings.url).await.map_err(unavailable)?;
+            let servers = super::bus_env::server_list(&settings.url);
+            let client = options
+                .connect(servers.as_slice())
+                .await
+                .map_err(unavailable)?;
             let context = match &settings.domain {
                 Some(domain) => async_nats::jetstream::with_domain(client, domain),
                 None => async_nats::jetstream::new(client),
@@ -628,6 +632,22 @@ mod tests {
             "m4m",
         );
         assert_eq!(named.inbox_prefix.as_deref(), Some("_INBOX_other"));
+    }
+
+    #[test]
+    fn a_list_of_servers_connects_to_the_one_that_answers() {
+        let Some(server) = Server::start(None) else {
+            return;
+        };
+        server.create_bucket(None);
+        let dead = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        // The live bus.env names three servers in one comma separated value.
+        let url = format!("nats://127.0.0.1:{dead},{}", server.url);
+        KvStore::connect(&settings(&url)).expect("the second server answers");
     }
 
     #[test]

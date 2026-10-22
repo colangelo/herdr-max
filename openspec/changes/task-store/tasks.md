@@ -50,8 +50,14 @@
   with its help entry. Tests: rendered layouts under `src/client/shell/tests/`,
   `keybind_help_lists_open_work_panel`
 - [x] 2.15 Tab-bar work count. Test: `tab_bar_work_count_from_pane_tasks`
-- [ ] 2.16 Oracle: the panel rows equal the forge API's for `uzi-sandbox` (diff test,
-  owned with worklink)
+- [x] 2.16 Oracle: the panel rows equal the forge API's (diff test, owned with worklink).
+  Gitea half done 2026-10-22 with `scripts/oracle_issue_rows.py` against the live ISSUES
+  bucket through a throwaway kv session: 964 panel rows, 966 forge issues in 41 repos,
+  959 equal, 7 changed on the forge after the snapshot (stale, expected), 0 mismatches;
+  41 of 41 projects synced, the sync rows add up to 964 and match each project's rows.
+  It found two bugs, fixed: a comma separated `NATS_URL` was one bad address, and the
+  sync record is flat with status `failing`. The GitLab half (`uzi-sandbox`) repeats the
+  run when worklink mirrors it.
 - [x] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
 - [x] 2.18 Panel data the client lacked: `issue.list {pane, closed_since}` (the server
   reads the pane's git remote off the app loop, `internal` then `origin`, a worktree
