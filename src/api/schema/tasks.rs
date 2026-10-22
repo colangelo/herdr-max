@@ -458,7 +458,7 @@ pub struct IssueProjectInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
     pub synced: bool,
-    /// `ok` or `error`.
+    /// `ok` or `failing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

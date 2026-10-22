@@ -96,7 +96,7 @@ pub(crate) fn project_infos(cache: &IssueCache) -> Vec<IssueProjectInfo> {
         projects.insert((forge.clone(), forge_id.clone(), *project_id), info);
     }
     for (_, row) in cache.syncs() {
-        let Some(project) = row.record.project.as_ref().map(|p| &p.project_ref) else {
+        let Some(project) = row.record.project.as_ref() else {
             continue;
         };
         let entry = projects
@@ -745,8 +745,8 @@ mod tests {
                 "sync.gitea.gitea-lab.84",
                 5,
                 serde_json::json!({
-                    "project": {"ref": {"forge": "gitea", "forge_id": "gitea-lab",
-                                        "project_id": 84, "project_path": "ac/worklink"}},
+                    "project": {"forge": "gitea", "forge_id": "gitea-lab",
+                                "project_id": 84, "project_path": "ac/worklink"},
                     "status": "ok", "last_ok": "2026-10-21T12:00:00Z",
                     "last_attempt": "2026-10-21T12:00:01Z", "issues": 3
                 }),

@@ -122,8 +122,8 @@ impl IssueRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SyncRecord {
     #[serde(default)]
-    pub project: Option<SyncProject>,
-    /// `ok` or `error`.
+    pub project: Option<ProjectRefRecord>,
+    /// `ok` or `failing`.
     pub status: String,
     #[serde(default)]
     pub error_class: Option<String>,
@@ -135,12 +135,6 @@ pub(crate) struct SyncRecord {
     pub last_full: Option<String>,
     #[serde(default)]
     pub issues: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SyncProject {
-    #[serde(rename = "ref")]
-    pub project_ref: ProjectRefRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +160,7 @@ impl SyncRecord {
             clean_opt(field, FIELD_MAX_CHARS);
         }
         if let Some(project) = self.project.as_mut() {
-            let p = &mut project.project_ref;
+            let p = project;
             p.forge = clean(&p.forge, FIELD_MAX_CHARS).0;
             p.forge_id = clean(&p.forge_id, FIELD_MAX_CHARS).0;
             clean_opt(&mut p.host, FIELD_MAX_CHARS);
@@ -313,7 +307,7 @@ pub(crate) fn parse_event(event: &WatchEvent) -> Option<IssueChange> {
             Err(err) => return Some(rejected(format!("unreadable: {err}"))),
         };
         if let Some(project) = &record.project {
-            let p = &project.project_ref;
+            let p = project;
             if p.forge != forge || p.forge_id != forge_id || p.project_id != project_id {
                 return Some(rejected("the document names another project".into()));
             }
@@ -505,8 +499,8 @@ mod tests {
             "sync.gitea.gitea-lab.84",
             4,
             serde_json::json!({
-                "project": {"ref": {"forge": "gitea", "forge_id": "gitea-lab", "project_id": 84,
-                                    "project_path": "ac/worklink"}},
+                "project": {"forge": "gitea", "forge_id": "gitea-lab", "project_id": 84,
+                            "project_path": "ac/worklink"},
                 "status": "ok", "last_ok": "2026-10-21T12:00:00Z", "issues": 14
             })
         )));
@@ -597,5 +591,42 @@ mod tests {
             at: None
         }));
         assert_eq!(cache.len(), 0);
+    }
+
+    /// Lines as worklink wrote them to the live bucket on 2026-10-22: the project
+    /// is a flat object, times carry microseconds, and a failing sync says
+    /// `failing` (the oracle against the live bucket found 41 of 41 refused when
+    /// this was assumed to be nested under `ref`).
+    #[test]
+    fn sync_rows_as_worklink_writes_them_are_read() {
+        let mut cache = IssueCache::default();
+        let ok = br#"{"v":1,"project":{"forge":"gitea","forge_id":"gitea-lab","host":"gitea.cat-bluegill.ts.net","project_id":37,"project_path":"ac/CONTEXT"},"status":"ok","last_attempt":"2026-10-21T23:25:58.085837Z","last_ok":"2026-10-21T23:25:58.085837Z","last_full":"2026-10-21T23:25:45.73264Z","cursor":"2026-10-21T23:25:58.085837Z","issues":21}"#;
+        let failing = br#"{"v":1,"project":{"forge":"gitea","forge_id":"gitea-lab","host":"gitea.cat-bluegill.ts.net","project_id":11,"project_path":"ac/DayOne-JSON-to-MD"},"status":"failing","error_class":"auth","last_attempt":"2026-10-22T01:00:00Z","last_ok":"2026-10-21T23:25:58.085837Z","issues":3}"#;
+        for (key, doc) in [
+            ("sync.gitea.gitea-lab.37", ok.as_slice()),
+            ("sync.gitea.gitea-lab.11", failing.as_slice()),
+        ] {
+            let event = WatchEvent {
+                key: StoreKey(key.into()),
+                rev: Rev(5),
+                value: Some(doc.to_vec()),
+                at: None,
+            };
+            assert!(cache.apply_event(&event), "{key} was refused");
+        }
+        assert_eq!(cache.syncs().count(), 2);
+        let (_, row) = cache
+            .syncs()
+            .find(|(name, _)| name.ends_with(".11"))
+            .unwrap();
+        assert_eq!(row.record.status, "failing");
+        assert_eq!(row.record.error_class.as_deref(), Some("auth"));
+        assert_eq!(
+            row.record
+                .project
+                .as_ref()
+                .and_then(|p| p.project_path.as_deref()),
+            Some("ac/DayOne-JSON-to-MD")
+        );
     }
 }

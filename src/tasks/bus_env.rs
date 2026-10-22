@@ -46,6 +46,28 @@ impl fmt::Debug for BusEnv {
 
 /// A URL with any `user:password@` part hidden, for logs and `Debug`.
 pub(crate) fn redact_url(url: &str) -> String {
+    // `NATS_URL` may list several servers, comma separated; each can carry
+    // its own credentials.
+    url.split(',').map(redact_one).collect::<Vec<_>>().join(",")
+}
+
+/// The servers `NATS_URL` names: it holds one address or a comma separated
+/// list (the client takes a list as separate addresses, never as one string).
+pub(crate) fn server_list(url: &str) -> Vec<String> {
+    let servers: Vec<String> = url
+        .split(',')
+        .map(str::trim)
+        .filter(|server| !server.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if servers.is_empty() {
+        vec![url.trim().to_owned()]
+    } else {
+        servers
+    }
+}
+
+fn redact_one(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
         None => (None, url),
@@ -228,9 +250,24 @@ mod tests {
         assert_eq!(redact_url("herdr:hunter2@bus:4222"), "<hidden>@bus:4222");
         assert_eq!(redact_url("nats://bus:4222"), "nats://bus:4222");
         assert_eq!(redact_url("nats://bus:4222/x@y"), "nats://bus:4222/x@y");
+        assert_eq!(
+            redact_url("nats://a:pw1@bus1:4222,nats://b:pw2@bus2:4222"),
+            "nats://<hidden>@bus1:4222,nats://<hidden>@bus2:4222",
+            "every server of a list is redacted"
+        );
         let env =
             parse("NATS_URL=nats://u:hunter2@bus:4222\nNATS_USER=u\nNATS_PASSWORD=p\n").unwrap();
         assert!(!format!("{env:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn a_url_list_is_split_into_its_servers() {
+        assert_eq!(
+            server_list("nats://bus1:4222, nats://bus2:4222,,nats://bus3:4222"),
+            ["nats://bus1:4222", "nats://bus2:4222", "nats://bus3:4222"]
+        );
+        assert_eq!(server_list("bus:4222"), ["bus:4222"]);
+        assert_eq!(server_list(" , "), [","], "nothing to split: left as given");
     }
 
     #[test]
