@@ -2434,6 +2434,75 @@ mod tests {
         assert_eq!(service.mirror_status(Mirror::Asks).detail, None);
     }
 
+    fn queued_entries(count: usize) -> (Sender<Message>, Receiver<Message>) {
+        let (tx, rx) = mpsc::channel();
+        for n in 0..count {
+            tx.send(Message::Mirror(
+                Mirror::Asks,
+                MirrorEvent::Entry(mirror_event(
+                    &format!("g.{n}"),
+                    n as u64 + 1,
+                    serde_json::json!({"status": "open"}),
+                )),
+            ))
+            .unwrap();
+        }
+        (tx, rx)
+    }
+
+    fn counted(events: &[StoreEvent]) -> usize {
+        events
+            .iter()
+            .map(|event| match event {
+                StoreEvent::MirrorChanges {
+                    changes: MirrorChanges::Asks(list),
+                    ..
+                } => list.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_batch_stops_at_its_size_and_leaves_the_rest_in_the_channel() {
+        let (_tx, rx) = queued_entries(1000);
+        let Ok(Message::Mirror(which, event)) = rx.try_recv() else {
+            panic!("a mirror message");
+        };
+        let mut carry = std::collections::VecDeque::new();
+        let (events, lost) = mirror_batch(which, event, &rx, &mut carry);
+        assert!(lost.is_empty() && carry.is_empty());
+        assert_eq!(
+            counted(&events),
+            MIRROR_BATCH,
+            "one batch, not the 999 waiting"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok()).count(),
+            1000 - MIRROR_BATCH,
+            "the rest waits its turn"
+        );
+    }
+
+    #[test]
+    fn a_batch_stops_at_a_message_of_another_kind_and_hands_it_on() {
+        let (tx, rx) = queued_entries(3);
+        tx.send(Message::Shutdown).unwrap();
+        tx.send(Message::Mirror(Mirror::Asks, MirrorEvent::Current))
+            .unwrap();
+        let Ok(Message::Mirror(which, event)) = rx.try_recv() else {
+            panic!("a mirror message");
+        };
+        let mut carry = std::collections::VecDeque::new();
+        let (events, _) = mirror_batch(which, event, &rx, &mut carry);
+        assert_eq!(counted(&events), 3);
+        assert!(matches!(carry.pop_front(), Some(Message::Shutdown)));
+        assert!(
+            matches!(rx.try_recv(), Ok(Message::Mirror(_, MirrorEvent::Current))),
+            "what came after the stop is not read ahead"
+        );
+    }
+
     #[test]
     fn a_big_start_does_not_hold_up_a_write() {
         let mut store = FakeStore::new(Duration::ZERO);

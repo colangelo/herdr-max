@@ -6,7 +6,8 @@ use super::super::work_panel::{ClientWorkPanelOverlay, Feed, WorkPanelLayout, Wo
 use super::*;
 use crate::api::schema::{
     AskInfo, IssueInfo, IssueProjectInfo, IssueRefInfo, Method, MirrorInfo, ResponseResult,
-    TaskInfo, TaskPaneInfo, TaskPriorityInfo, TaskShownInfo, TaskStatusInfo, TaskStoreInfo,
+    TaskInfo, TaskIssueRefInfo, TaskPaneInfo, TaskPriorityInfo, TaskShownInfo, TaskStatusInfo,
+    TaskStoreInfo,
 };
 use crate::input::KeybindAction;
 
@@ -33,13 +34,14 @@ fn requests(outcome: &ClientShellInput) -> Vec<(String, Method)> {
 }
 
 fn issue(project: &str, number: u64, title: &str, labels: &[&str], updated: &str) -> IssueInfo {
+    let project_id = if project == "ac/worklink" { 84 } else { 85 };
     IssueInfo {
-        key: format!("issue.gitea.gitea-lab.84.{number}"),
+        key: format!("issue.gitea.gitea-lab.{project_id}.{number}"),
         issue_ref: IssueRefInfo {
             forge: "gitea".into(),
             forge_id: "gitea-lab".into(),
             host: "gitea.example".into(),
-            project_id: if project == "ac/worklink" { 84 } else { 85 },
+            project_id,
             project_path: project.into(),
             number,
         },
@@ -113,15 +115,28 @@ fn task(key: &str, title: &str, shown: TaskShownInfo, owner: &str, pane: &str) -
     }
 }
 
-fn ask(key: &str, title: &str, status: &str) -> AskInfo {
+/// `task` that refers to the issue `number` of the worklink project.
+fn on_issue(mut task: TaskInfo, number: u64) -> TaskInfo {
+    task.refs = vec![TaskIssueRefInfo {
+        forge: "gitea".into(),
+        forge_id: "gitea-lab".into(),
+        host: "gitea.example".into(),
+        project_id: 84,
+        project_path: "ac/worklink".into(),
+        number,
+    }];
+    task
+}
+
+fn ask(key: &str, title: &str, status: &str, kind: &str, wher: &str) -> AskInfo {
     AskInfo {
         key: key.into(),
         rev: 2,
         status: status.into(),
-        kind: Some("task".into()),
+        kind: Some(kind.into()),
         title: Some(title.into()),
         how: None,
-        where_: Some("herdr-max #241".into()),
+        where_: Some(wher.into()),
         horizon: None,
         filed_by: None,
         answer: None,
@@ -133,9 +148,9 @@ fn ask(key: &str, title: &str, status: &str) -> AskInfo {
     }
 }
 
-fn store() -> TaskStoreInfo {
+fn store(state: &str) -> TaskStoreInfo {
     TaskStoreInfo {
-        state: "ready".into(),
+        state: state.into(),
         detail: None,
         pending: 0,
         conflicts: 0,
@@ -149,56 +164,101 @@ fn loaded() -> MirrorInfo {
     }
 }
 
-fn sample_issues() -> Vec<IssueInfo> {
-    vec![
-        issue(
-            "ac/worklink",
-            1,
-            "sync fails on rename",
-            &["bug"],
-            "2026-10-21T09:00:00Z",
-        ),
-        issue(
-            "ac/worklink",
-            2,
-            "pick a forge for the pilot",
-            &["needs/decision"],
-            "2026-10-21T11:00:00Z",
-        ),
-        issue(
-            "ac/herdr-max",
-            241,
-            "the task store",
-            &["status/in-progress"],
-            "2026-10-21T12:00:00Z",
-        ),
-    ]
+struct Answers {
+    issues: Vec<IssueInfo>,
+    projects: Vec<IssueProjectInfo>,
+    tasks: Vec<TaskInfo>,
+    asks: Vec<AskInfo>,
+    store: &'static str,
 }
 
-fn sample_tasks() -> Vec<TaskInfo> {
-    vec![
-        task(
-            "task.m4m.tk-1",
-            "write the store",
-            TaskShownInfo::Running,
-            "herdr-wrk",
-            "wrk",
-        ),
-        task(
-            "task.m4m.tk-2",
-            "review it",
-            TaskShownInfo::Open,
-            "herdr-helper",
-            "helper",
-        ),
-        task(
-            "task.m4m.tk-3",
-            "wait for ac",
-            TaskShownInfo::Waiting,
-            "herdr-wrk",
-            "wrk",
-        ),
-    ]
+fn answers() -> Answers {
+    Answers {
+        issues: vec![
+            issue(
+                "ac/worklink",
+                1,
+                "sync fails on rename",
+                &["bug", "horizon/later"],
+                "2026-10-21T09:00:00Z",
+            ),
+            issue(
+                "ac/worklink",
+                2,
+                "pick a forge for the pilot",
+                &["needs/decision", "horizon/now"],
+                "2026-10-21T11:00:00Z",
+            ),
+            issue(
+                "ac/herdr-max",
+                241,
+                "the task store",
+                &["status/in-progress"],
+                "2026-10-21T12:00:00Z",
+            ),
+        ],
+        projects: vec![
+            project("ac/worklink", 84, true),
+            project("ac/herdr-max", 85, false),
+        ],
+        tasks: vec![
+            task(
+                "task.m4m.tk-1",
+                "write the store",
+                TaskShownInfo::Running,
+                "herdr-wrk",
+                "wrk",
+            ),
+            task(
+                "task.m4m.tk-2",
+                "review it",
+                TaskShownInfo::Open,
+                "herdr-helper",
+                "helper",
+            ),
+            task(
+                "task.m4m.tk-3",
+                "wait for ac",
+                TaskShownInfo::Waiting,
+                "herdr-wrk",
+                "wrk",
+            ),
+        ],
+        asks: vec![ask(
+            "gestore-lab.a1",
+            "do the thing",
+            "open",
+            "task",
+            "herdr-max #241",
+        )],
+        store: "ready",
+    }
+}
+
+fn answer(sent: Vec<(String, Method)>, a: &Answers) -> Vec<(String, ResponseResult)> {
+    sent.into_iter()
+        .map(|(id, method)| {
+            let result = match method {
+                Method::IssueList(_) => ResponseResult::IssueList {
+                    issues: a.issues.clone(),
+                    total: a.issues.len() as u64,
+                    projects: a.projects.clone(),
+                    mirror: loaded(),
+                },
+                Method::TaskList(_) => ResponseResult::TaskList {
+                    tasks: a.tasks.clone(),
+                    store: store(a.store),
+                },
+                Method::AskList(_) => ResponseResult::AskList {
+                    asks: a.asks.clone(),
+                    total: a.asks.len() as u64,
+                    mirror: loaded(),
+                },
+                other => panic!("unexpected request {other:?}"),
+            };
+            (id, result)
+        })
+        .collect()
 }
 
 fn state_with(folder: Option<&str>) -> ClientShellState {
@@ -216,35 +276,24 @@ fn state_with(folder: Option<&str>) -> ClientShellState {
 }
 
 /// Open the panel and answer its three lists.
-fn open_with(
-    state: &mut ClientShellState,
-    issues: Vec<IssueInfo>,
-    projects: Vec<IssueProjectInfo>,
-    tasks: Vec<TaskInfo>,
-    asks: Vec<AskInfo>,
-) {
+fn open_with(state: &mut ClientShellState, a: &Answers) {
     let outcome = bind(state, KeybindAction::OpenWorkPanel);
     let sent = requests(&outcome);
     assert_eq!(sent.len(), 3, "{sent:?}");
-    for (id, method) in sent {
-        let result = match method {
-            Method::IssueList(_) => ResponseResult::IssueList {
-                issues: issues.clone(),
-                total: issues.len() as u64,
-                projects: projects.clone(),
-                mirror: loaded(),
-            },
-            Method::TaskList(_) => ResponseResult::TaskList {
-                tasks: tasks.clone(),
-                store: store(),
-            },
-            Method::AskList(_) => ResponseResult::AskList {
-                asks: asks.clone(),
-                total: asks.len() as u64,
-                mirror: loaded(),
-            },
-            other => panic!("unexpected request {other:?}"),
-        };
+    for (id, result) in answer(sent, a) {
+        state.handle_endpoint_result("boot-1", &id, Ok(result));
+    }
+    state.compose(W, H).unwrap();
+}
+
+/// Ask again (what `r` and the poll do) and answer.
+fn refresh_with(state: &mut ClientShellState, a: &Answers) {
+    let mut outcome = ClientShellInput::default();
+    if let Some(ClientShellOverlay::WorkPanel(panel)) = state.overlay.as_mut() {
+        panel.in_flight = 0;
+    }
+    state.request_work_panel(&mut outcome);
+    for (id, result) in answer(requests(&outcome), a) {
         state.handle_endpoint_result("boot-1", &id, Ok(result));
     }
     state.compose(W, H).unwrap();
@@ -252,16 +301,7 @@ fn open_with(
 
 fn sample() -> ClientShellState {
     let mut state = state_with(Some("/Users/ac/dev/worktrees/worklink"));
-    open_with(
-        &mut state,
-        sample_issues(),
-        vec![
-            project("ac/worklink", 84, true),
-            project("ac/herdr-max", 85, false),
-        ],
-        sample_tasks(),
-        vec![ask("gestore-lab.a1", "do the thing", "open")],
-    );
+    open_with(&mut state, &answers());
     state
 }
 
@@ -313,27 +353,41 @@ fn key(state: &mut ClientShellState, code: crossterm::event::KeyCode) {
     );
 }
 
+fn mouse_down(column: u16, row: u16) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    }
+}
+
+/// The rows of the current view as short strings.
 fn titles(state: &ClientShellState) -> Vec<String> {
-    panel(state)
+    let panel = panel(state);
+    panel
         .rows
         .iter()
-        .filter_map(|row| match row {
-            WorkRow::Heading { text, count } => Some(format!("# {text} {count}")),
-            WorkRow::Note(text) => Some(format!("note: {text}")),
-            WorkRow::Issue(i) => match &panel(state).issues {
-                Feed::Ready(data) => Some(format!("issue {}", data.issues[*i].issue_ref.number)),
-                _ => None,
-            },
-            WorkRow::Task(i) => match &panel(state).tasks {
-                Feed::Ready(tasks) => Some(format!("task {}", tasks[*i].title)),
-                _ => None,
-            },
-            WorkRow::Ask(i) => match &panel(state).asks {
-                Feed::Ready(data) => Some(format!("ask {}", data.asks[*i].key)),
-                _ => None,
-            },
+        .map(|row| match row {
+            WorkRow::Heading { text, count } => format!("# {text} {count}"),
+            WorkRow::Note(text) => format!("note: {text}"),
+            WorkRow::Problem(text) => format!("problem: {text}"),
+            WorkRow::Issue(i) => format!(
+                "issue {}",
+                panel.issues.data().unwrap().issues[*i].issue_ref.number
+            ),
+            WorkRow::IssueWhy(i, why) => format!(
+                "issue {} [{why}]",
+                panel.issues.data().unwrap().issues[*i].issue_ref.number
+            ),
+            WorkRow::Task(i) => format!("task {}", panel.tasks.data().unwrap().tasks[*i].title),
+            WorkRow::Ask(i) => format!("ask {}", panel.asks.data().unwrap().asks[*i].key),
         })
         .collect()
+}
+
+fn selected_key(state: &ClientShellState) -> Option<String> {
+    panel(state).selected_key.clone()
 }
 
 #[test]
@@ -345,98 +399,361 @@ fn opening_the_panel_asks_the_server_for_the_three_lists() {
         .map(|(_, method)| crate::api::api_method_name(method).to_owned())
         .collect();
     assert_eq!(names, ["issue.list", "task.list", "ask.list"]);
+    // Open issues, a page at a time; every kind of ask, for the reasons.
+    assert!(matches!(
+        &sent[0].1,
+        Method::IssueList(p) if p.state.as_deref() == Some("open") && p.limit == Some(500)
+    ));
+    assert!(matches!(
+        &sent[2].1,
+        Method::AskList(p) if p.kind.as_deref() == Some("any")
+    ));
 }
 
 #[test]
-fn this_repo_shows_the_project_the_focused_folder_names_and_its_last_sync() {
+fn this_repo_orders_by_horizon_and_shows_the_sync_line_in_utc() {
     let mut state = sample();
     assert_eq!(
         titles(&state),
         ["# ac/worklink 2", "issue 2", "issue 1"],
-        "the project named like a folder on the pane's path, newest first"
+        "horizon now before later, whatever the activity"
     );
     let text = boxed(&mut state).join("\n");
-    assert!(text.contains("work"), "{text}");
     assert!(text.contains("1 this repo 2"), "{text}");
     assert!(text.contains("2 needs me 1"), "{text}");
     assert!(
-        text.contains("ac/worklink synced 2026-10-21 12:00"),
-        "{text}"
+        text.contains("ac/worklink synced 2026-10-21 12:00 UTC (stale)"),
+        "the sync time says UTC, and an old one is marked: {text}"
     );
     assert!(text.contains("#2 pick a forge for the pilot"), "{text}");
+    assert!(text.contains("open"), "the state is drawn: {text}");
     assert!(!text.contains("the task store"), "{text}");
 }
 
 #[test]
 fn this_repo_with_no_match_says_so_and_shows_every_project() {
     let mut state = state_with(Some("/tmp/unrelated"));
-    open_with(
-        &mut state,
-        sample_issues(),
-        vec![
-            project("ac/worklink", 84, true),
-            project("ac/herdr-max", 85, false),
-        ],
-        Vec::new(),
-        Vec::new(),
-    );
+    open_with(&mut state, &answers());
     let rows = titles(&state);
-    assert_eq!(
-        rows[0],
-        "note: no project matches this pane's folder; every project is shown"
+    assert!(
+        rows[0].starts_with("note: no project matches this pane's folder"),
+        "{rows:?}"
     );
     assert!(rows.contains(&"# ac/herdr-max 1".to_owned()), "{rows:?}");
     let text = boxed(&mut state).join("\n");
+    assert!(text.contains("ac/herdr-max not synced"), "{text}");
+    // A folder that merely sits above the pane (a project called dev) is not it.
+    let mut a = answers();
+    a.issues.push(issue(
+        "ac/dev",
+        5,
+        "the dev project",
+        &[],
+        "2026-10-21T08:00:00Z",
+    ));
+    let mut state = state_with(Some("/Users/ac/dev/worktrees/herdr/issue-241-task-store"));
+    open_with(&mut state, &a);
     assert!(
-        text.contains("ac/herdr-max not synced"),
-        "a project with no sync row: {text}"
+        titles(&state)[0].starts_with("note: no project matches"),
+        "{:?}",
+        titles(&state)
     );
 }
 
 #[test]
-fn the_other_views_pick_their_rows_by_label_and_status() {
-    let mut state = sample();
+fn needs_me_shows_the_reason_on_each_row_in_the_plans_order() {
+    let mut a = answers();
+    // #1 has a run that is unknown, #2 needs a decision, #3 has an open ask.
+    a.tasks = vec![on_issue(
+        task(
+            "task.m4m.tk-9",
+            "stuck run",
+            TaskShownInfo::RunUnknown,
+            "herdr-wrk",
+            "wrk",
+        ),
+        1,
+    )];
+    a.issues.push(issue(
+        "ac/worklink",
+        3,
+        "asked about",
+        &[],
+        "2026-10-20T08:00:00Z",
+    ));
+    a.issues.push(issue(
+        "ac/worklink",
+        4,
+        "not mine to decide",
+        &["needs/design", "not-mine"],
+        "2026-10-20T07:00:00Z",
+    ));
+    a.issues.push(issue(
+        "ac/worklink",
+        5,
+        "needs a repro",
+        &["needs/repro"],
+        "2026-10-20T06:00:00Z",
+    ));
+    a.asks = vec![ask(
+        "gestore-lab.d1",
+        "pick",
+        "open",
+        "decision",
+        "https://gitea.example/ac/worklink/issues/3",
+    )];
+    let mut state = state_with(None);
+    open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('2'));
-    assert_eq!(panel(&state).view, WorkView::NeedsMe);
-    assert_eq!(titles(&state), ["# ac/worklink 1", "issue 2"]);
+    assert_eq!(
+        titles(&state),
+        [
+            "# run unknown 0",
+            "issue 1 [run unknown]",
+            "# ask open 0",
+            "issue 3 [ask open]",
+            "# needs a decision 0",
+            "issue 2 [needs a decision]",
+        ],
+        "by reason; not-mine, needs/repro and the rest do not count"
+    );
+    let text = boxed(&mut state).join("\n");
+    assert!(text.contains("run unknown"), "{text}");
+    assert_eq!(panel(&state).counts[1], 3, "the count is the badge");
+}
 
+#[test]
+fn in_flight_has_issues_with_a_run_or_the_label_then_tasks_without_an_issue() {
+    let mut a = answers();
+    a.tasks = vec![
+        on_issue(
+            task(
+                "task.m4m.tk-1",
+                "run on #1",
+                TaskShownInfo::Running,
+                "herdr-wrk",
+                "wrk",
+            ),
+            1,
+        ),
+        task(
+            "task.m4m.tk-2",
+            "loose run",
+            TaskShownInfo::Running,
+            "herdr-wrk",
+            "wrk",
+        ),
+        task(
+            "task.m4m.tk-3",
+            "idle",
+            TaskShownInfo::Open,
+            "herdr-wrk",
+            "wrk",
+        ),
+    ];
+    let mut state = state_with(None);
+    open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('3'));
     assert_eq!(
         titles(&state),
         [
-            "# ac/herdr-max 1",
-            "issue 241",
-            "# tasks running 1",
-            "task write the store"
-        ]
+            "# issues 2",
+            "issue 241 [in progress]",
+            "issue 1 [run running]",
+            "# tasks without an issue 1",
+            "task loose run",
+        ],
+        "newest first"
     );
+}
 
+#[test]
+fn my_tasks_lists_mine_first_then_the_agents_open_tasks_by_owner() {
+    let mut a = answers();
+    a.asks
+        .push(ask("gestore-lab.d2", "not a task", "open", "decision", ""));
+    let mut state = state_with(None);
+    open_with(&mut state, &a);
     key(&mut state, crossterm::event::KeyCode::Char('4'));
     assert_eq!(
         titles(&state),
         [
+            "# mine — ac's task rows 1",
+            "ask gestore-lab.a1",
             "# herdr-helper · helper 1",
             "task review it",
             "# herdr-wrk · wrk 2",
             "task write the store",
             "task wait for ac",
-            "# ac's task rows 1",
-            "ask gestore-lab.a1",
         ]
     );
     let text = boxed(&mut state).join("\n");
-    assert!(text.contains("do the thing"), "{text}");
-    assert!(text.contains("herdr-max #241"), "{text}");
+    assert!(text.contains("● write the store"), "{text}");
+    assert!(text.contains("◌ wait for ac"), "{text}");
+    assert!(text.contains("☐ review it"), "{text}");
+    assert!(
+        text.contains("run unknown") || text.contains("running"),
+        "{text}"
+    );
 }
 
 #[test]
-fn tab_and_the_view_chips_switch_views() {
+fn a_task_store_that_is_not_ready_is_said_not_shown_as_no_tasks() {
+    for state_name in ["unavailable", "loading", "disabled"] {
+        let mut a = answers();
+        a.tasks.clear();
+        a.asks.clear();
+        a.store = state_name;
+        let mut state = state_with(None);
+        open_with(&mut state, &a);
+        key(&mut state, crossterm::event::KeyCode::Char('4'));
+        let rows = titles(&state);
+        assert_eq!(
+            rows,
+            [format!("problem: task store {state_name}")],
+            "{rows:?}"
+        );
+    }
+    let mut a = answers();
+    a.tasks.clear();
+    a.asks.clear();
+    let mut state = state_with(None);
+    open_with(&mut state, &a);
+    key(&mut state, crossterm::event::KeyCode::Char('4'));
+    assert_eq!(titles(&state), ["note: no tasks"]);
+}
+
+#[test]
+fn the_selection_stays_on_its_issue_when_the_list_changes_under_it() {
+    let mut state = sample();
+    key(&mut state, crossterm::event::KeyCode::Down);
+    let before = selected_key(&state).expect("a selection");
+    assert_eq!(before, "issue.gitea.gitea-lab.84.1");
+    // Poll: a new issue sorts in before the selected one, and an old one goes.
+    let mut a = answers();
+    a.issues.push(issue(
+        "ac/worklink",
+        9,
+        "brand new",
+        &["horizon/now"],
+        "2026-10-21T20:00:00Z",
+    ));
+    a.issues.remove(1);
+    refresh_with(&mut state, &a);
+    assert_eq!(selected_key(&state).as_deref(), Some(before.as_str()));
+    let panel = panel(&state);
+    let row = &panel.rows[panel.selected];
+    assert_eq!(
+        panel.row_key_for_test(row).as_deref(),
+        Some(before.as_str())
+    );
+}
+
+#[test]
+fn a_failed_poll_keeps_the_last_answer_and_marks_it_stale() {
+    let mut state = sample();
+    let rows = titles(&state);
+    let mut outcome = ClientShellInput::default();
+    if let Some(ClientShellOverlay::WorkPanel(panel)) = state.overlay.as_mut() {
+        panel.in_flight = 0;
+    }
+    state.request_work_panel(&mut outcome);
+    for (id, method) in requests(&outcome) {
+        let _ = method;
+        state.handle_endpoint_result(
+            "boot-1",
+            &id,
+            Err(ClientShellEndpointError {
+                code: None,
+                message: "the bus is away".into(),
+            }),
+        );
+    }
+    state.compose(W, H).unwrap();
+    let now = titles(&state);
+    assert!(now[0].starts_with("problem: stale"), "{now:?}");
+    assert!(now[0].contains("the bus is away"), "{now:?}");
+    assert_eq!(&now[1..], &rows[..], "the rows stay");
+    assert!(matches!(panel(&state).issues, Feed::Stale(..)));
+    // The next good answer clears it.
+    refresh_with(&mut state, &answers());
+    assert_eq!(titles(&state), rows);
+}
+
+#[test]
+fn issues_are_fetched_a_page_at_a_time_until_the_total() {
+    let mut state = state_with(None);
+    let outcome = bind(&mut state, KeybindAction::OpenWorkPanel);
+    let sent = requests(&outcome);
+    let page = |from: u64, count: u64| -> Vec<IssueInfo> {
+        (from..from + count)
+            .map(|n| {
+                issue(
+                    "ac/worklink",
+                    n,
+                    &format!("issue {n}"),
+                    &[],
+                    "2026-10-21T09:00:00Z",
+                )
+            })
+            .collect()
+    };
+    let (issue_id, _) = sent
+        .iter()
+        .find(|(_, m)| matches!(m, Method::IssueList(_)))
+        .cloned()
+        .unwrap();
+    let (_, first) = state.handle_endpoint_result(
+        "boot-1",
+        &issue_id,
+        Ok(ResponseResult::IssueList {
+            issues: page(1, 500),
+            total: 620,
+            projects: Vec::new(),
+            mirror: loaded(),
+        }),
+    );
+    let next = first
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(request.clone()),
+            _ => None,
+        })
+        .expect("the second page is asked for");
+    assert!(
+        matches!(&next.method, Method::IssueList(p) if p.offset == Some(500)),
+        "{:?}",
+        next.method
+    );
+    assert!(
+        matches!(panel(&state).issues, Feed::Waiting),
+        "nothing is shown from half the pages"
+    );
+    state.handle_endpoint_result(
+        "boot-1",
+        &next.id,
+        Ok(ResponseResult::IssueList {
+            issues: page(501, 120),
+            total: 620,
+            projects: Vec::new(),
+            mirror: loaded(),
+        }),
+    );
+    assert_eq!(panel(&state).issues.data().unwrap().issues.len(), 620);
+}
+
+#[test]
+fn tab_and_the_view_chips_switch_views_and_the_action_letters_are_left_alone() {
     let mut state = sample();
     key(&mut state, crossterm::event::KeyCode::Tab);
     assert_eq!(panel(&state).view, WorkView::NeedsMe);
     key(&mut state, crossterm::event::KeyCode::BackTab);
     key(&mut state, crossterm::event::KeyCode::BackTab);
     assert_eq!(panel(&state).view, WorkView::MyTasks, "wraps around");
+    // h and l are the reserved action keys, not navigation.
+    key(&mut state, crossterm::event::KeyCode::Char('h'));
+    key(&mut state, crossterm::event::KeyCode::Char('l'));
+    assert_eq!(panel(&state).view, WorkView::MyTasks);
 
     state.compose(W, H).unwrap();
     let (rect, view) = layout(&state).tabs[2];
@@ -446,40 +763,30 @@ fn tab_and_the_view_chips_switch_views() {
     assert_eq!(panel(&state).view, WorkView::InFlight);
 }
 
-fn mouse_down(column: u16, row: u16) -> crossterm::event::MouseEvent {
-    crossterm::event::MouseEvent {
-        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        column,
-        row,
-        modifiers: crossterm::event::KeyModifiers::empty(),
-    }
-}
-
 #[test]
 fn the_selection_skips_headings_and_notes() {
     let mut state = sample();
     key(&mut state, crossterm::event::KeyCode::Char('4'));
     let on_row = |state: &ClientShellState| panel(state).rows[panel(state).selected].clone();
-    // The first selectable row is the first task, below its heading.
-    assert!(matches!(on_row(&state), WorkRow::Task(_)));
+    assert!(
+        matches!(on_row(&state), WorkRow::Ask(0)),
+        "mine comes first"
+    );
     for _ in 0..10 {
         key(&mut state, crossterm::event::KeyCode::Down);
         assert!(!matches!(
             on_row(&state),
-            WorkRow::Heading { .. } | WorkRow::Note(_)
+            WorkRow::Heading { .. } | WorkRow::Note(_) | WorkRow::Problem(_)
         ));
     }
-    assert_eq!(
-        on_row(&state),
-        WorkRow::Ask(0),
-        "the end of the list is the ask row"
-    );
-    key(&mut state, crossterm::event::KeyCode::Up);
-    key(&mut state, crossterm::event::KeyCode::Up);
     assert!(
         matches!(on_row(&state), WorkRow::Task(_)),
-        "going up steps over the heading in between"
+        "the end is a task"
     );
+    for _ in 0..3 {
+        key(&mut state, crossterm::event::KeyCode::Up);
+    }
+    assert!(!matches!(on_row(&state), WorkRow::Heading { .. }));
 }
 
 #[test]
@@ -573,22 +880,6 @@ fn the_panel_polls_but_not_while_a_request_is_on_its_way() {
 }
 
 #[test]
-fn keybind_help_lists_open_work_panel() {
-    let (live, _) = Config::default().live_keybinds_with_diagnostics().unwrap();
-    let groups = crate::input::keybind_help_groups(&live.keybinds, &live.prefix);
-    let found = groups
-        .iter()
-        .flat_map(|(_, entries)| entries.iter())
-        .find(|(_, label)| label == "work panel")
-        .map(|(key, _)| key.clone());
-    assert_eq!(
-        found.as_deref(),
-        Some("unset"),
-        "unbound until the user binds it"
-    );
-}
-
-#[test]
 fn a_click_selects_a_row_and_a_click_outside_closes() {
     let mut state = sample();
     state.compose(W, H).unwrap();
@@ -606,22 +897,67 @@ fn a_click_selects_a_row_and_a_click_outside_closes() {
 }
 
 #[test]
-fn a_tiny_screen_draws_nothing_instead_of_panicking() {
-    for (w, h) in [(10, 5), (30, 8), (61, 12)] {
-        let mut state = sample();
-        let _ = state.compose(w, h);
+fn a_screen_that_is_too_small_gets_one_yellow_line_not_a_panic() {
+    let mut state = sample();
+    for (w, h) in [(10, 5), (30, 8), (59, 30)] {
+        let frame = state.compose(w, h).expect("frame");
+        let row: String = frame.cells[..usize::from(w)]
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        let line = "widen the popup — work needs 60×12";
+        let shown: String = line.chars().take(usize::from(w)).collect();
+        assert!(row.starts_with(&shown), "{row:?}");
         key(&mut state, crossterm::event::KeyCode::Down);
         key(&mut state, crossterm::event::KeyCode::Char('4'));
-        let _ = state.compose(w, h);
     }
 }
 
 #[test]
-fn a_row_shows_its_marks_and_the_dim_words_on_the_right() {
+fn the_footer_is_a_key_bar_without_buttons_and_failures_are_red() {
     let mut state = sample();
-    key(&mut state, crossterm::event::KeyCode::Char('4'));
     let text = boxed(&mut state).join("\n");
-    assert!(text.contains("● write the store"), "running mark: {text}");
-    assert!(text.contains("◌ wait for ac"), "waiting mark: {text}");
-    assert!(text.contains("☐ review it"), "open mark: {text}");
+    assert!(text.contains("1-4 view"), "{text}");
+    assert!(text.contains("esc close"), "{text}");
+    // A sync that fails is drawn in red, not dim.
+    let mut a = answers();
+    a.projects[0].status = Some("error".into());
+    a.projects[0].error_class = Some("auth".into());
+    let mut state = state_with(Some("/Users/ac/dev/worktrees/worklink"));
+    open_with(&mut state, &a);
+    let p = state.config.palette.clone();
+    let layout = layout(&state);
+    let frame = state.compose(W, H).unwrap();
+    let cell = &frame.cells
+        [usize::from(layout.header.y + 2) * usize::from(W) + usize::from(layout.header.x + 1)];
+    assert_eq!(cell.fg, crate::protocol::color_to_u32(p.red));
+    assert!(boxed(&mut state).join("\n").contains("sync failing (auth)"));
+}
+
+#[test]
+fn keybind_help_lists_open_work_panel() {
+    let (live, _) = Config::default().live_keybinds_with_diagnostics().unwrap();
+    let groups = crate::input::keybind_help_groups(&live.keybinds, &live.prefix);
+    let found = groups
+        .iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .find(|(_, label)| label == "work panel")
+        .map(|(key, _)| key.clone());
+    assert_eq!(
+        found.as_deref(),
+        Some("unset"),
+        "unbound until the user binds it"
+    );
+    let chords = groups
+        .iter()
+        .find(|(name, _)| *name == "work panel")
+        .expect("the panel's own chords have a group");
+    assert!(chords
+        .1
+        .iter()
+        .any(|(key, label)| key.contains("1-4") && label == "switch view"));
+    assert!(chords
+        .1
+        .iter()
+        .any(|(key, label)| key == "esc / q" && label == "close panel"));
 }

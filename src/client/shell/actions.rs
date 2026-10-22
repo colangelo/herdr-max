@@ -1008,10 +1008,12 @@ impl ClientShellState {
                 let repaint = self.handle_todo_list_result(&pane_id, revision, panes, result);
                 return (repaint, Vec::new());
             }
-            kind @ (PendingEndpointKind::WorkIssues
+            kind @ (PendingEndpointKind::WorkIssues { .. }
             | PendingEndpointKind::WorkTasks
             | PendingEndpointKind::WorkAsks) => {
-                return (self.handle_work_panel_result(kind, result), Vec::new());
+                let mut outcome = ClientShellInput::default();
+                let repaint = self.handle_work_panel_result(kind, result, &mut outcome);
+                return (repaint || outcome.repaint, outcome.actions);
             }
             PendingEndpointKind::TodoBoardList { key } => {
                 let mut outcome = ClientShellInput::default();

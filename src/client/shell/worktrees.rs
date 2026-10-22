@@ -559,7 +559,7 @@ impl ClientShellState {
                 | PendingEndpointKind::NotificationMutation
                 | PendingEndpointKind::TodoList { .. }
                 | PendingEndpointKind::TodoBoardList { .. }
-                | PendingEndpointKind::WorkIssues
+                | PendingEndpointKind::WorkIssues { .. }
                 | PendingEndpointKind::WorkTasks
                 | PendingEndpointKind::WorkAsks
                 | PendingEndpointKind::TodoMutation { .. }

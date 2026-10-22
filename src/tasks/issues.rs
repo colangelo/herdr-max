@@ -269,16 +269,24 @@ pub(crate) fn parse_event(event: &WatchEvent) -> Option<IssueChange> {
         let Some(bytes) = &event.value else {
             return Some(IssueChange::IssueGone { name: name.clone() });
         };
+        // The version first: a record of a newer shape would not read as an
+        // issue, and must be called newer, not damaged.
+        #[derive(Deserialize)]
+        struct Version {
+            #[serde(default)]
+            v: Option<u32>,
+        }
+        if let Ok(Version { v: Some(v) }) = serde_json::from_slice(bytes) {
+            if v > SUPPORTED_VERSION {
+                return Some(rejected(format!(
+                    "record version {v} is newer than this reader"
+                )));
+            }
+        }
         let mut record = match serde_json::from_slice::<IssueRecord>(bytes) {
             Ok(record) => record,
             Err(err) => return Some(rejected(format!("unreadable: {err}"))),
         };
-        if record.v.is_some_and(|v| v > SUPPORTED_VERSION) {
-            return Some(rejected(format!(
-                "record version {} is newer than this reader",
-                record.v.unwrap_or_default()
-            )));
-        }
         let r = &record.issue_ref;
         if r.forge != forge
             || r.forge_id != forge_id
@@ -549,6 +557,19 @@ mod tests {
         assert_eq!(cache.rejected().len(), 2);
         // Not an issues key at all: not this cache's business.
         assert!(!cache.apply_event(&issue_event("mr.gitea.x.1.2", 1, issue_doc(1, "x"))));
+    }
+
+    #[test]
+    fn a_record_of_a_newer_shape_is_called_newer_not_unreadable() {
+        let mut cache = IssueCache::default();
+        let key = "issue.gitea.gitea-lab.84.7";
+        assert!(!cache.apply_event(&issue_event(
+            key,
+            1,
+            serde_json::json!({"v": 3, "ref": "now a string", "title": 5})
+        )));
+        let why = &cache.rejected()[0].1;
+        assert!(why.contains("newer"), "{why}");
     }
 
     #[test]

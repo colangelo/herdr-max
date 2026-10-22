@@ -825,7 +825,9 @@ pub(super) enum PendingEndpointKind {
         key: u64,
     },
     /// The work panel's three lists: `issue.list`, `task.list`, `ask.list`.
-    WorkIssues,
+    WorkIssues {
+        offset: u32,
+    },
     WorkTasks,
     WorkAsks,
     TodoMutation {

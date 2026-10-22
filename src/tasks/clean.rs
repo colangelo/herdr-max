@@ -12,7 +12,13 @@ pub(crate) fn clean(text: &str, max: usize) -> (String, bool) {
         let c = match c {
             '\n' | '\r' | '\t' => ' ',
             c if c.is_control() => continue,
-            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' => continue,
+            '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{061c}'
+            | '\u{2028}'
+            | '\u{2029}' => continue,
             c => c,
         };
         if count == max {
@@ -39,6 +45,14 @@ mod tests {
         assert_eq!(
             clean("a\u{1b}[31mred\u{7}\u{202e}b\nc", 100),
             ("a[31mredb c".to_owned(), false)
+        );
+    }
+
+    #[test]
+    fn the_arabic_letter_mark_and_the_line_separators_are_removed_too() {
+        assert_eq!(
+            clean("a\u{61c}b\u{2028}c\u{2029}d", 100),
+            ("abcd".to_owned(), false)
         );
     }
 

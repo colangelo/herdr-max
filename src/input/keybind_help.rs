@@ -617,6 +617,16 @@ pub(crate) fn command_table(
         ],
     ));
     groups.push((
+        "work panel",
+        vec![
+            entry("1-4 / tab / shift+tab", "switch view"),
+            entry("up / down / j / k", "previous / next row"),
+            entry("pgup / pgdn", "half page up / down"),
+            entry("r", "ask the server again"),
+            entry("esc / q", "close panel"),
+        ],
+    ));
+    groups.push((
         "todo edit modal",
         vec![
             entry("ctrl+s / alt+enter", "save todo"),
@@ -830,6 +840,7 @@ mod tests {
                 "move pane picker",
                 "command palette",
                 "todo board",
+                "work panel",
                 "todo edit modal",
             ]
         );
