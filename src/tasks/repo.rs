@@ -169,7 +169,12 @@ impl RepoResolver {
         let resolve = Arc::clone(&self.resolve);
         let folder = cwd.clone();
         let spawned = crate::thread_spawn::spawn_named("herdr-repo-remote", move || {
-            let found = resolve(&cwd);
+            // A reader that panics must not leave the folder reading forever.
+            let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolve(&cwd)))
+                .unwrap_or_else(|_| {
+                    tracing::warn!(folder = %cwd.display(), "the repo remote read panicked");
+                    None
+                });
             if let Ok(mut entries) = entries.lock() {
                 if let Some(entry) = entries.get_mut(&cwd) {
                     entry.answer = Some(found);
@@ -317,9 +322,30 @@ mod tests {
     }
 
     #[test]
+    fn a_reader_that_panics_leaves_the_folder_answered_not_reading_forever() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let counted = Arc::clone(&calls);
+        let resolver = RepoResolver::with_resolver(move |_| {
+            *counted.lock().unwrap() += 1;
+            panic!("the reader broke");
+        });
+        let cwd = Path::new("/work/broken");
+        assert_eq!(wait_for(&resolver, cwd), RepoState::NoRemote);
+        assert_eq!(*calls.lock().unwrap(), 1);
+        // The entry can be dropped to make room: it is not stuck as reading.
+        let entries = resolver.entries.lock().unwrap();
+        assert!(!entries[cwd].reading);
+    }
+
+    #[test]
     fn a_real_repo_resolves_through_its_config_and_a_worktree_shares_it() {
         let root = std::env::temp_dir().join(format!("herdr-repo-remote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        // No remote in the user's own git config may leak into the answer.
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
         let main = root.join("main");
         std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
         std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();

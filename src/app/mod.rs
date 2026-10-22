@@ -2623,6 +2623,31 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_picks_up_forge_accounts_and_an_invalid_tasks_section_keeps_them() {
+        let mut app = test_app();
+        assert!(app.task_config.forge_accounts.is_empty());
+        let mut config = Config::default();
+        config
+            .tasks
+            .forge_accounts
+            .insert("gitea-lab".into(), "ac".into());
+        app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(
+            app.task_config
+                .forge_accounts
+                .get("gitea-lab")
+                .map(String::as_str),
+            Some("ac")
+        );
+        // A tasks section that did not parse keeps what was there.
+        config.tasks.forge_accounts.clear();
+        app.apply_live_config(&config, &[], &["tasks".into()], false);
+        assert_eq!(app.task_config.forge_accounts.len(), 1);
+        app.apply_live_config(&config, &[], &[], false);
+        assert!(app.task_config.forge_accounts.is_empty());
+    }
+
+    #[test]
     fn reload_config_requests_client_reload_for_key_only_change() {
         let _guard = config_env_lock().lock().unwrap();
         let path = temp_config_path("reload-config-key-only");

@@ -3,6 +3,7 @@
 //! thread keeps up to date and never wait on the bus.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::responses::{encode_error, encode_success};
 use crate::api::schema::{
@@ -251,9 +252,14 @@ pub(crate) fn repo_info(cache: &IssueCache, state: &RepoState) -> IssueRepoInfo 
             status: "found".to_owned(),
             host: Some(host.clone()),
             path: Some(path.clone()),
-            mirrored: cache
-                .projects()
-                .any(|(_, count)| count.project_path.eq_ignore_ascii_case(path)),
+            // The same test the list filter uses, host included.
+            mirrored: cache.projects().any(|(_, count)| {
+                RepoRemote {
+                    host: host.clone(),
+                    path: path.clone(),
+                }
+                .is(&count.host, &count.project_path)
+            }),
         },
     }
 }
@@ -318,12 +324,30 @@ impl App {
     /// The repo of `pane`'s folder, read off this thread (`None`: no such pane).
     fn pane_repo(&self, pane: &str) -> Option<RepoState> {
         let (ws_idx, pane_id) = self.parse_pane_id(pane)?;
-        Some(
-            match self.launch_cwd_for_pane_in_workspace(ws_idx, pane_id) {
-                Some(cwd) => self.repo_resolver.lookup(&cwd),
-                None => RepoState::NoRemote,
-            },
-        )
+        Some(match self.cached_pane_cwd(ws_idx, pane_id) {
+            Some(cwd) => self.repo_resolver.lookup(&cwd),
+            None => RepoState::NoRemote,
+        })
+    }
+
+    /// The pane's directory from what it already knows. A client polls this
+    /// every few seconds, so no process lookup (`launch_cwd_for_pane_in_workspace`
+    /// walks the process table).
+    fn cached_pane_cwd(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> Option<PathBuf> {
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab = workspace
+            .tabs
+            .get(workspace.find_tab_index_for_pane(pane_id)?)?;
+        let terminal_id = tab.terminal_id(pane_id)?;
+        self.terminal_runtimes
+            .get(terminal_id)
+            .and_then(|runtime| runtime.cached_cwd())
+            .or_else(|| {
+                self.state
+                    .terminals
+                    .get(terminal_id)
+                    .map(|terminal| terminal.cwd.clone())
+            })
     }
 
     pub(super) fn handle_ask_list(&mut self, id: String, params: AskListParams) -> String {
@@ -1017,6 +1041,21 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_repo_is_read_from_the_panes_known_directory_not_a_process_lookup() {
+        let (mut app, _) = mirrored_issues();
+        let pane = with_pane(&mut app);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        app.repo_resolver = crate::tasks::RepoResolver::with_resolver(move |cwd| {
+            log.lock().unwrap().push(cwd.to_path_buf());
+            None
+        });
+        let known = app.state.terminals.values().next().unwrap().cwd.clone();
+        resolved(&mut app, &pane, "all");
+        assert_eq!(*seen.lock().unwrap(), [known]);
+    }
+
+    #[test]
     fn issue_list_for_a_pane_in_another_repo_or_none_shows_nothing_and_says_why() {
         let (mut app, _) = mirrored_issues();
         let pane = with_pane(&mut app);
@@ -1030,6 +1069,10 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+        assert!(
+            other_host["result"]["repo"].get("mirrored").is_none(),
+            "the same owner/repo on another host is not the mirrored project"
+        );
         app.repo_resolver = crate::tasks::RepoResolver::with_resolver(|_| {
             Some(remote("gitea.example", "ac/other"))
         });

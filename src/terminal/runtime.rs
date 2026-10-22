@@ -624,6 +624,10 @@ impl TerminalRuntime {
         self.0.cwd()
     }
 
+    pub fn cached_cwd(&self) -> Option<std::path::PathBuf> {
+        self.0.cached_cwd()
+    }
+
     pub fn cwd_for_persistence(&self) -> Option<std::path::PathBuf> {
         self.0.cwd_for_persistence()
     }

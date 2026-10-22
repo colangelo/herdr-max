@@ -519,6 +519,33 @@ fn this_repo_says_why_when_the_pane_has_no_repo_or_it_is_still_being_read() {
 }
 
 #[test]
+fn a_repo_with_more_issues_than_one_page_says_how_many_are_shown() {
+    let mut state = state_with();
+    let sent = requests(&bind(&mut state, KeybindAction::OpenWorkPanel));
+    let (id, _) = sent
+        .iter()
+        .find(|(_, m)| matches!(m, Method::IssueList(p) if p.pane.is_some()))
+        .cloned()
+        .unwrap();
+    state.handle_endpoint_result(
+        "boot-1",
+        &id,
+        Ok(ResponseResult::IssueList {
+            issues: vec![issue("ac/worklink", 1, "one", &[], "2026-10-21T09:00:00Z")],
+            total: 600,
+            projects: Vec::new(),
+            mirror: loaded(),
+            repo: Some(repo_found("ac/worklink", true)),
+        }),
+    );
+    assert!(
+        titles(&state).contains(&"note: showing 1 of 600 issues".to_owned()),
+        "{:?}",
+        titles(&state)
+    );
+}
+
+#[test]
 fn w_adds_the_issues_closed_in_the_last_seven_days_and_sends_the_cutoff() {
     let mut a = answers();
     let mut closed = issue(

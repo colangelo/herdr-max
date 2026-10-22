@@ -200,6 +200,8 @@ pub(crate) struct SyncRow {
 /// What a project's issues add up to, kept as rows come and go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectCount {
+    /// The forge's host, as the issues name it.
+    pub host: String,
     pub project_path: String,
     pub open: usize,
     pub total: usize,
@@ -382,11 +384,13 @@ impl IssueCache {
         let key = (r.forge.clone(), r.forge_id.clone(), r.project_id);
         if add {
             let entry = self.projects.entry(key).or_insert_with(|| ProjectCount {
+                host: r.host.clone(),
                 project_path: r.project_path.clone(),
                 open: 0,
                 total: 0,
             });
             entry.project_path.clone_from(&r.project_path);
+            entry.host.clone_from(&r.host);
             entry.total += 1;
             entry.open += usize::from(row.record.state == IssueState::Open);
         } else if let Some(entry) = self.projects.get_mut(&key) {
