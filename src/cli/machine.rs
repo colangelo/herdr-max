@@ -467,17 +467,26 @@ fn render_remote_session_picker(
     output.flush()
 }
 
-fn rename(args: &[String]) -> std::io::Result<i32> {
+/// The profile id and label of `machine rename`, with `--label` before or
+/// after the id.
+fn parse_rename_args(args: &[String]) -> Option<(String, String)> {
     let args = super::expand_equals_args(args, &["--label"]);
-    let [raw_id, flag, label] = args.as_slice() else {
+    match args.as_slice() {
+        [flag, label, raw_id] | [raw_id, flag, label]
+            if flag == "--label" && !raw_id.starts_with('-') =>
+        {
+            Some((raw_id.clone(), label.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn rename(args: &[String]) -> std::io::Result<i32> {
+    let Some((raw_id, label)) = parse_rename_args(args) else {
         eprintln!("usage: herdr machine rename <profile-id> --label <label>");
         return Ok(2);
     };
-    if flag != "--label" {
-        eprintln!("usage: herdr machine rename <profile-id> --label <label>");
-        return Ok(2);
-    }
-    let id = match ProfileId::parse(raw_id.clone()) {
+    let id = match ProfileId::parse(raw_id) {
         Ok(id) => id,
         Err(error) => {
             eprintln!("error: {error}");
@@ -485,7 +494,7 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
         }
     };
     let mut catalog = load_catalog()?;
-    match catalog.rename_ssh(&id, label) {
+    match catalog.rename_ssh(&id, &label) {
         Ok(true) => {}
         Ok(false) => {
             eprintln!("machine profile {id} was not found");
@@ -617,6 +626,32 @@ mod tests {
                 },
                 "{args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn rename_parser_accepts_label_before_or_after_the_id() {
+        for args in [
+            vec!["921b27a9", "--label", "agent1"],
+            vec!["--label", "agent1", "921b27a9"],
+            vec!["--label=agent1", "921b27a9"],
+            vec!["921b27a9", "--label=agent1"],
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(
+                parse_rename_args(&args),
+                Some(("921b27a9".to_owned(), "agent1".to_owned())),
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["921b27a9"],
+            vec!["921b27a9", "--name", "agent1"],
+            vec!["--label", "agent1", "--label"],
+            vec!["921b27a9", "agent1", "--label"],
+        ] {
+            let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(parse_rename_args(&args), None, "{args:?}");
         }
     }
 
