@@ -3,6 +3,7 @@ use super::*;
 const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
 /// How long the old server waits for its task store to let go before it gives
 /// up the handoff.
+#[cfg(unix)]
 const TASK_STORE_QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) fn wait_for_live_handoff_response_write(

@@ -130,8 +130,8 @@ pub struct App {
     task_timer: Option<std::sync::mpsc::Sender<(u64, std::time::SystemTime)>>,
     task_timer_deadline: Option<std::time::SystemTime>,
     /// What the store is started from, kept so a live handoff (unix only) can
-    /// stop it and start it again.
-    #[cfg(unix)]
+    /// stop it and start it again, and read for the forge accounts on every
+    /// platform.
     pub(crate) task_config: crate::config::TasksConfig,
     /// Reads a pane's git remote off the app loop, for `issue.list {pane}`.
     pub(crate) repo_resolver: crate::tasks::RepoResolver,
@@ -803,7 +803,6 @@ impl App {
             tasks,
             task_timer: None,
             task_timer_deadline: None,
-            #[cfg(unix)]
             task_config: config.tasks.clone(),
             repo_resolver: crate::tasks::RepoResolver::default(),
             #[cfg(unix)]
