@@ -55,6 +55,7 @@ deliberate difference from upstream's contract or names).
 | input | port | copy/scroll mode, navigate keys, layout bindings, sync-panes input, mouse, help entries. All pane keys go through synced delivery, which carries upstream's echo-latency signal (#5149): panes whose child got keyboard input, synced peers included, are marked interactive | `port/input`, merged through `bf8a056e` (`sync-merge/11`); #5149 port in `7b423546` |
 | chrome | port | sidebar, tabs, pane chrome, toasts, state colours/symbols, pins, resize labels, notification/todo indicators (click opens their panels) | `port/chrome`, merged `3e4827ff`, clicks `7e363fa4`/`3ccbf1e3` (`sync-merge/11`) |
 | overlays | port | todo panel/editor/board, notification center, confirm dialogs, move picker, navigator deltas | `port/overlays`, merged through `sync-merge/11` |
+| chrome-clipboard-feedback | carried | the "copied to clipboard" toast is anchored to the pane the selection came from (public pane id + endpoint, OSC52 provenance control `endpoint.clipboard-origin.v1`). Since the 2026-10-27 sync it follows upstream de8503c1 (#5583): the toast shows only after the clipboard write succeeds; the source waits in `pending_copy_source` until `finish_clipboard_write` | `f2544529`, merge `18d32561` (`sync-merge/70`, issue 244) |
 | sync-frame-hold | port | upstream holds mid-sync surfaces; the fork adds the 200 ms cap so a stuck app cannot freeze a pane | fork 839473d8 (issue 126) |
 | sync-hold-cursor-test | divergent | upstream's Windows-only test `cursor_settle_ignores_intermediate_synchronized_frame_positions` (src/pane/terminal.rs) expects no render delay inside a `?2026h` block; the fork's sync-frame-hold schedules `SYNC_HOLD_MAX` on the frame that opens one, so the test expects that on the opening frame. Keep it when syncing; drop the edit if the 200 ms cap goes upstream or the fork drops it | `ad933b48` (issue 188) |
 | prefix-list | superseded | `keys.prefix` as a list | upstream 7f89b11a (fork 73a00623) |
@@ -62,6 +63,7 @@ deliberate difference from upstream's contract or names).
 | agent-restart-group | superseded | a restarted agent in another process group is a replacement | upstream AgentJobTracker::replaced_in_front (fork 9d6ba1f8, issue 112) |
 | droid-scrollback-strip | superseded | droid's ED3 scrollback-clear filter | upstream 309749ad (#4432) |
 | session-save-flush | superseded | the session file is flushed before the rename that replaces it | upstream 6b1f9f6c (#5152, with `platform::replace_file`); the fork's own flush dropped in `7b423546` |
+| windows-cmd-cwd-test | superseded | the fork's 30 s observe loop for the slow-runner cmd cwd test | upstream 5bd900d8 (#5476, readiness markers); fork 415c4bf4 dropped in `sync-merge/70` (issue 244) |
 | overlay-kit | superseded | the fork's overlay kit (AnchoredPanelSpec, ButtonRow, ListCursor, TextField) | dropped by ac's decision; overlays use the client-shell idiom |
 
 Legacy fork commits before the v0.9.3 merge stay in history as they were; the classification of
