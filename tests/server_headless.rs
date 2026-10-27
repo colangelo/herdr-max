@@ -610,7 +610,7 @@ fn server_survives_hangup_and_logs_why_it_stops() {
     assert!(ping_socket(&api_socket).contains("pong"));
 
     // API ping works before the main loop installs its signal handlers.
-    wait_for_file(&client_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket);
     let mut client = UnixStream::connect(&client_socket).expect("connect to ready server");
     let (version, error) = client_handshake(&mut client, CURRENT_PROTOCOL, 80, 24)
         .expect("server event loop must be ready before SIGTERM");
