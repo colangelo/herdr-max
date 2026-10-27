@@ -46,6 +46,22 @@ impl ClientShellState {
         self.copy_feedback_deadline = Some(now + std::time::Duration::from_secs(2));
         true
     }
+    /// Shows the copy toast once a clipboard write went through, anchored to
+    /// the pane a selection copy came from when one is waiting.
+    pub(crate) fn finish_clipboard_write(
+        &mut self,
+        written: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        let source = self.pending_copy_source.take();
+        if !written {
+            return false;
+        }
+        let (pane, endpoint) = source.map_or((None, None), |(pane, endpoint)| {
+            (Some(pane), Some(endpoint))
+        });
+        self.show_copy_feedback_for(pane, endpoint, now)
+    }
     pub(crate) fn cache_clipboard_origin(
         &mut self,
         endpoint: &ClientEndpointId,

@@ -53,7 +53,10 @@ pub(super) fn dispatch_client_shell_actions(
                 }
             }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
-                crate::selection::write_osc52_bytes(&bytes);
+                let written = crate::selection::write_osc52_bytes(&bytes);
+                if let Some(shell) = shell.as_deref_mut() {
+                    repaint |= shell.finish_clipboard_write(written, std::time::Instant::now());
+                }
             }
             shell::ClientShellAction::ActivateEndpoint {
                 endpoint_id,

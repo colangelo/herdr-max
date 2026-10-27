@@ -1135,6 +1135,10 @@ pub(crate) struct ClientShellState {
         ),
     >,
     pub(super) copy_feedback_deadline: Option<std::time::Instant>,
+    /// The pane a selection copy came from, held until the clipboard write it
+    /// asked for has run, so the toast is anchored to it only once the write
+    /// went through.
+    pub(super) pending_copy_source: Option<(String, ClientEndpointId)>,
     pub(super) host_mouse_pixels: Option<crate::input::mouse::HostPixels>,
     pub(super) input_leases: ClientInputLeases,
     pub(super) scroll_entry_repeats:
@@ -1318,6 +1322,7 @@ impl ClientShellState {
             copy_feedback: None,
             clipboard_origins: HashMap::new(),
             copy_feedback_deadline: None,
+            pending_copy_source: None,
             host_mouse_pixels: None,
             input_leases: ClientInputLeases::default(),
             scroll_entry_repeats: HashMap::new(),
