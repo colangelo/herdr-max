@@ -104,7 +104,11 @@ fi
 for leftover in $(gh release list --repo "$REPO" --limit 100 --json tagName --jq '.[].tagName | select(startswith("beta-staging-"))'); do
   if [ "$leftover" != "$STAGING" ]; then
     step "remove leftover staging release ${leftover}"
-    gh release delete "$leftover" --repo "$REPO" --yes --cleanup-tag
+    gh release delete "$leftover" --repo "$REPO" --yes
+    # A create that failed mid-way leaves a draft, and a draft has no tag.
+    if ref_exists "$leftover"; then
+      gh api --method DELETE "repos/${REPO}/git/refs/tags/${leftover}" >/dev/null
+    fi
   fi
 done
 

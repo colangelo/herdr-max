@@ -75,9 +75,13 @@ FAKE_GH = textwrap.dedent(
     elif args[:2] == ["release", "delete"]:
         tag = args[2]
         state["releases"].pop(tag)
-        if "--cleanup-tag" in args:
-            state["tags"].pop(tag, None)
         save()
+        if "--cleanup-tag" in args:
+            if tag not in state["tags"]:
+                print("HTTP 422: Reference does not exist", file=sys.stderr)
+                sys.exit(1)
+            state["tags"].pop(tag)
+            save()
     elif args[:2] == ["release", "edit"]:
         tag, new = args[2], opt("--tag")
         state["releases"][new] = state["releases"].pop(tag)
@@ -216,6 +220,14 @@ class BetaPublishTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("beta-staging-7", self.state["releases"])
         self.assertNotIn("beta-staging-7", self.state["tags"])
+
+    def test_a_leftover_draft_without_a_tag_is_cleared(self) -> None:
+        # A create that failed mid-way leaves a draft release, and a draft has no tag.
+        self.state["releases"]["beta-staging-8"] = [str(self.old_asset)]
+        result = self.run_publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("beta-staging-8", self.state["releases"])
+        self.assertEqual(self.state["tags"].get("beta"), "newsha")
 
 
 class BetaWorkflowPublishTests(unittest.TestCase):
