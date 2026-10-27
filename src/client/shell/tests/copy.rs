@@ -351,6 +351,28 @@ fn client_mouse_selection_highlights_and_copies_through_endpoint_extraction() {
         state.copy_feedback.is_none(),
         "feedback must wait for clipboard dispatch"
     );
+    assert!(state.finish_clipboard_write(true, std::time::Instant::now()));
+    let feedback = state.copy_feedback.as_ref().expect("toast after the write");
+    assert_eq!(feedback.source_pane.as_deref(), Some("pane_1"));
+    assert!(feedback.endpoint_id.is_some());
+}
+
+#[test]
+fn a_failed_clipboard_write_shows_no_toast_and_drops_its_source_pane() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let now = std::time::Instant::now();
+    state.pending_copy_source = Some(("pane_1".into(), state.active_endpoint_id.clone()));
+    assert!(!state.finish_clipboard_write(false, now));
+    assert!(state.copy_feedback.is_none());
+    assert!(state.pending_copy_source.is_none());
+    assert!(state.finish_clipboard_write(true, now));
+    assert_eq!(
+        state
+            .copy_feedback
+            .as_ref()
+            .and_then(|feedback| feedback.source_pane.as_deref()),
+        None
+    );
 }
 
 #[test]
