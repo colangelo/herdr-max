@@ -27,12 +27,16 @@ server (they are respawned once after the first install, as today).
 
 ### D1. One anchor per session, started disclaimed
 
-The server, on macOS, connects to `<api socket dir>/herdr-pane-anchor.sock`. When
-nothing answers it starts `<exe> __pane-anchor --socket <path>` with
+The server, on macOS, connects to `<api socket>.pane-anchor` (next to the API
+socket, one per session). When nothing listens there (no file, or connection
+refused) it starts `<exe> __pane-anchor --socket <path>` with
 `spawn_disclaimed_daemon` (new session, stdio on /dev/null, its own responsible
-process) and connects with a short retry. A socket path over the platform limit, a
-failed start or a failed connect means no anchor: the server spawns panes itself
-and logs the reason once.
+process) and connects with a short retry, and reaps it if it ever exits first. An anchor that
+listens but answers wrongly (another protocol, no greeting) is left alone with its
+socket and panes. A socket path over the platform limit, a failed start or a
+failed connect means no anchor: the server spawns panes itself, logs why, and
+tries again a minute later. The anchor binds with umask 077 and unlinks its
+socket at exit only if the path still holds the socket it bound.
 
 ### D2. The anchor runs from a link the package manager cannot remove
 
@@ -40,10 +44,11 @@ Homebrew deletes the old keg on upgrade. A running process whose executable is
 deleted may fail a code-signing check when tccd evaluates it, which would bring the
 prompt back. The server hard-links its executable to
 `<config dir>/pane-anchor/<version>/<exe file name>` (a copy when linking fails)
-and starts the anchor from there. The file name stays the executable's, so the
-prompt still says "herdr-beta". The anchor writes `anchor.pid` next to the link;
-at start the server removes version directories whose `anchor.pid` names no live
-process, never its own.
+and starts the anchor from there; the directory is named after the source
+executable's inode, so another build never reuses it, and a staged link or copy
+replaces the file atomically. The file name stays the executable's, so the prompt
+still says "herdr-beta". Each anchor writes `pids/<pid>` next to the link; at
+start the server removes link directories with no live pid, never its own.
 
 ### D3. The server keeps the PTY; the anchor only forks
 
@@ -58,8 +63,14 @@ answer.
 
 Protocol: newline-delimited JSON on a Unix stream socket, one connection per
 server. `Hello {version}` both ways first; a different version means no anchor
-(D1 fallback). Then `Spawn {id, command}` + one descriptor → `Spawned {id, pid}` or
-`Failed {id, error}`, and unsolicited `Exited {pid, code, signal}`.
+(D1 fallback). Then `Spawn {id, command}` + one descriptor → `Spawned {id, pid}`,
+`Failed {id, error}`, or `Refused {id, error}` when the anchor cannot decode the
+request (a server of another build), after which the server spawns panes itself;
+and unsolicited `Exited {pid, code, signal}`. The command is base64 of its bincode
+encoding (its environment is keyed by `OsString`), which is positional, so a test
+pins the encoding to `PROTOCOL`: a change to the vendored `CommandBuilder` fails it
+until the protocol is bumped. When a connection ends the anchor shuts the socket
+down, so the server sees the end even while children's waiters hold clones.
 
 ### D4. Exit statuses go to the server that spawned the pane
 
@@ -70,8 +81,10 @@ channel fed by the connection reader) turns it into the `portable_pty::ExitStatu
 the pane watcher already classifies. When the spawning connection is gone (a live
 handoff), the exit is dropped: the new server sees those panes as imported and
 learns of their end by PTY EOF, exactly as today. When the connection breaks
-while the server lives, every waiting `AnchoredChild` returns a wait error, which
-the watcher already reports as `WaitFailed`.
+while the server lives (the anchor died), the pane program keeps running under
+launchd, which reaps it; a waiting `AnchoredChild` then polls the pid and reports
+exit code 0 once it is gone, so the pane closes as one whose program ended rather
+than at once with `WaitFailed`.
 
 ### D5. Lifetime
 

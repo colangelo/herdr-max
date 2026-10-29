@@ -15,6 +15,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -26,7 +27,8 @@ use serde::{Deserialize, Serialize};
 
 const PROTOCOL: u32 = 1;
 pub(crate) const SUBCOMMAND: &str = "__pane-anchor";
-const SOCKET_NAME: &str = "herdr-pane-anchor.sock";
+/// Appended to the API socket's name, so each session has its own anchor.
+const SOCKET_SUFFIX: &str = ".pane-anchor";
 /// The anchor ends after this long with no child and no server.
 const IDLE_EXIT: Duration = Duration::from_secs(10);
 /// After a failed start, panes are spawned directly for this long before
@@ -97,6 +99,12 @@ enum Reply {
         pid: u32,
         code: u32,
         signal: Option<String>,
+    },
+    /// The anchor could not read the request (a server of another build): the
+    /// server spawns the pane itself.
+    Refused {
+        id: u64,
+        error: String,
     },
 }
 
@@ -204,7 +212,12 @@ fn recv_with_fds(
 
 /// The anchor socket of the session this server serves.
 fn socket_path() -> PathBuf {
-    crate::session::active_api_socket_path().with_file_name(SOCKET_NAME)
+    let api = crate::session::active_api_socket_path();
+    let name = api
+        .file_name()
+        .map(|name| format!("{}{SOCKET_SUFFIX}", name.to_string_lossy()))
+        .unwrap_or_else(|| format!("herdr.sock{SOCKET_SUFFIX}"));
+    api.with_file_name(name)
 }
 
 // ----- the anchor process -----
@@ -230,7 +243,12 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
     }
     let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)?;
+    // SAFETY: no other thread runs yet, so the umask change is not observed.
+    let umask = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(&socket);
+    unsafe { libc::umask(umask) };
+    let listener = bound?;
+    let socket_inode = std::fs::metadata(&socket).map(|meta| meta.ino()).ok();
     std::fs::set_permissions(
         &socket,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
@@ -277,7 +295,10 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
             break;
         }
     }
-    let _ = std::fs::remove_file(&socket);
+    // A newer anchor may have taken the path; leave its socket alone.
+    if std::fs::metadata(&socket).map(|meta| meta.ino()).ok() == socket_inode {
+        let _ = std::fs::remove_file(&socket);
+    }
     if let Some(marker) = pid_marker {
         let _ = std::fs::remove_file(marker);
     }
@@ -285,6 +306,13 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
 }
 
 fn serve_connection(stream: &UnixStream, state: &Arc<AnchorState>) {
+    serve_requests(stream, state);
+    // Waiters of earlier children hold clones of the stream; shutting it down
+    // makes the server see the end now instead of a silent connection.
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+fn serve_requests(stream: &UnixStream, state: &Arc<AnchorState>) {
     let Ok(writer) = stream.try_clone() else {
         return;
     };
@@ -303,7 +331,20 @@ fn serve_connection(stream: &UnixStream, state: &Arc<AnchorState>) {
             let line: Vec<u8> = pending.drain(..=end).collect();
             let request = match serde_json::from_slice::<Request>(&line) {
                 Ok(request) => request,
-                Err(_) => return,
+                Err(err) => {
+                    let Some(id) = refusable_spawn(&line) else {
+                        return;
+                    };
+                    fds.pop_front();
+                    let _ = write_reply(
+                        &writer,
+                        &Reply::Refused {
+                            id,
+                            error: err.to_string(),
+                        },
+                    );
+                    continue;
+                }
             };
             match request {
                 Request::Hello { version } => {
@@ -334,6 +375,14 @@ fn serve_connection(stream: &UnixStream, state: &Arc<AnchorState>) {
             return;
         }
     }
+}
+
+/// The id of a spawn request this anchor cannot decode.
+fn refusable_spawn(line: &[u8]) -> Option<u64> {
+    let value = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+    (value.get("type")?.as_str()? == "spawn")
+        .then(|| value.get("id")?.as_u64())
+        .flatten()
 }
 
 fn spawn_for(
@@ -394,11 +443,15 @@ fn spawn_for(
 
 // ----- the server side -----
 
-type SpawnResult = Result<(u32, mpsc::Receiver<ExitStatus>), String>;
+enum SpawnOutcome {
+    Spawned(u32, mpsc::Receiver<ExitStatus>),
+    Failed(String),
+    Refused(String),
+}
 
 struct Client {
     writer: Mutex<UnixStream>,
-    pending: Mutex<HashMap<u64, mpsc::Sender<SpawnResult>>>,
+    pending: Mutex<HashMap<u64, mpsc::Sender<SpawnOutcome>>>,
     exits: Mutex<HashMap<u32, mpsc::Sender<ExitStatus>>>,
     next_id: AtomicU64,
     broken: AtomicBool,
@@ -447,12 +500,17 @@ impl Client {
                     let (exit_tx, exit_rx) = mpsc::channel();
                     lock(&self.exits).insert(pid, exit_tx);
                     if let Some(tx) = lock(&self.pending).remove(&id) {
-                        let _ = tx.send(Ok((pid, exit_rx)));
+                        let _ = tx.send(SpawnOutcome::Spawned(pid, exit_rx));
                     }
                 }
                 Reply::Failed { id, error } => {
                     if let Some(tx) = lock(&self.pending).remove(&id) {
-                        let _ = tx.send(Err(error));
+                        let _ = tx.send(SpawnOutcome::Failed(error));
+                    }
+                }
+                Reply::Refused { id, error } => {
+                    if let Some(tx) = lock(&self.pending).remove(&id) {
+                        let _ = tx.send(SpawnOutcome::Refused(error));
                     }
                 }
                 Reply::Exited { pid, code, signal } => {
@@ -494,14 +552,20 @@ impl Client {
             return Ok(None);
         }
         match rx.recv_timeout(REPLY_TIMEOUT) {
-            Ok(Ok((pid, exit))) => Ok(Some(AnchoredChild {
+            Ok(SpawnOutcome::Spawned(pid, exit)) => Ok(Some(AnchoredChild {
                 pid,
                 exit: Mutex::new(exit),
                 done: None,
             })),
-            Ok(Err(error)) => Err(io::Error::other(error)),
+            Ok(SpawnOutcome::Failed(error)) => Err(io::Error::other(error)),
+            Ok(SpawnOutcome::Refused(error)) => {
+                self.broken.store(true, Ordering::Release);
+                tracing::warn!(%error, "the pane anchor cannot read this server's requests; spawning panes directly");
+                Ok(None)
+            }
             Err(_) => {
                 lock(&self.pending).remove(&id);
+                self.broken.store(true, Ordering::Release);
                 Err(io::Error::other("the pane anchor did not answer a spawn"))
             }
         }
@@ -670,13 +734,25 @@ fn connect_or_start() -> io::Result<Arc<Client>> {
             path.display()
         )));
     }
-    if let Ok(client) = Client::connect(&path) {
-        return Ok(client);
+    match Client::connect(&path) {
+        Ok(client) => return Ok(client),
+        // Only when nothing listens: an anchor that answers wrongly keeps its
+        // socket and its panes, and this server spawns panes itself.
+        Err(err)
+            if !matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Err(err)
+        }
+        Err(_) => {}
     }
     let exe = anchor_executable()?;
     let mut command = std::process::Command::new(&exe);
     command.arg(SUBCOMMAND).arg("--socket").arg(&path);
     let pid = super::spawn_disclaimed_daemon(&command)?;
+    crate::platform::daemon_reaper::reap_when_it_exits(pid);
     tracing::info!(pid, exe = %exe.display(), "started the pane anchor");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -695,7 +771,6 @@ fn connect_or_start() -> io::Result<Arc<Client>> {
 /// The directory is named after the executable's inode, so another build never
 /// reuses it, and the file keeps the executable's name, which the prompt shows.
 fn anchor_executable() -> io::Result<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
     let exe = std::env::current_exe()?;
     let name = exe
         .file_name()
@@ -707,13 +782,18 @@ fn anchor_executable() -> io::Result<PathBuf> {
     remove_unused_links(&root, &dir);
     std::fs::create_dir_all(&dir)?;
     let link = dir.join(name);
-    if std::fs::metadata(&link).is_ok_and(|meta| meta.ino() == inode) {
+    let size = std::fs::metadata(&exe)?.len();
+    // A copy (no hard link across volumes) has another inode but the same size;
+    // replacing it would pull the file from under a running anchor.
+    if std::fs::metadata(&link).is_ok_and(|meta| meta.ino() == inode || meta.len() == size) {
         return Ok(link);
     }
-    let _ = std::fs::remove_file(&link);
-    if std::fs::hard_link(&exe, &link).is_err() {
-        std::fs::copy(&exe, &link)?;
+    let staged = dir.join(".staged");
+    let _ = std::fs::remove_file(&staged);
+    if std::fs::hard_link(&exe, &staged).is_err() {
+        std::fs::copy(&exe, &staged)?;
     }
+    std::fs::rename(&staged, &link)?;
     Ok(link)
 }
 
@@ -874,6 +954,35 @@ mod tests {
         assert_eq!(status.exit_code(), 3);
         assert!(status.signal().is_none());
         assert_eq!(state.children.load(Ordering::Acquire), 0);
+    }
+
+    /// The command travels bincode-encoded, which is positional: a change to the
+    /// vendored `CommandBuilder` changes it, and a long-lived anchor of the old
+    /// build would misread new servers. Bump `PROTOCOL` when this fails.
+    #[test]
+    fn the_command_encoding_is_pinned_to_the_protocol() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env_clear();
+        command.arg("-c");
+        command.env("A", "b");
+        command.cwd("/tmp");
+        let line = String::from_utf8(encode(&Request::Spawn { id: 1, command }).unwrap()).unwrap();
+        assert_eq!(PROTOCOL, 1);
+        assert_eq!(
+            line.trim_end(),
+            PINNED_SPAWN_V1,
+            "the spawn encoding changed: bump PROTOCOL"
+        );
+    }
+
+    const PINNED_SPAWN_V1: &str =
+        r#"{"type":"spawn","id":1,"command":"AgAHL2Jpbi9zaAACLWMBAAFBAAABQQABYgEABC90bXAAAQ=="}"#;
+
+    #[test]
+    fn an_undecodable_spawn_is_refused_with_its_id() {
+        let line = br#"{"type":"spawn","id":42,"command":"not base64 of a command"}"#;
+        assert_eq!(refusable_spawn(line), Some(42));
+        assert_eq!(refusable_spawn(br#"{"type":"hello","version":9}"#), None);
     }
 
     #[test]
