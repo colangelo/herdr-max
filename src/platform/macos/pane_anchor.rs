@@ -771,15 +771,25 @@ fn connect_or_start() -> io::Result<Arc<Client>> {
 /// The directory is named after the executable's inode, so another build never
 /// reuses it, and the file keeps the executable's name, which the prompt shows.
 fn anchor_executable() -> io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
+    link_executable(
+        &std::env::current_exe()?,
+        &crate::config::config_dir().join("pane-anchor"),
+    )
+}
+
+/// Links `exe` under `root`. `exe` may be a symlink, as Homebrew's
+/// `/opt/homebrew/bin/herdr-beta` is: macOS `link(2)` would link the symlink
+/// itself, whose relative target dangles in another directory, so the real
+/// file is linked, under the name the process was started with.
+fn link_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
     let name = exe
         .file_name()
         .ok_or_else(|| io::Error::other("the executable has no file name"))?
         .to_owned();
+    let exe = std::fs::canonicalize(exe)?;
     let inode = std::fs::metadata(&exe)?.ino();
-    let root = crate::config::config_dir().join("pane-anchor");
     let dir = root.join(format!("{}-{inode}", env!("CARGO_PKG_VERSION")));
-    remove_unused_links(&root, &dir);
+    remove_unused_links(root, &dir);
     std::fs::create_dir_all(&dir)?;
     let link = dir.join(name);
     let size = std::fs::metadata(&exe)?.len();
@@ -983,6 +993,24 @@ mod tests {
         let line = br#"{"type":"spawn","id":42,"command":"not base64 of a command"}"#;
         assert_eq!(refusable_spawn(line), Some(42));
         assert_eq!(refusable_spawn(br#"{"type":"hello","version":9}"#), None);
+    }
+
+    #[test]
+    fn a_symlinked_executable_is_linked_as_the_real_file() {
+        let root = std::env::temp_dir().join(format!("herdr-anchor-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("Cellar/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("herdr-real"), b"#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink("Cellar/bin/herdr-real", root.join("herdr-beta")).unwrap();
+
+        let link = link_executable(&root.join("herdr-beta"), &root.join("pane-anchor")).unwrap();
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        let real = std::fs::metadata(bin.join("herdr-real")).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(link.file_name().unwrap(), "herdr-beta");
+        assert!(meta.file_type().is_file(), "linked a symlink: {link:?}");
+        assert_eq!(meta.ino(), real.ino());
     }
 
     #[test]
