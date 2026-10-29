@@ -2281,9 +2281,16 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
 
     let shell = pane_shell_pid(&api_socket, &first_pane, &marker);
     let (anchor, command) = parent_and_command(shell);
-    assert!(command.contains("__pane-anchor"), "pane parent is {anchor} `{command}`, not the anchor");
+    assert!(
+        command.contains("__pane-anchor"),
+        "pane parent is {anchor} `{command}`, not the anchor"
+    );
     assert_ne!(anchor, server_pid);
-    assert_eq!(responsible_for(shell), anchor as i32, "the anchor answers for the pane");
+    assert_eq!(
+        responsible_for(shell),
+        anchor as i32,
+        "the anchor answers for the pane"
+    );
 
     assert_ok(request(
         &api_socket,
@@ -2294,7 +2301,11 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
     wait_for_api(&api_socket, Duration::from_secs(30));
     assert_ne!(replacement_pid, server_pid);
 
-    assert_eq!(responsible_for(shell), anchor as i32, "the old pane keeps the anchor");
+    assert_eq!(
+        responsible_for(shell),
+        anchor as i32,
+        "the old pane keeps the anchor"
+    );
     let split = request(
         &api_socket,
         serde_json::json!({
@@ -2303,9 +2314,16 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
             "params": {"target_pane_id": first_pane, "direction": "right", "focus": false}
         }),
     );
-    let new_pane = split["result"]["pane"]["pane_id"].as_str().expect("split pane id").to_owned();
+    let new_pane = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .expect("split pane id")
+        .to_owned();
     let new_shell = pane_shell_pid(&api_socket, &new_pane, &marker);
-    assert_eq!(parent_and_command(new_shell).0, anchor, "the replacement uses the same anchor");
+    assert_eq!(
+        parent_and_command(new_shell).0,
+        anchor,
+        "the replacement uses the same anchor"
+    );
     assert_eq!(responsible_for(new_shell), anchor as i32);
 
     let _ = request(

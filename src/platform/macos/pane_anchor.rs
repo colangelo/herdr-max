@@ -40,7 +40,9 @@ const MAX_SOCKET_PATH: usize = 103;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
-    Hello { version: u32 },
+    Hello {
+        version: u32,
+    },
     Spawn {
         id: u64,
         #[serde(with = "command_codec")]
@@ -55,13 +57,18 @@ mod command_codec {
     use portable_pty::CommandBuilder;
     use serde::{de, ser, Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(command: &CommandBuilder, serializer: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(
+        command: &CommandBuilder,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         let bytes = bincode::serde::encode_to_vec(command, bincode::config::standard())
             .map_err(ser::Error::custom)?;
         serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<CommandBuilder, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<CommandBuilder, D::Error> {
         let text = String::deserialize(deserializer)?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(text)
@@ -75,10 +82,22 @@ mod command_codec {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Reply {
-    Hello { version: u32 },
-    Spawned { id: u64, pid: u32 },
-    Failed { id: u64, error: String },
-    Exited { pid: u32, code: u32, signal: Option<String> },
+    Hello {
+        version: u32,
+    },
+    Spawned {
+        id: u64,
+        pid: u32,
+    },
+    Failed {
+        id: u64,
+        error: String,
+    },
+    Exited {
+        pid: u32,
+        code: u32,
+        signal: Option<String>,
+    },
 }
 
 fn encode<T: Serialize>(message: &T) -> io::Result<Vec<u8>> {
@@ -89,7 +108,9 @@ fn encode<T: Serialize>(message: &T) -> io::Result<Vec<u8>> {
 
 fn write_reply(writer: &Mutex<UnixStream>, reply: &Reply) -> io::Result<()> {
     let line = encode(reply)?;
-    let mut stream = writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stream = writer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     stream.write_all(&line)
 }
 
@@ -137,7 +158,11 @@ fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<()> 
 }
 
 /// Reads into `buf`, queuing any received descriptors.
-fn recv_with_fds(stream: &UnixStream, buf: &mut [u8], fds: &mut VecDeque<OwnedFd>) -> io::Result<usize> {
+fn recv_with_fds(
+    stream: &UnixStream,
+    buf: &mut [u8],
+    fds: &mut VecDeque<OwnedFd>,
+) -> io::Result<usize> {
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: buf.len(),
@@ -193,7 +218,11 @@ struct AnchorState {
 pub(crate) fn run(args: &[String]) -> io::Result<()> {
     let socket = match args {
         [flag, path] if flag == "--socket" => PathBuf::from(path),
-        _ => return Err(io::Error::other(format!("usage: herdr {SUBCOMMAND} --socket <path>"))),
+        _ => {
+            return Err(io::Error::other(format!(
+                "usage: herdr {SUBCOMMAND} --socket <path>"
+            )))
+        }
     };
     // SAFETY: changes this process's own dispositions before any thread starts.
     unsafe {
@@ -206,9 +235,10 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
         &socket,
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
     )?;
-    let pid_marker = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("pids").join(std::process::id().to_string())));
+    let pid_marker = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .map(|dir| dir.join("pids").join(std::process::id().to_string()))
+    });
     if let Some(marker) = &pid_marker {
         if let Some(dir) = marker.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -288,7 +318,10 @@ fn serve_connection(stream: &UnixStream, state: &Arc<AnchorState>) {
                     let Some(slave_fd) = fds.pop_front() else {
                         let _ = write_reply(
                             &writer,
-                            &Reply::Failed { id, error: "no pty descriptor arrived".into() },
+                            &Reply::Failed {
+                                id,
+                                error: "no pty descriptor arrived".into(),
+                            },
                         );
                         continue;
                     };
@@ -317,13 +350,25 @@ fn spawn_for(
     let mut child = match spawned {
         Ok(child) => child,
         Err(err) => {
-            let _ = write_reply(writer, &Reply::Failed { id, error: err.to_string() });
+            let _ = write_reply(
+                writer,
+                &Reply::Failed {
+                    id,
+                    error: err.to_string(),
+                },
+            );
             return;
         }
     };
     let Some(pid) = child.process_id() else {
         let _ = child.kill();
-        let _ = write_reply(writer, &Reply::Failed { id, error: "spawned child has no pid".into() });
+        let _ = write_reply(
+            writer,
+            &Reply::Failed {
+                id,
+                error: "spawned child has no pid".into(),
+            },
+        );
         return;
     };
     state.children.fetch_add(1, Ordering::AcqRel);
@@ -332,7 +377,9 @@ fn spawn_for(
     let writer = writer.clone();
     let state = state.clone();
     std::thread::spawn(move || {
-        let status = child.wait().unwrap_or_else(|_| ExitStatus::with_signal("unknown"));
+        let status = child
+            .wait()
+            .unwrap_or_else(|_| ExitStatus::with_signal("unknown"));
         state.children.fetch_sub(1, Ordering::AcqRel);
         let _ = write_reply(
             &writer,
@@ -427,9 +474,16 @@ impl Client {
 
     /// Sends one spawn; `Ok(None)` when the request never left, so the caller
     /// may spawn the pane itself.
-    fn spawn(&self, command: &CommandBuilder, slave_fd: RawFd) -> io::Result<Option<AnchoredChild>> {
+    fn spawn(
+        &self,
+        command: &CommandBuilder,
+        slave_fd: RawFd,
+    ) -> io::Result<Option<AnchoredChild>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let line = encode(&Request::Spawn { id, command: command.clone() })?;
+        let line = encode(&Request::Spawn {
+            id,
+            command: command.clone(),
+        })?;
         let (tx, rx) = mpsc::channel();
         lock(&self.pending).insert(id, tx);
         let sent = send_with_fd(&lock(&self.writer), &line, slave_fd);
@@ -455,7 +509,9 @@ impl Client {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A pane program started by the anchor.
@@ -609,7 +665,10 @@ fn client() -> Option<Arc<Client>> {
 fn connect_or_start() -> io::Result<Arc<Client>> {
     let path = socket_path();
     if path.as_os_str().len() > MAX_SOCKET_PATH {
-        return Err(io::Error::other(format!("socket path too long: {}", path.display())));
+        return Err(io::Error::other(format!(
+            "socket path too long: {}",
+            path.display()
+        )));
     }
     if let Ok(client) = Client::connect(&path) {
         return Ok(client);
@@ -684,7 +743,10 @@ fn remove_unused_links(root: &Path, keep: &Path) {
 
 /// Starts `command` on the PTY whose slave is `tty` through the anchor.
 /// `None` means the caller spawns the pane itself.
-pub(crate) fn spawn(command: &CommandBuilder, tty: &Path) -> Option<io::Result<Box<dyn Child + Send + Sync>>> {
+pub(crate) fn spawn(
+    command: &CommandBuilder,
+    tty: &Path,
+) -> Option<io::Result<Box<dyn Child + Send + Sync>>> {
     let client = client()?;
     let slave = match open_slave(tty) {
         Ok(slave) => slave,
@@ -703,7 +765,12 @@ pub(crate) fn spawn(command: &CommandBuilder, tty: &Path) -> Option<io::Result<B
 fn open_slave(tty: &Path) -> io::Result<OwnedFd> {
     let path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(tty.as_os_str()))
         .map_err(io::Error::other)?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -719,18 +786,34 @@ mod tests {
     fn requests_and_replies_round_trip() {
         let mut command = CommandBuilder::new("/bin/echo");
         command.arg("hi");
-        let line = encode(&Request::Spawn { id: 7, command: command.clone() }).unwrap();
+        let line = encode(&Request::Spawn {
+            id: 7,
+            command: command.clone(),
+        })
+        .unwrap();
         match serde_json::from_slice::<Request>(&line).unwrap() {
-            Request::Spawn { id, command: decoded } => {
+            Request::Spawn {
+                id,
+                command: decoded,
+            } => {
                 assert_eq!(id, 7);
                 assert_eq!(decoded, command);
             }
             other => panic!("unexpected {other:?}"),
         }
-        let line = encode(&Reply::Exited { pid: 9, code: 3, signal: None }).unwrap();
+        let line = encode(&Reply::Exited {
+            pid: 9,
+            code: 3,
+            signal: None,
+        })
+        .unwrap();
         assert!(matches!(
             serde_json::from_slice::<Reply>(&line).unwrap(),
-            Reply::Exited { pid: 9, code: 3, signal: None }
+            Reply::Exited {
+                pid: 9,
+                code: 3,
+                signal: None
+            }
         ));
     }
 
@@ -749,7 +832,10 @@ mod tests {
     }
 
     fn temp_socket(name: &str) -> PathBuf {
-        let path = PathBuf::from(format!("/tmp/herdr-anchor-{name}-{}.sock", std::process::id()));
+        let path = PathBuf::from(format!(
+            "/tmp/herdr-anchor-{name}-{}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -798,7 +884,12 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut line = String::new();
                 let _ = BufReader::new(stream.try_clone().unwrap()).read_line(&mut line);
-                let _ = stream.write_all(&encode(&Reply::Hello { version: PROTOCOL + 1 }).unwrap());
+                let _ = stream.write_all(
+                    &encode(&Reply::Hello {
+                        version: PROTOCOL + 1,
+                    })
+                    .unwrap(),
+                );
             }
         });
         let err = Client::connect(&path).err().expect("refused");
@@ -810,7 +901,10 @@ mod tests {
     fn a_lost_anchor_still_sees_its_child_end() {
         let (tx, rx) = mpsc::channel::<ExitStatus>();
         drop(tx);
-        let mut sleeper = std::process::Command::new("/bin/sleep").arg("0.3").spawn().unwrap();
+        let mut sleeper = std::process::Command::new("/bin/sleep")
+            .arg("0.3")
+            .spawn()
+            .unwrap();
         let mut child = AnchoredChild {
             pid: sleeper.id(),
             exit: Mutex::new(rx),
