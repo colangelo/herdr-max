@@ -35,6 +35,7 @@ const IDLE_EXIT: Duration = Duration::from_secs(10);
 /// the anchor is tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const ANCHOR_START_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_LINE: usize = 4 * 1024 * 1024;
 /// `sun_path` holds 104 bytes on macOS, the terminating NUL included.
 const MAX_SOCKET_PATH: usize = 103;
@@ -754,7 +755,9 @@ fn connect_or_start() -> io::Result<Arc<Client>> {
     let pid = super::spawn_disclaimed_daemon(&command)?;
     crate::platform::daemon_reaper::reap_when_it_exits(pid);
     tracing::info!(pid, exe = %exe.display(), "started the pane anchor");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // macOS scans an executable it has not run before, which can hold the
+    // anchor's start for seconds on a busy machine.
+    let deadline = Instant::now() + ANCHOR_START_TIMEOUT;
     loop {
         match Client::connect(&path) {
             Ok(client) => return Ok(client),
