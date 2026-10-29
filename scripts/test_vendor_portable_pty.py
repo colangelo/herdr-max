@@ -23,7 +23,7 @@ class VendorPortablePtyTests(unittest.TestCase):
         project_root = Path(__file__).resolve().parent.parent
         cargo_toml = (project_root / "Cargo.toml").read_text()
 
-        self.assertIn('portable-pty = "=0.9.0"', cargo_toml)
+        self.assertIn('portable-pty = { version = "=0.9.0", features = ["serde_support"] }', cargo_toml)
         self.assertIn("[patch.crates-io]", cargo_toml)
         self.assertIn('portable-pty = { path = "vendor/portable-pty" }', cargo_toml)
 

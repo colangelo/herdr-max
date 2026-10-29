@@ -1639,6 +1639,8 @@ dependencies = [
  "libc",
  "log",
  "nix 0.28.0",
+ "serde",
+ "serde_derive",
  "serial2",
  "sha2",
  "shell-words",

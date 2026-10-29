@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: herdr maintainers <maintainers@herdr.dev>
+Date: Thu, 29 Oct 2026 00:00:00 +0000
+Subject: [PATCH] build a slave pty from a received descriptor
+
+On macOS a long-lived pane anchor starts pane programs for the herdr server so
+their privacy answers outlive server upgrades. The server opens the pty and
+passes the slave descriptor to the anchor, which needs the library's own
+session, controlling-terminal and descriptor setup to start the program on it.
+
+Herdr issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/246
+Vendored base: portable-pty 0.9.0
+---
+diff --git a/vendor/portable-pty/src/unix.rs b/vendor/portable-pty/src/unix.rs
+index cc458ce9..6cedfda1 100644
+--- a/vendor/portable-pty/src/unix.rs
++++ b/vendor/portable-pty/src/unix.rs
+@@ -312,6 +312,15 @@ struct UnixSlavePty {
+     fd: PtyFd,
+ }
+ 
++/// The slave end of a pty from a descriptor received from another process, so a
++/// helper that did not open the pty can start a program on it.
++pub fn slave_from_fd(fd: std::os::fd::OwnedFd) -> Box<dyn SlavePty + Send> {
++    use std::os::fd::IntoRawFd;
++    Box::new(UnixSlavePty {
++        fd: PtyFd(unsafe { FileDescriptor::from_raw_fd(fd.into_raw_fd()) }),
++    })
++}
++
+ /// Helper function to set the close-on-exec flag for a raw descriptor
+ fn cloexec(fd: RawFd) -> Result<(), Error> {
+     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };

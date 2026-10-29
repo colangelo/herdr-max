@@ -174,3 +174,38 @@ cp -r vendor/portable-pty "$TMP/portable-pty"
 printf '\n[workspace]\n' >> "$TMP/portable-pty/Cargo.toml"
 cargo test --manifest-path "$TMP/portable-pty/Cargo.toml" windows_search_path_skips_directories
 ```
+
+## 0005 build a slave pty from a received descriptor
+
+status: active
+
+patch: `vendor/patches/portable-pty/0005-slave-pty-from-a-received-descriptor.patch`
+
+herdr issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/246 (fork)
+
+upstream discussion: none
+
+upstream pr: none
+
+vendored base: `portable-pty 0.9.0`
+
+local files:
+
+- `vendor/portable-pty/src/unix.rs`
+
+reason: on macOS a long-lived pane anchor starts pane programs for the herdr
+server, so their privacy (TCC) answers outlive server upgrades. The server opens
+the pty and passes the slave descriptor to the anchor over `SCM_RIGHTS`.
+`slave_from_fd` wraps that descriptor in the library's own slave pty, so the
+anchor's `spawn_command` uses the library's session, controlling-terminal, signal
+and descriptor setup instead of a copy of it. Herdr also enables the crate's
+`serde_support` feature to send the `CommandBuilder`.
+
+remove when: upstream `portable-pty` can build a slave pty from a descriptor, or
+Herdr drops the pane anchor.
+
+verification:
+
+```sh
+python3 -m unittest scripts.test_vendor_portable_pty
+```

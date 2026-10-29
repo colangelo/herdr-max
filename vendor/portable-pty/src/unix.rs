@@ -312,6 +312,15 @@ struct UnixSlavePty {
     fd: PtyFd,
 }
 
+/// The slave end of a pty from a descriptor received from another process, so a
+/// helper that did not open the pty can start a program on it.
+pub fn slave_from_fd(fd: std::os::fd::OwnedFd) -> Box<dyn SlavePty + Send> {
+    use std::os::fd::IntoRawFd;
+    Box::new(UnixSlavePty {
+        fd: PtyFd(unsafe { FileDescriptor::from_raw_fd(fd.into_raw_fd()) }),
+    })
+}
+
 /// Helper function to set the close-on-exec flag for a raw descriptor
 fn cloexec(fd: RawFd) -> Result<(), Error> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
