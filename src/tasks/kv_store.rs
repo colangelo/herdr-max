@@ -9,6 +9,8 @@
 use async_nats::jetstream::kv::{
     CreateErrorKind, Entry, Operation, Store as Bucket, UpdateErrorKind,
 };
+use async_nats::jetstream::message::StreamMessage;
+use async_nats::jetstream::stream::{DirectGetErrorKind, Stream};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use std::time::SystemTime;
@@ -128,13 +130,29 @@ impl KvStore {
 
     /// As [`Self::entry`], with the time the server took the revision.
     fn entry_at(&self, key: &str) -> StoreResult<Option<(Rev, Vec<u8>, SystemTime)>> {
-        let entry = self
+        let subject = format!("{}{key}", self.bucket.prefix);
+        let message = match self
             .runtime
-            .block_on(self.bucket.entry(key.to_owned()))
-            .map_err(unavailable)?;
-        Ok(entry.and_then(|entry| {
-            let (rev, value) = live(&entry)?;
-            Some((rev, value, entry.created.into()))
+            .block_on(self.bucket.stream.direct_get_last_for_subject(subject))
+        {
+            Ok(message) => message,
+            Err(err) if err.kind() == DirectGetErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(unavailable(err)),
+        };
+        if reflected(&message, &self.bucket.stream_name) {
+            note_reflected(&self.bucket.name, key);
+            return Ok(None);
+        }
+        let removed = message
+            .headers
+            .get(KV_OPERATION)
+            .is_some_and(|operation| matches!(operation.as_str(), "DEL" | "PURGE"));
+        Ok((!removed).then(|| {
+            (
+                Rev(message.sequence),
+                message.payload.to_vec(),
+                message.time.into(),
+            )
         }))
     }
 
@@ -170,6 +188,84 @@ fn update_error(kind: UpdateErrorKind, why: String) -> StoreError {
         UpdateErrorKind::WrongLastRevision | UpdateErrorKind::TimedOut | UpdateErrorKind::Other => {
             StoreError::Indeterminate(why)
         }
+    }
+}
+
+const KV_OPERATION: &str = "KV-Operation";
+
+/// Headers the server puts on its own answer to a get. A row stored with any
+/// of them is a server answer that a client with no write grant on the bucket
+/// had sent into it as a reply (ac/security#29): never act on it or show it.
+const REFLECTION_HEADERS: [&str; 6] = [
+    "nats-stream",
+    "nats-subject",
+    "nats-sequence",
+    "nats-time-stamp",
+    "nats-last-sequence",
+    "nats-num-pending",
+];
+
+/// Whether a direct-get answer for a row of `stream` carries a stored set of
+/// server headers. The server adds one `Nats-Stream`, `Nats-Subject`,
+/// `Nats-Sequence` and `Nats-Time-Stamp` to its answer and keeps the row's own
+/// headers, so a reflected row shows a name twice, and its stored
+/// `Nats-Stream` names the stream it was read from.
+fn reflected_in<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, stream: &str) -> bool {
+    let mut seen = [0usize; REFLECTION_HEADERS.len()];
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        let Some(index) = REFLECTION_HEADERS.iter().position(|known| *known == name) else {
+            continue;
+        };
+        seen[index] += 1;
+        let foreign_stream = name == "nats-stream" && value != stream;
+        // Only a batch get carries these; a single get never does.
+        let batch_only = name == "nats-last-sequence" || name == "nats-num-pending";
+        if seen[index] > 1 || foreign_stream || batch_only {
+            return true;
+        }
+    }
+    false
+}
+
+fn reflected(message: &StreamMessage, stream: &str) -> bool {
+    reflected_in(
+        message.headers.iter().flat_map(|(name, values)| {
+            values
+                .iter()
+                .map(move |value| (name.as_ref(), value.as_str()))
+        }),
+        stream,
+    )
+}
+
+/// Whether the row at `sequence` of `stream` is reflected. A failed lookup
+/// counts as genuine: the bus being slow is not something a reflector controls.
+async fn reflected_at(stream: &Stream, name: &str, sequence: u64) -> bool {
+    match stream.direct_get(sequence).await {
+        Ok(message) => reflected(&message, name),
+        Err(err) => {
+            tracing::debug!(%err, stream = name, sequence, "could not read a row's headers");
+            false
+        }
+    }
+}
+
+/// Logs a dropped reflected row once per bucket and key.
+fn note_reflected(bucket: &str, key: &str) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let entry = format!("{bucket}/{key}");
+    let mut seen = SEEN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.insert(entry) {
+        tracing::warn!(
+            bucket,
+            key,
+            "dropped a row stored with server headers: a reflected direct-get answer (ac/security#29)"
+        );
     }
 }
 
@@ -269,9 +365,18 @@ impl TaskStore for KvStore {
                 }
             })
             .map_err(unavailable)?;
+        let stream = self.bucket.stream.clone();
+        let stream_name = self.bucket.stream_name.clone();
+        let bucket_name = self.bucket.name.clone();
         self.runtime.spawn(async move {
             while let Some(item) = watch.next().await {
                 let Ok(entry) = item else { continue };
+                if entry.operation == Operation::Put
+                    && reflected_at(&stream, &stream_name, entry.revision).await
+                {
+                    note_reflected(&bucket_name, &entry.key);
+                    continue;
+                }
                 let event = WatchEvent {
                     key: StoreKey(entry.key.clone()),
                     rev: Rev(entry.revision),
@@ -296,11 +401,16 @@ impl TaskStore for KvStore {
         // then follows the changes: no scan, no key list, nothing that waits
         // for one answer per key. (No durable consumer; the server may be
         // configured to refuse one.)
-        let (empty, mut watch) = self.runtime.block_on(async {
+        let (empty, mut watch, stream, stream_name) = self.runtime.block_on(async {
             let bucket = context.get_key_value(&name).await.map_err(unavailable)?;
             let empty = bucket.status().await.map_err(unavailable)?.values() == 0;
             let watch = bucket.watch_with_history(">").await.map_err(unavailable)?;
-            Ok::<_, StoreError>((empty, watch))
+            Ok::<_, StoreError>((
+                empty,
+                watch,
+                bucket.stream.clone(),
+                bucket.stream_name.clone(),
+            ))
         })?;
         self.runtime.spawn(async move {
             // An empty bucket sends no entry to say the start is over.
@@ -334,13 +444,18 @@ impl TaskStore for KvStore {
                     }
                 };
                 let current = entry.seen_current;
+                let reflected = entry.operation == Operation::Put
+                    && reflected_at(&stream, &stream_name, entry.revision).await;
+                if reflected {
+                    note_reflected(&name, &entry.key);
+                }
                 let event = WatchEvent {
                     key: StoreKey(entry.key.clone()),
                     rev: Rev(entry.revision),
                     value: live(&entry).map(|(_, value)| value),
                     at: Some(entry.created.into()),
                 };
-                if !sink(MirrorEvent::Entry(event)) {
+                if !reflected && !sink(MirrorEvent::Entry(event)) {
                     return;
                 }
                 if current && !told {
@@ -522,6 +637,130 @@ mod tests {
                 MirrorEvent::Lost(why) => panic!("the watch was lost: {why}"),
             }
         }
+    }
+
+    #[test]
+    fn server_headers_stored_on_a_row_mark_it_reflected() {
+        let answer = [
+            ("Nats-Stream", "KV_TASKS"),
+            ("Nats-Subject", "$KV.TASKS.task.m4m.a"),
+            ("Nats-Sequence", "7"),
+            ("Nats-Time-Stamp", "2026-10-29T14:03:07Z"),
+        ];
+        assert!(!reflected_in(answer, "KV_TASKS"), "a genuine row's answer");
+        let reflected = [
+            ("Nats-Stream", "KV_ASKS"),
+            ("Nats-Subject", "$KV.ASKS.r1"),
+            ("Nats-Stream", "KV_TASKS"),
+            ("Nats-Subject", "$KV.TASKS.task.m4m.a"),
+        ];
+        assert!(reflected_in(reflected, "KV_TASKS"));
+        assert!(reflected_in(
+            [("nats-sequence", "1"), ("NATS-SEQUENCE", "2")],
+            "KV_TASKS"
+        ));
+        assert!(reflected_in([("Nats-Stream", "KV_ASKS")], "KV_TASKS"));
+        assert!(reflected_in([("Nats-Num-Pending", "0")], "KV_TASKS"));
+        assert!(!reflected_in([("KV-Operation", "DEL")], "KV_TASKS"));
+    }
+
+    /// Sends a direct get of `source` with the reply subject `into`: the server
+    /// stores its answer, the source row with its headers, in `into`.
+    fn reflect(server: &Server, source: &str, into: &str) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            client
+                .publish_with_reply(source.to_owned(), into.to_owned(), Bytes::new())
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    fn put_raw(server: &Server, bucket: &str, key: &str, value: &str) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let client = async_nats::connect(&server.url).await.unwrap();
+            let kv = async_nats::jetstream::new(client)
+                .get_key_value(bucket)
+                .await
+                .unwrap();
+            kv.put(key, value.to_owned().into()).await.unwrap();
+        });
+    }
+
+    /// ac/security#29: a user with no grant on TASKS or ISSUES stores a row
+    /// there as the reply to a direct get of its own bucket. herdr never
+    /// reads such a row; a genuine row is the control.
+    #[test]
+    fn rows_reflected_into_tasks_and_issues_are_never_read() {
+        let Some(server) = Server::start(None) else {
+            return;
+        };
+        server.create_bucket(None);
+        fill_bucket(&server, "ASKS", &[("r1", "{\"planted\":true}")]);
+        fill_bucket(&server, "ISSUES", &[("i.genuine", "{\"issue\":1}")]);
+        put_raw(&server, "TASKS", "task.m4m.genuine", "{\"genuine\":true}");
+        reflect(
+            &server,
+            "$JS.API.DIRECT.GET.KV_ASKS.$KV.ASKS.r1",
+            "$KV.TASKS.task.m4m.evil",
+        );
+        reflect(
+            &server,
+            "$JS.API.DIRECT.GET.KV_ASKS.$KV.ASKS.r1",
+            "$KV.ISSUES.i.evil",
+        );
+
+        let mut store = KvStore::connect(&settings(&server.url)).unwrap();
+        assert!(store
+            .get(&StoreKey("task.m4m.genuine".into()))
+            .unwrap()
+            .is_some());
+        assert_eq!(store.get(&StoreKey("task.m4m.evil".into())).unwrap(), None);
+        let scanned: Vec<String> = store
+            .scan("task.")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.key.0)
+            .collect();
+        assert_eq!(scanned, ["task.m4m.genuine"]);
+
+        let (watch_tx, watched) = std::sync::mpsc::channel();
+        let watch_tx = std::sync::Mutex::new(watch_tx);
+        store
+            .watch(
+                "task.",
+                Box::new(move |event| watch_tx.lock().unwrap().send(event.key.0).is_ok()),
+            )
+            .unwrap();
+        reflect(
+            &server,
+            "$JS.API.DIRECT.GET.KV_ASKS.$KV.ASKS.r1",
+            "$KV.TASKS.task.m4m.evil2",
+        );
+        put_raw(&server, "TASKS", "task.m4m.later", "{\"genuine\":true}");
+        assert_eq!(
+            watched.recv_timeout(Duration::from_secs(10)).unwrap(),
+            "task.m4m.later",
+            "the reflected put is skipped, the genuine one arrives"
+        );
+
+        let (mirror_tx, mirrored) = std::sync::mpsc::channel();
+        let mirror_tx = std::sync::Mutex::new(mirror_tx);
+        store
+            .mirror(
+                Mirror::Issues,
+                Box::new(move |event| mirror_tx.lock().unwrap().send(event).is_ok()),
+            )
+            .unwrap();
+        let keys: Vec<String> = events_until_current(&mirrored)
+            .into_iter()
+            .map(|event| event.key.0)
+            .collect();
+        assert_eq!(keys, ["i.genuine"]);
     }
 
     #[test]
