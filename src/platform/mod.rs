@@ -523,6 +523,37 @@ pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::
     command.spawn().map(|child| child.id())
 }
 
+/// Starts a pane program through the macOS pane anchor, so its privacy answers
+/// outlive server upgrades (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/246).
+/// `None` means the caller spawns it itself.
+#[cfg(target_os = "macos")]
+pub(crate) fn pane_anchor_spawn(
+    command: &portable_pty::CommandBuilder,
+    tty: &std::path::Path,
+) -> Option<std::io::Result<Box<dyn portable_pty::Child + Send + Sync>>> {
+    macos::pane_anchor::spawn(command, tty)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn pane_anchor_spawn(
+    _command: &portable_pty::CommandBuilder,
+    _tty: &std::path::Path,
+) -> Option<std::io::Result<Box<dyn portable_pty::Child + Send + Sync>>> {
+    None
+}
+
+/// Runs the pane anchor when this process was started as one.
+#[cfg(target_os = "macos")]
+pub(crate) fn maybe_run_pane_anchor(args: &[String]) -> Option<std::io::Result<()>> {
+    (args.get(1).map(String::as_str) == Some(macos::pane_anchor::SUBCOMMAND))
+        .then(|| macos::pane_anchor::run(&args[2..]))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn maybe_run_pane_anchor(_args: &[String]) -> Option<std::io::Result<()>> {
+    None
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }

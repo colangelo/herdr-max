@@ -29,10 +29,17 @@ pub(crate) fn spawn_with_portable_pty(
         .ok_or_else(|| std::io::Error::other("pty master fd is unavailable"))?;
     let actor_fd = fd::duplicate_cloexec_fd(master_fd)?;
     let actor_fd = unsafe { OwnedFd::from_raw_fd(actor_fd) };
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let anchored = pair
+        .master
+        .tty_name()
+        .and_then(|tty| crate::platform::pane_anchor_spawn(&cmd, &tty));
+    let child = match anchored {
+        Some(spawned) => spawned?,
+        None => pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|err| std::io::Error::other(err.to_string()))?,
+    };
     drop(pair);
 
     Ok(SpawnedPty {
