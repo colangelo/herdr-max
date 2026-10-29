@@ -2208,3 +2208,115 @@ fn live_handoff_after_restored_failure_rolls_back_old_server() {
 fn live_handoff_commit_failure_gives_the_old_server_its_task_store_back() {
     live_handoff_failure_rolls_back_old_server("HERDR_TEST_HANDOFF_COMMIT_FAIL", "commit");
 }
+
+#[cfg(target_os = "macos")]
+fn responsible_for(pid: u32) -> i32 {
+    type ResponsibleFor = unsafe extern "C" fn(libc::pid_t) -> libc::pid_t;
+    let name = c"responsibility_get_pid_responsible_for_pid";
+    let address = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+    assert!(!address.is_null(), "responsibility lookup unavailable");
+    let lookup = unsafe { std::mem::transmute::<*mut libc::c_void, ResponsibleFor>(address) };
+    unsafe { lookup(pid as libc::pid_t) }
+}
+
+#[cfg(target_os = "macos")]
+fn ps_field(pid: u32, field: &str) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", field, "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A process's parent and the parent's command line.
+#[cfg(target_os = "macos")]
+fn parent_and_command(pid: u32) -> (u32, String) {
+    let parent = ps_field(pid, "ppid=").parse().unwrap_or(0);
+    (parent, ps_field(parent, "command="))
+}
+
+#[cfg(target_os = "macos")]
+fn pane_shell_pid(api_socket: &Path, pane_id: &str, marker: &Path) -> u32 {
+    let _ = fs::remove_file(marker);
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:pane:send",
+            "method": "pane.send_text",
+            "params": {"pane_id": pane_id, "text": format!("echo $$ > {}\r", marker.display())}
+        }),
+    ));
+    wait_for_pid_marker(marker, Duration::from_secs(15))
+}
+
+/// Fork issue 246: pane programs are started by the pane anchor, which macOS
+/// holds responsible for them, and which outlives a live handoff.
+#[cfg(target_os = "macos")]
+#[test]
+fn panes_are_anchored_to_one_process_across_a_live_handoff() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let marker = base.join("shell.pid");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket);
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned.child.process_id().expect("server pid");
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let first_pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let shell = pane_shell_pid(&api_socket, &first_pane, &marker);
+    let (anchor, command) = parent_and_command(shell);
+    assert!(command.contains("__pane-anchor"), "pane parent is {anchor} `{command}`, not the anchor");
+    assert_ne!(anchor, server_pid);
+    assert_eq!(responsible_for(shell), anchor as i32, "the anchor answers for the pane");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(30));
+    wait_for_api(&api_socket, Duration::from_secs(30));
+    assert_ne!(replacement_pid, server_pid);
+
+    assert_eq!(responsible_for(shell), anchor as i32, "the old pane keeps the anchor");
+    let split = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split",
+            "method": "pane.split",
+            "params": {"target_pane_id": first_pane, "direction": "right", "focus": false}
+        }),
+    );
+    let new_pane = split["result"]["pane"]["pane_id"].as_str().expect("split pane id").to_owned();
+    let new_shell = pane_shell_pid(&api_socket, &new_pane, &marker);
+    assert_eq!(parent_and_command(new_shell).0, anchor, "the replacement uses the same anchor");
+    assert_eq!(responsible_for(new_shell), anchor as i32);
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while unsafe { libc::kill(anchor as libc::pid_t, 0) } == 0 {
+        assert!(Instant::now() < deadline, "the anchor outlived its session");
+        thread::sleep(Duration::from_millis(200));
+    }
+    cleanup_test_base(&base);
+}
