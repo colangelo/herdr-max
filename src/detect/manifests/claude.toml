@@ -1,5 +1,5 @@
 id = "claude"
-version = "2026.10.17.1"
+version = "2026.10.30.1"
 min_engine_version = 4
 updated_at = "2026-10-17T00:00:00Z"
 aliases = ["claude-code"]
@@ -63,6 +63,16 @@ line_regex = [
   '^\s*/btw(?:\s|$)',
   '(?i)esc to close\s*$',
 ]
+
+# The detailed transcript (ctrl+o) hides a waiting permission prompt or
+# question, and a scrolled transcript can hide it far up; its footer still
+# says "dialog waiting" (fork issue 251).
+[[rules]]
+id = "transcript_viewer_dialog_waiting"
+state = "blocked"
+priority = 1001
+region = "bottom_non_empty_lines(3)"
+contains = ["showing detailed transcript", "dialog waiting"]
 
 [[rules]]
 id = "transcript_viewer"
