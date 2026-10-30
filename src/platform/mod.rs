@@ -911,6 +911,11 @@ pub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {
     None
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_env_var(_pid: u32, _name: &str) -> Option<String> {
+    None
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agent> {
     for record in environ.split(|&byte| byte == 0) {
@@ -920,6 +925,15 @@ pub(crate) fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agen
         return crate::detect::parse_agent_label(std::str::from_utf8(value).ok()?);
     }
     None
+}
+
+/// The value of `name` in a NUL-separated environment block.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn env_block_value(environ: &[u8], name: &str) -> Option<String> {
+    environ.split(|&byte| byte == 0).find_map(|record| {
+        let value = record.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
+        String::from_utf8(value.to_vec()).ok()
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1201,6 +1215,57 @@ mod tests {
             parse_agent_env_hint(b"HERDR_AGENT=codex"),
             Some(crate::detect::Agent::Codex)
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn env_block_value_reads_one_exact_name() {
+        let environ = b"CLAUDE_CONFIG_DIR_X=/no\0CLAUDE_CONFIG_DIR=/a/b\0TERM=xterm\0";
+        assert_eq!(
+            env_block_value(environ, "CLAUDE_CONFIG_DIR").as_deref(),
+            Some("/a/b")
+        );
+        assert_eq!(env_block_value(environ, "CLAUDE"), None);
+        assert_eq!(env_block_value(b"PATH=/bin", "CLAUDE_CONFIG_DIR"), None);
+    }
+
+    /// A process to read: this test binary, waiting. Not `/bin/sleep`: macOS
+    /// hides the environment of its own platform binaries.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "started by process_env_var_reads_a_running_process"]
+    fn process_env_var_target_waits() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    /// Fork issue 248: the value a running process was started with.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_env_var_reads_a_running_process() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::tests::process_env_var_target_waits",
+                "--ignored",
+            ])
+            .env("HERDR_TEST_248", "/tmp/claude-b")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut value = None;
+        for _ in 0..50 {
+            value = process_env_var(child.id(), "HERDR_TEST_248");
+            if value.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let missing = process_env_var(child.id(), "HERDR_TEST_248_NOT_SET");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(value.as_deref(), Some("/tmp/claude-b"));
+        assert_eq!(missing, None);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
