@@ -2279,7 +2279,33 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
         .unwrap()
         .to_string();
 
-    let shell = pane_shell_pid(&api_socket, &first_pane, &marker);
+    let mut anchored_pane = first_pane.clone();
+    let mut shell = pane_shell_pid(&api_socket, &first_pane, &marker);
+    // macOS checks an executable on its first run, and a fresh debug build in
+    // a loaded full check can outlast the anchor's start window: that pane is
+    // spawned by the server, as designed. The next pane must be anchored.
+    if !parent_and_command(shell).1.contains("__pane-anchor") {
+        eprintln!("the first pane fell back to the server (cold anchor start)");
+        let anchor_socket = runtime_dir.join("herdr.sock.pane-anchor");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !anchor_socket.exists() {
+            assert!(Instant::now() < deadline, "the pane anchor never listened");
+            thread::sleep(Duration::from_millis(50));
+        }
+        let split = request(
+            &api_socket,
+            serde_json::json!({
+                "id": "test:pane:split:retry",
+                "method": "pane.split",
+                "params": {"target_pane_id": first_pane, "direction": "down", "focus": false}
+            }),
+        );
+        anchored_pane = split["result"]["pane"]["pane_id"]
+            .as_str()
+            .expect("split pane id")
+            .to_owned();
+        shell = pane_shell_pid(&api_socket, &anchored_pane, &marker);
+    }
     let (anchor, command) = parent_and_command(shell);
     assert!(
         command.contains("__pane-anchor"),
@@ -2311,7 +2337,7 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
         serde_json::json!({
             "id": "test:pane:split",
             "method": "pane.split",
-            "params": {"target_pane_id": first_pane, "direction": "right", "focus": false}
+            "params": {"target_pane_id": anchored_pane, "direction": "right", "focus": false}
         }),
     );
     let new_pane = split["result"]["pane"]["pane_id"]
