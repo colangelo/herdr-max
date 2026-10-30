@@ -149,7 +149,9 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let socket_path = runtime_dir.join("herdr.sock");
-    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "3.2");
+    // The shell stays busy until the test ends the sleep, so no machine speed
+    // lets it free itself inside the CLI's retry window.
+    let (bin, delayed_shell, invocations) = write_delayed_shell_and_fake_pi(&base, "317");
     let config = format!(
         "onboarding = false\n[terminal]\ndefault_shell = {:?}\nshell_mode = \"non_login\"\n",
         delayed_shell.to_str().unwrap()
@@ -168,14 +170,23 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     );
     let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
 
+    let mut sleep_pid = None;
     assert!(wait_until(
-        Duration::from_secs(2),
+        Duration::from_secs(10),
         Duration::from_millis(20),
         || {
-            String::from_utf8_lossy(
-                &run_cli(&socket_path, &["pane", "process-info", "--pane", pane_id]).stdout,
-            )
-            .contains(" 3.2")
+            let info = run_cli_json(&socket_path, &["pane", "process-info", "--pane", pane_id]);
+            sleep_pid = info["result"]["process_info"]["foreground_processes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|process| {
+                    process["argv"]
+                        .as_array()
+                        .is_some_and(|argv| argv.iter().any(|arg| arg == "317"))
+                })
+                .and_then(|process| process["pid"].as_u64());
+            sleep_pid.is_some()
         },
     ));
     let started_at = Instant::now();
@@ -197,8 +208,15 @@ fn agent_start_stops_retrying_when_the_pane_shell_stays_busy() {
     let error: serde_json::Value = serde_json::from_slice(&unavailable.stderr).unwrap();
     assert_eq!(error["error"]["code"], "agent_pane_busy");
     assert!(started_at.elapsed() >= Duration::from_secs(2));
-    assert!(started_at.elapsed() < Duration::from_secs(4));
+    // Below the 8 s --timeout: the retry stopped, it did not time out.
+    assert!(started_at.elapsed() < Duration::from_secs(6));
     assert!(!invocations.exists());
+
+    let killed = std::process::Command::new("kill")
+        .arg(sleep_pid.unwrap().to_string())
+        .status()
+        .unwrap();
+    assert!(killed.success());
 
     let retried = run_cli_json(
         &socket_path,
