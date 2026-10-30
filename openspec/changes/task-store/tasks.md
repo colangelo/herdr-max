@@ -56,8 +56,9 @@
   959 equal, 7 changed on the forge after the snapshot (stale, expected), 0 mismatches;
   41 of 41 projects synced, the sync rows add up to 964 and match each project's rows.
   It found two bugs, fixed: a comma separated `NATS_URL` was one bad address, and the
-  sync record is flat with status `failing`. The GitLab half (`uzi-sandbox`) repeats the
-  run when worklink mirrors it.
+  sync record is flat with status `failing`. GitLab half done 2026-10-30 (`uzi-sandbox`,
+  group 146, 4 projects, `gitlab-121`): panel 1 row, forge 1 issue, equal, 0 mismatches,
+  4 of 4 sync rows ok; the script takes `gitea` or `gitlab`.
 - [x] 2.17 Render scaling: `just bench-render-scale` with 1 and 15 panes, delta reported
 - [x] 2.18 Panel data the client lacked: `issue.list {pane, closed_since}` (the server
   reads the pane's git remote off the app loop, `internal` then `origin`, a worktree
