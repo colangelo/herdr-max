@@ -853,13 +853,40 @@ fn link_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
     if std::fs::metadata(&link).is_ok_and(|meta| meta.ino() == inode || meta.len() == size) {
         return Ok(link);
     }
-    let staged = dir.join(".staged");
-    let _ = std::fs::remove_file(&staged);
-    if std::fs::hard_link(&exe, &staged).is_err() {
-        std::fs::copy(&exe, &staged)?;
+    // A stage of this call alone: servers of other sessions link into the same
+    // folder at the same moment, and a shared name let one of them copy over a
+    // stage that was the executable itself, emptying it (fork issue 252).
+    static STAGE: AtomicU64 = AtomicU64::new(0);
+    let staged = dir.join(format!(
+        ".staged-{}-{}",
+        std::process::id(),
+        STAGE.fetch_add(1, Ordering::Relaxed)
+    ));
+    match std::fs::hard_link(&exe, &staged) {
+        Ok(()) => {}
+        Err(err) if err.raw_os_error() == Some(libc::EXDEV) => copy_into_new_file(&exe, &staged)?,
+        Err(err) => return Err(err),
     }
-    std::fs::rename(&staged, &link)?;
+    let renamed = std::fs::rename(&staged, &link);
+    // A rename onto a link of the same file does nothing and keeps the stage.
+    let _ = std::fs::remove_file(&staged);
+    renamed?;
     Ok(link)
+}
+
+/// Copies `from` into a file `to` that this call creates, so no existing file,
+/// and never the executable through another of its names, is opened for
+/// writing.
+fn copy_into_new_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut source = std::fs::File::open(from)?;
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o755)
+        .open(to)?;
+    io::copy(&mut source, &mut target)?;
+    Ok(())
 }
 
 /// Removes link directories no running anchor uses, never `keep`.
@@ -1066,6 +1093,45 @@ mod tests {
         assert_eq!(link.file_name().unwrap(), "herdr-beta");
         assert!(meta.file_type().is_file(), "linked a symlink: {link:?}");
         assert_eq!(meta.ino(), real.ino());
+    }
+
+    /// Fork issue 252: servers that link the anchor at the same moment must
+    /// never write into the executable they link (it was truncated to 0 bytes).
+    #[test]
+    fn linking_at_the_same_moment_never_changes_the_executable() {
+        let root = std::env::temp_dir().join(format!("herdr-anchor-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("herdr");
+        let body = vec![7u8; 64 * 1024];
+        std::fs::write(&exe, &body).unwrap();
+        for round in 0..100 {
+            let links = root.join(format!("pane-anchor-{round}"));
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let (exe, links) = (exe.clone(), links.clone());
+                    std::thread::spawn(move || link_executable(&exe, &links))
+                })
+                .collect();
+            for thread in threads {
+                let _ = thread.join().unwrap();
+            }
+            let now = std::fs::metadata(&exe).unwrap().len();
+            assert_eq!(
+                now,
+                body.len() as u64,
+                "round {round} changed the executable"
+            );
+            let link = links
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .map(|dir| dir.path().join("herdr"))
+                .next()
+                .unwrap();
+            assert_eq!(std::fs::read(&link).unwrap(), body, "round {round}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
