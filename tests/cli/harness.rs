@@ -297,7 +297,8 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_ENV");
+        .env_remove("HERDR_ENV")
+        .env(crate::support::PANE_ANCHOR_ENV, "off");
     for (key, value) in envs {
         command.env(key, value);
     }
@@ -306,7 +307,7 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
     } else {
         command.env_remove("HERDR_SOCKET_PATH");
     }
-    command.output().unwrap()
+    output_naming_signal(&mut command, args)
 }
 
 pub(super) fn run_named_cli_json(
@@ -413,17 +414,28 @@ pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output
     clear_caller_ids(&mut command);
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
-    let output = command.output().unwrap();
-    report_signal(args, &output);
-    output
+    output_naming_signal(&mut command, args)
 }
 
-/// Names the signal that ended a CLI call, which `status.code()` hides.
-fn report_signal(args: &[&str], output: &std::process::Output) {
+/// Runs a CLI call like `Command::output` and names the signal that ended it,
+/// which `status.code()` hides, with its pid to find it in the system log.
+fn output_naming_signal(command: &mut Command, args: &[&str]) -> std::process::Output {
     use std::os::unix::process::ExitStatusExt;
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let output = child.wait_with_output().unwrap();
     if let Some(signal) = output.status.signal() {
-        eprintln!("herdr {} ended by signal {signal}", args.join(" "));
+        eprintln!(
+            "herdr {} (pid {pid}) ended by signal {signal}",
+            args.join(" ")
+        );
     }
+    output
 }
 
 pub(super) fn run_cli_in_dir(
@@ -437,9 +449,7 @@ pub(super) fn run_cli_in_dir(
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
-    let output = command.output().unwrap();
-    report_signal(args, &output);
-    output
+    output_naming_signal(&mut command, args)
 }
 
 pub(super) fn pane_topology_snapshot(list_response: &serde_json::Value) -> Vec<serde_json::Value> {
