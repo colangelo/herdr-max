@@ -2567,11 +2567,10 @@ impl TerminalState {
                 // No hook report: the transcript shows the model, effort and
                 // mode it runs in now (fork issue 123).
                 if plan.agent == "claude" {
-                    let since = self
-                        .agent_launch_for_snapshot()
-                        .filter(|launch| launch.agent == "claude")
-                        .and_then(|launch| launch.started_at_ms);
-                    let transcript = crate::agent_resume::claude_transcript_resume(&value, since);
+                    let transcript = crate::agent_resume::claude_transcript_resume(
+                        &value,
+                        self.agent_launch_for_snapshot(),
+                    );
                     plan.with_claude_transcript(transcript)
                 } else {
                     plan
@@ -7365,6 +7364,7 @@ mod tests {
             agent: "codex".into(),
             flags: ["-s", "read-only"].map(String::from).to_vec(),
             started_at_ms: None,
+            env: Vec::new(),
         };
         terminal.set_persisted_agent_session(session.clone());
         terminal.restore_agent_launch(launch.clone());
@@ -7379,6 +7379,7 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
             started_at_ms: Some(1),
+            env: Vec::new(),
         });
         let revision = terminal.revision;
 

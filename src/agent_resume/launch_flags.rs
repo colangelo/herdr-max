@@ -20,6 +20,9 @@ pub struct AgentLaunchArgv {
     /// When the process started, in unix ms: transcript records older than
     /// this belong to an earlier run of the session.
     pub started_at_ms: Option<i64>,
+    /// The process's values of its agent's carried environment variables
+    /// (`carried_env_names`).
+    pub env: Vec<(String, String)>,
 }
 
 /// The carried launch flags of the agent that runs in a pane now.
@@ -29,6 +32,9 @@ pub struct AgentLaunchFlags {
     pub flags: Vec<String>,
     /// When the agent process started, in unix ms (see `AgentLaunchArgv`).
     pub started_at_ms: Option<i64>,
+    /// `NAME=value` for each carried environment variable the agent ran with
+    /// a value other than the server's (`carried_launch_env`).
+    pub env: Vec<String>,
 }
 
 impl AgentLaunchFlags {
@@ -37,7 +43,20 @@ impl AgentLaunchFlags {
             agent: agent.to_string(),
             flags: carried_launch_flags(agent, &launch.argv, launch.cwd.as_deref()),
             started_at_ms: launch.started_at_ms,
+            env: carried_launch_env(agent, &launch.env, |name| std::env::var(name).ok()),
         }
+    }
+
+    /// The Claude config directory the agent ran with, when it was not the
+    /// server's.
+    pub fn claude_config_dir(&self) -> Option<&str> {
+        (self.agent == "claude")
+            .then(|| {
+                self.env
+                    .iter()
+                    .find_map(|word| word.strip_prefix("CLAUDE_CONFIG_DIR="))
+            })
+            .flatten()
     }
 }
 
@@ -148,6 +167,46 @@ fn carry_list(agent: &str) -> &'static [CarriedFlag] {
         "codex" => CODEX,
         _ => &[],
     }
+}
+
+/// Environment variables that choose where an agent keeps its sessions: a
+/// resume typed into a shell without them looks in the wrong place and finds
+/// no session (fork issue 248).
+pub fn carried_env_names(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &["CLAUDE_CONFIG_DIR"],
+        _ => &[],
+    }
+}
+
+/// `NAME=value` for each of `agent`'s carried variables that `env` sets to a
+/// value restore can type and that differs from `server_value`: a pane that
+/// only inherited the server's value needs nothing added.
+pub fn carried_launch_env(
+    agent: &str,
+    env: &[(String, String)],
+    server_value: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    carried_env_names(agent)
+        .iter()
+        .filter_map(|name| {
+            let (_, value) = env.iter().find(|(key, _)| key == name)?;
+            (carryable_value(value) && server_value(name).as_deref() != Some(value.as_str()))
+                .then(|| format!("{name}={value}"))
+        })
+        .collect()
+}
+
+/// `argv` run through `env` with the recorded variables set; unchanged when
+/// there are none.
+pub fn with_launch_env(argv: Vec<String>, env: &[String]) -> Vec<String> {
+    if env.is_empty() {
+        return argv;
+    }
+    std::iter::once("env".to_string())
+        .chain(env.iter().cloned())
+        .chain(argv)
+        .collect()
 }
 
 /// How a flag is spelled on the command line: `--name`, `--name=value`, and
@@ -414,6 +473,7 @@ mod tests {
             agent: "claude".into(),
             flags: words(&["--settings", &gone.display().to_string(), "--model", "opus"]),
             started_at_ms: None,
+            env: Vec::new(),
         };
 
         let plan = plan.with_launch_flags(Some(&launch));
@@ -604,6 +664,51 @@ mod tests {
                 "-m",
                 "gpt-6-astra",
                 "--dangerously-bypass-approvals-and-sandbox"
+            ])
+        );
+    }
+
+    /// Fork issue 248: a Claude started with its own `CLAUDE_CONFIG_DIR` is
+    /// resumed with it, so it finds its session; one that only inherited the
+    /// server's value gets nothing added.
+    #[test]
+    fn a_claude_on_its_own_config_dir_resumes_through_env() {
+        let server = |_: &str| Some("/home/u/.claude".to_string());
+        let env = |value: &str| vec![("CLAUDE_CONFIG_DIR".to_string(), value.to_string())];
+
+        let own = carried_launch_env("claude", &env("/home/u/.claude-b"), server);
+        assert_eq!(own, ["CLAUDE_CONFIG_DIR=/home/u/.claude-b"]);
+        assert!(carried_launch_env("claude", &env("/home/u/.claude"), server).is_empty());
+        assert!(carried_launch_env("claude", &env("/a'b"), server).is_empty());
+        assert!(carried_launch_env("codex", &env("/home/u/.claude-b"), server).is_empty());
+        assert_eq!(
+            carried_launch_env("claude", &env("/home/u/.claude-b"), |_| None),
+            ["CLAUDE_CONFIG_DIR=/home/u/.claude-b"]
+        );
+
+        let launch = AgentLaunchFlags {
+            agent: "claude".into(),
+            flags: words(&["--model", "opus"]),
+            started_at_ms: None,
+            env: own,
+        };
+        assert_eq!(launch.claude_config_dir(), Some("/home/u/.claude-b"));
+        let plan = crate::agent_resume::AgentResumePlan {
+            agent: "claude".into(),
+            argv: words(&["claude", "--resume", "s1"]),
+            dedupe_key: "k".into(),
+        }
+        .with_launch_flags(Some(&launch));
+        assert_eq!(
+            plan.argv,
+            words(&[
+                "env",
+                "CLAUDE_CONFIG_DIR=/home/u/.claude-b",
+                "claude",
+                "--resume",
+                "s1",
+                "--model",
+                "opus"
             ])
         );
     }

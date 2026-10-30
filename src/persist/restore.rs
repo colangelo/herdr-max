@@ -175,6 +175,7 @@ fn saved_agent_launch(
             agent: launch.agent.clone(),
             flags: launch.flags.clone(),
             started_at_ms: launch.started_at_ms,
+            env: launch.env.clone(),
         })
 }
 
@@ -1074,6 +1075,7 @@ fn pane_restore_startup<'a>(
         agent: launch.agent.clone(),
         flags: launch.flags.clone(),
         started_at_ms: launch.started_at_ms,
+        env: launch.env.clone(),
     });
     let restore_plan = if !agent_restore.enabled {
         None
@@ -1148,10 +1150,7 @@ fn with_session_transcript(
     }
     // Only what the process that ran at shutdown wrote: an older record is
     // an earlier run's, maybe in another mode.
-    let since = launch
-        .filter(|launch| launch.agent == "claude")
-        .and_then(|launch| launch.started_at_ms);
-    let transcript = crate::agent_resume::claude_transcript_resume(&session.value, since);
+    let transcript = crate::agent_resume::claude_transcript_resume(&session.value, launch);
     plan.with_claude_transcript(transcript)
 }
 
@@ -2069,6 +2068,7 @@ mod tests {
                     agent: agent.to_string(),
                     flags: flags.iter().map(|flag| flag.to_string()).collect(),
                     started_at_ms: None,
+                    env: Vec::new(),
                 },
             );
         let mut resumed = HashSet::new();
@@ -2462,6 +2462,7 @@ mod tests {
                     agent: agent.into(),
                     flags: vec!["--model".into(), flag.into()],
                     started_at_ms: Some(started_at_ms),
+                    env: Vec::new(),
                 }
             };
             use crate::terminal::todo::TodoPriority::{High, Low};

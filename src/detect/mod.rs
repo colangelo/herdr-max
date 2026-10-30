@@ -366,10 +366,19 @@ pub fn agent_launch(pane_pid: u32, agent: Agent) -> Option<crate::agent_resume::
             wrapped_shell_job(&job, crate::platform::nested_foreground_job_with_owner)?;
         find(&nested)
     })?;
+    let label = agent_label(agent);
+    let env = crate::agent_resume::carried_env_names(label)
+        .iter()
+        .filter_map(|name| {
+            let value = crate::platform::process_env_var(process.pid, name)?;
+            Some((name.to_string(), value))
+        })
+        .collect();
     Some(crate::agent_resume::AgentLaunchArgv {
         argv: process.argv?,
         cwd: crate::platform::process_cwd(process.pid),
         started_at_ms: crate::platform::process_started_at_ms(process.pid),
+        env,
     })
 }
 

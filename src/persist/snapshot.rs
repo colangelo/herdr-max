@@ -201,6 +201,9 @@ pub struct PaneAgentLaunchSnapshot {
     pub flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<i64>,
+    /// `NAME=value` of carried environment variables (fork issue 248).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,6 +520,7 @@ fn capture_tab(
                 agent: record.agent.clone(),
                 flags: record.flags.clone(),
                 started_at_ms: record.started_at_ms,
+                env: record.env.clone(),
             });
         panes.insert(
             id.raw(),
@@ -1641,6 +1645,32 @@ mod tests {
         assert_eq!(resume.argv, vec!["prime-agent", "--resume", "a"]);
     }
 
+    /// Fork issue 248: the carried environment is saved, and a file written
+    /// before it existed still loads.
+    #[test]
+    fn agent_launch_env_round_trips_and_older_files_load() {
+        let launch = PaneAgentLaunchSnapshot {
+            agent: "claude".into(),
+            flags: Vec::new(),
+            started_at_ms: None,
+            env: vec!["CLAUDE_CONFIG_DIR=/u/.claude-b".into()],
+        };
+        let json = serde_json::to_value(&launch).unwrap();
+        assert_eq!(json["env"][0], "CLAUDE_CONFIG_DIR=/u/.claude-b");
+        assert_eq!(
+            serde_json::from_value::<PaneAgentLaunchSnapshot>(json).unwrap(),
+            launch
+        );
+        let older: PaneAgentLaunchSnapshot =
+            serde_json::from_value(serde_json::json!({"agent": "claude", "flags": []})).unwrap();
+        assert!(older.env.is_empty());
+        let none = PaneAgentLaunchSnapshot {
+            env: Vec::new(),
+            ..launch
+        };
+        assert!(serde_json::to_value(none).unwrap().get("env").is_none());
+    }
+
     #[test]
     fn capture_contract_includes_agent_launch_flags() {
         let mut state = state_with_workspaces(&["one"]);
@@ -1660,6 +1690,7 @@ mod tests {
                     .to_vec(),
                 cwd: None,
                 started_at_ms: None,
+                env: Vec::new(),
             }),
         );
 
@@ -1672,6 +1703,7 @@ mod tests {
                 agent: "claude".into(),
                 flags: vec!["--settings".into(), "/u/gpt.json".into()],
                 started_at_ms: None,
+                env: Vec::new(),
             })
         );
         let json = serde_json::to_value(pane).unwrap();

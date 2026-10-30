@@ -503,6 +503,7 @@ mod tests {
                 agent: "codex".into(),
                 flags: flags.iter().map(|flag| flag.to_string()).collect(),
                 started_at_ms: None,
+                env: Vec::new(),
             });
             let plan = terminal.restore_plan_preview().unwrap();
             let typed = super::super::agent_resume::typed_resume_argv(&plan, &on, cwd, None);

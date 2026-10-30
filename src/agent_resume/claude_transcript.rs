@@ -183,13 +183,23 @@ fn claude_config_dir() -> Option<PathBuf> {
 /// The resume command of a Claude session with no hook report, from its
 /// transcript. `None` when the transcript cannot be found.
 ///
-/// `since_ms` is when the agent process that ran in the pane started (see
-/// `transcript_facts`); `None` counts every record.
-pub fn claude_transcript_resume(session_id: &str, since_ms: Option<i64>) -> Option<Vec<String>> {
-    let path = find_transcript(&claude_config_dir()?, session_id)?;
+/// `launch` is the record of the agent process that ran in the pane: only
+/// records written since it started count (see `transcript_facts`), and its
+/// own config directory, when it ran with one, holds the transcript (fork
+/// issue 248).
+pub fn claude_transcript_resume(
+    session_id: &str,
+    launch: Option<&super::AgentLaunchFlags>,
+) -> Option<Vec<String>> {
+    let launch = launch.filter(|launch| launch.agent == "claude");
+    let config_dir = match launch.and_then(super::AgentLaunchFlags::claude_config_dir) {
+        Some(dir) => PathBuf::from(dir),
+        None => claude_config_dir()?,
+    };
+    let path = find_transcript(&config_dir, session_id)?;
     Some(resume_argv_from_facts(
         session_id,
-        &transcript_facts(&path, since_ms),
+        &transcript_facts(&path, launch.and_then(|launch| launch.started_at_ms)),
     ))
 }
 
@@ -229,6 +239,34 @@ mod tests {
 
     fn assistant(model: &str, effort: &str) -> serde_json::Value {
         serde_json::json!({"type": "assistant", "effort": effort, "message": {"model": model}})
+    }
+
+    /// Fork issue 248: a pane whose Claude ran with its own config directory
+    /// has its transcript there, not in the server's.
+    #[test]
+    fn the_transcript_is_read_from_the_config_dir_the_agent_ran_with() {
+        let own = Scratch::new("own-config-dir");
+        let empty = Scratch::new("other-config-dir");
+        write_lines(
+            &own.0.join("projects").join("-repo").join("s248.jsonl"),
+            &[user("plan"), assistant("claude-sonnet-5-5", "low")],
+        );
+        let launch = |dir: &Path| super::super::AgentLaunchFlags {
+            agent: "claude".into(),
+            flags: Vec::new(),
+            started_at_ms: None,
+            env: vec![format!("CLAUDE_CONFIG_DIR={}", dir.display())],
+        };
+
+        let argv = claude_transcript_resume("s248", Some(&launch(&own.0))).unwrap();
+        assert_eq!(&argv[..3], ["claude", "--resume", "s248"]);
+        assert!(argv
+            .windows(2)
+            .any(|pair| pair == ["--model", "claude-sonnet-5-5"]));
+        assert_eq!(
+            claude_transcript_resume("s248", Some(&launch(&empty.0))),
+            None
+        );
     }
 
     #[test]

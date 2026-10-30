@@ -3620,6 +3620,7 @@ mod tests {
                 argv: argv.iter().map(|word| word.to_string()).collect(),
                 cwd: None,
                 started_at_ms: None,
+                env: Vec::new(),
             }),
         };
         let flags = |state: &AppState| {

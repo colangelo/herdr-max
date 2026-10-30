@@ -9,7 +9,8 @@ mod launch_flags;
 pub use claude_transcript::claude_transcript_resume;
 pub use footer::argv_with_live_footer;
 pub use launch_flags::{
-    compose_resume_argv, without_missing_settings, AgentLaunchArgv, AgentLaunchFlags,
+    carried_env_names, compose_resume_argv, with_launch_env, without_missing_settings,
+    AgentLaunchArgv, AgentLaunchFlags,
 };
 
 const MAX_SESSION_ID_LEN: usize = 512;
@@ -126,7 +127,10 @@ impl AgentResumePlan {
             return self;
         };
         let flags = without_missing_settings(&self.agent, &launch.flags, Path::exists);
-        let argv = compose_resume_argv(&self.agent, &self.argv, &flags);
+        let argv = with_launch_env(
+            compose_resume_argv(&self.agent, &self.argv, &flags),
+            &launch.env,
+        );
         if validate_resume_argv(&argv).is_ok() {
             self.argv = argv;
         }
@@ -441,6 +445,7 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
             started_at_ms: None,
+            env: Vec::new(),
         };
 
         let plan = plan
