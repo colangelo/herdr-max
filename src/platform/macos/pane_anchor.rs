@@ -32,7 +32,7 @@ const SOCKET_SUFFIX: &str = ".pane-anchor";
 /// The anchor ends after this long with no child and no server.
 const IDLE_EXIT: Duration = Duration::from_secs(10);
 /// After a failed start, panes are spawned directly for this long before
-/// the anchor is tried again.
+/// another anchor is started; one that is listening is used at once.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const ANCHOR_START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -710,15 +710,21 @@ fn client() -> Option<Arc<Client>> {
         }
         connection.client = None;
     }
-    if connection.retry_at.is_some_and(|at| Instant::now() < at) {
-        return None;
-    }
-    match connect_or_start() {
+    let waiting = connection.retry_at.is_some_and(|at| Instant::now() < at);
+    let starting = if waiting {
+        // An anchor whose start outlasted the window may be listening by now:
+        // use it, but start no other before the retry time.
+        Client::connect(&socket_path())
+    } else {
+        connect_or_start()
+    };
+    match starting {
         Ok(client) => {
             connection.client = Some(client.clone());
             connection.retry_at = None;
             Some(client)
         }
+        Err(_) if waiting => None,
         Err(err) => {
             tracing::warn!(%err, "no pane anchor; panes are spawned by the server");
             connection.retry_at = Some(Instant::now() + RETRY_AFTER);
