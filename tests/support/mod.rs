@@ -206,6 +206,23 @@ pub fn cleanup_test_base(base: &Path) {
 /// correct run never approaches this bound, so only a real hang trips it.
 pub const APPEARS_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The least a test waits for something the server must answer or send.
+///
+/// A reply can legitimately take long: the first pane of a fresh server waits
+/// on the app loop for the macOS pane anchor to listen, up to the 20 s of
+/// `ANCHOR_START_TIMEOUT` (src/platform/macos/pane_anchor.rs), and macOS scans
+/// an executable it has not run before, which on a loaded machine took seconds
+/// (fork issue 249: 2 to 5 s waits timed out in `just check`). The wait ends the
+/// moment the thing arrives, so a wrong reply still fails at once; only a reply
+/// that never comes costs the whole wait.
+pub const REPLY_PATIENCE: Duration = Duration::from_secs(30);
+
+/// `wanted`, but never less than `REPLY_PATIENCE`: for a wait that must succeed.
+/// Never use it for a wait that expects nothing to arrive.
+pub fn must_arrive_within(wanted: Duration) -> Duration {
+    wanted.max(REPLY_PATIENCE)
+}
+
 pub fn wait_for_socket(path: &Path) {
     let deadline = Instant::now() + APPEARS_TIMEOUT;
     while Instant::now() < deadline {
@@ -582,7 +599,7 @@ pub fn wait_for_client_shell_bootstrap(
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + must_arrive_within(timeout);
     let mut saw_snapshot = false;
     while Instant::now() < deadline {
         match read_server_message(stream) {

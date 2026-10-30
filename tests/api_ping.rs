@@ -177,9 +177,15 @@ impl JsonLineReader {
         self.stream.flush().unwrap();
     }
 
+    /// A line that must arrive. `timeout` is the wait the test expects; the
+    /// server is given at least `support::REPLY_PATIENCE`, because it may be
+    /// busy starting its pane anchor or starved by a loaded machine. The line
+    /// is returned when it comes, so a wrong reply fails the test's own assert
+    /// at once. For a line that must NOT arrive use `try_read_json_line`.
     fn read_json_line(&mut self, timeout: Duration) -> serde_json::Value {
-        self.try_read_json_line(timeout)
-            .unwrap_or_else(|| panic!("timed out waiting for json line"))
+        let wait = support::must_arrive_within(timeout);
+        self.try_read_json_line(wait)
+            .unwrap_or_else(|| panic!("no json line within {wait:?}"))
     }
 
     fn try_read_json_line(&mut self, timeout: Duration) -> Option<serde_json::Value> {
@@ -214,7 +220,7 @@ impl JsonLineReader {
 fn send_request(socket_path: &Path, json: &str) -> serde_json::Value {
     let mut reader = JsonLineReader::connect(socket_path);
     reader.send_line(json);
-    reader.read_json_line(Duration::from_secs(5))
+    reader.read_json_line(support::REPLY_PATIENCE)
 }
 
 fn open_subscription(socket_path: &Path, json: &str) -> JsonLineReader {
@@ -2650,4 +2656,46 @@ fn metadata_status_subscription_filter_and_ttl_expiry_are_observable() {
     assert!(expiry_event["data"]["title"].is_null());
 
     cleanup_spawned_herdr(child, base);
+}
+
+#[test]
+fn a_slow_reply_is_read_and_a_wrong_one_is_returned_at_once() {
+    // A server that answers after 1.5 s: far over the 100 ms the caller names,
+    // well under the patience, so it must be read and not given up on.
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let mut reader = JsonLineReader {
+        stream: client,
+        buf: Vec::new(),
+    };
+    let slow = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1500));
+        server
+            .write_all(b"{\"id\":\"slow\",\"result\":{}}\n")
+            .unwrap();
+        server
+    });
+    let started = Instant::now();
+    let reply = reader.read_json_line(Duration::from_millis(100));
+    assert_eq!(reply["id"], "slow");
+    assert!(started.elapsed() >= Duration::from_millis(1400));
+    let mut server = slow.join().unwrap();
+
+    // A wrong reply comes back as soon as it is sent, so the test's own assert
+    // on it fails fast instead of waiting out the patience.
+    server.write_all(b"{\"id\":\"wrong\"}\n").unwrap();
+    let started = Instant::now();
+    let reply = reader.read_json_line(Duration::from_secs(2));
+    assert_eq!(reply["id"], "wrong");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // What must not arrive is still checked with the caller's short wait.
+    let started = Instant::now();
+    assert!(reader
+        .try_read_json_line(Duration::from_millis(200))
+        .is_none());
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
