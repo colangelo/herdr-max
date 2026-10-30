@@ -317,9 +317,9 @@ pub(super) fn run_named_cli_json(
     let output = run_named_cli(config_home, runtime_dir, args);
     assert!(
         output.status.success(),
-        "command failed: herdr {}\nstatus: {:?}\nstderr: {}\nstdout: {}",
+        "command failed: herdr {}\nstatus: {}\nstderr: {}\nstdout: {}",
         args.join(" "),
-        output.status.code(),
+        output.status,
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
@@ -413,7 +413,17 @@ pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output
     clear_caller_ids(&mut command);
     command.args(args);
     command.env("HERDR_SOCKET_PATH", socket_path);
-    command.output().unwrap()
+    let output = command.output().unwrap();
+    report_signal(args, &output);
+    output
+}
+
+/// Names the signal that ended a CLI call, which `status.code()` hides.
+fn report_signal(args: &[&str], output: &std::process::Output) {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = output.status.signal() {
+        eprintln!("herdr {} ended by signal {signal}", args.join(" "));
+    }
 }
 
 pub(super) fn run_cli_in_dir(
@@ -427,7 +437,9 @@ pub(super) fn run_cli_in_dir(
     command.args(args);
     command.current_dir(current_dir);
     command.env("HERDR_SOCKET_PATH", socket_path);
-    command.output().unwrap()
+    let output = command.output().unwrap();
+    report_signal(args, &output);
+    output
 }
 
 pub(super) fn pane_topology_snapshot(list_response: &serde_json::Value) -> Vec<serde_json::Value> {
