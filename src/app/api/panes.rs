@@ -3148,6 +3148,36 @@ mod tests {
         assert_eq!(scroll.viewport_rows, 5);
     }
 
+    /// Fork issue 251: a full-screen application has no terminal scrollback,
+    /// so offset 0 says nothing about its own view; the flag says so.
+    #[tokio::test]
+    async fn api_pane_get_says_when_the_terminal_shows_the_alternate_screen() {
+        let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();
+        let scroll = |app: &mut App| {
+            let response = app.handle_pane_get(
+                "req".into(),
+                PaneTarget {
+                    pane_id: public_pane_id.clone(),
+                },
+            );
+            let json: serde_json::Value = serde_json::from_str(&response).unwrap();
+            json["result"]["pane"]["scroll"].clone()
+        };
+
+        let primary = scroll(&mut app);
+        assert!(primary["max_offset_from_bottom"].as_u64().unwrap() > 0);
+        assert!(primary.get("alternate_screen").is_none());
+
+        app.state
+            .runtime_for_pane_in_workspace(&app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\x1b[?1049hfull-screen app");
+        let alternate = scroll(&mut app);
+        assert_eq!(alternate["alternate_screen"], true);
+        assert_eq!(alternate["offset_from_bottom"], 0);
+        assert_eq!(alternate["max_offset_from_bottom"], 0);
+    }
+
     #[tokio::test]
     async fn api_pane_scroll_sets_and_clamps_endpoint_owned_history() {
         let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();

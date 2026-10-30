@@ -664,11 +664,21 @@ pub struct PaneInfo {
     pub revision: u64,
 }
 
+/// Where a pane's terminal stands in its own scrollback.
+///
+/// An application on the alternate screen (a full-screen TUI, such as Claude
+/// Code with `"tui": "fullscreen"`) has no terminal scrollback and scrolls its
+/// own view, which herdr cannot see. Then both offsets are 0 and
+/// `alternate_screen` is true: `offset_from_bottom == 0` does not mean the
+/// application shows its end (fork issue 251).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneScrollInfo {
     pub offset_from_bottom: u64,
     pub max_offset_from_bottom: u64,
     pub viewport_rows: u64,
+    /// The terminal shows the alternate screen; absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alternate_screen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

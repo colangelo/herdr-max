@@ -1239,7 +1239,12 @@
           "type": "object"
         },
         "PaneScrollInfo": {
+          "description": "Where a pane's terminal stands in its own scrollback.\n\nAn application on the alternate screen (a full-screen TUI, such as Claude\nCode with `\"tui\": \"fullscreen\"`) has no terminal scrollback and scrolls its\nown view, which herdr cannot see. Then both offsets are 0 and\n`alternate_screen` is true: `offset_from_bottom == 0` does not mean the\napplication shows its end (fork issue 251).",
           "properties": {
+            "alternate_screen": {
+              "description": "The terminal shows the alternate screen; absent means false.",
+              "type": "boolean"
+            },
             "max_offset_from_bottom": {
               "format": "uint64",
               "minimum": 0,
@@ -8892,7 +8897,12 @@
           "type": "object"
         },
         "PaneScrollInfo": {
+          "description": "Where a pane's terminal stands in its own scrollback.\n\nAn application on the alternate screen (a full-screen TUI, such as Claude\nCode with `\"tui\": \"fullscreen\"`) has no terminal scrollback and scrolls its\nown view, which herdr cannot see. Then both offsets are 0 and\n`alternate_screen` is true: `offset_from_bottom == 0` does not mean the\napplication shows its end (fork issue 251).",
           "properties": {
+            "alternate_screen": {
+              "description": "The terminal shows the alternate screen; absent means false.",
+              "type": "boolean"
+            },
             "max_offset_from_bottom": {
               "format": "uint64",
               "minimum": 0,
@@ -11644,7 +11654,12 @@
           "type": "object"
         },
         "PaneScrollInfo": {
+          "description": "Where a pane's terminal stands in its own scrollback.\n\nAn application on the alternate screen (a full-screen TUI, such as Claude\nCode with `\"tui\": \"fullscreen\"`) has no terminal scrollback and scrolls its\nown view, which herdr cannot see. Then both offsets are 0 and\n`alternate_screen` is true: `offset_from_bottom == 0` does not mean the\napplication shows its end (fork issue 251).",
           "properties": {
+            "alternate_screen": {
+              "description": "The terminal shows the alternate screen; absent means false.",
+              "type": "boolean"
+            },
             "max_offset_from_bottom": {
               "format": "uint64",
               "minimum": 0,

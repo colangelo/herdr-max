@@ -403,7 +403,7 @@ Arguments after `--` are the command Herdr runs to resume this session after a s
 
 Those commands include `foreground_cwd` when Herdr can resolve the cwd of the foreground process controlling the pane. The `cwd` field remains the pane/workspace cwd used for labels and follow-cwd behavior.
 
-`pane get` and `pane list` include `scroll` when terminal scroll metrics are available. `scroll.offset_from_bottom == 0` means the pane is at the bottom of its scrollback.
+`pane get` and `pane list` include `scroll` when terminal scroll metrics are available. `scroll.offset_from_bottom == 0` means the pane is at the bottom of its scrollback. With `scroll.alternate_screen: true`, a full-screen application scrolls its own view, which Herdr cannot see, and both offsets stay `0`.
 
 Tell Herdr an agent is waiting on a question or a permission prompt, or that it stopped:
 

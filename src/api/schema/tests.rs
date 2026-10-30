@@ -910,6 +910,7 @@ fn scroll_changed_subscription_event_round_trips() {
                 offset_from_bottom: 12,
                 max_offset_from_bottom: 240,
                 viewport_rows: 30,
+                alternate_screen: false,
             },
         }),
     };

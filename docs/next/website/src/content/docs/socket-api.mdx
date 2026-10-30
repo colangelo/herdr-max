@@ -180,7 +180,11 @@ pane.
 }
 ```
 
-Clients can treat `offset_from_bottom == 0` as at-bottom state.
+`scroll` describes the terminal's own scrollback. Clients can treat
+`offset_from_bottom == 0` as at-bottom state, except when `"alternate_screen":
+true` is present: a full-screen application (for example Claude Code with
+`"tui": "fullscreen"`) then has no terminal scrollback and scrolls its own view,
+which Herdr cannot see, so both offsets are `0` whatever the application shows.
 
 ### Pane graphics
 
