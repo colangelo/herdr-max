@@ -39,8 +39,6 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a started anchor may take to listen: macOS checks an executable it
 /// has not run before, which can take seconds on a busy machine.
 const ANCHOR_START_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a pane spawn, on the app loop, waits for a starting anchor.
-const PANE_WAIT: Duration = Duration::from_secs(2);
 const MAX_LINE: usize = 4 * 1024 * 1024;
 /// `sun_path` holds 104 bytes on macOS, the terminating NUL included.
 const MAX_SOCKET_PATH: usize = 103;
@@ -721,10 +719,27 @@ pub(crate) fn start_early() {
     }
 }
 
-/// The anchor client for a pane spawn, which runs on the app loop: it waits at
-/// most `PANE_WAIT` for an anchor that is starting.
+/// Set once the server serves clients (`serving`).
+static SERVING: AtomicBool = AtomicBool::new(false);
+
+/// From now on pane spawns run on the app loop, with clients waiting on it.
+pub(crate) fn serving() {
+    SERVING.store(true, Ordering::Release);
+}
+
+/// The anchor client for a pane spawn. Panes restored as the server starts,
+/// before it serves anyone, wait for the anchor the early start began, so they
+/// are anchored after a reboot. Once the server serves, a spawn never waits:
+/// an anchor that does not answer at once leaves the pane to the server, and
+/// later panes use it when it listens (fork issue 249: even 2 s on the app
+/// loop held a waiting client past its deadline).
 fn client() -> Option<Arc<Client>> {
-    client_within(PANE_WAIT)
+    let wait = if SERVING.load(Ordering::Acquire) {
+        Duration::ZERO
+    } else {
+        ANCHOR_START_TIMEOUT
+    };
+    client_within(wait)
 }
 
 /// The live anchor client: the one in use, one that listens, or one started

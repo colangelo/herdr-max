@@ -437,6 +437,7 @@ impl HeadlessServer {
     /// - Handles scheduled tasks (session save, metadata expiry, etc.)
     /// - Renders virtually and streams frames to clients
     pub async fn run(&mut self) -> io::Result<()> {
+        crate::platform::pane_anchor_serving();
         crate::logging::startup("server");
 
         let server_stop = self.server_stop.clone();

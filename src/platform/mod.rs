@@ -551,6 +551,15 @@ pub(crate) fn start_pane_anchor_early() {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn start_pane_anchor_early() {}
 
+/// The server now serves clients: a pane spawn no longer waits for the anchor.
+#[cfg(target_os = "macos")]
+pub(crate) fn pane_anchor_serving() {
+    macos::pane_anchor::serving();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn pane_anchor_serving() {}
+
 /// Runs the pane anchor when this process was started as one.
 #[cfg(target_os = "macos")]
 pub(crate) fn maybe_run_pane_anchor(args: &[String]) -> Option<std::io::Result<()>> {
