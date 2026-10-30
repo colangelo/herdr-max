@@ -834,24 +834,26 @@ fn start_anchor(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A link to this executable that outlives the package manager removing it.
+/// A clone of this executable that outlives the package manager removing it.
 ///
 /// Homebrew deletes the old version's files on upgrade, while the anchor keeps
 /// running for months; a deleted executable may fail tccd's code-signing check.
 /// The directory is named after the executable's inode, so another build never
 /// reuses it, and the file keeps the executable's name, which the prompt shows.
 fn anchor_executable() -> io::Result<PathBuf> {
-    link_executable(
+    clone_executable(
         &std::env::current_exe()?,
         &crate::config::config_dir().join("pane-anchor"),
     )
 }
 
-/// Links `exe` under `root`. `exe` may be a symlink, as Homebrew's
-/// `/opt/homebrew/bin/herdr-beta` is: macOS `link(2)` would link the symlink
-/// itself, whose relative target dangles in another directory, so the real
-/// file is linked, under the name the process was started with.
-fn link_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
+/// Puts a clone of `exe` under `root`, a file of its own: macOS kills some of
+/// the processes that start a new executable while it also starts through a
+/// hard link of it, as the anchor did (fork issue 253; cargo copies for the
+/// same reason, rust-lang/cargo#10196). `exe` may be a symlink, as Homebrew's
+/// `/opt/homebrew/bin/herdr-beta` is: the real file is cloned, under the name
+/// the process was started with.
+fn clone_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
     let name = exe
         .file_name()
         .ok_or_else(|| io::Error::other("the executable has no file name"))?
@@ -863,12 +865,12 @@ fn link_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let link = dir.join(name);
     let size = std::fs::metadata(&exe)?.len();
-    // A copy (no hard link across volumes) has another inode but the same size;
-    // replacing it would pull the file from under a running anchor.
-    if std::fs::metadata(&link).is_ok_and(|meta| meta.ino() == inode || meta.len() == size) {
+    // A clone, or a hard link an older build made, has the same size; replacing
+    // it would pull the file from under a running anchor.
+    if std::fs::metadata(&link).is_ok_and(|meta| meta.len() == size) {
         return Ok(link);
     }
-    // A stage of this call alone: servers of other sessions link into the same
+    // A stage of this call alone: servers of other sessions clone into the same
     // folder at the same moment, and a shared name let one of them copy over a
     // stage that was the executable itself, emptying it (fork issue 252).
     static STAGE: AtomicU64 = AtomicU64::new(0);
@@ -877,16 +879,32 @@ fn link_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
         std::process::id(),
         STAGE.fetch_add(1, Ordering::Relaxed)
     ));
-    match std::fs::hard_link(&exe, &staged) {
+    match clone_file(&exe, &staged) {
         Ok(()) => {}
-        Err(err) if err.raw_os_error() == Some(libc::EXDEV) => copy_into_new_file(&exe, &staged)?,
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EXDEV)) => {
+            copy_into_new_file(&exe, &staged)?;
+        }
         Err(err) => return Err(err),
     }
     let renamed = std::fs::rename(&staged, &link);
-    // A rename onto a link of the same file does nothing and keeps the stage.
-    let _ = std::fs::remove_file(&staged);
+    if renamed.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
     renamed?;
     Ok(link)
+}
+
+/// `clonefile(2)`: creates `to`, which must not exist, sharing `from`'s blocks
+/// until either is written.
+fn clone_file(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let from = std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    let to = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    // SAFETY: both paths are NUL-terminated strings that outlive the call.
+    if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Copies `from` into a file `to` that this call creates, so no existing file,
@@ -1093,27 +1111,60 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_executable_is_linked_as_the_real_file() {
+    fn a_symlinked_executable_is_cloned_as_the_real_file() {
         let root = std::env::temp_dir().join(format!("herdr-anchor-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let bin = root.join("Cellar/bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("herdr-real"), b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            bin.join("herdr-real"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         std::os::unix::fs::symlink("Cellar/bin/herdr-real", root.join("herdr-beta")).unwrap();
 
-        let link = link_executable(&root.join("herdr-beta"), &root.join("pane-anchor")).unwrap();
+        let link = clone_executable(&root.join("herdr-beta"), &root.join("pane-anchor")).unwrap();
         let meta = std::fs::symlink_metadata(&link).unwrap();
-        let real = std::fs::metadata(bin.join("herdr-real")).unwrap();
+        let body = std::fs::read(&link).unwrap();
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(link.file_name().unwrap(), "herdr-beta");
-        assert!(meta.file_type().is_file(), "linked a symlink: {link:?}");
-        assert_eq!(meta.ino(), real.ino());
+        assert!(meta.file_type().is_file(), "cloned a symlink: {link:?}");
+        assert_eq!(body, b"#!/bin/sh\n");
+        assert_eq!(meta.mode() & 0o777, 0o755);
+    }
+
+    /// Fork issue 253: starting a new executable through a hard link while it
+    /// also starts under its own name gets some of those starts killed.
+    #[test]
+    fn the_anchor_executable_is_a_file_of_its_own() {
+        let root = std::env::temp_dir().join(format!("herdr-anchor-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.join("herdr");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+        let copy = clone_executable(&exe, &root.join("pane-anchor")).unwrap();
+        let exe_meta = std::fs::metadata(&exe).unwrap();
+        let copy_meta = std::fs::metadata(&copy).unwrap();
+        let body = std::fs::read(&copy).unwrap();
+        let again = clone_executable(&exe, &root.join("pane-anchor")).unwrap();
+        let again_ino = std::fs::metadata(&again).unwrap().ino();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(copy_meta.ino(), exe_meta.ino());
+        assert_eq!(exe_meta.nlink(), 1);
+        assert_eq!(body, b"#!/bin/sh\n");
+        assert_eq!(
+            again_ino,
+            copy_meta.ino(),
+            "a second start replaced the anchor's file"
+        );
     }
 
     /// Fork issue 252: servers that link the anchor at the same moment must
     /// never write into the executable they link (it was truncated to 0 bytes).
     #[test]
-    fn linking_at_the_same_moment_never_changes_the_executable() {
+    fn cloning_at_the_same_moment_never_changes_the_executable() {
         let root = std::env::temp_dir().join(format!("herdr-anchor-race-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -1125,7 +1176,7 @@ mod tests {
             let threads: Vec<_> = (0..8)
                 .map(|_| {
                     let (exe, links) = (exe.clone(), links.clone());
-                    std::thread::spawn(move || link_executable(&exe, &links))
+                    std::thread::spawn(move || clone_executable(&exe, &links))
                 })
                 .collect();
             for thread in threads {
