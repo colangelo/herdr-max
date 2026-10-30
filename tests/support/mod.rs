@@ -84,6 +84,14 @@ impl PtyTail {
 /// live handoff or client autodetect inherit it, so they end with the test too.
 pub const TEST_PARENT_PID_ENV: &str = "HERDR_TEST_PARENT_PID";
 
+/// The macOS pane anchor switch, which the spawn helpers below set to `off`; a
+/// test of the anchor sets it back on. Each server starts its anchor from a
+/// fresh clone of the build, and
+/// macOS scans every new executable before it runs (about 1.6 s for a debug
+/// build), so a run full of servers queues the scans and a fake agent script
+/// waits seconds to start (fork issue 253).
+pub const PANE_ANCHOR_ENV: &str = "HERDR_PANE_ANCHOR";
+
 pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_STARTUP_CWD");
     command.env_remove("HERDR_SESSION");
@@ -91,11 +99,13 @@ pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_WORKSPACE_ID");
     command.env_remove("HERDR_TAB_ID");
     command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
+    command.env(PANE_ANCHOR_ENV, "off");
 }
 
 /// The same ownership for a server spawned with `std::process::Command`.
 pub fn bind_server_to_test_process(command: &mut std::process::Command) {
     command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
+    command.env(PANE_ANCHOR_ENV, "off");
 }
 
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {

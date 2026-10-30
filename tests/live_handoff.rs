@@ -2261,7 +2261,12 @@ fn panes_are_anchored_to_one_process_across_a_live_handoff() {
     let api_socket = runtime_dir.join("herdr.sock");
     let marker = base.join("shell.pid");
 
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[(support::PANE_ANCHOR_ENV, "on")],
+    );
     wait_for_socket(&api_socket);
     register_runtime_dir(&runtime_dir);
     let server_pid = spawned.child.process_id().expect("server pid");
