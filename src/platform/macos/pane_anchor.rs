@@ -31,11 +31,16 @@ pub(crate) const SUBCOMMAND: &str = "__pane-anchor";
 const SOCKET_SUFFIX: &str = ".pane-anchor";
 /// The anchor ends after this long with no child and no server.
 const IDLE_EXIT: Duration = Duration::from_secs(10);
-/// After a failed start, panes are spawned directly for this long before
-/// another anchor is started; one that is listening is used at once.
+/// After a start that failed or never listened, panes are spawned directly
+/// for this long before another anchor is started; one that is listening is
+/// used at once.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a started anchor may take to listen: macOS checks an executable it
+/// has not run before, which can take seconds on a busy machine.
 const ANCHOR_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a pane spawn, on the app loop, waits for a starting anchor.
+const PANE_WAIT: Duration = Duration::from_secs(2);
 const MAX_LINE: usize = 4 * 1024 * 1024;
 /// `sun_path` holds 104 bytes on macOS, the terminating NUL included.
 const MAX_SOCKET_PATH: usize = 103;
@@ -685,6 +690,8 @@ fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
 #[derive(Default)]
 struct Connection {
     client: Option<Arc<Client>>,
+    /// When this server last started an anchor that has not answered yet.
+    started_at: Option<Instant>,
     retry_at: Option<Instant>,
 }
 
@@ -698,51 +705,52 @@ fn disabled() -> bool {
     cfg!(test) || std::env::var_os("HERDR_PANE_ANCHOR").is_some_and(|value| value == "off")
 }
 
-/// The live anchor client, connecting to or starting the anchor when needed.
-fn client() -> Option<Arc<Client>> {
+/// Connects to the anchor, or starts it, in the background as the server
+/// starts, so the first pane rarely waits for it.
+pub(crate) fn start_early() {
     if disabled() {
-        return None;
+        return;
     }
-    let mut connection = lock(connection());
-    if let Some(client) = &connection.client {
-        if !client.broken.load(Ordering::Acquire) {
-            return Some(client.clone());
-        }
-        connection.client = None;
-    }
-    let waiting = connection.retry_at.is_some_and(|at| Instant::now() < at);
-    let starting = if waiting {
-        // An anchor whose start outlasted the window may be listening by now:
-        // use it, but start no other before the retry time.
-        Client::connect(&socket_path())
-    } else {
-        connect_or_start()
-    };
-    match starting {
-        Ok(client) => {
-            connection.client = Some(client.clone());
-            connection.retry_at = None;
-            Some(client)
-        }
-        Err(_) if waiting => None,
-        Err(err) => {
-            tracing::warn!(%err, "no pane anchor; panes are spawned by the server");
-            connection.retry_at = Some(Instant::now() + RETRY_AFTER);
-            None
-        }
+    let started = std::thread::Builder::new()
+        .name("pane-anchor-start".into())
+        .spawn(|| {
+            client_within(ANCHOR_START_TIMEOUT);
+        });
+    if let Err(err) = started {
+        tracing::warn!(%err, "could not start the pane anchor in the background");
     }
 }
 
-fn connect_or_start() -> io::Result<Arc<Client>> {
+/// The anchor client for a pane spawn, which runs on the app loop: it waits at
+/// most `PANE_WAIT` for an anchor that is starting.
+fn client() -> Option<Arc<Client>> {
+    client_within(PANE_WAIT)
+}
+
+/// The live anchor client: the one in use, one that listens, or one started
+/// now. Waits at most `wait` for a started anchor to listen, without holding
+/// the lock, so a slow start (macOS checks an executable it has not run
+/// before) never blocks another caller for longer than its own wait.
+fn client_within(wait: Duration) -> Option<Arc<Client>> {
+    if disabled() {
+        return None;
+    }
+    {
+        let mut connection = lock(connection());
+        if let Some(client) = &connection.client {
+            if !client.broken.load(Ordering::Acquire) {
+                return Some(client.clone());
+            }
+            connection.client = None;
+        }
+    }
     let path = socket_path();
     if path.as_os_str().len() > MAX_SOCKET_PATH {
-        return Err(io::Error::other(format!(
-            "socket path too long: {}",
-            path.display()
-        )));
+        tracing::warn!(path = %path.display(), "no pane anchor: socket path too long");
+        return None;
     }
     match Client::connect(&path) {
-        Ok(client) => return Ok(client),
+        Ok(client) => return Some(remember(client)),
         // Only when nothing listens: an anchor that answers wrongly keeps its
         // socket and its panes, and this server spawns panes itself.
         Err(err)
@@ -751,26 +759,64 @@ fn connect_or_start() -> io::Result<Arc<Client>> {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            return Err(err)
+            tracing::warn!(%err, "the pane anchor did not answer; panes are spawned by the server");
+            return None;
         }
         Err(_) => {}
     }
-    let exe = anchor_executable()?;
-    let mut command = std::process::Command::new(&exe);
-    command.arg(SUBCOMMAND).arg("--socket").arg(&path);
-    let pid = super::spawn_disclaimed_daemon(&command)?;
-    crate::platform::daemon_reaper::reap_when_it_exits(pid);
-    tracing::info!(pid, exe = %exe.display(), "started the pane anchor");
-    // macOS scans an executable it has not run before, which can hold the
-    // anchor's start for seconds on a busy machine.
-    let deadline = Instant::now() + ANCHOR_START_TIMEOUT;
+    let started_at = {
+        let mut connection = lock(connection());
+        let now = Instant::now();
+        if connection.retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        match connection.started_at {
+            Some(at) if now.duration_since(at) < ANCHOR_START_TIMEOUT => at,
+            Some(_) => {
+                tracing::warn!(
+                    "the pane anchor did not listen in time; panes are spawned by the server"
+                );
+                connection.started_at = None;
+                connection.retry_at = Some(now + RETRY_AFTER);
+                return None;
+            }
+            None => {
+                if let Err(err) = start_anchor(&path) {
+                    tracing::warn!(%err, "no pane anchor; panes are spawned by the server");
+                    connection.retry_at = Some(now + RETRY_AFTER);
+                    return None;
+                }
+                connection.started_at = Some(now);
+                now
+            }
+        }
+    };
+    let deadline = (Instant::now() + wait).min(started_at + ANCHOR_START_TIMEOUT);
     loop {
         match Client::connect(&path) {
-            Ok(client) => return Ok(client),
-            Err(err) if Instant::now() >= deadline => return Err(err),
+            Ok(client) => return Some(remember(client)),
+            Err(_) if Instant::now() >= deadline => return None,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+fn remember(client: Arc<Client>) -> Arc<Client> {
+    let mut connection = lock(connection());
+    connection.client = Some(client.clone());
+    connection.started_at = None;
+    connection.retry_at = None;
+    client
+}
+
+fn start_anchor(path: &Path) -> io::Result<()> {
+    let exe = anchor_executable()?;
+    let mut command = std::process::Command::new(&exe);
+    command.arg(SUBCOMMAND).arg("--socket").arg(path);
+    let pid = super::spawn_disclaimed_daemon(&command)?;
+    crate::platform::daemon_reaper::reap_when_it_exits(pid);
+    tracing::info!(pid, exe = %exe.display(), "started the pane anchor");
+    Ok(())
 }
 
 /// A link to this executable that outlives the package manager removing it.

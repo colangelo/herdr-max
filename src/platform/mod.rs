@@ -542,6 +542,15 @@ pub(crate) fn pane_anchor_spawn(
     None
 }
 
+/// Connects to or starts the pane anchor off the app loop as the server starts.
+#[cfg(target_os = "macos")]
+pub(crate) fn start_pane_anchor_early() {
+    macos::pane_anchor::start_early();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn start_pane_anchor_early() {}
+
 /// Runs the pane anchor when this process was started as one.
 #[cfg(target_os = "macos")]
 pub(crate) fn maybe_run_pane_anchor(args: &[String]) -> Option<std::io::Result<()>> {

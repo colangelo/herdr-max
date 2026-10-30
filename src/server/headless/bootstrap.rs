@@ -65,6 +65,7 @@ pub fn run_server() -> io::Result<()> {
         }
         Err(err) => return Err(err),
     };
+    crate::platform::start_pane_anchor_early();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
