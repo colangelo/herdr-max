@@ -1,6 +1,15 @@
 use super::harness::*;
 
 #[test]
+fn named_session_sockets_fit_the_unix_path_cap() {
+    // "updates" is the longest session name these tests start a server for.
+    let socket = named_session_socket(&unique_test_dir().join("config"), "updates");
+    let client = socket.with_file_name("herdr-client.sock");
+    let len = client.as_os_str().len();
+    assert!(len <= 103, "{} is {len} bytes", client.display());
+}
+
+#[test]
 fn named_sessions_use_separate_servers_and_workspace_state() {
     let base = unique_test_dir();
     let config_home = base.join("config");

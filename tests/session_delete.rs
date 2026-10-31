@@ -14,7 +14,7 @@ impl SessionConfig {
         // Keep Unix socket paths below the host's length limit, in the one
         // folder the other integration tests use (fork issue 256).
         #[cfg(unix)]
-        let base = PathBuf::from("/tmp/herdr-tests");
+        let base = PathBuf::from("/tmp/ht");
         #[cfg(not(unix))]
         let base = std::env::temp_dir();
         let _ = std::fs::create_dir_all(&base);

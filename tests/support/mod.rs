@@ -86,10 +86,11 @@ pub const TEST_PARENT_PID_ENV: &str = "HERDR_TEST_PARENT_PID";
 
 /// `name` inside the one folder every integration test's temp dirs live in,
 /// which this creates. One fixed folder lets a sandbox allow the tests' Unix
-/// sockets by name (fork issue 256); it stays short because macOS caps a
-/// socket path at 103 bytes.
+/// sockets by name (fork issue 256). The name is this short because macOS
+/// caps a socket path at 103 bytes and a named session's client socket sits
+/// six folders down (`named_session_sockets_fit_the_unix_path_cap`).
 pub fn test_tmp_dir(name: &str) -> PathBuf {
-    let root = Path::new("/tmp/herdr-tests");
+    let root = Path::new("/tmp/ht");
     let _ = fs::create_dir_all(root);
     root.join(name)
 }
