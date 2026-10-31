@@ -2249,6 +2249,95 @@ fn pane_shell_pid(api_socket: &Path, pane_id: &str, marker: &Path) -> u32 {
     wait_for_pid_marker(marker, Duration::from_secs(15))
 }
 
+#[cfg(target_os = "macos")]
+fn split_pane(api_socket: &Path, pane_id: &str) -> String {
+    let split = request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:pane:split",
+            "method": "pane.split",
+            "params": {"target_pane_id": pane_id, "direction": "right", "focus": false}
+        }),
+    );
+    split["result"]["pane"]["pane_id"]
+        .as_str()
+        .expect("split pane id")
+        .to_owned()
+}
+
+/// Fork issue 255: an anchor a serving server starts for a pane, without
+/// waiting for it, is connected once it listens, so it does not exit idle and
+/// later panes are anchored after the anchor they used is gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_serving_server_connects_the_anchor_it_starts_for_a_pane() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let anchor_socket = runtime_dir.join("herdr.sock.pane-anchor");
+    let marker = base.join("shell.pid");
+
+    let _spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[(support::PANE_ANCHOR_ENV, "on")],
+    );
+    wait_for_socket(&api_socket);
+    register_runtime_dir(&runtime_dir);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !anchor_socket.exists() {
+        assert!(Instant::now() < deadline, "the pane anchor never listened");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let first_pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (old_anchor, command) =
+        parent_and_command(pane_shell_pid(&api_socket, &first_pane, &marker));
+    assert!(
+        command.contains("__pane-anchor"),
+        "first pane parent `{command}`"
+    );
+
+    // The anchor goes away; its socket file stays, as after a crash.
+    assert_eq!(unsafe { libc::kill(old_anchor as i32, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while unsafe { libc::kill(old_anchor as i32, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the killed anchor is still there"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    // This pane starts a new anchor without waiting for it.
+    let started_by = split_pane(&api_socket, &first_pane);
+    pane_shell_pid(&api_socket, &started_by, &marker);
+    // An anchor no server connects to exits after 10 s idle.
+    thread::sleep(Duration::from_secs(12));
+
+    let later = split_pane(&api_socket, &started_by);
+    let (anchor, command) = parent_and_command(pane_shell_pid(&api_socket, &later, &marker));
+    assert!(
+        command.contains("__pane-anchor"),
+        "pane parent is {anchor} `{command}`, not the anchor"
+    );
+    assert_ne!(anchor, old_anchor);
+}
+
 /// Fork issue 246: pane programs are started by the pane anchor, which macOS
 /// holds responsible for them, and which outlives a live handoff.
 #[cfg(target_os = "macos")]
