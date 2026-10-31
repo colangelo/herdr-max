@@ -74,8 +74,10 @@ reconcile.py. They speak the NATS protocol to `bus.cat-bluegill.ts.net:4222`, wh
 - **Controls that passed (11:16Z):** a write outside the allowed folders was blocked; an off-list host (example.com) got
   403 while GitHub answered; a plain bell to manager-lab arrived; `git push` to gitea worked (throwaway branch, deleted).
 - **Sockets:** `allowUnixSockets` takes a folder and allows every socket below it, nested folders included. A wildcard
-  entry (`/private/tmp/hsbx-glob-*`) does not work. So every integration test's temp dir lives under `/tmp/herdr-tests`
-  (`tests/support::test_tmp_dir`). Measured in the sandbox: cli tests 46/134 with no socket entry, 86/134 with the
+  entry (`/private/tmp/hsbx-glob-*`) does not work. So every integration test's temp dir lives under one folder
+  (`tests/support::test_tmp_dir`), `/tmp/herdr-tests` during the pilot and `/tmp/ht` since: the longer name pushed a
+  named session's client socket to 105 bytes, over macOS's 103-byte cap, and six cli tests failed outside the sandbox
+  (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/258). Measured in the sandbox: cli tests 46/134 with no socket entry, 86/134 with the
   folder (the 48 left all need PTYs). Unit tests 4598/5019, and 4844/5019 with `TMPDIR=/tmp/herdr-tests`. About 80 unit
   tests still bind sockets at hard-coded `/tmp` paths in `src/` (for example `/tmp/hu-<name>.sock` in `update.rs`):
   https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/257, worth doing anyway for parallel-run collisions.
