@@ -84,6 +84,16 @@ impl PtyTail {
 /// live handoff or client autodetect inherit it, so they end with the test too.
 pub const TEST_PARENT_PID_ENV: &str = "HERDR_TEST_PARENT_PID";
 
+/// `name` inside the one folder every integration test's temp dirs live in,
+/// which this creates. One fixed folder lets a sandbox allow the tests' Unix
+/// sockets by name (fork issue 256); it stays short because macOS caps a
+/// socket path at 103 bytes.
+pub fn test_tmp_dir(name: &str) -> PathBuf {
+    let root = Path::new("/tmp/herdr-tests");
+    let _ = fs::create_dir_all(root);
+    root.join(name)
+}
+
 /// The macOS pane anchor switch, which the spawn helpers below set to `off`; a
 /// test of the anchor sets it back on. Each server starts its anchor from a
 /// fresh clone of the build, and

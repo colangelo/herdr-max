@@ -28,8 +28,8 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/herdr-autodetect-test-{}-{nanos}",
+    support::test_tmp_dir(&format!(
+        "herdr-autodetect-test-{}-{nanos}",
         std::process::id()
     ))
 }

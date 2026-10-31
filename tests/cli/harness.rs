@@ -18,7 +18,8 @@ pub(super) fn unique_test_dir() -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     // The server canonicalizes cwds; on macOS /tmp is a symlink to /private/tmp.
-    let tmp = fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+    let root = crate::support::test_tmp_dir("");
+    let tmp = fs::canonicalize(&root).unwrap_or(root);
     tmp.join(format!("hcli-{}-{nanos}", std::process::id()))
 }
 

@@ -37,10 +37,7 @@ fn unique_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/herdr-orphan-test-{}-{nanos}",
-        std::process::id()
-    ))
+    support::test_tmp_dir(&format!("herdr-orphan-test-{}-{nanos}", std::process::id()))
 }
 
 fn pid_alive(pid: u32) -> bool {

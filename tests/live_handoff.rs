@@ -48,7 +48,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
 fn unique_test_dir() -> PathBuf {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = PathBuf::from(format!("/tmp/hlh-{}-{n}", std::process::id()));
+    let dir = support::test_tmp_dir(&format!("hlh-{}-{n}", std::process::id()));
     // Test processes reuse pids, and a dir left by an earlier one still holds
     // its saved session: a server started there restores those panes, so a
     // test that counts the server's pty masters from zero sees 1 or 2.

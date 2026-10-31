@@ -11,11 +11,13 @@ struct SessionConfig {
 impl SessionConfig {
     fn new() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-        // Keep Unix socket paths below the host's length limit.
+        // Keep Unix socket paths below the host's length limit, in the one
+        // folder the other integration tests use (fork issue 256).
         #[cfg(unix)]
-        let base = PathBuf::from("/tmp");
+        let base = PathBuf::from("/tmp/herdr-tests");
         #[cfg(not(unix))]
         let base = std::env::temp_dir();
+        let _ = std::fs::create_dir_all(&base);
         let root = base.join(format!(
             "hs-delete-{}-{}-{}",
             std::process::id(),

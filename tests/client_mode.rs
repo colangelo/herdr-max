@@ -30,10 +30,7 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!(
-        "/tmp/herdr-client-test-{}-{nanos}",
-        std::process::id()
-    ))
+    support::test_tmp_dir(&format!("herdr-client-test-{}-{nanos}", std::process::id()))
 }
 
 struct SpawnedHerdr {

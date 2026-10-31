@@ -27,8 +27,8 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    PathBuf::from(format!(
-        "/tmp/herdr-multi-client-{}-{nanos}",
+    support::test_tmp_dir(&format!(
+        "herdr-multi-client-{}-{nanos}",
         std::process::id()
     ))
 }
