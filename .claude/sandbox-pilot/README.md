@@ -64,3 +64,13 @@ carry. A command keeps the sandbox when it contains a pipe, a `cd` or `$(…)`, 
   house rule that heavy cargo runs niced on m4m. Raised with manager-lab.
 - `allowPty` set in this file did not take effect in the running session (unix sockets did). Checked again after the
   restart with the launch file.
+- `allowUnixSockets` takes a folder and allows every socket below it, nested folders included; a wildcard entry
+  (`/private/tmp/hsbx-glob-*`) does not work. So every integration test's temp dir lives under `/tmp/herdr-tests`
+  (`tests/support::test_tmp_dir`), and only that folder is listed. manager-lab refused `allowAllUnixSockets`: it also
+  opens docker.sock, the agent sockets and herdr's own server.
+- Measured in the sandbox before the restart (2026-10-31): cli tests 46/134 with no socket entry, 86/134 with the
+  folder (the 48 left all need PTYs). Unit tests 4598/5019, and 4844/5019 with `TMPDIR=/tmp/herdr-tests`. About 80
+  unit tests still bind sockets at hard-coded `/tmp` paths in `src/` (for example `/tmp/hu-<name>.sock` in
+  `update.rs`). How to run `just check` in the pilot is manager-lab's call.
+- An excluded command keeps the sandbox when its line holds a pipe, a `cd` or `$(…)`: `agent-bell … | tail -1` failed
+  with `bus unreachable`. Bells go out as a plain command.
