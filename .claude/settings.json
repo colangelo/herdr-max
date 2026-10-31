@@ -35,10 +35,7 @@
     "network": {
       "allowLocalBinding": true,
       "allowUnixSockets": [
-        "/private/tmp/herdr-tests",
-        "~/.config/herdr/herdr.sock",
-        "~/.config/herdr/herdr-client.sock",
-        "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+        "/private/tmp/herdr-tests"
       ],
       "allowedDomains": [
         "github.com",

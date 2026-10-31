@@ -20,9 +20,11 @@ Rollback: remove the `sandbox` block and the two hooks, and restart with plain s
 - `allowPty`: every pane is a PTY, and 88 of 134 cli tests failed with `failed to openpty` without it.
 - `network.allowAllUnixSockets`: the tests bind and connect server sockets in fresh random `/tmp/hcli-*` folders,
   which a fixed path list cannot name (39 tests failed on `UnixListener::bind`).
-- `network.allowUnixSockets`: the live server's sockets (`~/.config/herdr/herdr.sock`, `herdr-client.sock`) for
-  `herdr-beta` calls, and the 1Password SSH agent socket named by `IdentityAgent` in `~/.ssh/config`. These are kept
-  as the record of what the sessions actually use; `allowAllUnixSockets` already covers them.
+- `network.allowUnixSockets`: only `/private/tmp/herdr-tests`, the folder every integration test's sockets live in.
+  Not listed, pending security: the live server's `~/.config/herdr/herdr.sock` (it drives every pane, and can type
+  into an unsandboxed shell) and the 1Password SSH agent socket (it signs with the ssh keys). Nothing here signs
+  commits or uses ssh. Without the server socket, `herdr-beta` calls from a sandboxed command fail; they are asked
+  for through manager-lab.
 - `network.allowLocalBinding`: the live-handoff and client tests listen on localhost TCP ports.
 
 **Writes** (the checkout itself is writable by default):
