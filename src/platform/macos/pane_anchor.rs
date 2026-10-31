@@ -703,8 +703,10 @@ fn disabled() -> bool {
     cfg!(test) || std::env::var_os("HERDR_PANE_ANCHOR").is_some_and(|value| value == "off")
 }
 
-/// Connects to the anchor, or starts it, in the background as the server
-/// starts, so the first pane rarely waits for it.
+/// Connects to the anchor, or starts it, in the background: as the server
+/// starts, so the first pane rarely waits for it, and for an anchor a pane
+/// spawn started without waiting, which would exit idle with no server
+/// connected (fork issue 255).
 pub(crate) fn start_early() {
     if disabled() {
         return;
@@ -779,14 +781,14 @@ fn client_within(wait: Duration) -> Option<Arc<Client>> {
         }
         Err(_) => {}
     }
-    let started_at = {
+    let (started_at, just_started) = {
         let mut connection = lock(connection());
         let now = Instant::now();
         if connection.retry_at.is_some_and(|at| now < at) {
             return None;
         }
         match connection.started_at {
-            Some(at) if now.duration_since(at) < ANCHOR_START_TIMEOUT => at,
+            Some(at) if now.duration_since(at) < ANCHOR_START_TIMEOUT => (at, false),
             Some(_) => {
                 tracing::warn!(
                     "the pane anchor did not listen in time; panes are spawned by the server"
@@ -802,10 +804,13 @@ fn client_within(wait: Duration) -> Option<Arc<Client>> {
                     return None;
                 }
                 connection.started_at = Some(now);
-                now
+                (now, true)
             }
         }
     };
+    if just_started && wait < ANCHOR_START_TIMEOUT {
+        start_early();
+    }
     let deadline = (Instant::now() + wait).min(started_at + ANCHOR_START_TIMEOUT);
     loop {
         match Client::connect(&path) {
