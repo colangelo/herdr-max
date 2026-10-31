@@ -38,7 +38,10 @@ Rollback: remove the `sandbox` block and the two hooks, and restart with plain s
 - `~/.local/state/herdr-sync`: the upstream sync runner's state.
 - `~/.local/state/model-routing`, `~/.local/state/agent-bell`: the route and bell tools write their state there.
 - `~/_sync/dev/.agent-state/reconcile`: reconcile records.
-- `~/.Trash`: `trash` (the house rule instead of `rm`) moves files there.
+
+Not granted: `~/.Trash`. The sandbox refuses it even when listed (clipper measured it), so `trash` does not work from a
+sandboxed command; scratch files go in `$TMPDIR`. The whole of `/tmp` is on the end-of-week review list: the tests'
+`hcli-*` folders and the heavy-cargo lock are the reason.
 
 **Hosts** (`network.allowedDomains`):
 

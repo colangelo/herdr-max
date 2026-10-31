@@ -29,8 +29,7 @@
         "~/.local/state/herdr-sync",
         "~/.local/state/model-routing",
         "~/.local/state/agent-bell",
-        "~/_sync/dev/.agent-state/reconcile",
-        "~/.Trash"
+        "~/_sync/dev/.agent-state/reconcile"
       ]
     },
     "network": {
