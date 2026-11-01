@@ -79,8 +79,10 @@ just beta-local                   # m4m builds origin/master and publishes (~2 m
 ```
 
 5. Install, seamless (live handoff, panes and sessions kept): **both Macs at
-   once**, in the same step. Bell mac-m4 (m4m) and manager-aruba (mac-m5 on
-   mbm5) together; each runs `just brew-upgrade herdr-beta`. Never hold m4m back
+   once**, in the same step. Bell mac-m4 (m4m) and mac-m5 (mbm5) directly and
+   together; each runs `just brew-upgrade herdr-beta` (mac-m5 cc's manager-aruba,
+   which no longer gives a go first: manager-aruba, 2026-11-01). House rule
+   `herdr-beta-installs-both-macs`. Never hold m4m back
    for mbm5's report: ac works on m4m and asks there (ac, 2026-11-01: "this is
    almost always the case, you defaulted to m5 without reason other times
    change it"). Starting both together also keeps m4m from running ahead of
