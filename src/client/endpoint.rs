@@ -6,6 +6,8 @@ use sha2::{Digest as _, Sha256};
 mod activation;
 mod catalog;
 mod control;
+#[cfg(unix)]
+mod dormancy;
 mod health;
 mod message_policy;
 mod registry;
@@ -16,6 +18,8 @@ mod writer;
 pub(crate) use activation::*;
 pub(crate) use catalog::*;
 pub(crate) use control::*;
+#[cfg(unix)]
+pub(crate) use dormancy::{Dormancy, InputClock};
 pub(crate) use message_policy::*;
 pub(crate) use registry::*;
 pub(crate) use ssh_metadata::{SshMachineMetadata, SshMetadataCache};

@@ -98,6 +98,10 @@ pub(crate) struct EndpointRegistry {
     connections: HashMap<ClientEndpointId, EndpointConnection>,
     failures: Vec<EndpointTransportFailure>,
     last_health_tick: Instant,
+    /// Remotes are dormant (fork issue 260): no health pings and no ping
+    /// expiry, so a sleeping remote machine is not woken. Only remote
+    /// connections carry health, so this gates nothing local.
+    remotes_dormant: bool,
 }
 
 impl EndpointRegistry {
@@ -108,6 +112,16 @@ impl EndpointRegistry {
             connections: HashMap::new(),
             failures: Vec::new(),
             last_health_tick: Instant::now(),
+            remotes_dormant: false,
+        }
+    }
+
+    #[cfg(any(unix, test))]
+    /// Stop health checks while the client has no user, or resume them with
+    /// an immediate probe of every live remote when the user comes back.
+    pub(crate) fn set_remotes_dormant(&mut self, dormant: bool, now: Instant) {
+        if std::mem::replace(&mut self.remotes_dormant, dormant) && !dormant {
+            self.resume_health(now);
         }
     }
 
@@ -224,6 +238,10 @@ impl EndpointRegistry {
     }
 
     pub(crate) fn tick_health(&mut self, now: Instant) {
+        if self.remotes_dormant {
+            self.last_health_tick = now;
+            return;
+        }
         // The client could not consume queued replies during a local scheduling pause.
         if now.saturating_duration_since(self.last_health_tick) > super::health::HEARTBEAT_TIMEOUT {
             self.resume_health(now);
@@ -685,5 +703,49 @@ mod tests {
         );
         assert!(registry.accepts(&ClientEndpointId::Local, 7));
         assert!(!registry.accepts(&ClientEndpointId::Local, 6));
+    }
+
+    #[test]
+    fn dormant_remotes_get_no_ping_or_expiry_and_a_probe_on_wake() {
+        // Fork issue 260: a ping every few seconds wakes a sleeping remote Mac.
+        let mut registry = EndpointRegistry::new(
+            FakeTransport {
+                sent: Arc::new(Mutex::new(Vec::new())),
+                error: None,
+            },
+            1,
+            negotiation(),
+        );
+        let ssh_id = ClientEndpointId::Ssh(profile());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        registry.insert(
+            ssh_id.clone(),
+            FakeTransport {
+                sent: sent.clone(),
+                error: None,
+            },
+            2,
+            negotiation(),
+            false,
+        );
+        let now = Instant::now();
+        registry.mark_ready(&ssh_id, 2);
+        registry.set_remotes_dormant(true, now);
+        let later = now + std::time::Duration::from_secs(3600);
+        registry.tick_health(now + super::super::health::HEARTBEAT_INTERVAL);
+        registry.tick_health(later);
+        assert!(sent.lock().unwrap().is_empty(), "no ping while dormant");
+        assert!(
+            registry.connection(&ssh_id).is_some(),
+            "no expiry while dormant"
+        );
+
+        registry.set_remotes_dormant(false, later);
+        registry.tick_health(later);
+        assert!(matches!(
+            sent.lock().unwrap().as_slice(),
+            [ClientMessage::EndpointControl { kind, .. }]
+                if kind == crate::protocol::endpoint::HEALTH_PING_KIND
+        ));
     }
 }

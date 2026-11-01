@@ -644,12 +644,14 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.
 # When true (default), herdr runs remote ssh through a generated config that
-# includes your ~/.ssh/config first and adds ServerAliveInterval/
-# ServerAliveCountMax as fallbacks (so any keepalive values you set yourself
-# still win) to survive idle network/NAT timeouts. Herdr also uses a private
-# per-attach OpenSSH control socket to reuse the first authenticated connection.
+# includes your ~/.ssh/config and uses a private per-attach OpenSSH control
+# socket to reuse the first authenticated connection. Herdr adds no ssh
+# keepalive of its own (it would wake a sleeping remote Mac); set
+# ServerAliveInterval in your ~/.ssh/config if an idle link must survive a NAT
+# timeout. After 10 minutes without input the client also stops pinging and
+# reconnecting remotes until your next key or click.
 # Set false to run plain ssh against your ssh config unchanged — this does not
-# force keepalive or multiplexing off, it only stops herdr from adding its own.
+# force multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
 [experimental]

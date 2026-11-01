@@ -1788,7 +1788,7 @@
           "key": "remote.manage_ssh_config",
           "type": "boolean",
           "default": "true",
-          "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+          "description": "Use a generated ssh config with private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
         }
       ]
     },

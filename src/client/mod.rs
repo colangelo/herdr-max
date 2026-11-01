@@ -81,6 +81,36 @@ use terminal_setup::{
     setup_direct_attach_terminal, setup_terminal, should_draw_host_cursor, TerminalGuard,
 };
 
+/// Keys, text, paste or mouse: input from the person at this client.
+#[cfg(unix)]
+fn events_are_user_input(events: &[crate::raw_input::RawInputEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            crate::raw_input::RawInputEvent::Key(_)
+                | crate::raw_input::RawInputEvent::Text(_)
+                | crate::raw_input::RawInputEvent::Paste(_)
+                | crate::raw_input::RawInputEvent::Mouse(_)
+        )
+    })
+}
+
+/// User input restarts the dormancy wait; the first input after dormancy probes
+/// live remotes and retries waiting reconnects at once (fork issue 260).
+#[cfg(unix)]
+fn wake_remotes_on_input(
+    input_clock: &mut endpoint::InputClock,
+    supervisors: &mut endpoint::EndpointSupervisors,
+    write_stream: &mut endpoint::EndpointRegistry,
+    now: std::time::Instant,
+) {
+    if input_clock.input(now) == endpoint::Dormancy::Woke {
+        info!("input after dormancy: probing remote endpoints and retrying reconnects");
+        supervisors.set_remotes_dormant(false, now);
+        write_stream.set_remotes_dormant(false, now);
+    }
+}
+
 fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
     if let Err(err) = set_mouse_capture(enabled, sgr_pixels) {
         warn!(err = %err, "failed to re-assert host mouse capture");
@@ -670,6 +700,11 @@ async fn run_client_loop(
     };
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
+    // `herdr --remote` runs this client over a forwarded socket: its local
+    // endpoint reaches the remote machine (fork issue 260).
+    supervisors.set_local_is_remote(is_remote_client);
+    #[cfg(unix)]
+    let mut input_clock = endpoint::InputClock::new(std::time::Instant::now());
     // Local shut down for a live handoff and has not come back online since.
     let mut local_handed_off = false;
     if federated {
@@ -929,16 +964,14 @@ async fn run_client_loop(
                         }
                     }
                     let events = crate::raw_input::parse_framed_input(&data);
-                    if events.iter().any(|event| {
-                        matches!(
-                            event,
-                            crate::raw_input::RawInputEvent::Key(_)
-                                | crate::raw_input::RawInputEvent::Text(_)
-                                | crate::raw_input::RawInputEvent::Paste(_)
-                                | crate::raw_input::RawInputEvent::Mouse(_)
-                        )
-                    }) {
+                    if events_are_user_input(&events) {
                         supervisors.user_activity(now);
+                        wake_remotes_on_input(
+                            &mut input_clock,
+                            &mut supervisors,
+                            &mut write_stream,
+                            now,
+                        );
                     }
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
                         refresh_host_mouse_capture(
@@ -1020,6 +1053,14 @@ async fn run_client_loop(
                     }
                 } else {
                     let events = crate::raw_input::parse_framed_input(&data);
+                    if events_are_user_input(&events) {
+                        wake_remotes_on_input(
+                            &mut input_clock,
+                            &mut supervisors,
+                            &mut write_stream,
+                            now,
+                        );
+                    }
                     if crate::raw_input::events_require_host_surface_redraw(
                         &events,
                         state.redraw_on_focus_gained,
@@ -1144,6 +1185,12 @@ async fn run_client_loop(
             ClientLoopEvent::PixelMouse(data, geometry) => {
                 if state.shell.is_some() {
                     supervisors.user_activity(now);
+                    wake_remotes_on_input(
+                        &mut input_clock,
+                        &mut supervisors,
+                        &mut write_stream,
+                        now,
+                    );
                     let (outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let outcome = shell.handle_pixel_mouse(&data, geometry);
@@ -2324,6 +2371,14 @@ async fn run_client_loop(
                 state
                     .detached_process_children
                     .retain_mut(|child| child.try_wait().ok().flatten().is_none());
+                #[cfg(unix)]
+                if input_clock.tick(now) == endpoint::Dormancy::Slept {
+                    info!(
+                        "no input for a while: remote endpoints dormant (no pings, no reconnects)"
+                    );
+                    supervisors.set_remotes_dormant(true, now);
+                    write_stream.set_remotes_dormant(true, now);
+                }
                 write_stream.tick_health(now);
                 for failure in write_stream.take_failures() {
                     if write_stream.connection(&failure.endpoint_id).is_some()

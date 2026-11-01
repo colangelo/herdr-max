@@ -100,9 +100,39 @@ pub(crate) struct EndpointSupervisors {
     shutdown: Arc<AtomicBool>,
     power_state: Option<crate::platform::HostPowerEvent>,
     wake_recovery_until: Option<Instant>,
+    /// Remotes are dormant (fork issue 260): their reconnect attempts wait,
+    /// kept as they are, for the user's next input.
+    remotes_dormant: bool,
+    /// This client was started by `herdr --remote`: its local endpoint is a
+    /// forwarded socket whose every reconnect opens ssh to the remote.
+    local_is_remote: bool,
 }
 
 impl EndpointSupervisors {
+    pub(crate) fn set_local_is_remote(&mut self, local_is_remote: bool) {
+        self.local_is_remote = local_is_remote;
+    }
+
+    fn reaches_remote(local_is_remote: bool, endpoint_id: &ClientEndpointId) -> bool {
+        !endpoint_id.is_local() || local_is_remote
+    }
+
+    #[cfg(any(unix, test))]
+    /// Hold remote reconnects while the client has no user; when the user comes
+    /// back, retry every waiting remote now, from the bottom of its backoff.
+    pub(crate) fn set_remotes_dormant(&mut self, dormant: bool, now: Instant) {
+        let woke = std::mem::replace(&mut self.remotes_dormant, dormant) && !dormant;
+        if !woke {
+            return;
+        }
+        let local_is_remote = self.local_is_remote;
+        for (endpoint_id, state) in &mut self.endpoints {
+            if Self::reaches_remote(local_is_remote, endpoint_id) && state.next_attempt.is_some() {
+                state.attempts = 0;
+                state.next_attempt = Some(now);
+            }
+        }
+    }
     pub(crate) fn new(profiles: &[super::SavedSshEndpoint], now: Instant) -> Self {
         let endpoints = profiles
             .iter()
@@ -121,6 +151,8 @@ impl EndpointSupervisors {
             shutdown: Arc::new(AtomicBool::new(false)),
             power_state: None,
             wake_recovery_until: None,
+            remotes_dormant: false,
+            local_is_remote: false,
         }
     }
 
@@ -188,11 +220,13 @@ impl EndpointSupervisors {
         }
         self.retired
             .retain(|_, completed| !completed.load(Ordering::Acquire));
+        let (dormant, local_is_remote) = (self.remotes_dormant, self.local_is_remote);
         for (endpoint_id, state) in &mut self.endpoints {
             if state.cancelled.load(Ordering::Acquire) && state.completed.load(Ordering::Acquire) {
                 state.in_flight = false;
             }
-            if state.in_flight
+            if (dormant && Self::reaches_remote(local_is_remote, endpoint_id))
+                || state.in_flight
                 || !state.completed.load(Ordering::Acquire)
                 || self.retired.contains_key(endpoint_id)
                 || state.next_attempt.is_none_or(|deadline| deadline > now)
@@ -1195,5 +1229,51 @@ mod tests {
             supervisors.endpoints[&endpoint_id].next_attempt,
             Some(now + Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn dormant_remotes_hold_their_reconnects_until_input_retries_them_now() {
+        // Fork issue 260: no reconnect wakes a sleeping remote while nobody is here.
+        let now = Instant::now();
+        let profile = profile();
+        let id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile], now);
+        let (events, _received) = tokio::sync::mpsc::channel(4);
+        supervisors.endpoints.get_mut(&id).unwrap().attempts = 5;
+        supervisors.set_remotes_dormant(true, now);
+        let later = now + Duration::from_secs(3600);
+        supervisors.spawn_due(later, connect_options(), &events);
+        let state = &supervisors.endpoints[&id];
+        assert!(!state.in_flight, "a dormant remote must not reconnect");
+        assert_eq!(
+            state.next_attempt,
+            Some(now),
+            "the attempt is held, not dropped"
+        );
+
+        supervisors.set_remotes_dormant(false, later);
+        let state = &supervisors.endpoints[&id];
+        assert_eq!(state.next_attempt, Some(later), "input retries at once");
+        assert_eq!(state.attempts, 0, "from the bottom of the backoff");
+    }
+
+    #[test]
+    fn the_local_endpoint_is_dormant_only_behind_herdr_remote() {
+        let now = Instant::now();
+        let (events, _received) = tokio::sync::mpsc::channel(4);
+        let mut supervisors = EndpointSupervisors::new(&[], now);
+        supervisors.add_local(PathBuf::from("forwarded"), None, now);
+        supervisors.set_local_is_remote(true);
+        supervisors.set_remotes_dormant(true, now);
+        supervisors.spawn_due(now, connect_options(), &events);
+        assert!(!supervisors.endpoints[&ClientEndpointId::Local].in_flight);
+        assert!(!EndpointSupervisors::reaches_remote(
+            false,
+            &ClientEndpointId::Local
+        ));
+        assert!(EndpointSupervisors::reaches_remote(
+            true,
+            &ClientEndpointId::Local
+        ));
     }
 }

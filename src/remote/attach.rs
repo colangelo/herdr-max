@@ -1460,11 +1460,7 @@ fn apply_noninteractive_ssh_options(command: &mut Command) {
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("-o")
-        .arg("ConnectionAttempts=1")
-        .arg("-o")
-        .arg("ServerAliveInterval=15")
-        .arg("-o")
-        .arg("ServerAliveCountMax=4");
+        .arg("ConnectionAttempts=1");
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -3220,8 +3216,11 @@ fn ssh_user_config_include(path: Option<&Path>) -> Option<String> {
         .map(ssh_config_include_path)
 }
 
-/// Builds a temporary ssh config that includes the user's settings first, so
-/// OpenSSH's first-value-wins behavior preserves explicit user keepalives.
+/// Builds a temporary ssh config that includes the user's and system settings.
+/// Herdr adds no `ServerAlive*` keepalive of its own: a keepalive every few
+/// seconds wakes a sleeping remote Mac all night (fork issue 260), and the
+/// client's own health check finds a dead link while someone uses it. A
+/// keepalive in the user's ssh config still applies.
 fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
     let paths = crate::platform::remote_ssh_config_paths();
     let control_path = if paths.multiplexing {
@@ -3245,9 +3244,6 @@ fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
             ssh_config_include_path(&system_config)
         ));
     }
-    contents.push_str("Host *\n");
-    contents.push_str("  ServerAliveInterval 15\n");
-    contents.push_str("  ServerAliveCountMax 4\n");
 
     let write_result = (|| {
         let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
@@ -4199,7 +4195,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_ssh_config_includes_user_config_then_fallback() {
+    fn managed_ssh_config_includes_user_config_and_adds_no_keepalive() {
         use std::os::unix::fs::PermissionsExt;
 
         let managed_config = write_managed_ssh_config("example").expect("write managed config");
@@ -4211,24 +4207,15 @@ mod tests {
             .expect("Unix managed config has a control path");
         let contents = std::fs::read_to_string(&path).expect("read keepalive config");
 
-        // herdr's fallback transport settings are present...
+        // No keepalive of herdr's own: it would wake a sleeping remote Mac (fork issue 260).
         assert!(
-            contents.contains("Host *"),
-            "config should add a Host * fallback block: {contents}"
-        );
-        assert!(
-            contents.contains("ServerAliveInterval 15"),
-            "config should set the keepalive interval: {contents}"
-        );
-        assert!(
-            contents.contains("ServerAliveCountMax 4"),
-            "config should set the keepalive count: {contents}"
+            !contents.contains("ServerAlive"),
+            "config must not add a keepalive: {contents}"
         );
         assert!(!contents.contains("ControlMaster"));
         assert!(!contents.contains("ControlPersist"));
         assert!(!contents.contains("ControlPath"));
-        // ...and any user config is Included (quoted) BEFORE it so
-        // first-value-wins keeps the user's own settings.
+        // Any user config is Included (quoted), so its own keepalive still applies.
         if let Some(home) = crate::config::home_env() {
             let user_config = PathBuf::from(home).join(".ssh").join("config");
             if user_config.is_file() {
@@ -4236,11 +4223,9 @@ mod tests {
                     "Include {}",
                     ssh_config_quote(&user_config.to_string_lossy())
                 );
-                let include_at = contents.find(&include).expect("user config Included");
-                let fallback_at = contents.find("Host *").expect("fallback present");
                 assert!(
-                    include_at < fallback_at,
-                    "user config must be Included before herdr's fallback: {contents}"
+                    contents.contains(&include),
+                    "user config Included: {contents}"
                 );
             }
         }
@@ -4248,7 +4233,7 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, BRIDGE_SOCKET_PERMISSION_MODE,
-            "keepalive config must be user-only"
+            "managed config must be user-only"
         );
         // The config lives in a private 0700 dir, not a predictable temp path.
         let dir = path.parent().expect("config has a parent dir");
@@ -4430,22 +4415,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_managed_ssh_config_uses_keepalives_without_control_socket() {
+    fn windows_managed_ssh_config_adds_no_keepalive_or_control_socket() {
         let managed_config = write_managed_ssh_config("example").expect("write managed config");
         let config_path = managed_config.options.config_path.clone();
         assert!(managed_config.options.control_path.is_none());
         let contents = std::fs::read_to_string(&config_path).expect("read managed config");
-        assert!(contents.contains("ServerAliveInterval 15"));
-        assert!(contents.contains("ServerAliveCountMax 4"));
+        assert!(!contents.contains("ServerAlive"));
         // Git Bash's MSYS OpenSSH ignores drive-letter `Include` paths, so the
         // user config must be referenced through `~` for aliases to resolve.
-        let include_at = contents
-            .find("Include \"~/.ssh/config\"")
-            .expect("user config Included through home");
-        let fallback_at = contents.find("Host *").expect("fallback present");
         assert!(
-            include_at < fallback_at,
-            "user config must be Included before herdr's fallback: {contents}"
+            contents.contains("Include \"~/.ssh/config\""),
+            "user config Included through home: {contents}"
         );
 
         let ssh = RemoteSsh {
@@ -4579,11 +4559,12 @@ mod tests {
             "StrictHostKeyChecking=yes",
             "ConnectTimeout=10",
             "ConnectionAttempts=1",
-            "ServerAliveInterval=15",
-            "ServerAliveCountMax=4",
         ] {
             assert!(args.iter().any(|arg| arg == required), "missing {required}");
         }
+        // Any of these commands can become the shared control master and carry
+        // the long-lived bridge, so none adds a keepalive (fork issue 260).
+        assert!(!args.iter().any(|arg| arg.starts_with("ServerAlive")));
         assert_eq!(args.iter().any(|arg| arg == "-F"), ssh.options().is_some());
     }
 

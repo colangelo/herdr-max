@@ -127,14 +127,14 @@ To delete a worktree checkout, use `Delete worktree checkout...` on a grouped ch
 
 ## Remote attach
 
-Remote attach manages its SSH connection with temporary keepalives and, where supported, connection reuse by default.
+Remote attach manages its SSH connection with a temporary config and, where supported, connection reuse by default.
 
 ```toml
 [remote]
 manage_ssh_config = true
 ```
 
-When enabled, `herdr --remote` writes a private temporary SSH config that includes your user and system SSH configs first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Linux and macOS clients also use a private per-attach OpenSSH control socket to reuse the first authenticated connection; Windows OpenSSH does not. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
+When enabled, `herdr --remote` writes a private temporary SSH config that includes your user and system SSH configs. Herdr adds no SSH keepalive of its own, because a keepalive every few seconds keeps a sleeping remote Mac awake; set `ServerAliveInterval` in your own SSH config if an idle link must survive a NAT timeout. After 10 minutes without input, the client also stops its health checks and reconnect attempts to remote machines until your next key or click, which probes them at once. Linux and macOS clients also use a private per-attach OpenSSH control socket to reuse the first authenticated connection; Windows OpenSSH does not. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
 
 ## Keybindings
 
