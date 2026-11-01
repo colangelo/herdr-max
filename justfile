@@ -70,9 +70,16 @@ setup-windows-cross *args:
 windows-lint:
     {{python}} scripts/windows_cross.py lint
 
+# Fork: betas ship the kv task store, so lint the build with it and run the task tests on it
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/265).
+[unix]
+tasks-kv-check:
+    cargo clippy --all-targets --locked --features tasks-kv -- -D warnings
+    cargo nextest run --locked --features tasks-kv -E 'test(tasks) | test(kv)' --status-level fail --final-status-level fail --failure-output final --success-output never
+
 # Check formatting + run unit tests + Windows target lint + documentation contract tests
 [unix]
-check: ci windows-lint
+check: ci tasks-kv-check windows-lint
     just docs-contract-test
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 

@@ -69,11 +69,12 @@ BUILD_ID=$(sed -n 's/^build_id=//p' <<<"$ids")
 VERSION=$(sed -n 's/^version=//p' <<<"$ids")
 step "2/6 build ${VERSION} at ${SHA:0:8} (${TARGET}, ${JOBS} jobs, waits for ${LOCK})"
 started=$(date +%s)
+# Betas carry the kv task store the work panel reads (fork issue 265).
 lockf -k "$LOCK" nice -n 15 env \
   CARGO_BUILD_JOBS="$JOBS" CARGO_INCREMENTAL=0 ZIG="$ZIG" \
   LIBGHOSTTY_VT_OPTIMIZE=ReleaseFast LIBGHOSTTY_VT_SIMD=true \
   HERDR_BUILD_CHANNEL=ac-beta HERDR_BUILD_ID="$BUILD_ID" \
-  timeout 2400 rustup run "$TOOLCHAIN" cargo build --release --locked --target "$TARGET"
+  timeout 2400 rustup run "$TOOLCHAIN" cargo build --release --locked --features tasks-kv --target "$TARGET"
 step "built in $(($(date +%s) - started)) s"
 
 step "3/6 sign and check the binary"
