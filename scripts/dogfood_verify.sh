@@ -70,26 +70,38 @@ verify)
 
     server="$(server_version)"
     echo "dogfood: server runs $server"
-    found=0
-    while read -r pid ppid rest; do
-        [[ -n "$pid" ]] || continue
-        found=1
-        build="$(build_of "$pid")"
-        parent="$(ps -o command= -p "$ppid" 2>/dev/null || true)"
-        if [[ "$rest" == "client" && "$parent" =~ --remote[=\ ]([^ ]+) ]]; then
-            window="remote tab ${BASH_REMATCH[1]}"
-            fix="detach it, then run: $bin --remote ${BASH_REMATCH[1]}"
-        else
-            window="main window${rest:+ ($rest)}"
-            fix="detach it, then run: $bin${rest:+ $rest}"
-        fi
-        if [[ "$build" == "$server" ]]; then
-            echo "dogfood: $window (pid $pid) runs $build: up to date"
-        else
-            echo "dogfood: $window (pid $pid) runs $build, NOT $server: $fix"
-            [[ $rc -eq 0 ]] && rc=3
-        fi
-    done < <(clients)
+    # A client that follows the new build (issue 261) is mid-exec for a moment after the
+    # handoff and reads as "no exe": judge only after the clients settle, or the deadline.
+    settle="${DOGFOOD_SETTLE_S:-15}"
+    deadline=$((SECONDS + settle))
+    while :; do
+        report=()
+        lagging=0
+        found=0
+        while read -r pid ppid rest; do
+            [[ -n "$pid" ]] || continue
+            found=1
+            build="$(build_of "$pid")"
+            parent="$(ps -o command= -p "$ppid" 2>/dev/null || true)"
+            if [[ "$rest" == "client" && "$parent" =~ --remote[=\ ]([^ ]+) ]]; then
+                window="remote tab ${BASH_REMATCH[1]}"
+                fix="detach it, then run: $bin --remote ${BASH_REMATCH[1]}"
+            else
+                window="main window${rest:+ ($rest)}"
+                fix="detach it, then run: $bin${rest:+ $rest}"
+            fi
+            if [[ "$build" == "$server" ]]; then
+                report+=("dogfood: $window (pid $pid) runs $build: up to date")
+            else
+                report+=("dogfood: $window (pid $pid) runs $build, NOT $server: $fix")
+                lagging=1
+            fi
+        done < <(clients)
+        [[ $lagging -eq 1 && $SECONDS -lt $deadline ]] || break
+        sleep 1
+    done
+    [[ ${#report[@]} -eq 0 ]] || printf '%s\n' "${report[@]}"
+    [[ $lagging -eq 1 && $rc -eq 0 ]] && rc=3
     [[ $found -eq 1 ]] || echo "dogfood: no attached client found (nothing open on this Mac)"
     if [[ $rc -eq 0 ]]; then
         echo "dogfood: SEAMLESS"
