@@ -5,8 +5,9 @@
 //! server's socket, and attaches again at the terminal's current size; a
 //! detach, a normal server stop and a direct terminal attach still exit.
 //! A federated client's Local endpoint supervisor reconnects while the shell
-//! keeps running. Only when the server that took over refuses it (a rollback
-//! to an older build) does it come through here to re-exec onto that build.
+//! keeps running. When Local comes back on another build (issue 261), or the
+//! server that took over refuses it (a rollback to an older build), the client
+//! comes through here to re-exec onto that build.
 
 use super::*;
 use std::sync::Mutex;
@@ -46,6 +47,28 @@ pub(super) fn federated_local_follows_handoff(
     endpoint_is_local
         && local_handed_off
         && status == super::endpoint::ClientEndpointStatus::Attention
+}
+
+/// Whether a federated client leaves its session for the reconnect loop when
+/// Local comes back after a live handoff on another build (fork issue 261).
+/// The endpoint supervisor reconnects Local inside the session, so without this
+/// the client kept drawing with its old build after every update and ac had to
+/// detach and reattach to see client-side changes. `guard` is the server build
+/// a previous re-exec was for ([`super::reexec::REEXEC_ENV_VAR`]); the same
+/// build is not followed twice.
+pub(super) fn federated_local_follows_build(
+    endpoint_is_local: bool,
+    local_handed_off: bool,
+    client: &str,
+    server: Option<&str>,
+    guard: Option<&str>,
+) -> bool {
+    endpoint_is_local
+        && local_handed_off
+        && matches!(
+            super::reexec::decide(client, server, guard),
+            super::reexec::ReexecDecision::Reexec(_)
+        )
 }
 
 /// The error that hands a federated session to the reconnect loop as if Local
@@ -226,6 +249,61 @@ mod tests {
         assert!(!is_live_handoff_shutdown(&detached));
         assert!(!is_live_handoff_shutdown(&stopped));
         assert!(!is_live_handoff_shutdown(&lost));
+    }
+
+    #[test]
+    fn a_federated_client_follows_local_back_from_a_handoff_on_another_build() {
+        // Fork issue 261: Local reconnected inside the session on the new build,
+        // and the client kept drawing with its old one.
+        const OLD: &str = "0.9.5-ac-beta.179-kostic";
+        const NEW: &str = "0.9.5-ac-beta.181-fagioli";
+        assert!(federated_local_follows_build(
+            true,
+            true,
+            OLD,
+            Some(NEW),
+            None
+        ));
+        // Same build, unknown build, or already exec'd for this server build: stay.
+        assert!(!federated_local_follows_build(
+            true,
+            true,
+            NEW,
+            Some(NEW),
+            None
+        ));
+        assert!(!federated_local_follows_build(true, true, OLD, None, None));
+        assert!(!federated_local_follows_build(
+            true,
+            true,
+            OLD,
+            Some(NEW),
+            Some(NEW)
+        ));
+        // A guard for an earlier build does not block a later handoff.
+        assert!(federated_local_follows_build(
+            true,
+            true,
+            OLD,
+            Some(NEW),
+            Some("0.9.5-ac-beta.180-milik")
+        ));
+        // Only Local, and only after a live handoff: a reconnect after a network
+        // drop or a saved machine's server never moves this client.
+        assert!(!federated_local_follows_build(
+            true,
+            false,
+            OLD,
+            Some(NEW),
+            None
+        ));
+        assert!(!federated_local_follows_build(
+            false,
+            true,
+            OLD,
+            Some(NEW),
+            None
+        ));
     }
 
     #[test]

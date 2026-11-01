@@ -1469,7 +1469,21 @@ async fn run_client_loop(
                         continue;
                     }
                     if endpoint_id.is_local() {
+                        let follow = handoff::federated_local_follows_build(
+                            true,
+                            local_handed_off,
+                            &crate::build_info::version(),
+                            negotiation.server_version(),
+                            std::env::var(reexec::REEXEC_ENV_VAR).ok().as_deref(),
+                        );
                         local_handed_off = false;
+                        if follow {
+                            info!(
+                                server_version = negotiation.server_version().unwrap_or("unknown"),
+                                "Local came back on another build after a live handoff; following it"
+                            );
+                            return Err(handoff::federated_handoff_exit());
+                        }
                     }
                     let surface_decoder = negotiated_surface_decoder(&negotiation);
                     let agent_view_projection_supported = negotiation.supports_capability(
