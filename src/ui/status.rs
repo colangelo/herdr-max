@@ -12,6 +12,26 @@ use crate::{
     config::ToastClipboardPosition,
 };
 
+/// `rect` grown by one cell on every side, clipped to `within`: an empty ring a
+/// bordered box keeps between itself and the text under it, so it stands out
+/// (fork issue 263: display-panes boxes and the clipboard toast).
+pub(crate) fn outer_ring(rect: Rect, within: Rect) -> Rect {
+    Rect::new(
+        rect.x.saturating_sub(1),
+        rect.y.saturating_sub(1),
+        rect.width.saturating_add(2),
+        rect.height.saturating_add(2),
+    )
+    .intersection(within)
+}
+
+/// Blanks `ring` in the panel background before a box is drawn inside it.
+pub(crate) fn clear_ring(buffer: &mut Buffer, ring: Rect, palette: &Palette) {
+    let ring = ring.intersection(buffer.area);
+    Clear.render(ring, buffer);
+    buffer.set_style(ring, Style::default().bg(palette.panel_bg));
+}
+
 pub(crate) fn copy_feedback_rect(
     area: Rect,
     feedback: &CopyFeedback,
@@ -99,7 +119,8 @@ pub(crate) fn render_copy_feedback_buffer_for_source(
         return feedback_area;
     }
 
-    Clear.render(feedback_area, buffer);
+    let ring = outer_ring(feedback_area, area.union(source.unwrap_or(area)));
+    clear_ring(buffer, ring, palette);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.green))
@@ -108,7 +129,7 @@ pub(crate) fn render_copy_feedback_buffer_for_source(
     block.render(feedback_area, buffer);
 
     if inner.height == 0 {
-        return feedback_area;
+        return ring;
     }
 
     let text = Line::from(vec![
@@ -123,7 +144,7 @@ pub(crate) fn render_copy_feedback_buffer_for_source(
         ),
     ]);
     Paragraph::new(text).render(inner, buffer);
-    feedback_area
+    ring
 }
 
 pub(crate) fn render_config_diagnostic_buffer(
@@ -166,6 +187,35 @@ pub(crate) fn render_config_diagnostic_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clipboard_toast_keeps_an_empty_ring_outside_its_border() {
+        // Fork issue 263: one blank cell around the box, clipped to the area.
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buffer = Buffer::empty(area);
+        for cell in buffer.content.iter_mut() {
+            cell.set_symbol("x");
+        }
+        let feedback = CopyFeedback {
+            message: "copied to clipboard".to_owned(),
+            source_pane: None,
+        };
+        let palette = Palette::catppuccin();
+        let toast = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::BottomCenter);
+        let drawn = render_copy_feedback_buffer(
+            &mut buffer,
+            area,
+            &feedback,
+            0,
+            ToastClipboardPosition::BottomCenter,
+            &palette,
+        );
+        assert_eq!(drawn, outer_ring(toast, area));
+        assert_eq!(drawn.height, toast.height + 1, "clipped at the bottom edge");
+        assert_eq!(buffer[(toast.x - 1, toast.y)].symbol(), " ");
+        assert_eq!(buffer[(toast.x, toast.y - 1)].symbol(), " ");
+        assert_eq!(buffer[(toast.x - 2, toast.y)].symbol(), "x");
+    }
 
     #[test]
     fn copy_feedback_rect_uses_configured_position() {

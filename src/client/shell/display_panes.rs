@@ -62,6 +62,104 @@ impl ClientShellState {
     }
 }
 
+/// One piece of a pane label, styled by [`label_spans`] (fork issue 263).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabelPart {
+    /// The digit that focuses the pane in the numbered view.
+    Digit,
+    /// The pane's title: first, in the clipboard toast's green.
+    Name,
+    /// The pane's inner size, a reversed chip like the sidebar's size badges.
+    Size,
+    /// The pane id, plain grey.
+    Id,
+}
+
+const LABEL_GAP: &str = "  ";
+
+/// A pane label's parts in order: [digit] name, size, id. When they do not fit
+/// `maximum` cells the name is shortened first, then the id is dropped, then
+/// the name; the size always stays.
+fn label_parts(
+    index: usize,
+    address: &str,
+    name: &str,
+    inner: Rect,
+    maximum: usize,
+    numbered: bool,
+) -> Vec<(LabelPart, String)> {
+    let digit = numbered.then(|| {
+        if index < 9 {
+            (index + 1).to_string()
+        } else {
+            "·".into()
+        }
+    });
+    let size = format!(" {}x{} ", inner.width, inner.height);
+    let width = |parts: &[(LabelPart, String)]| {
+        parts
+            .iter()
+            .map(|(_, text)| usize::from(super::render::display_width(text)))
+            .sum::<usize>()
+            + LABEL_GAP.len() * parts.len().saturating_sub(1)
+    };
+    let build = |name: Option<String>, id: bool| {
+        let mut parts = Vec::new();
+        if let Some(digit) = &digit {
+            parts.push((LabelPart::Digit, digit.clone()));
+        }
+        if let Some(name) = name {
+            parts.push((LabelPart::Name, name));
+        }
+        parts.push((LabelPart::Size, size.clone()));
+        if id {
+            parts.push((LabelPart::Id, address.to_owned()));
+        }
+        parts
+    };
+    let full = build(Some(name.to_owned()), true);
+    if width(&full) <= maximum {
+        return full;
+    }
+    for id in [true, false] {
+        let without_name = width(&build(None, id)) + LABEL_GAP.len();
+        let budget = maximum.saturating_sub(without_name);
+        if budget >= 4 {
+            return build(Some(crate::ui::truncate_end(name, budget).to_string()), id);
+        }
+    }
+    build(None, false)
+}
+
+/// The label's spans: the name bold in the toast's green, the size reversed in
+/// the mode's colour, the id plain grey, the digit a key in the mode's colour.
+fn label_spans(parts: Vec<(LabelPart, String)>, mode_colour: Color, p: &Palette) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (part, text)) in parts.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(LABEL_GAP, Style::default().bg(p.panel_bg)));
+        }
+        let style = match part {
+            LabelPart::Digit => Style::default()
+                .fg(mode_colour)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+            LabelPart::Name => Style::default()
+                .fg(p.green)
+                .bg(p.panel_bg)
+                .add_modifier(Modifier::BOLD),
+            LabelPart::Size => Style::default()
+                .fg(panel_contrast_fg(p))
+                .bg(mode_colour)
+                .add_modifier(Modifier::BOLD),
+            LabelPart::Id => Style::default().fg(p.overlay1).bg(p.panel_bg),
+        };
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
 fn label_text(
     index: usize,
     address: &str,
@@ -70,33 +168,11 @@ fn label_text(
     maximum: usize,
     numbered: bool,
 ) -> String {
-    let head = if numbered {
-        format!(
-            "{}  {address}",
-            if index < 9 {
-                (index + 1).to_string()
-            } else {
-                "·".into()
-            }
-        )
-    } else {
-        address.to_owned()
-    };
-    let size = format!("{}x{}", inner.width, inner.height);
-    let full = format!("{head} · {name}  {size}");
-    if usize::from(super::render::display_width(&full)) <= maximum {
-        return full;
-    }
-    let without = usize::from(super::render::display_width(&head))
-        + 3
-        + 2
-        + usize::from(super::render::display_width(&size));
-    let budget = maximum.saturating_sub(without);
-    if budget >= 4 {
-        format!("{head} · {}  {size}", crate::ui::truncate_end(name, budget))
-    } else {
-        crate::ui::truncate_end(&format!("{head}  {size}"), maximum)
-    }
+    label_parts(index, address, name, inner, maximum, numbered)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(LABEL_GAP)
 }
 
 fn connected_version<'a>(
@@ -171,33 +247,45 @@ pub(super) fn paint(
         }
         let name = pane_name(snapshot, &pane.pane_id);
         let boxed = inner.height >= 3 && inner.width > 4;
-        let text = label_text(
+        // Room for the empty ring outside the border too (fork issue 263).
+        let ringed = inner.height >= 5 && inner.width > 6;
+        let chrome = if ringed { 6 } else { 4 };
+        let parts = label_parts(
             index,
             &pane.pane_id,
             name,
             inner,
-            usize::from(if boxed { inner.width - 4 } else { inner.width }),
+            usize::from(if boxed {
+                inner.width - chrome
+            } else {
+                inner.width
+            }),
             state.pane_labels_explicit,
         );
-        let width = super::render::display_width(&text);
+        let line = label_spans(parts, mode_colour, p);
+        let width = u16::try_from(line.width())
+            .unwrap_or(u16::MAX)
+            .min(inner.width);
         let active = snapshot.focused_pane_id.as_deref() == Some(pane.pane_id.as_str());
         let border = if active { p.red } else { p.muted_red() };
-        let style = Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD);
         let rect = if boxed {
+            let box_width = (width + 4).min(inner.width);
             Rect::new(
-                inner.x + (inner.width - width - 4) / 2,
+                inner.x + (inner.width - box_width) / 2,
                 inner.y + (inner.height - 3) / 2,
-                width + 4,
+                box_width,
                 3,
             )
         } else {
             Rect::new(inner.x, inner.y + inner.height / 2, width, 1)
         };
-        covered.push(rect);
-        Clear.render(rect, buffer);
+        let drawn = if ringed {
+            crate::ui::outer_ring(rect, inner)
+        } else {
+            rect
+        };
+        covered.push(drawn);
+        crate::ui::clear_ring(buffer, drawn, p);
         if boxed {
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -206,9 +294,9 @@ pub(super) fn paint(
                 .style(Style::default().bg(p.panel_bg));
             let text_area = block.inner(rect);
             block.render(rect, buffer);
-            Paragraph::new(text).style(style).render(text_area, buffer);
+            Paragraph::new(line).render(text_area, buffer);
         } else {
-            Paragraph::new(text).style(style).render(rect, buffer);
+            Paragraph::new(line).render(rect, buffer);
         }
         if state.pane_labels_explicit {
             for y in pane.rect.y..pane.rect.bottom() {
@@ -496,11 +584,51 @@ mod tests {
     }
 
     #[test]
-    fn long_label_drops_name_before_address_and_size() {
+    fn label_reads_name_size_id_and_shortens_the_name_then_drops_the_id() {
+        // Fork issue 263: title first, then the size chip, then the pane id.
         let inner = Rect::new(0, 0, 80, 20);
+        let parts = label_parts(0, "w5:p16", "herdr", inner, 80, false);
+        assert_eq!(
+            parts,
+            vec![
+                (LabelPart::Name, "herdr".to_owned()),
+                (LabelPart::Size, " 80x20 ".to_owned()),
+                (LabelPart::Id, "w5:p16".to_owned()),
+            ]
+        );
+        assert_eq!(
+            label_text(0, "w5:p16", "herdr", inner, 80, true),
+            "1  herdr   80x20   w5:p16"
+        );
+
         let text = label_text(0, "w5:p16", "very long name", inner, 20, true);
-        assert!(text.contains("w5:p16"));
-        assert!(text.ends_with("80x20"));
+        assert!(text.contains(" 80x20 "), "the size always stays: {text}");
+        assert!(
+            !text.contains("w5:p16"),
+            "the id goes before the name: {text}"
+        );
         assert!(super::super::render::display_width(&text) <= 20);
+    }
+
+    #[test]
+    fn label_styles_name_green_size_reversed_id_plain_grey() {
+        let p = Palette::catppuccin();
+        let line = label_spans(
+            label_parts(0, "w5:pV", "herdr", Rect::new(0, 0, 138, 52), 80, false),
+            p.red,
+            &p,
+        );
+        let style_of = |text: &str| {
+            line.spans
+                .iter()
+                .find(|span| span.content == text)
+                .map(|span| span.style)
+                .expect(text)
+        };
+        assert_eq!(style_of("herdr").fg, Some(p.green));
+        assert!(style_of("herdr").add_modifier.contains(Modifier::BOLD));
+        assert_eq!(style_of(" 138x52 ").bg, Some(p.red));
+        assert_eq!(style_of("w5:pV").fg, Some(p.overlay1));
+        assert!(!style_of("w5:pV").add_modifier.contains(Modifier::BOLD));
     }
 }

@@ -45,7 +45,7 @@ pub(crate) use self::sidebar::{
 };
 use self::status::copy_feedback_rect;
 pub(crate) use self::status::{
-    render_config_diagnostic_buffer, render_copy_feedback_buffer,
+    clear_ring, outer_ring, render_config_diagnostic_buffer, render_copy_feedback_buffer,
     render_copy_feedback_buffer_for_source,
 };
 pub(crate) use self::tab_surface::{
