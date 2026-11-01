@@ -8,7 +8,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
 };
 
@@ -336,9 +336,9 @@ fn clip(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
     Line::from(out)
 }
 
-/// The dim style of an edge row's text.
-pub(crate) fn dim_style(color: Color) -> Style {
-    Style::default().fg(color).add_modifier(Modifier::DIM)
+/// The style of an edge row's text: the section headers' colour, not dimmed.
+pub(crate) fn edge_text_style(color: Color) -> Style {
+    Style::default().fg(color)
 }
 
 #[cfg(test)]
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn edge_rows_read_as_a_summary() {
-        let dim = dim_style(Color::Gray);
+        let dim = edge_text_style(Color::Gray);
         let above = EdgeRow {
             edge: Edge::Above,
             rect: Rect::new(0, 0, 30, 1),
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn edge_row_clips_to_the_width() {
-        let dim = dim_style(Color::Gray);
+        let dim = edge_text_style(Color::Gray);
         let below = EdgeRow {
             edge: Edge::Below,
             rect: Rect::new(0, 5, 12, 1),
@@ -722,7 +722,7 @@ pub(super) fn paint(
         Paragraph::new(edge_row_line(
             row,
             row.rect.width,
-            dim_style(p.overlay0),
+            edge_text_style(p.overlay0),
             color,
         ))
         .render(row.rect, buffer);

@@ -275,11 +275,7 @@ pub(super) fn render_expanded(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
-            " MACHINES"
-        } else {
-            " machines"
-        },
+        &super::sidebar_chrome::header_label(config, "machines", state.endpoints.len()),
         super::sidebar_chrome::header_style(config),
     );
 

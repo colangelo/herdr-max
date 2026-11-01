@@ -1275,6 +1275,8 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                // A peek ends on release, wherever the pointer moved meanwhile.
+                Some(ClientChromeDrag::PaneLabelPeek) => return,
                 None => {}
             }
             if let Some(press) = self.workspace_press.as_ref() {
@@ -1420,6 +1422,9 @@ impl ClientShellState {
                     }
                     ClientChromeDrag::SidebarWidth | ClientChromeDrag::SidebarSection => {
                         self.persist_chrome_preferences(outcome);
+                    }
+                    ClientChromeDrag::PaneLabelPeek => {
+                        outcome.repaint = true;
                     }
                     ClientChromeDrag::WorkspaceScrollbar { .. }
                     | ClientChromeDrag::AgentScrollbar { .. }
@@ -2136,6 +2141,11 @@ impl ClientShellState {
                             }
                         }
                     }
+                    return;
+                }
+                if super::contains(self.hits.agent_header, point) {
+                    self.chrome_drag = Some(ClientChromeDrag::PaneLabelPeek);
+                    outcome.repaint = true;
                     return;
                 }
                 if super::contains(self.hits.agent_sort_toggle, point) {

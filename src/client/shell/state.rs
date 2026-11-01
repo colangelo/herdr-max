@@ -147,6 +147,8 @@ pub(super) struct ShellHitMap {
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) agent_max_scroll: usize,
     pub(super) agent_sort_toggle: Rect,
+    /// The `AGENTS (n)` label: held down, it shows the pane labels.
+    pub(super) agent_header: Rect,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
@@ -243,6 +245,9 @@ pub(super) struct ClientTabPress {
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
+    /// The left button is held on the `AGENTS` label: the pane labels show
+    /// until it is released, with no linger.
+    PaneLabelPeek,
     WorkspaceScrollbar {
         grab_row_offset: u16,
     },

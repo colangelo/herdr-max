@@ -2,12 +2,23 @@ use super::*;
 use crate::config::{SidebarActiveBorderConfig as Border, SidebarStyleConfig};
 use ratatui::style::Color;
 
+/// A section header (`AGENTS`, `MACHINES`, `SPACES`): the sort label's colour,
+/// never dimmed, which left the editorial headers nearly invisible.
 pub(super) fn header_style(config: &ClientShellConfig) -> Style {
     let style = Style::default().fg(config.palette.overlay0);
     if config.sidebar_style == SidebarStyleConfig::Editorial {
-        style.add_modifier(Modifier::DIM)
+        style
     } else {
         style.add_modifier(Modifier::BOLD)
+    }
+}
+
+/// A section header's label with its count, `" AGENTS (16)"` or `" agents (16)"`.
+pub(super) fn header_label(config: &ClientShellConfig, name: &str, count: usize) -> String {
+    if config.sidebar_style == SidebarStyleConfig::Editorial {
+        format!(" {} ({count})", name.to_uppercase())
+    } else {
+        format!(" {} ({count})", name.to_lowercase())
     }
 }
 

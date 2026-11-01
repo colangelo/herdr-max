@@ -964,6 +964,87 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
 }
 
 #[test]
+fn agents_header_counts_agents_and_shows_pane_labels_only_while_held() {
+    // Fork issue 259: `AGENTS (n)`, and holding the label peeks at the pane labels.
+    let mut projected = snapshot();
+    projected.agents.push(ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("pi".into()),
+        display_agent: None,
+        agent: Some("pi".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Idle,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    });
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 30).expect("agent sidebar frame");
+    let text: String = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    assert!(
+        text.to_lowercase().contains(" agents (1)"),
+        "header must carry the agent count: {text}"
+    );
+    let header = state.hits.agent_header;
+    assert_ne!(header, Rect::default());
+    assert!(!state.pane_labels_visible());
+
+    let mouse = |kind| {
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column: header.x + 1,
+            row: header.y,
+            modifiers: KeyModifiers::empty(),
+        })
+    };
+    let press = state.handle_raw_events(vec![mouse(MouseEventKind::Down(MouseButton::Left))]);
+    assert!(press.repaint);
+    assert!(press.actions.is_empty());
+    assert!(
+        state.pane_labels_visible(),
+        "labels show while the button is held"
+    );
+    state.compose(106, 30).expect("frame while held");
+    assert!(state.pane_labels_visible(), "a frame while held keeps them");
+
+    let release = state.handle_raw_events(vec![mouse(MouseEventKind::Up(MouseButton::Left))]);
+    assert!(release.repaint);
+    assert!(
+        !state.pane_labels_visible(),
+        "labels go the moment the button is released, with no linger"
+    );
+}
+
+#[test]
+fn section_header_labels_carry_their_count_in_both_styles() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.sidebar_style = crate::config::SidebarStyleConfig::Editorial;
+    assert_eq!(
+        super::sidebar_chrome::header_label(&config, "machines", 2),
+        " MACHINES (2)"
+    );
+    assert!(!super::sidebar_chrome::header_style(&config)
+        .add_modifier
+        .contains(ratatui::style::Modifier::DIM));
+    config.sidebar_style = crate::config::SidebarStyleConfig::Default;
+    assert_eq!(
+        super::sidebar_chrome::header_label(&config, "agents", 16),
+        " agents (16)"
+    );
+}
+
+#[test]
 fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
     let path = std::env::temp_dir().join(format!(
         "herdr-shell-agent-sort-{}-{}.json",

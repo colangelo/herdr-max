@@ -19,6 +19,7 @@ impl ClientShellState {
                     ClientChromeDrag::PaneSplit { .. }
                         | ClientChromeDrag::SidebarWidth
                         | ClientChromeDrag::SidebarSection
+                        | ClientChromeDrag::PaneLabelPeek
                 )
             )
     }
