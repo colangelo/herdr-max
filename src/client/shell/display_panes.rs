@@ -247,9 +247,10 @@ pub(super) fn paint(
         }
         let name = pane_name(snapshot, &pane.pane_id);
         let boxed = inner.height >= 3 && inner.width > 4;
-        // Room for the empty ring outside the border too (fork issue 263).
-        let ringed = inner.height >= 5 && inner.width > 6;
-        let chrome = if ringed { 6 } else { 4 };
+        // Room for the empty ring outside the border too: a row above and below, two columns
+        // on each side (fork issues 263, 264).
+        let ringed = inner.height >= 5 && inner.width > 8;
+        let chrome = if ringed { 8 } else { 4 };
         let parts = label_parts(
             index,
             &pane.pane_id,
@@ -394,7 +395,12 @@ fn summary_spans<'a>(
         .fg(chip.bg.unwrap_or(p.red))
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
-    let value = Style::default().fg(p.text);
+    // The sizes are chips in the mode's colour, like the size in each pane box, and the version a
+    // green chip (fork issue 264).
+    let version_chip = Style::default()
+        .fg(panel_contrast_fg(p))
+        .bg(p.green)
+        .add_modifier(Modifier::BOLD);
     let mut spans = vec![
         Span::styled(if resize { " RESIZE " } else { " PANES " }, chip),
         Span::raw("  "),
@@ -411,9 +417,9 @@ fn summary_spans<'a>(
     }
     spans.extend([
         Span::styled("window ", dim),
-        Span::styled(format!("{}x{}", window.width, window.height), value),
+        Span::styled(format!(" {}x{} ", window.width, window.height), chip),
         Span::styled(" · panes ", dim),
-        Span::styled(format!("{}x{}", panes.width, panes.height), value),
+        Span::styled(format!(" {}x{} ", panes.width, panes.height), chip),
     ]);
     if explicit {
         spans.push(Span::raw("  "));
@@ -433,13 +439,12 @@ fn summary_spans<'a>(
         }
         spans.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
     }
-    // Keep the hints on narrow bars, dropping the version first, as in the fork. One chip per
-    // mode: the version is a dim label, not a second chip.
+    // Keep the hints on narrow bars, dropping the version first, as in the fork.
     let version_spans = [
         Span::raw("  "),
         Span::styled("version", dim),
         Span::raw(" "),
-        Span::styled(version, value),
+        Span::styled(format!(" {version} "), version_chip),
     ];
     if spans.iter().map(Span::width).sum::<usize>()
         + version_spans.iter().map(Span::width).sum::<usize>()
@@ -492,8 +497,9 @@ mod tests {
         assert!(!state.pane_labels_visible());
     }
     #[test]
-    fn summary_has_one_chip_keys_in_the_modes_colour_and_a_dim_version_label() {
-        // Fork issue 174: one chip per mode, keys in the mode's colour, `version` a dim label.
+    fn summary_has_mode_chips_for_the_mode_and_sizes_and_a_green_version_chip() {
+        // Fork issue 174: keys in the mode's colour, `version` a dim label. Fork issue 264: the
+        // window and panes sizes are chips in the mode's colour, the version a green chip.
         let config = ClientShellConfig::from_config(&Config::default());
         let p = &config.palette;
         let chip = |colour| {
@@ -516,14 +522,16 @@ mod tests {
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with(" PANES "), "{text}");
         assert!(
-            text.ends_with("any key close  version server-build"),
+            text.ends_with("any key close  version  server-build "),
             "{text}"
         );
-        assert_eq!(
-            spans.iter().filter(|s| s.style.bg == Some(p.red)).count(),
-            1,
-            "only the PANES chip is filled"
-        );
+        assert!(text.contains("window  140x30  · panes  114x29 "), "{text}");
+        let filled: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.style.bg == Some(p.red))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(filled, [" PANES ", " 140x30 ", " 114x29 "]);
         let find = |spans: &[Span<'_>], text: &str| {
             spans
                 .iter()
@@ -533,7 +541,11 @@ mod tests {
         };
         assert_eq!(find(&spans, "any key").fg, Some(p.red));
         assert_eq!(find(&spans, "version").fg, Some(p.overlay0));
-        assert_eq!(find(&spans, "server-build").fg, Some(p.text));
+        assert_eq!(find(&spans, " server-build ").bg, Some(p.green));
+        assert_eq!(
+            find(&spans, " server-build ").fg,
+            Some(panel_contrast_fg(p))
+        );
         let resize = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
@@ -552,8 +564,8 @@ mod tests {
                 .iter()
                 .filter(|s| s.style.bg == Some(p.mauve))
                 .count(),
-            1,
-            "only the RESIZE chip is filled"
+            3,
+            "the RESIZE chip and the two sizes"
         );
         let narrow = summary_spans(
             Rect::new(0, 0, 70, 30),

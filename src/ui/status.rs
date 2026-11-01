@@ -12,14 +12,15 @@ use crate::{
     config::ToastClipboardPosition,
 };
 
-/// `rect` grown by one cell on every side, clipped to `within`: an empty ring a
-/// bordered box keeps between itself and the text under it, so it stands out
-/// (fork issue 263: display-panes boxes and the clipboard toast).
+/// `rect` grown by one row above and below and two columns left and right, clipped to `within`:
+/// an empty ring a bordered box keeps between itself and the text under it, so it stands out
+/// (fork issue 263: display-panes boxes and the clipboard toast). The sides are two columns
+/// because a terminal cell is about half as wide as it is tall (fork issue 264).
 pub(crate) fn outer_ring(rect: Rect, within: Rect) -> Rect {
     Rect::new(
-        rect.x.saturating_sub(1),
+        rect.x.saturating_sub(2),
         rect.y.saturating_sub(1),
-        rect.width.saturating_add(2),
+        rect.width.saturating_add(4),
         rect.height.saturating_add(2),
     )
     .intersection(within)
@@ -213,8 +214,11 @@ mod tests {
         assert_eq!(drawn, outer_ring(toast, area));
         assert_eq!(drawn.height, toast.height + 1, "clipped at the bottom edge");
         assert_eq!(buffer[(toast.x - 1, toast.y)].symbol(), " ");
+        assert_eq!(buffer[(toast.x - 2, toast.y)].symbol(), " ");
+        assert_eq!(buffer[(toast.right() + 1, toast.y)].symbol(), " ");
         assert_eq!(buffer[(toast.x, toast.y - 1)].symbol(), " ");
-        assert_eq!(buffer[(toast.x - 2, toast.y)].symbol(), "x");
+        assert_eq!(buffer[(toast.x - 3, toast.y)].symbol(), "x");
+        assert_eq!(buffer[(toast.x, toast.y - 2)].symbol(), "x");
     }
 
     #[test]
