@@ -78,11 +78,16 @@ just beta-local                   # m4m builds origin/master and publishes (~2 m
 # backup: just beta, then command gh run watch <run-id> --repo colangelo/herdr-max --exit-status
 ```
 
-5. Install, seamless (live handoff, panes and sessions kept): mbm5 first, by
-   mac-m5 via manager-aruba, unless ac names another order; then mac-m4 runs
-   `just brew-upgrade herdr-beta` on m4m. The recipe ends with
-   `scripts/dogfood_verify.sh verify`, and each Mac reports its last lines
-   verbatim.
+5. Install, seamless (live handoff, panes and sessions kept): **both Macs at
+   once**, in the same step. Bell mac-m4 (m4m) and manager-aruba (mac-m5 on
+   mbm5) together; each runs `just brew-upgrade herdr-beta`. Never hold m4m back
+   for mbm5's report: ac works on m4m and asks there (ac, 2026-11-01: "this is
+   almost always the case, you defaulted to m5 without reason other times
+   change it"). Starting both together also keeps m4m from running ahead of
+   mbm5, which the old mbm5-first order guarded against: ac's `--remote
+   ac-mbm5` tab pushes the m4m build onto mbm5 when it reattaches. Only ac
+   names another order. The recipe ends with `scripts/dogfood_verify.sh
+   verify`, and each Mac reports its last lines verbatim.
 6. **"Live" means the last line reads `dogfood: SEAMLESS`.** That needs no pane
    or session lost (exit 2 otherwise) AND every window ac has open on the build
    the server runs (exit 3 otherwise). A live handoff moves only the server;
