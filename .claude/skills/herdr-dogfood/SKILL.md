@@ -78,10 +78,21 @@ just beta-local                   # m4m builds origin/master and publishes (~2 m
 # backup: just beta, then command gh run watch <run-id> --repo colangelo/herdr-max --exit-status
 ```
 
-5. Install, seamless (live handoff, panes and sessions kept): mac-m4 runs
-   `just brew-upgrade herdr-beta` on m4m; then ask manager-aruba to have mac-m5
-   do the same on mbm5. Each reports `herdr-beta --version`
-   (`X.Y.Z-ac-beta.<run>-<codename>` = the new build).
+5. Install, seamless (live handoff, panes and sessions kept): mbm5 first, by
+   mac-m5 via manager-aruba, unless ac names another order; then mac-m4 runs
+   `just brew-upgrade herdr-beta` on m4m. The recipe ends with
+   `scripts/dogfood_verify.sh verify`, and each Mac reports its last lines
+   verbatim.
+6. **"Live" means the last line reads `dogfood: SEAMLESS`.** That needs no pane
+   or session lost (exit 2 otherwise) AND every window ac has open on the build
+   the server runs (exit 3 otherwise). A live handoff moves only the server;
+   the sidebar, input and remote keepalives are the CLIENT's, so on exit 3 a
+   client-side change has NOT reached ac. Never call it live then: give ac the
+   per-window line the script prints (`detach it, then run: ...`) and say why
+   (issue 261: the client did not re-exec). Recorded 2026-11-01: betas 180/181
+   were reported live while ac's main window ran 174 and his remote tab 179;
+   he had to ask twice. Read-only re-check any time:
+   `scripts/dogfood_verify.sh snapshot /tmp/s.json && scripts/dogfood_verify.sh verify /tmp/s.json`.
 
 If `gh` or the push to `origin` says the token is invalid, ask mac-m4 to log in
 again on m4m; the Gitea steps keep working meanwhile.
