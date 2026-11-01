@@ -668,6 +668,19 @@ fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
         .map_or("Local", |endpoint| endpoint.label.as_str())
 }
 
+/// A machine row's text: its name and, once it has sent a snapshot, how many
+/// spaces it has, `▾ Local (13)` (fork issue 259).
+fn endpoint_row_label(marker: &str, endpoint: &ClientShellEndpoint) -> String {
+    match endpoint.snapshot.as_deref() {
+        Some(snapshot) => format!(
+            " {marker} {} ({})",
+            endpoint.label,
+            snapshot.workspaces.len()
+        ),
+        None => format!(" {marker} {}", endpoint.label),
+    }
+}
+
 fn render_endpoint_row(
     buffer: &mut Buffer,
     rect: Rect,
@@ -703,7 +716,7 @@ fn render_endpoint_row(
         rect.x,
         rect.y,
         rect.width.saturating_sub(signal_width.saturating_add(1)),
-        &format!(" {marker} {}", endpoint.label),
+        &endpoint_row_label(marker, endpoint),
         Style::default()
             .fg(
                 if matches!(endpoint.status, ClientEndpointStatus::Disabled) {

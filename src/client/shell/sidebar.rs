@@ -235,11 +235,7 @@ pub(crate) fn render_sidebar(
         workspace_area.x,
         workspace_area.y,
         workspace_area.width,
-        if config.sidebar_style == crate::config::SidebarStyleConfig::Editorial {
-            " SPACES"
-        } else {
-            " spaces"
-        },
+        &super::sidebar_chrome::header_label(config, "spaces", snapshot.workspaces.len()),
         super::sidebar_chrome::header_style(config),
     );
 

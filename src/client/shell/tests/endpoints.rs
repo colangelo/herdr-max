@@ -2130,6 +2130,51 @@ fn reconnecting_local_selection_still_reaches_the_runtime() {
 }
 
 #[test]
+fn machine_rows_and_the_spaces_header_carry_their_space_count() {
+    // Fork issue 259: `▾ Local (13)` per machine, `SPACES (n)` with one machine.
+    let (mut state, remote_id) = state_with_remote();
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&remote_id, Box::new(snapshot()));
+    let spaces = snapshot().workspaces.len();
+    let frame = state.compose(100, 28).expect("two machine frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let label = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == remote_id)
+        .expect("remote endpoint")
+        .label
+        .clone();
+    assert!(
+        text.contains(&format!("{label} ({spaces})")),
+        "machine row must carry its space count: {text}"
+    );
+
+    let mut local = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    local.set_snapshot(Box::new(snapshot()));
+    local.set_pane_surface(surface());
+    let frame = local.compose(100, 28).expect("local-only frame");
+    let text: String = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    assert!(
+        text.to_lowercase().contains(&format!(" spaces ({spaces})")),
+        "one machine: the header carries the space count: {text}"
+    );
+}
+
+#[test]
 fn machine_arrow_toggles_inactive_machine_without_switching() {
     for sidebar_collapsed in [false, true] {
         for status in [
