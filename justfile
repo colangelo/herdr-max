@@ -387,6 +387,8 @@ brew-upgrade formula="herdr":
     set -euo pipefail
     bin="$(brew --prefix)/bin/{{formula}}"
     test -x "$bin" || { echo "$bin not installed — run: brew install colangelo/tap/{{formula}}"; exit 1; }
+    snap="$(mktemp -t herdr-dogfood)"
+    HERDR_DOGFOOD_BIN={{formula}} scripts/dogfood_verify.sh snapshot "$snap"
     brew update
     brew upgrade {{formula}}
     version=$("$bin" --version | awk '{print $2}')
@@ -395,7 +397,10 @@ brew-upgrade formula="herdr":
         flags+=(--user-context)
     fi
     "$bin" server live-handoff --import-exe "$bin" "${flags[@]}"
-    echo "{{formula}} upgraded to $version; running server handed off onto $bin, panes preserved"
+    echo "{{formula}} upgraded to $version; running server handed off onto $bin"
+    # Seamless only when no pane was lost AND every attached client runs $version
+    # (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/261).
+    HERDR_DOGFOOD_BIN={{formula}} scripts/dogfood_verify.sh verify "$snap"
 
 # Hands the current (stable) server off to the herdr-beta binary via live handoff
 # (source-agnostic); they share one session socket, so it takes over in place.
