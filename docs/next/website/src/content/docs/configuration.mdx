@@ -356,6 +356,8 @@ The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](
 
 `ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
+Set `smooth_scroll = true` under `[ui]` to ease mouse wheel scrolling of pane scrollback. Each notch still scrolls `ui.mouse_scroll_lines` rows, but they arrive over a few frames, several rows at a time during a fast burst and one at a time at the end, instead of in one jump. The host terminal draws a grid of cells, so the motion is still one row at a time, not by pixels. A pane whose app takes the wheel itself (it turned on mouse reporting or uses the alternate screen) and popups keep one wheel event per notch. The default is `false`, and `herdr server reload-config` applies a change.
+
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
 ### Hidden rows
