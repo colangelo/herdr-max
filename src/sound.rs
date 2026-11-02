@@ -39,7 +39,8 @@ pub enum Sound {
 /// Play a notification sound in a background thread.
 /// Silently does nothing if no audio player is available.
 pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
-    if sound_playback_disabled_by_env() {
+    // A sound that is switched off spawns no thread and no player process.
+    if !config.plays(sound) || sound_playback_disabled_by_env() {
         return;
     }
 

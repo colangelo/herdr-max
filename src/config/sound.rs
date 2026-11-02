@@ -19,6 +19,10 @@ pub struct SoundConfig {
     /// Optional mp3 file path for "request" notifications.
     /// Relative paths are resolved from the config file's directory.
     pub request_path: Option<PathBuf>,
+    /// Play the "done" sound. `false` turns it off without spawning any player.
+    pub done: bool,
+    /// Play the "request" sound. `false` turns it off without spawning any player.
+    pub request: bool,
     pub agents: AgentSoundOverrides,
 }
 
@@ -65,6 +69,15 @@ impl SoundConfig {
         }
 
         !matches!(self.agents.for_agent(agent), AgentSoundSetting::Off)
+    }
+
+    /// Whether `sound` plays at all: `enabled` and its own switch.
+    pub fn plays(&self, sound: crate::sound::Sound) -> bool {
+        self.enabled
+            && match sound {
+                crate::sound::Sound::Done => self.done,
+                crate::sound::Sound::Request => self.request,
+            }
     }
 
     pub fn path_for(&self, sound: crate::sound::Sound) -> Option<PathBuf> {
@@ -158,6 +171,8 @@ impl Default for SoundConfig {
             path: None,
             done_path: None,
             request_path: None,
+            done: true,
+            request: true,
             agents: AgentSoundOverrides::default(),
         }
     }
@@ -227,6 +242,19 @@ claude = "on"
         assert_eq!(config.ui.sound.agents.claude, AgentSoundSetting::On);
         assert_eq!(config.ui.sound.agents.pi, AgentSoundSetting::Default);
         assert_eq!(config.ui.sound.agents.letta, AgentSoundSetting::Default);
+        assert!(config.ui.sound.done);
+        assert!(config.ui.sound.request);
+    }
+
+    #[test]
+    fn per_sound_switches_turn_one_sound_off() {
+        let config: Config = toml::from_str("[ui.sound]\ndone = false\n").unwrap();
+        assert!(!config.ui.sound.plays(crate::sound::Sound::Done));
+        assert!(config.ui.sound.plays(crate::sound::Sound::Request));
+
+        let config: Config = toml::from_str("[ui.sound]\nenabled = false\n").unwrap();
+        assert!(!config.ui.sound.plays(crate::sound::Sound::Done));
+        assert!(!config.ui.sound.plays(crate::sound::Sound::Request));
     }
 
     #[test]

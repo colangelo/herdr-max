@@ -633,6 +633,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # path = "sounds/notification.mp3"   # one mp3 file for all sound notifications
 # done_path = "sounds/done.mp3"      # overrides only finished notifications
 # request_path = "sounds/request.mp3" # overrides only needs-attention notifications
+# done = true                        # false: no finished sound, and no player process
+# request = true                     # false: no needs-attention sound, and no player process
 
 # Per-agent overrides: default | on | off
 # By default, droid is muted.
