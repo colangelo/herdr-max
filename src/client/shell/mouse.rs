@@ -2457,14 +2457,20 @@ impl ClientShellState {
                             outcome,
                         );
                     }
-                    self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
+                    if !self.glide_pane_wheel(&hit, mouse, outcome) {
+                        self.push_pane_mouse_event(&hit, mouse, mouse.modifiers, outcome);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    fn pane_mouse_position(&self, hit: &PaneHit, mouse: MouseEvent) -> ClientMousePosition {
+    pub(super) fn pane_mouse_position(
+        &self,
+        hit: &PaneHit,
+        mouse: MouseEvent,
+    ) -> ClientMousePosition {
         let cell = ClientMousePosition::Cell {
             column: mouse.column.saturating_sub(hit.inner_rect.x),
             row: mouse.row.saturating_sub(hit.inner_rect.y),
@@ -2503,14 +2509,7 @@ impl ClientShellState {
             return;
         };
         let position = self.pane_mouse_position(hit, mouse);
-        let geometry = matches!(position, ClientMousePosition::Pixels { .. }).then_some(
-            crate::protocol::ClientMouseGeometry {
-                cols: hit.inner_rect.width,
-                rows: hit.inner_rect.height,
-                width_px: hit.pixel_width,
-                height_px: hit.pixel_height,
-            },
-        );
+        let geometry = super::wheel_glide::pane_mouse_geometry(hit, position);
         let target = if hit.popup {
             ClientInputTarget::Popup(hit.pane_id.clone())
         } else {

@@ -288,6 +288,7 @@ mod startup_overlays;
 mod todo_board;
 mod todo_overlays;
 mod tui_look;
+mod wheel_glide;
 mod work_panel;
 
 #[test]

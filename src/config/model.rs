@@ -1470,6 +1470,9 @@ pub struct UiConfig {
     pub redraw_on_focus_gained: bool,
     /// Lines to scroll per mouse wheel notch. Default: 3.
     pub mouse_scroll_lines: Option<NonZeroUsize>,
+    /// Ease mouse wheel scrolling of pane scrollback over a few frames instead
+    /// of jumping mouse_scroll_lines rows at once. Default: false.
+    pub smooth_scroll: bool,
     /// Ask for confirmation before closing a workspace. Default: true.
     pub confirm_close: bool,
     /// Ask for a tab name before creating a new tab. Default: true.
@@ -2040,6 +2043,7 @@ impl Default for UiConfig {
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
             mouse_scroll_lines: None,
+            smooth_scroll: false,
             confirm_close: true,
             prompt_new_tab_name: true,
             prompt_new_workspace_name: false,
@@ -3104,6 +3108,15 @@ mouse_scroll_lines = 1
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.mouse_scroll_lines(), 1);
+    }
+
+    // Fork issue 273.
+    #[test]
+    fn smooth_scroll_defaults_off_and_parses() {
+        assert!(!Config::default().ui.smooth_scroll);
+
+        let config: Config = toml::from_str("[ui]\nsmooth_scroll = true\n").unwrap();
+        assert!(config.ui.smooth_scroll);
     }
 
     #[test]

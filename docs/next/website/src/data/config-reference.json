@@ -1103,6 +1103,12 @@
           "description": "Lines to scroll per mouse wheel notch."
         },
         {
+          "key": "ui.smooth_scroll",
+          "type": "boolean",
+          "default": "false",
+          "description": "Ease mouse wheel scrolling of pane scrollback: each notch's ui.mouse_scroll_lines rows arrive over a few frames, fast at first and slowing to one row at a time, instead of all at once. Panes whose app takes the wheel itself (mouse reporting or the alternate screen) and popups keep one wheel event per notch."
+        },
+        {
           "key": "ui.confirm_close",
           "type": "boolean",
           "default": "true",

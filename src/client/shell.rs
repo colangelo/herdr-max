@@ -11,6 +11,7 @@ mod list_motion;
 mod machine_diagnostics;
 mod sync_chrome;
 mod tab_indicators;
+mod wheel_glide;
 mod workspace_navigation;
 use workspace_navigation::{PendingWorkspaceHighlight, WorkspaceNavigationTarget};
 mod composition;

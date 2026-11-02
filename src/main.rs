@@ -334,6 +334,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pane scrollback lines to scroll per mouse wheel notch.
 # mouse_scroll_lines = 3
 
+# Ease wheel scrolling of pane scrollback: each notch's rows arrive over a few
+# frames, fast at first and one row at a time at the end, instead of all at once.
+# Apps that take the wheel themselves (mouse reporting, alternate screen) are unchanged.
+# smooth_scroll = false
+
 # Ask for confirmation before closing a workspace
 # confirm_close = true
 

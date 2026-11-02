@@ -81,6 +81,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) palette_send_busy: crate::config::PaletteBusyPolicy,
     pub(super) mouse_capture: bool,
     pub(super) mouse_scroll_lines: usize,
+    pub(super) smooth_scroll: bool,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
     pub(super) redraw_on_focus_gained: bool,
     pub(super) switch_ascii_input_source_in_prefix: bool,
@@ -1119,6 +1120,10 @@ pub(crate) struct ClientShellState {
     pub(super) last_pane_click: Option<ClientPaneClick>,
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
+    /// Wheel rows `ui.smooth_scroll` still has to send, and when the next
+    /// step is due.
+    pub(super) wheel_glide: Option<super::wheel_glide::ClientWheelGlide>,
+    pub(super) wheel_glide_deadline: Option<std::time::Instant>,
     pub(super) selection_highlight_clear_deadline: Option<std::time::Instant>,
     pub(super) word_selection_gesture: Option<ClientWordSelection>,
     pub(super) word_selection_generation: u64,
@@ -1312,6 +1317,8 @@ impl ClientShellState {
             last_pane_click: None,
             selection_autoscroll: None,
             selection_autoscroll_deadline: None,
+            wheel_glide: None,
+            wheel_glide_deadline: None,
             selection_highlight_clear_deadline: None,
             word_selection_gesture: None,
             word_selection_generation: 0,
@@ -1521,6 +1528,7 @@ impl ClientShellState {
         self.last_pane_click = None;
         self.selection_autoscroll = None;
         self.selection_autoscroll_deadline = None;
+        self.stop_wheel_glide();
         self.selection_highlight_clear_deadline = None;
         self.word_selection_gesture = None;
         self.copy_mode = None;
@@ -2127,6 +2135,7 @@ impl ClientShellState {
         let default = std::time::Duration::from_millis(100);
         self.selection_autoscroll_deadline
             .into_iter()
+            .chain(self.wheel_glide_deadline)
             .chain(self.selection_repaint_deadline)
             .chain(self.activity_deadline)
             .chain(self.config.sort_motion.deadline)

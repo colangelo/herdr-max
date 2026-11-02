@@ -224,6 +224,7 @@ impl ClientShellConfig {
             palette_send_busy: config.palette.send.busy,
             mouse_capture: config.ui.mouse_capture,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
+            smooth_scroll: config.ui.smooth_scroll,
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
             switch_ascii_input_source_in_prefix: config
@@ -494,6 +495,7 @@ impl ClientShellConfig {
                 self.confirm_close = ui.confirm_close;
                 self.mouse_capture = ui.mouse_capture;
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
+                self.smooth_scroll = ui.smooth_scroll;
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;
             }
