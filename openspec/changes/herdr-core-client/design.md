@@ -537,6 +537,20 @@ How core maps onto it:
   `~/.local/bin/dsh-aiproxy`. `dsh-aiproxy headless "..."` answered. npm skipped the native install
   scripts (node-pty, koffi); local bash tools may need `--allow-scripts` later.
 - **pi 1.5.0:** reports 7501 in core already (`app=pi`).
+- **pi durable 1.5.0 (pinned with pi-ai and chord 1.5.0):** a small terminal host at
+  `~/.local/share/herdr-core-pilot/pi-durable-host/` (local git repo, commit 6f19979). It runs a REPL
+  over a SQLite store on local disk (`~/.local/state/pi-durable-host/<name>/`), uses aiproxy through
+  pi-ai's `anthropic-messages` provider with a per-agent virtual key (launcher `pi-durable-aiproxy`),
+  and reports 7501 as `app=pi-durable`. Proven: an answer; resume after a restart (it recalled a word
+  from the previous run); a `kill -9` mid-answer, after which the restart retries the model request
+  from the start (the partial text already saved is kept as an aborted answer, and both attempts
+  count in usage); and in the pilot core, idle → working → done on `hc send`, re-checked by the
+  coordinator. Core answers pi's capability query `ESC]7501;?` with
+  `states=idle,working,done,blocked,error`, so pi's ask-first reporting works in `hc`. pi durable has
+  no lock between processes, so the host adds a pid lock. Limits: a virtual key lives 8 h and is read
+  at start, and a store must stay on its own machine's disk. For a VM: Node ≥ 22.19, `npm ci`, the
+  store on the VM's disk, and a route to aiproxy and the mint on the tailnet; then
+  `hc run --on <vm> ... pi-durable-aiproxy --name <n>`.
 
 ## 5. Questions for the live pilot
 
