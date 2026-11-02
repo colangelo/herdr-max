@@ -495,6 +495,49 @@ In short: core owns the processes, their survival and the remote machines. 7501 
 agents that report it. Our layer keeps detection for the rest, the chunked typing for compaction, the
 layout, and agent-bell as the mailbox.
 
+## 4d. Goal from ac: harnesses in VMs, driven from herdr-max
+
+ac, 2026-11-02: *"for durable (but also for the other harnesses) what im thinking about is having a
+way to start them in vms, even remote ones, and being able to connect and interact with them via
+herdr-max, together with the usual local usage patterns"*.
+
+How core maps onto it:
+
+- **A VM is a core machine.** `hc machine add <ssh-host>` installs and starts a core there (the
+  machine's own session), and `hc run --on <vm> --cwd <dir> <harness>` starts a harness in a
+  terminal that lives on the VM. Its status (7501), screen (`hc read`), input (`hc send`, `hc keys`,
+  the attach stream) and recovery (`keep`) work the same as locally. The addresses are `vm/t3`, and
+  `hc ls` lists local and VM terminals together. A VM that is off or unreachable is a client-local
+  outcome: the rest keeps working. herdr-max's remote dormancy (issue 260) has to carry over (pilot
+  Q7).
+- **Terminal harnesses** (Claude Code, Codex, pi, opencode, and `dsh headless` for one-shot tasks)
+  need nothing more: herdr-max shows a VM's terminals in a space under that machine, like the
+  desktop app does.
+- **Service harnesses** (pi durable, `dsh web`) are not terminal programs. pi durable is a library:
+  bmlab's Aruba migration agent embeds it in an HTTP service on a lab VM (runs, events stream,
+  steer, abort; one SQLite file per run on local block storage; systemd). To be driven from
+  herdr-max, such a harness needs one of two things. Either a small terminal host that embeds it
+  and reports 7501 (being built for the pilot under `~/.local/share/herdr-core-pilot/pi-durable-host/`),
+  which runs in a core terminal on the VM like any other. Or a herdr-max view that is a client of
+  the service's own API (runs list, events, steer) next to the panes. The first reuses everything
+  above; the second fits long, unattended runs better.
+- **Model access from a VM** goes through the same gateway: a per-agent Bifrost virtual key from the
+  mint on the tailnet (`claude-gpt-key`'s pattern), so each VM agent shows apart in usage.
+
+### Harnesses set up on m4m for the pilot (2026-11-02)
+
+- **opencode 1.19.5:** provider `aiproxy` (OpenAI-compatible, `https://aiproxy.cat-bluegill.ts.net/v1`)
+  in `~/.config/opencode/opencode.jsonc`, launcher `~/.local/bin/opencode-aiproxy` (mints a
+  virtual key per start). `opencode-aiproxy run -m aiproxy/claude-haiku-5-5 "..."` answered. Its
+  7501 reporter is on opencode's `dev` branch only (not in the v1.19.5 tag), so core shows no status
+  for it yet.
+- **deepseek-harness (`dsh`) 0.2.1-rc.5:** `npm i -g @deepseek-ai/dsh`. The npm release has no
+  terminal UI (`web`, `headless`, `acp`, `sdk`; the TUI is a source example). Route `aiproxy` and
+  default model `claude-sonnet-5-5` in `~/.dsh/profiles/{headless,web}/cordis.patch.yml`, launcher
+  `~/.local/bin/dsh-aiproxy`. `dsh-aiproxy headless "..."` answered. npm skipped the native install
+  scripts (node-pty, koffi); local bash tools may need `--allow-scripts` later.
+- **pi 1.5.0:** reports 7501 in core already (`app=pi`).
+
 ## 5. Questions for the live pilot
 
 Run with `HC_SESSION=pilot` and scratch XDG paths, as core:AGENTS.md § Traps asks.
