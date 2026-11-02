@@ -306,12 +306,12 @@ fn resize_summary_survives_composition_with_connected_version() {
     state.mode = ClientShellMode::Resize;
     let frame = state.compose(180, 30).unwrap();
     let text = frame_rows(&frame).join("\n");
-    assert!(
-        text.contains("h/l width  j/k height  esc done  window  180x30 "),
-        "{text}"
-    );
+    assert!(text.contains(" RESIZE   window  180x30 "), "{text}");
     // A dim `version` label, then the version as a green chip (fork issues 174, 264).
-    assert!(text.contains("  version  connected-build "), "{text}");
+    assert!(
+        text.contains("  version  connected-build     h/l width  j/k height  esc done"),
+        "the hints come after the version (fork issue 268): {text}"
+    );
     assert!(!text.contains("VERSION"), "{text}");
     // RESIZE keeps its own colour for everything it paints: the chip, the keys and the size badges.
     let mauve = crate::protocol::color_to_u32(state.config.palette.mauve);

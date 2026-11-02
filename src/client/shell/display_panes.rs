@@ -391,41 +391,41 @@ fn summary_spans<'a>(
     width: u16,
 ) -> Vec<Span<'a>> {
     // The keys take the chip's colour: the mode's own.
-    let key = Style::default()
-        .fg(chip.bg.unwrap_or(p.red))
-        .add_modifier(Modifier::BOLD);
+    let mode = chip.bg.unwrap_or(p.red);
+    let key = Style::default().fg(mode).add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(p.overlay0);
-    // The sizes are chips in the mode's colour, like the size in each pane box, and the version a
-    // green chip (fork issue 264).
+    // Fork issue 268: the size labels in the mode's colour and the version label in green, plain;
+    // the sizes are chips in the mode's colour and the version a green chip (fork issue 264).
+    let label = Style::default().fg(mode);
+    let version_label = Style::default().fg(p.green);
     let version_chip = Style::default()
         .fg(panel_contrast_fg(p))
         .bg(p.green)
         .add_modifier(Modifier::BOLD);
     let mut spans = vec![
-        Span::styled(if resize { " RESIZE " } else { " PANES " }, chip),
+        Span::styled(if resize { " RESIZE " } else { " SIZES " }, chip),
         Span::raw("  "),
+        Span::styled("window ", label),
+        Span::styled(format!(" {}x{} ", window.width, window.height), chip),
+        Span::styled(" · ", dim),
+        Span::styled("panes ", label),
+        Span::styled(format!(" {}x{} ", panes.width, panes.height), chip),
     ];
+    // The key hints come last, after the version, a little apart from it (fork issue 268).
+    let mut hints = Vec::new();
     if resize {
-        spans.extend([
+        hints.extend([
             Span::styled("h/l", key),
             Span::styled(" width  ", dim),
             Span::styled("j/k", key),
             Span::styled(" height  ", dim),
             Span::styled("esc", key),
-            Span::styled(" done  ", dim),
+            Span::styled(" done", dim),
         ]);
-    }
-    spans.extend([
-        Span::styled("window ", dim),
-        Span::styled(format!(" {}x{} ", window.width, window.height), chip),
-        Span::styled(" · panes ", dim),
-        Span::styled(format!(" {}x{} ", panes.width, panes.height), chip),
-    ]);
-    if explicit {
-        spans.push(Span::raw("  "));
+    } else if explicit {
         if count > 0 {
             let last = count.min(9);
-            spans.extend([
+            hints.extend([
                 Span::styled(
                     if last == 1 {
                         "1".to_owned()
@@ -437,21 +437,24 @@ fn summary_spans<'a>(
                 Span::styled(" focus  ", dim),
             ]);
         }
-        spans.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
+        hints.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
     }
-    // Keep the hints on narrow bars, dropping the version first, as in the fork.
     let version_spans = [
         Span::raw("  "),
-        Span::styled("version", dim),
+        Span::styled("version", version_label),
         Span::raw(" "),
         Span::styled(format!(" {version} "), version_chip),
     ];
-    if spans.iter().map(Span::width).sum::<usize>()
-        + version_spans.iter().map(Span::width).sum::<usize>()
-        <= usize::from(width)
-    {
+    let gap = if hints.is_empty() { "" } else { "    " };
+    let total = |parts: &[Span<'_>]| parts.iter().map(Span::width).sum::<usize>();
+    // Keep the hints on narrow bars, dropping the version first, as in the fork.
+    if total(&spans) + total(&version_spans) + gap.len() + total(&hints) <= usize::from(width) {
         spans.extend(version_spans);
+        spans.push(Span::raw(gap));
+    } else if !hints.is_empty() {
+        spans.push(Span::raw("  "));
     }
+    spans.extend(hints);
     spans
 }
 
@@ -520,18 +523,21 @@ mod tests {
             140,
         );
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with(" PANES "), "{text}");
+        // Fork issue 268: SIZES, then the sizes, the version, and the key hints last.
         assert!(
-            text.ends_with("any key close  version  server-build "),
+            text.starts_with(" SIZES   window  140x30  · panes  114x29 "),
             "{text}"
         );
-        assert!(text.contains("window  140x30  · panes  114x29 "), "{text}");
+        assert!(
+            text.ends_with("  version  server-build     1-2 focus  any key close"),
+            "{text}"
+        );
         let filled: Vec<&str> = spans
             .iter()
             .filter(|s| s.style.bg == Some(p.red))
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(filled, [" PANES ", " 140x30 ", " 114x29 "]);
+        assert_eq!(filled, [" SIZES ", " 140x30 ", " 114x29 "]);
         let find = |spans: &[Span<'_>], text: &str| {
             spans
                 .iter()
@@ -540,7 +546,14 @@ mod tests {
                 .style
         };
         assert_eq!(find(&spans, "any key").fg, Some(p.red));
-        assert_eq!(find(&spans, "version").fg, Some(p.overlay0));
+        for (text, colour) in [("window ", p.red), ("panes ", p.red), ("version", p.green)] {
+            let style = find(&spans, text);
+            assert_eq!(style.fg, Some(colour), "{text:?}");
+            assert!(
+                !style.add_modifier.contains(Modifier::BOLD),
+                "{text:?} is not bold"
+            );
+        }
         assert_eq!(find(&spans, " server-build ").bg, Some(p.green));
         assert_eq!(
             find(&spans, " server-build ").fg,
@@ -559,6 +572,9 @@ mod tests {
         );
         assert_eq!(find(&resize, "h/l").fg, Some(p.mauve));
         assert_eq!(find(&resize, "esc").fg, Some(p.mauve));
+        let text: String = resize.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with(" RESIZE   window "), "{text}");
+        assert!(text.ends_with("esc done"), "the hints come last: {text}");
         assert_eq!(
             resize
                 .iter()
