@@ -446,6 +446,55 @@ Ranked. Each one stops herdr-max from working as a core client at all, not only 
 Not blockers, but costs: text without Enter (row 69), ANSI reads (row 70), the macOS logout and TCC
 behaviour (rows 15, 16), and remote dormancy (row 55). Each can be worked around or upstreamed.
 
+## 4b. Which agents report status (OSC 7501), checked 2026-11-02
+
+| Agent | Reports 7501? | How we know |
+|---|---|---|
+| Claude Code 2.1.316 | yes | live in the pilot core: `app=claude-code`, idle → working → done on a prompt |
+| Codex 0.166.0 | yes | live: `app=codex`, idle |
+| pi 1.5.0 | yes | live: `app=pi`, idle. Pi reports only after the terminal confirms support; `PI_PROGRAM_STATUS=1/0` forces it (earendil-works/pi `packages/coding-agent/docs/environment-variables.md`) |
+| opencode 1.19.5 | yes in code, not seen live | `packages/tui/src/context/program-status.ts` in anomalyco/opencode sends one root record plus one per child session. In the pilot it showed no status at its "connect a provider" screen: no provider is set up here, so no session ran |
+| pi durable (`@earendil-works/pi-durable` 1.5.0) | not applicable | a library, not a terminal program (no `bin`). It is a durable conversation, task and document runtime that apps embed, and those apps have web or terminal clients. Status reaches core only if such an app runs in a terminal and reports 7501 itself |
+| deepseek-harness | no | shallow clone of deepseek-ai/deepseek-harness: no 7501 or program-status code; the four "7501" hits are hash strings. It sets the pane title with OSC 0. It needs screen detection for a status |
+
+So 7501 covers our main agents, but not every program we run. A plain shell, a REPL, a build, deepseek-harness and any agent without 7501 have no status in core.
+
+## 4c. How the pieces fit: status, reading, writing, messaging
+
+There are four separate jobs. Core does some of each, and none of them goes away.
+
+1. **Status: what state is a program in.** Core keeps only what the program reports (7501). herdr-max
+   keeps screen detection (`src/detect/manifests/`) and hook reports for everything else. In a core
+   world the two stack: a 7501 report wins when present, and our detection fills in for programs that
+   don't report (deepseek-harness, shells waiting at a prompt, a REPL, a dev server). Core will never
+   store a guessed status (core:AGENTS.md § Rules), so ours lives in our adapter or our client and is
+   published as our own fact. A label such as `herdr.status` (inferred) would let other clients see it.
+2. **Reading the screen: what is on it now.** Core keeps this: `hc read` (screen plus history, as
+   text), `hc wait <t> --output X`, and attach or observe streams with the raw bytes. Driving panes
+   that run no agent (wait for a shell prompt, a server's ready line, a test summary) works the same
+   way through the adapter. Gaps: ANSI or styled reads, and the bottom-buffer regions our manifests
+   read (gap row 70; pilot Q12).
+3. **Writing into a pane: driving it.** Core has `hc send` (paste plus Enter, held while a person is
+   typing, refused when the program is `blocked` unless `--force`), `hc keys` (named keys) and the
+   attach stream's input (any bytes). Compaction (`herdr-compact`) needs more than `send`: `/compact`
+   typed as keystrokes, the text in 300-byte pieces with no Enter, the box read back after each piece,
+   then Enter. Only the attach stream can type without Enter (pilot Q11), so the adapter keeps
+   `pane send-text --chunk` and its read-back working by writing to the stream. Shape B keeps this
+   for free; Shape A needs the same code in the client.
+4. **Messaging: one agent telling another something.** agent-bell stays the messaging layer. It is a
+   durable inbox per Claude session over NATS, delivered through Claude Code hooks (wake, queue,
+   interrupt) with msg ids, receipts, reply-to, TTL and hold/ack, and it works while the receiver is
+   busy or offline. `hc send` only types into a box, keeps no queue and gives no receipt. Core adds
+   two things agent-bell can use. First, an address book: a terminal labelled with its Claude session
+   id (pilot Q2) lets agent-bell map an inbox to a terminal on any machine. Second, the parent/child
+   tree: core tells a parent when a child gets blocked, errors or exits, which can become agent-bell
+   events. For agents without Claude hooks (Codex, pi, opencode), agent-bell can fall back to typing
+   through the adapter, as `herdr pane send-text` does today.
+
+In short: core owns the processes, their survival and the remote machines. 7501 gives status for the
+agents that report it. Our layer keeps detection for the rest, the chunked typing for compaction, the
+layout, and agent-bell as the mailbox.
+
 ## 5. Questions for the live pilot
 
 Run with `HC_SESSION=pilot` and scratch XDG paths, as core:AGENTS.md § Traps asks.
