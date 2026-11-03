@@ -111,6 +111,9 @@ const CLAUDE: &[CarriedFlag] = &[
     flag(&["--plugin-dir"], Arity::One, true, "plugin-dir"),
     flag(&["--setting-sources"], Arity::One, false, "setting-sources"),
     flag(&["--fallback-model"], Arity::One, false, "fallback-model"),
+    // The session's display name (fork issue 275): a pane started by hand
+    // with `--name` has no herdr agent name to restore it from.
+    flag(&["-n", "--name"], Arity::One, false, "name"),
     // The hook reports these as the session changes them; the launch values
     // only fill in when it has not.
     flag(&["--model"], Arity::One, false, "model"),
@@ -552,6 +555,28 @@ mod tests {
                 "--setting-sources",
                 "user,project",
             ])
+        );
+    }
+
+    /// Fork issue 275: a Claude started by hand with a session name keeps it.
+    #[test]
+    fn a_hand_named_claude_keeps_its_session_name() {
+        for spelling in [
+            &["--name", "mac-m4"][..],
+            &["-n", "mac-m4"],
+            &["--name=mac-m4"],
+        ] {
+            let mut argv = words(&["claude", "--resume", "s1", "--model", "opus"]);
+            argv.extend(words(spelling));
+            let carried = carried_launch_flags("claude", &argv, None);
+            assert_eq!(carried[..2], words(&["--model", "opus"])[..]);
+            assert_eq!(carried[3], "mac-m4", "{spelling:?}");
+        }
+        let resume = words(&["claude", "--resume", "s1", "--name", "kept"]);
+        assert_eq!(
+            compose_resume_argv("claude", &resume, &words(&["--name", "other"])),
+            resume,
+            "a resume command that already names the session keeps its name"
         );
     }
 
