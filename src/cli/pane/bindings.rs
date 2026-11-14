@@ -467,6 +467,15 @@ pub(super) const LEAVES: &[Leaf] = &[
         PaneClearScrollbackProjection,
         PaneClearScrollback
     ),
+    // Fork issue 276: clear every unread pane, in one space or the session.
+    leaf!(
+        "mark-seen",
+        "Mark unread panes read, in one space or the whole session",
+        "cli:pane:mark-seen",
+        Json,
+        PaneMarkSeenProjection,
+        PaneMarkSeen
+    ),
     // Fork: `--resume` sends `pane.respawn_agent`, which brings the pane's
     // agent back from its saved session as a restore does
     // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
@@ -951,6 +960,9 @@ fn layout_preset(value: &str) -> Result<AppliedLayoutPreset, ParseError> {
 }
 cli_projection! { pub(crate) PaneClearScrollbackProjection for PaneTarget {
     pane_id => clear_target(),
+} }
+cli_projection! { pub(crate) PaneMarkSeenProjection for PaneMarkSeenParams {
+    workspace_id => Field::new(None::<String>).input(Input::value("workspace", "WORKSPACE_ID", |slot, value| { *slot = Some(crate::cli::normalize_workspace_id(value)); Ok(()) })),
 } }
 cli_projection! { pub(crate) PaneRespawnProjection for PaneRespawnParams {
     pane_id => Field::new(String::new()).input(pane_id().value_name("pane_id")),

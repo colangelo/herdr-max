@@ -449,6 +449,15 @@ mod tests {
         }
     }
 
+    // Fork issue 276: no `--workspace` means the whole session.
+    #[test]
+    fn pane_mark_seen_without_workspace_covers_the_session() {
+        assert_eq!(
+            serde_json::to_value(request("mark-seen", &[]).unwrap()).unwrap(),
+            serde_json::json!({"id": "cli:pane:mark-seen", "method": "pane.mark_seen", "params": {}}),
+        );
+    }
+
     // Fork issue 238: `--resume` is its own method, so an older server refuses
     // it instead of running a plain respawn.
     #[test]
@@ -1135,6 +1144,13 @@ const FORK_PANE_REQUEST_CASES: &[(&str, &[&str], &str, &str, &str)] = &[
         "cli:request",
         "pane.clear_scrollback",
         r#"{"pane_id":"pane"}"#,
+    ),
+    (
+        "mark-seen",
+        &["--workspace", "w2"],
+        "cli:pane:mark-seen",
+        "pane.mark_seen",
+        r#"{"workspace_id":"w2"}"#,
     ),
     (
         "respawn",
