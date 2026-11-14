@@ -2909,6 +2909,42 @@ mod tests {
     }
 
     #[test]
+    fn pane_mark_seen_leaves_completion_seq_on_agent_list_unchanged() {
+        let mut app = app_with_two_unread_done_workspaces();
+        let terminal_ids: Vec<_> = (0..2)
+            .map(|ws_idx| {
+                let pane = app.state.workspaces[ws_idx].tabs[0].root_pane;
+                app.state.workspaces[ws_idx]
+                    .pane_state(pane)
+                    .unwrap()
+                    .attached_terminal_id
+                    .clone()
+            })
+            .collect();
+        for (seq, terminal_id) in (7u64..).zip(&terminal_ids) {
+            app.state
+                .terminals
+                .get_mut(terminal_id)
+                .unwrap()
+                .last_agent_completion_seq = Some(seq);
+        }
+        let completion_seqs = |app: &App| -> Vec<Option<u64>> {
+            let mut seqs: Vec<_> = app
+                .session_metadata_snapshot()
+                .agents
+                .iter()
+                .map(|agent| agent.completion_seq)
+                .collect();
+            seqs.sort();
+            seqs
+        };
+        let before = completion_seqs(&app);
+        assert_eq!(before, vec![Some(7), Some(8)]);
+        mark_seen(&mut app, None);
+        assert_eq!(completion_seqs(&app), before);
+    }
+
+    #[test]
     fn pane_mark_seen_with_workspace_clears_only_that_space() {
         let mut app = app_with_two_unread_done_workspaces();
         let workspace_id = app.public_workspace_id(0);

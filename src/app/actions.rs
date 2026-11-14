@@ -493,9 +493,9 @@ impl AppState {
     /// Mark every unread pane read: in the workspace at `scope`, or in the
     /// whole session when `scope` is `None`. Returns how many panes changed.
     ///
-    /// A pane is unread when its `seen` flag is clear or its terminal still
-    /// carries an unacknowledged completion marker: attached clients derive
-    /// their `done` indicator from that marker, so it is dropped here too.
+    /// Only `seen` flips. The terminal's completion marker identifies finished
+    /// work independently of who viewed it, so it is never touched; each client
+    /// acknowledges completions on its own.
     pub(crate) fn mark_panes_seen(&mut self, scope: Option<usize>) -> usize {
         let mut changed = 0;
         for (ws_idx, workspace) in self.workspaces.iter_mut().enumerate() {
@@ -507,11 +507,10 @@ impl AppState {
                 .iter_mut()
                 .flat_map(|tab| tab.panes.values_mut())
             {
-                let mut was_unread = !std::mem::replace(&mut pane.seen, true);
-                if let Some(terminal) = self.terminals.get_mut(&pane.attached_terminal_id) {
-                    was_unread |= terminal.last_agent_completion_seq.take().is_some();
+                if !pane.seen {
+                    pane.seen = true;
+                    changed += 1;
                 }
-                changed += usize::from(was_unread);
             }
         }
         if changed > 0 {
@@ -2337,29 +2336,6 @@ mod tests {
         assert_eq!(state.mark_panes_seen(Some(0)), 1);
         assert_eq!(unread_in(&state, 0), 0);
         assert_eq!(unread_in(&state, 1), 1);
-    }
-
-    #[test]
-    fn mark_panes_seen_drops_the_completion_marker_clients_show_as_done() {
-        let mut state = app_with_workspaces(&["a"]);
-        let pane = state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = state.workspaces[0]
-            .pane_state(pane)
-            .unwrap()
-            .attached_terminal_id
-            .clone();
-        // Seen on the server, yet a client still shows the completion as done.
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .last_agent_completion_seq = Some(4);
-        assert_eq!(state.mark_panes_seen(None), 1);
-        assert_eq!(
-            state.terminals[&terminal_id].last_agent_completion_seq,
-            None
-        );
-        assert_eq!(state.mark_panes_seen(None), 0);
     }
 
     #[test]
