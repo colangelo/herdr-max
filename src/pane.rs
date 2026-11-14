@@ -21,8 +21,9 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
-use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
+use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyReadResult};
 use crate::render_signal::RenderSignal;
+use runtime_io::PaneIo;
 
 mod agent_detection;
 mod background_agent;
@@ -30,6 +31,7 @@ mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;
+mod runtime_io;
 mod state;
 mod terminal;
 mod xtgettcap;
@@ -1976,7 +1978,7 @@ async fn run_terminal_compression_task(
 pub struct PaneRuntime {
     pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
-    io: PaneRuntimeIo,
+    io: PaneIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
     /// Process group an agent was identified in one PTY below this pane's own,
@@ -2022,177 +2024,6 @@ impl PaneRuntime {
 
     pub(crate) fn has_input_identity(&self, identity: &PaneRuntimeInputIdentity) -> bool {
         std::sync::Weak::ptr_eq(&Arc::downgrade(&self.terminal), &identity.0)
-    }
-}
-
-enum PaneRuntimeIo {
-    Actor(PtyIoActorHandle),
-    #[cfg(test)]
-    TestChannel {
-        sender: mpsc::Sender<Bytes>,
-        resize_tx: watch::Sender<(u16, u16, u32, u32)>,
-    },
-}
-
-impl PaneRuntimeIo {
-    fn shutdown(&self) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.shutdown(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {}
-        }
-    }
-
-    #[cfg(unix)]
-    fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {
-                Err(std::io::Error::other("test runtime has no PTY master fd"))
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn foreground_process_group_id(&self) -> Option<u32> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => None,
-        }
-    }
-
-    #[cfg(unix)]
-    fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    #[cfg(unix)]
-    fn set_handoff_paused(&self, paused: bool) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                if paused {
-                    actor.begin_handoff(std::time::Duration::from_secs(1))
-                } else {
-                    actor.rollback_handoff()
-                }
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    #[cfg(unix)]
-    fn release_after_commit(&self) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    fn resize(
-        &self,
-        rows: u16,
-        cols: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-        terminal_responses: Vec<Bytes>,
-    ) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                actor.resize(
-                    rows,
-                    cols,
-                    cell_width_px,
-                    cell_height_px,
-                    terminal_responses,
-                );
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { resize_tx, .. } => {
-                let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn nudge_child_redraw_after_handoff(
-        &self,
-        rows: u16,
-        cols: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-    ) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {}
-        }
-    }
-
-    fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
-        }
-    }
-
-    fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.write_terminal_response(response),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
-                if let Some(bytes) = response() {
-                    let _ = sender.try_send(bytes);
-                }
-            }
-        }
-    }
-
-    fn queue_user_input_submission(
-        &self,
-        text: Bytes,
-        enter: Bytes,
-        delay: std::time::Duration,
-        deadline: Option<std::time::Instant>,
-    ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                #[cfg(windows)]
-                return actor.queue_user_input_submission(text, enter, delay, deadline);
-                #[cfg(unix)]
-                {
-                    let _ = deadline;
-                    actor.queue_user_input_submission(text, enter, delay)
-                }
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
-                let _ = deadline;
-                let sender = sender.clone();
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let result = sender
-                        .try_send(text)
-                        .map_err(std::io::Error::other)
-                        .and_then(|()| {
-                            std::thread::sleep(delay);
-                            sender.try_send(enter).map_err(std::io::Error::other)
-                        });
-                    let _ = reply_tx.send(result);
-                });
-                Ok(reply_rx)
-            }
-        }
     }
 }
 
@@ -3170,7 +3001,7 @@ impl PaneRuntime {
                 }));
                 debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
             });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+            PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 master_fd,
                 initially_quiesced: true,
@@ -3379,7 +3210,7 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+            PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
                 pane_id: pane_id.raw(),
                 #[cfg(unix)]
                 master_fd: spawned.master_fd,
@@ -4374,17 +4205,7 @@ impl PaneRuntime {
 
     /// Preflight a complete API command without changing input queue semantics.
     pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
-        match &self.io {
-            #[cfg(unix)]
-            PaneRuntimeIo::Actor(actor) => actor.validate_input_submission(bytes),
-            #[cfg(windows)]
-            PaneRuntimeIo::Actor(_) => {
-                let _ = bytes;
-                Ok(())
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
+        self.io.validate_input_submission(bytes)
     }
 
     pub fn queue_user_input_submission(
@@ -4640,9 +4461,9 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
-    pub(crate) fn test_with_actor(actor: PtyIoActorHandle) -> Self {
+    pub(crate) fn test_with_actor(actor: crate::pty::actor::PtyIoActorHandle) -> Self {
         let (mut runtime, _) = Self::test_with_channel(80, 24);
-        runtime.io = PaneRuntimeIo::Actor(actor);
+        runtime.io = PaneIo::Actor(actor);
         runtime
     }
 
@@ -4808,7 +4629,7 @@ impl PaneRuntime {
             Self {
                 pane_id,
                 terminal,
-                io: PaneRuntimeIo::TestChannel {
+                io: PaneIo::TestChannel {
                     sender: tx,
                     resize_tx,
                 },
@@ -6289,7 +6110,7 @@ mod tests {
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6349,7 +6170,7 @@ mod tests {
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6403,7 +6224,7 @@ mod tests {
             persistence_cwd: Mutex::new(None),
             pane_id,
             terminal,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6448,7 +6269,7 @@ mod tests {
             persistence_cwd: Mutex::new(None),
             pane_id,
             terminal,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },

@@ -38,9 +38,9 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 ## 4. The seam (no behaviour change)
 
-- [ ] 4.1 `src/pane/io/mod.rs`: move `PaneRuntimeIo` as `PaneIo` with its methods, unchanged;
+- [ ] 4.1 `src/pane/runtime_io/mod.rs`: move `PaneRuntimeIo` as `PaneIo` with its methods, unchanged;
   `TestChannel` moves with it. Commit
-- [ ] 4.2 `src/pane/io/pty.rs`: `PtyPaneIo` wraps `PtyIoActorHandle`; `PaneIo::spawn(SpawnSpec,
+- [ ] 4.2 `src/pane/runtime_io/pty.rs`: `PtyPaneIo` wraps `PtyIoActorHandle`; `PaneIo::spawn(SpawnSpec,
   PaneIoSink)` calls `spawn_with_portable_pty` and `PtyIoActor::spawn`; the child wait moves in
   and calls `on_exit` once after setting `child_wait_completed`. Commit
 - [ ] 4.3 `shutdown_pane_processes` and helpers move to `pty.rs`; `PaneIo::terminate_session`;

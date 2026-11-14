@@ -56,7 +56,7 @@ Non-goals:
 
 ### D1. Widen the existing enum; no trait object
 
-`PaneRuntimeIo` becomes `PaneIo` in `src/pane/io/mod.rs`, still an enum:
+`PaneRuntimeIo` becomes `PaneIo` in `src/pane/runtime_io/mod.rs`, still an enum:
 
 ```rust
 pub(crate) enum PaneIo {
@@ -104,7 +104,7 @@ impl PaneIo {
 
 - The child wait moves into `PtyPaneIo::spawn`; it calls `sink.on_exit` exactly once, after it has
   set `child_wait_completed`, as today. `PaneRuntime` turns that into `AppEvent::PaneDied`.
-- `shutdown_pane_processes` and its helpers move to `src/pane/io/pty.rs` unchanged. `PaneRuntime`'s
+- `shutdown_pane_processes` and its helpers move to `src/pane/runtime_io/pty.rs` unchanged. `PaneRuntime`'s
   `Drop` calls `io.shutdown()`, then `io.terminate_session()` unless it preserves processes.
 - `child_pid: Arc<AtomicU32>` stays where the parser and detection read it; the backend publishes
   into it (the PTY backend stores `child.process_id()` at spawn, the handoff path stores the
@@ -133,7 +133,7 @@ handoff code must treat that pane as "not handed off by fd". That last part is p
 The command is built by platform helpers that return `portable_pty::CommandBuilder`
 (`pane_shell_command_builder`, `platform::pane_custom_command_pty_builder`, env helpers at
 `src/pane.rs:105,210`). Phase 1 carries it inside `SpawnSpec` so no helper changes. The type is
-named only inside `src/pane/io/` and the builders; the architecture test (V9) allows exactly those
+named only inside `src/pane/runtime_io/` and the builders; the architecture test (V9) allows exactly those
 files.
 
 Phase 2 needs argv, cwd and env as plain data for `terminal.run`. It will add `SpawnSpec` accessors
@@ -142,7 +142,7 @@ struct; that choice needs the builder's public API, which phase 1 does not depen
 
 ### D6. Platform gating
 
-`PaneIo` itself compiles on every target. `src/pane/io/pty.rs` keeps the Unix/Windows split it
+`PaneIo` itself compiles on every target. `src/pane/runtime_io/pty.rs` keeps the Unix/Windows split it
 inherits from `src/pty/actor.rs` and `src/pty/backend.rs`. Characterization tests that spawn real
 programs are `#[cfg(unix)]` at module level, not per function (two red Windows clippy runs on
 2026-10-10 came from Unix-only helpers left ungated). The Windows variant keeps the `deadline`
@@ -184,7 +184,7 @@ unmodified code first (characterization), then stays green after the move.
 | V6 | resize reaches the program, and terminal replies keep their order | resize, then the program runs `stty size`; then it sends a cursor-position query (`CSI 6n`) followed by a marker line and reads the reply | the new size; the reply `CSI <row>;<col>R` arrives before anything typed after it | equal |
 | V7 | live handoff unchanged | `tests/live_handoff.rs`, all of it | today's suite | green, no test edited |
 | V8 | process facts unchanged: `shell_pid` is the spawned shell, `shell_at_prompt` true at an idle shell, foreground job seen while `sleep` runs | `pane.process_info` handler against a real spawn | today's answers | equal |
-| V9 | no code outside the seam names the PTY layer | architecture test over `src/` (text scan by file) | allow-list: `src/pane/io/`, `src/pty/`, `src/platform/`, the command builders (`src/integration/env.rs`, the builder functions in `src/pane.rs`, D5), and today's test-only users (`src/detect/mod.rs` tests, `src/pane/terminal/migration_tests.rs`, `src/server/headless/tests/mod.rs`, `src/terminal/runtime.rs::test_with_actor`, which becomes `test_with_pane_io`) | no other file matches `crate::pty::` or `portable_pty` |
+| V9 | no code outside the seam names the PTY layer | architecture test over `src/` (text scan by file) | allow-list: `src/pane/runtime_io/`, `src/pty/`, `src/platform/`, the command builders (`src/integration/env.rs`, the builder functions in `src/pane.rs`, D5), and today's test-only users (`src/detect/mod.rs` tests, `src/pane/terminal/migration_tests.rs`, `src/server/headless/tests/mod.rs`, `src/terminal/runtime.rs::test_with_actor`, which becomes `test_with_pane_io`) | no other file matches `crate::pty::` or `portable_pty` |
 | V10 | the read path costs the same | `just bench-render-scale`, 1 and 15 panes, before and after | before numbers | within run-to-run noise; delta reported in the PR |
 | V11 | the whole suite and every platform build | `just check`; CI on Linux, macOS and Windows (Windows lint is skipped on macOS by design) | green | green |
 | V13 | macOS: the pane anchor stays the responsible process (the privacy-prompt fix, `openspec/changes/pane-anchor`) | `#[cfg(target_os = "macos")]` test: the pane's program asks `responsibility_get_pid_responsible_for_pid` for itself (as phase 0's `resp.c` did) | the anchor's pid, not the server's | equal, today and after |

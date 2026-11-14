@@ -5,8 +5,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Files that may name `crate::pty::`. The `src/pty/` tree itself is always
-/// allowed; `src/pane/io/` joins when the seam lands.
+/// Files that may name `crate::pty::`. The `src/pty/` tree and the seam,
+/// `src/pane/runtime_io/`, are always allowed.
 const PTY_LAYER_ALLOWED: &[&str] = &[
     // Shrinks to nothing outside the seam in runtime-seam task 4.6.
     "src/pane.rs",
@@ -16,7 +16,8 @@ const PTY_LAYER_ALLOWED: &[&str] = &[
     "src/platform/macos/input_tests.rs",
 ];
 
-/// Files that may name `portable_pty`, besides `src/pty/` and `src/platform/`.
+/// Files that may name `portable_pty`, besides `src/pty/`, `src/platform/` and
+/// the seam.
 const PORTABLE_PTY_ALLOWED: &[&str] = &[
     // Command builders (design D5): `CommandBuilder` is how a spawn is described.
     "src/pane.rs",
@@ -63,7 +64,11 @@ fn offenders(needle: &str, always: &[&str], allowed: &[&str]) -> Vec<String> {
 
 #[test]
 fn only_the_seam_names_the_pty_layer() {
-    let found = offenders("crate::pty::", &["src/pty/"], PTY_LAYER_ALLOWED);
+    let found = offenders(
+        "crate::pty::",
+        &["src/pty/", "src/pane/runtime_io/"],
+        PTY_LAYER_ALLOWED,
+    );
     assert!(
         found.is_empty(),
         "these files reach into crate::pty:: outside the pane backend seam: {found:?}"
@@ -74,7 +79,7 @@ fn only_the_seam_names_the_pty_layer() {
 fn only_the_seam_and_command_builders_name_portable_pty() {
     let found = offenders(
         "portable_pty",
-        &["src/pty/", "src/platform/"],
+        &["src/pty/", "src/platform/", "src/pane/runtime_io/"],
         PORTABLE_PTY_ALLOWED,
     );
     assert!(

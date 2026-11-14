@@ -8,7 +8,7 @@ commands, session restore and live-handoff adoption. Code outside the seam's all
 name `crate::pty` or `portable_pty`.
 
 #### Scenario: A new spawn path cannot bypass the seam
-- **WHEN** code outside `src/pane/io/`, `src/pty/`, `src/platform/` and the command builders refers to `crate::pty::` or `portable_pty::`
+- **WHEN** code outside `src/pane/runtime_io/`, `src/pty/`, `src/platform/` and the command builders refers to `crate::pty::` or `portable_pty::`
 - **THEN** the architecture test fails and names the file
 
 #### Scenario: Restore and handoff adoption use the seam

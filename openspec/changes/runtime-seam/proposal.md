@@ -19,7 +19,7 @@ https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/267 (the migration).
 
 ## What Changes
 
-- A new module, `src/pane/io/`, owns the seam: `PaneIo` (today's `PaneRuntimeIo`, widened),
+- A new module, `src/pane/runtime_io/`, owns the seam: `PaneIo` (today's `PaneRuntimeIo`, widened),
   `SpawnSpec` and `PaneIoSink`. The exit report reuses the existing neutral
   `platform::ChildExitReason`.
 - Spawn, the child wait, the exit report, session termination and the shell pid move from
@@ -45,7 +45,7 @@ requirements; this change must not alter what they specify.
 ## Impact
 
 - Code: `src/pane.rs` (`PaneRuntime`, `PaneRuntimeIo`, `spawn_command_builder`, `from_handoff_fd`,
-  `shutdown_pane_processes`), new `src/pane/io/` (`mod.rs`, `pty.rs`), `src/pty/` (unchanged
+  `shutdown_pane_processes`), new `src/pane/runtime_io/` (`mod.rs`, `pty.rs`), `src/pty/` (unchanged
   behaviour, now private to the seam), `src/terminal/runtime.rs` and `src/persist/restore.rs`
   (call sites only).
 - Risk: refactor-risk under AGENTS.md § Testing (pane runtime, restore and handoff). A roundtable
