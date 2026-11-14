@@ -104,6 +104,13 @@ build:
 build:
     python scripts/package_windows_conpty.py build-local
 
+# Live herdr-core backend checks against real hc, in throwaway cores only (core-backend V2-V10)
+[unix]
+core-live-test:
+    HERDR_TEST_HC=1 cargo nextest run --locked --run-ignored ignored-only -E 'test(~core_backend_live_tests)'
+    cargo build --locked
+    bash scripts/core_live_test.sh
+
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
     cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1

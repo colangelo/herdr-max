@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# V10, server half (openspec/changes/core-backend, D10): a throwaway herdr
+# with one PTY pane and one herdr-core pane goes through a live handoff, then
+# `herdr server restart`, then `herdr server stop`.
+#
+# Everything lives under one scratch folder: herdr's config and sockets, and
+# the herdr-core session `herdr-dev-<session>` it starts there (core follows
+# XDG_RUNTIME_DIR and XDG_STATE_HOME). A user's herdr and core are never
+# reached.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HERDR_BIN="${HERDR_BIN:-$ROOT/target/debug/herdr}"
+BASE="$(mktemp -d /tmp/hcl.XXXXXX)"
+CONFIG_HOME="$BASE/c"
+RUNTIME_DIR="$BASE/r"
+STATE_DIR="$BASE/s"
+SESSION="v10"
+CORE_SESSION="herdr-dev-$SESSION"
+SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
+
+case "$BASE" in
+  /tmp/hcl.*) ;;
+  *) echo "refusing scratch folder $BASE" >&2; exit 1 ;;
+esac
+
+run_herdr() {
+  env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \
+    -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
+    -u CLAUDECODE \
+    XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
+    SHELL=/bin/sh \
+    "$HERDR_BIN" --session "$SESSION" "$@"
+}
+
+hc_scratch() {
+  env -u HC_SOCKET XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
+    HC_SESSION="$CORE_SESSION" hc "$@"
+}
+
+cleanup() {
+  set +e
+  run_herdr server stop >/dev/null 2>&1
+  hc_scratch server stop >/dev/null 2>&1
+  for pid in $(jobs -p); do kill "$pid" 2>/dev/null; done
+  rm -rf "$BASE"
+}
+trap cleanup EXIT
+
+fail() {
+  echo "FAIL: $*" >&2
+  echo "--- server log tail ---" >&2
+  tail -n 40 "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.log 2>/dev/null >&2 || true
+  if [[ -s "$BASE/restart.out" ]]; then
+    echo "--- herdr server restart output ---" >&2
+    tail -n 20 "$BASE/restart.out" >&2
+  fi
+  exit 1
+}
+
+api() {
+  python3 -I - "$SOCKET" "$1" <<'PY'
+import json, socket, sys
+path, body = sys.argv[1], sys.argv[2]
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(path)
+client.sendall(body.encode() + b"\n")
+response = b""
+while not response.endswith(b"\n"):
+    chunk = client.recv(65536)
+    if not chunk:
+        break
+    response += chunk
+reply = json.loads(response)
+if "error" in reply:
+    raise SystemExit(f"api error: {reply['error']}")
+print(json.dumps(reply["result"]))
+PY
+}
+
+send_line() {
+  api "$(python3 -I -c 'import json,sys; print(json.dumps({"id":"v10","method":"pane.send_input","params":{"pane_id":sys.argv[1],"text":sys.argv[2],"keys":["Enter"]}}))' "$1" "$2")" >/dev/null
+}
+
+wait_until() {
+  local what="$1"
+  shift
+  for _ in $(seq 1 200); do
+    if "$@"; then return 0; fi
+    sleep 0.05
+  done
+  fail "timed out waiting for: $what"
+}
+
+file_has_line() { [[ -s "$1" ]] && [[ "$(tail -c1 "$1" | od -An -c | tr -d ' ')" == '\n' ]]; }
+alive() { kill -0 "$1" 2>/dev/null; }
+gone() { ! kill -0 "$1" 2>/dev/null; }
+socket_up() { [[ -S "$SOCKET" ]] && api '{"id":"v10","method":"ping","params":{}}' >/dev/null 2>&1; }
+
+# One line per live core terminal of this session: address, pid, pane label.
+core_terminals() {
+  local address
+  for address in $(hc_scratch ls --json --label "herdr.session=$CORE_SESSION" 2>/dev/null \
+    | python3 -I -c 'import json,sys; [print(t["address"]) for t in json.load(sys.stdin)["terminals"] if t["state"] == "live"]'); do
+    hc_scratch get "$address" --json \
+      | python3 -I -c 'import json,sys; t=json.load(sys.stdin); print(t["address"], t.get("pid") or 0, (t.get("labels") or {}).get("herdr.pane_id","-"))'
+  done
+}
+
+set_runtime() {
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\n' "$1" > "$CONFIG_HOME/herdr-dev/config.toml"
+}
+
+echo "herdr: $HERDR_BIN"
+echo "scratch: $BASE"
+mkdir -p "$CONFIG_HOME/herdr-dev" "$RUNTIME_DIR" "$STATE_DIR"
+
+# 1. A PTY pane, then a core pane, in one server.
+set_runtime pty
+run_herdr server >/dev/null 2>&1 &
+wait_until "server socket" socket_up
+A="$(api "{\"id\":\"v10\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')"
+send_line "$A" "echo \$\$ > $BASE/a.pid"
+wait_until "pane A pid" file_has_line "$BASE/a.pid"
+A_PID="$(cat "$BASE/a.pid")"
+
+set_runtime core
+run_herdr server reload-config >/dev/null
+B="$(api "{\"id\":\"v10\",\"method\":\"pane.split\",\"params\":{\"target_pane_id\":\"$A\",\"direction\":\"right\"}}" \
+  | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print((r.get("pane") or r)["pane_id"])')"
+send_line "$B" "echo \$\$ > $BASE/b.pid; echo V10-B-SCREEN"
+wait_until "pane B pid" file_has_line "$BASE/b.pid"
+B_PID="$(cat "$BASE/b.pid")"
+
+read -r ADDR CORE_PID LABEL <<<"$(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 1 ]] || fail "expected one core terminal: $(core_terminals)"
+[[ "$CORE_PID" == "$B_PID" ]] || fail "core terminal pid $CORE_PID is not pane B's shell $B_PID"
+[[ "$LABEL" == "$B" ]] || fail "core terminal labelled $LABEL, pane B is $B"
+echo "ok: pane A ($A, pid $A_PID) on the PTY, pane B ($B, pid $B_PID) in core as $ADDR"
+
+# 2. Live handoff: both programs keep running; B stays the same core terminal.
+run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
+  || fail "live handoff with a core pane did not complete (R1)"
+wait_until "server after handoff" socket_up
+alive "$A_PID" || fail "PTY pane's program ended in the handoff"
+alive "$B_PID" || fail "core pane's program ended in the handoff"
+[[ "$(core_terminals)" == "$ADDR $CORE_PID $B" ]] || fail "core terminals changed: $(core_terminals)"
+send_line "$B" "echo after-handoff > $BASE/b.handoff"
+wait_until "input to B after the handoff" file_has_line "$BASE/b.handoff"
+echo "ok: live handoff kept both programs; B reattached to $ADDR and takes input"
+
+# 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
+#    pane is kept and reattached.
+run_herdr server restart --yes >"$BASE/restart.out" 2>&1 &
+wait_until "PTY program ended by the restart" gone "$A_PID"
+wait_until "server after restart" socket_up
+alive "$B_PID" || fail "core pane's program ended in the restart"
+[[ "$(core_terminals)" == "$ADDR $CORE_PID $B" ]] \
+  || fail "expected only B's kept terminal (A restores on the PTY, D1): $(core_terminals)"
+send_line "$B" "echo after-restart > $BASE/b.restart"
+wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
+echo "ok: server restart kept B's program in $ADDR and reattached it"
+
+# 4. herdr server stop ends the core pane's program.
+run_herdr server stop >/dev/null
+wait_until "core pane's program ended by the stop" gone "$B_PID"
+if core_terminals | grep -q "^$ADDR "; then
+  fail "$ADDR still live after server stop"
+fi
+echo "ok: server stop ended B's program"
+echo "PASS: V10 server half"
