@@ -54,9 +54,7 @@ impl PaneIo {
         match self {
             PaneIo::Actor(actor) => actor.duplicate_for_handoff(),
             #[cfg(test)]
-            PaneIo::TestChannel { .. } => {
-                Err(std::io::Error::other("test runtime has no PTY master fd"))
-            }
+            PaneIo::TestChannel { .. } => Err(no_master_fd()),
         }
     }
 
@@ -236,5 +234,32 @@ impl PaneIo {
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Ok(()),
         }
+    }
+}
+
+/// The answer a backend without a PTY master fd gives to a handoff by fd
+/// (runtime-seam design D4). Phase 3 matches on this kind to hand such a pane
+/// over another way.
+#[cfg(all(unix, test))]
+fn no_master_fd() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this pane backend has no PTY master fd",
+    )
+}
+
+#[cfg(all(unix, test))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_backend_without_a_master_fd_refuses_a_handoff_by_fd_as_unsupported() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let (resize_tx, _resize_rx) = watch::channel((24, 80, 0, 0));
+        let io = PaneIo::TestChannel { sender, resize_tx };
+
+        let err = io.duplicate_handoff_fd().expect_err("no fd to hand off");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     }
 }
