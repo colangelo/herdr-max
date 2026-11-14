@@ -4,7 +4,8 @@ AGENTS.md classes this change as refactor-risk: it touches the pane runtime, ses
 handoff. This record is the roundtable it asks for, held before any code moves (tasks.md 2.1). Base:
 `91ce8175` on `issue/277-runtime-seam` (master `15d30cc3` plus the plan docs).
 
-Status: **draft by the implementer (herdr-core); waiting for herdr's read.** Verifier review (herdr, 2026-11-14) folded in: V13-V15.
+Status: **reviewed by herdr 2026-11-14 (approved at `919a954c`).** Drafted by the implementer
+(herdr-core); herdr's verifier review is folded in as V13-V15.
 
 ## Protected behaviour, where it lives, what holds it
 
@@ -45,7 +46,8 @@ In `spawn_command_builder` the child-wait task starts before `PtyIoActor::spawn`
 its master close and usually dies of SIGHUP, but nothing guarantees it, and its `PaneDied` is sent
 for a pane that was never created. **Phase 1 keeps this behaviour** (no behaviour change), records it
 here, and adds a test that names it so the move cannot make it worse. A fix (start the wait only
-after the actor is up, or terminate on the error path) is a separate issue to file after phase 1.
+after the actor is up, or terminate on the error path) lands after phase 1:
+https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/279.
 
 ### F3. Drop order is load-bearing but untested
 
@@ -77,7 +79,7 @@ first and last numbers are both present.
 | exit | `child.wait()` + `classify_child_exit` | CLOSE `{reason, exit_code, signal}` | ok, maps onto `ChildExitReason` |
 | shell pid | `child.process_id()` | terminal `pid` | ok (same host) |
 | foreground pgid | `tcgetpgrp` on the fd | no fd; core reports `foreground.pid` | ok: `None` already degrades (`follow_cwd` falls back to `cwd()`, `foreground_cwd` to `platform::foreground_process_group_id(pid)`, `src/pane.rs:4578-4605`), and core's `foreground.pid` can fill it |
-| terminate | HUP/TERM/KILL over the session | `terminal.kill`; core does not sweep detached processes | **difference:** documented, accepted for phase 2 |
+| terminate | HUP/TERM/KILL over the session | `terminal.kill`; core does not sweep detached processes | **difference, user-visible:** a backgrounded job survives a pane close. Phase 2 requirement to decide: kill the process group through core, or accept and document |
 | handoff | fd | none (core keeps the program) | ok: `Unsupported` (D4) |
 
 ## Outcome
@@ -85,4 +87,6 @@ first and last numbers are both present.
 - D2 gains the pid-before-reads order (F1) and the drop order (F3).
 - Tasks gain: a named test for F2's behaviour; a count of raw-actor test constructors (F4); the
   scrollback setting in V5 (F5).
-- F2's fix is filed as a follow-up when phase 1 lands.
+- F2 is filed as https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/279; its fix lands after phase 1.
+- F6's terminate difference is a phase 2 requirement to decide (recorded in
+  `openspec/changes/herdr-core-client/design.md` § 6.4, phase 2).

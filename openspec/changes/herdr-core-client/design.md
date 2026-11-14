@@ -696,7 +696,10 @@ next phase starts.
    (§ 5a): the server starts, restarts and updates the core with a clean environment; one attach
    per pane on a single connection, as a typing viewer (not `terminal.read` polling); a reattach's first
    paint resets the pane's parser; the Claude manifest learns the `●` busy line, because Claude does
-   not animate its title under core.
+   not animate its title under core. To decide in phase 2 (runtime-seam roundtable F6): core's
+   `terminal.kill` does not sweep detached processes, so a backgrounded job would survive a pane
+   close that today's HUP/TERM/KILL sweep ends; kill the process group through core, or accept and
+   document it.
 3. **Restore and update through core.** With the core backend, a herdr-max server restart re-adopts
    live core terminals by address instead of respawning, and our live handoff is not needed for those
    panes. Mixed sessions (some PTY, some core) must restore. Then default the switch on for m4m, then
