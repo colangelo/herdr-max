@@ -316,6 +316,11 @@ async fn v3_drop_escalates_hangup_terminate_kill_in_order() {
     assert_eq!(log, "HUP\nTERM\n");
 }
 
+// The first hangup here comes from the kernel: `Drop` shuts the reader down,
+// which closes the master fd before the sweep starts. So this pins the end
+// state a pane close gives today, not the sweep's own order (the test above
+// does that). A backend that does not own the master fd (herdr-core) must
+// still deliver this hangup.
 #[tokio::test]
 async fn v3_a_program_that_exits_on_hangup_gets_only_hangup() {
     let scratch = Scratch::new("v3-hup");

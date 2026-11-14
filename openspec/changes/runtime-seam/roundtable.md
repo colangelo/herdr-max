@@ -55,6 +55,16 @@ Termination reads `child_wait_completed` to skip a reaped pid, and must run afte
 reading. The seam's `terminate_session` must be called after `io.shutdown()`, as today. V3 should
 also assert that no output is parsed after termination begins (the actor is stopped first).
 
+### F3b. On a pane close the first hangup comes from the kernel
+
+Found while proving the V3 tests bite (task 3.3): with the sweep's HUP and TERM swapped on purpose,
+`v3_a_program_that_exits_on_hangup_gets_only_hangup` still passed. `Drop` shuts the reader down
+first, which closes the master fd, so the kernel hangs the terminal up and the program gets SIGHUP
+before the sweep's first signal. Today's close behaviour therefore rests on two mechanisms. A backend
+that does not hold the master fd (core) must still deliver that hangup; phase 2 checks what
+`terminal.kill` sends (core's skill: it "hangs up the terminal and ends its own program and
+foreground job").
+
 ### F4. Tests that build a `PaneRuntime` from a raw actor
 
 `src/terminal/runtime.rs::test_with_actor` and the `openpty` tests in `src/pane.rs` (`:5392`, `:8231`)
