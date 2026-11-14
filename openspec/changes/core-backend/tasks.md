@@ -18,7 +18,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 2. Roundtable (refactor-risk)
 
-- [ ] 2.1 `roundtable.md`: protected behaviour (PTY panes unchanged; detection precedence; handoff
+- [x] 2.1 `roundtable.md` (draft; R1-R6 folded into D7, D9, D10): protected behaviour (PTY panes unchanged; detection precedence; handoff
   of PTY panes; client protocol; the new `core_terminal` field in persisted state), the exact entry
   point for status reports (D9), the handoff code path for a core pane (D10), findings
 
@@ -39,9 +39,11 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 - [ ] 4.2 Exit mapping (D7) and exactly-once; V6
 - [ ] 4.3 Reattach with reset before repaint (D5); V3
 - [ ] 4.4 `terminate_session`: kill, then the local sweep (D8); V7
-- [ ] 4.5 Status events as authoritative reports (D9); V8
-- [ ] 4.6 Re-adoption (D10): `core_terminal` in the pane snapshot, detach on handoff and restart,
-  label-checked reattach on restore, kill on stop, orphan notice; V10
+- [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported` with a per-pane `seq` (D9,
+  R2, R4); V8
+- [ ] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);
+  `core_terminal` in the pane snapshot, detach on handoff and `stop_for_restart` (R3),
+  label-checked reattach on restore with no launch line (R6), kill on stop, orphan notice; V10
 - [ ] 4.6a Core lifetime and the sweep guard; V15, V16
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
   `docs/next` config reference

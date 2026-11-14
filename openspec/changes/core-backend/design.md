@@ -159,6 +159,7 @@ second is ignored. The backend sets `child_wait_completed`, then calls `on_exit`
 
 | core | `ChildExitReason` |
 |---|---|
+| (status `done`) | not an exit: maps to `Idle` in D9 (roundtable R4) |
 | `exited` with an exit code | `Exited` |
 | `exited` or `killed` with a signal | `Interrupted` |
 | `killed` with no signal (our close) | `Exited` |
@@ -189,11 +190,13 @@ Rejected: it is user-visible (a dev server keeps its port) and differs between b
 
 - The client subscribes to `events.subscribe` with the label filter `herdr.session=<name>` on the same
   connection. A `status` event for a pane's terminal becomes an authoritative agent report for that
-  pane, through the same path hook reports take today (exact entry point chosen in the roundtable:
-  `src/app/api/panes.rs` report handling and `PaneRuntime`'s `self_reported_agent_active` /
-  `full_lifecycle_authority_active` flags). `state` maps: idle → idle, working → working, done →
-  done, blocked → blocked with `kind` as `blocked_reason`, error → idle, with the message logged at warn (so an `error` report is visible in the server log
-  and not silently idle).
+  pane, through the same event a hook report takes (roundtable R4): `AppEvent::HookStateReported`
+  with source `herdr:core`, a normal (not full-lifecycle) source, and a per-pane counter as `seq`,
+  never core's own `seq`, which restarts at 0 on a new core (R2). `state` maps: idle → `Idle`,
+  working → `Working`, done → `Idle` (the unseen mark comes from the transition), blocked →
+  `Blocked` plus an `AgentHintReported` carrying `kind` as the `BlockedReason`, error → `Idle`, with
+  the message logged at warn (so an `error` report is visible in the server log and not silently
+  idle).
   `status.app` maps to our agent kind (`claude-code` → claude, `codex`, `pi`, `opencode`; unknown →
   detection decides).
 - When no `status` has arrived, screen detection runs as today (the Claude `●` busy line counts since
@@ -211,14 +214,19 @@ the migration.
 - **Persisted link.** A core pane's record in `session.json` (and in the handoff snapshot) gains an
   optional field `core_terminal: {session, address}`. Older binaries ignore it (the persist structs
   do not deny unknown fields); a PTY pane omits it.
-- **Leaving.** On live handoff and on `herdr server restart`, the old server detaches from core
-  panes (closes their attach channels and the connection) without killing them: a core pane counts
-  as preserved, like a PTY pane handed over by fd. On `herdr server stop`, on pane close and on a
-  pane respawn it kills them (D8), as today's semantics for those actions.
+- **Leaving.** On live handoff and on `herdr server restart` (which sends `server.stop_for_restart`,
+  roundtable R3), the old server detaches from core panes (closes their attach channels and the
+  connection) without killing them: a core pane counts as preserved, like a PTY pane handed over by
+  fd. On `server.stop`, on pane close and on a pane respawn it kills them (D8), as today's semantics
+  for those actions.
+- **Not in the fd list.** Today one pane failing `duplicate_handoff_fd` aborts the whole handoff
+  (`src/server/headless/lifecycle.rs:157-174`, roundtable R1). Core panes are left out of the
+  handoff entries, the manifest's pane list and the fd list before any fd is duplicated; they ride in
+  the snapshot's `core_terminal` instead.
 - **Arriving.** While restoring, a pane with `core_terminal` calls `terminal.get` on that address and
   checks `state: live` and the labels `herdr.session` and `herdr.pane_id` match. If they do, the pane
-  attaches (D5: reset, then the first paint) and publishes the terminal's pid; detection and status
-  resume. If not (terminal gone, labels differ, core unreachable), the pane is restored as today (a
+  attaches (D5: the first paint repaints) and publishes the terminal's pid; detection and status
+  resume; no restore launch line is sent into the running program (roundtable R6). If not (terminal gone, labels differ, core unreachable), the pane is restored as today (a
   fresh program, agent resume through `restore_argv`).
 - **Handoff steps.** For a core pane, `duplicate_handoff_fd` stays `Unsupported` (it is not sent by
   fd); `begin_handoff`, `set_handoff_paused` and `release_after_commit` stop and resume the pane's
@@ -275,9 +283,9 @@ against a real hc 0.1.21+ in a scratch `HC_SESSION` and scratch XDG dirs; those 
 | V5 | resize and replies: `stty size` sees the new size; `CSI 6n` after `999;999H` answers the new size; replies go as AUTOMATIC_INPUT when negotiated | live; fake core asserts the frame kind | runtime-seam V6 | equal; kind 6 seen |
 | V6 | exit mapping per D7, exactly one `PaneDied`, flag set first | fake core sends each CLOSE/`finished` case; live for `exit 3` and a signal | D7 table | each case maps as the table; one event |
 | V7 | close ends detached processes (D8) and never reaches core | live: the program starts `nohup sleep 300 &` and a trap logger; a second core terminal runs alongside; close the pane | the PTY backend's result for the same program | the detached pid is gone on both backends; signal logs match; the core server, its holder and the second terminal are still alive |
-| V8 | status events are authoritative and detection fills in | fake core sends `status` working/idle/blocked; live Claude Code with `--settings ~/.config/claude/direct-noconnectors.settings.json` | D9 mapping; detection for a shell with no reports | pane state follows the events; a plain shell still reads idle by detection |
+| V8 | status events are authoritative and detection fills in; a core restart mid-session does not silence later reports (R2) | fake core sends `status` working/idle/blocked; live Claude Code with `--settings ~/.config/claude/direct-noconnectors.settings.json` | D9 mapping; detection for a shell with no reports | pane state follows the events; a plain shell still reads idle by detection |
 | V9 | fallback: no `hc`, old version, refused connection, failed `run` → PTY pane plus one notice | fake core / no socket | D1 | pane alive on PTY; exactly one notice |
-| V10 | mixed live handoff and restart keep programs (D10) | `tests/live_handoff.rs` style test with one PTY and one core pane (live), then `herdr server restart`, then `herdr server stop` | D10 | after handoff and restart: both programs keep their pids and the core pane's screen equals `hc read`; after stop: the core terminal is finished; a pane whose terminal vanished restores fresh; an unclaimed labelled terminal survives and is named in one notice |
+| V10 | mixed live handoff and restart keep programs (D10); a handoff with a core pane completes, never rolls back (R1); a reattached pane gets no launch line (R6) | `tests/live_handoff.rs` style test with one PTY and one core pane (live), then `herdr server restart`, then `herdr server stop` | D10 | after handoff and restart: both programs keep their pids and the core pane's screen equals `hc read`; after stop: the core terminal is finished; a pane whose terminal vanished restores fresh; an unclaimed labelled terminal survives and is named in one notice |
 | V11 | hooks still report through our API from a core pane | live: `herdr pane report-agent` from inside a core pane | today's report path | the report lands on the right pane |
 | V12 | hot path cost | `just bench-render-scale` plus phase 0's 30-terminal busy test (30 terminals printing a 90-byte line twice a second, 30 s), PTY vs core backend | PTY baseline: herdr server 0.83 s CPU per 30 s busy and 0.23 s idle with 30 panes, server+anchor 20.4 MB footprint (phase 0 Q4); render bench in `openspec/changes/runtime-seam/bench-after.txt` | our server + core + holder within 1.5× of 0.83 s busy; render bench median within noise; scaling 1 vs 15 panes reported |
 | V13 | no `terminal.send` anywhere | architecture test over `src/` | none allowed | no match |
