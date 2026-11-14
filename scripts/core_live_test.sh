@@ -118,6 +118,7 @@ mkdir -p "$CONFIG_HOME/herdr-dev" "$RUNTIME_DIR" "$STATE_DIR"
 # 1. A PTY pane, then a core pane, in one server.
 set_runtime pty
 run_herdr server >/dev/null 2>&1 &
+SERVER_PID=$!
 wait_until "server socket" socket_up
 A="$(api "{\"id\":\"v10\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
   | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')"
@@ -139,6 +140,25 @@ read -r ADDR CORE_PID LABEL <<<"$(core_terminals)"
 [[ "$LABEL" == "$B" ]] || fail "core terminal labelled $LABEL, pane B is $B"
 echo "ok: pane A ($A, pid $A_PID) on the PTY, pane B ($B, pid $B_PID) in core as $ADDR"
 
+# V15 (D2): the core our server started is not ours to end: not our child, not
+# in our session, and started without a pane's or an agent's variables.
+core_pid() { hc_scratch server status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["pid"])'; }
+sid() { python3 -I -c 'import os,sys; print(os.getsid(int(sys.argv[1])))' "$1"; }
+CORE="$(core_pid)"
+[[ "$(ps -o ppid= -p "$CORE" | tr -d ' ')" != "$SERVER_PID" ]] || fail "core $CORE is our server's child"
+[[ "$(sid "$CORE")" != "$(sid "$SERVER_PID")" ]] || fail "core $CORE is in our server's session"
+# What core hands its programs is what counts (it keeps its starter's
+# environment, phase 0): run one from a clean caller environment and read it.
+env -i HOME="$HOME" PATH="/usr/bin:/bin:/opt/homebrew/bin:$HOME/.local/bin" \
+  XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" HC_SESSION="$CORE_SESSION" \
+  hc run --bg "env > $BASE/core.env" >/dev/null
+wait_until "the core's environment" file_has_line "$BASE/core.env"
+grep -q '^PATH=' "$BASE/core.env" || fail "could not read the core's environment"
+if grep -Eq '^(HERDR_PANE_ID|HERDR_TAB_ID|HERDR_WORKSPACE_ID|CLAUDE_CODE_[A-Z_]*|ANTHROPIC_[A-Z_]*|CLAUDECODE)=' "$BASE/core.env"; then
+  fail "core hands its programs a pane's or an agent's variables: $(grep -E '^(HERDR_|CLAUDE|ANTHROPIC)' "$BASE/core.env" | cut -d= -f1 | tr '\n' ' ')"
+fi
+echo "ok: core $CORE runs outside our server's session, without pane or agent variables"
+
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
   || fail "live handoff with a core pane did not complete (R1)"
@@ -148,7 +168,8 @@ alive "$B_PID" || fail "core pane's program ended in the handoff"
 [[ "$(core_terminals)" == "$ADDR $CORE_PID $B" ]] || fail "core terminals changed: $(core_terminals)"
 send_line "$B" "echo after-handoff > $BASE/b.handoff"
 wait_until "input to B after the handoff" file_has_line "$BASE/b.handoff"
-echo "ok: live handoff kept both programs; B reattached to $ADDR and takes input"
+[[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the handoff"
+echo "ok: live handoff kept both programs and the core; B reattached to $ADDR and takes input"
 
 # 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
 #    pane is kept and reattached.
@@ -160,7 +181,8 @@ alive "$B_PID" || fail "core pane's program ended in the restart"
   || fail "expected only B's kept terminal (A restores on the PTY, D1): $(core_terminals)"
 send_line "$B" "echo after-restart > $BASE/b.restart"
 wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
-echo "ok: server restart kept B's program in $ADDR and reattached it"
+[[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the restart"
+echo "ok: server restart kept the core and B's program in $ADDR, and reattached it"
 
 # 4. herdr server stop ends the core pane's program.
 run_herdr server stop >/dev/null
@@ -168,5 +190,8 @@ wait_until "core pane's program ended by the stop" gone "$B_PID"
 if core_terminals | grep -q "^$ADDR "; then
   fail "$ADDR still live after server stop"
 fi
-echo "ok: server stop ended B's program"
+# B was the pane whose spawn started the core; ending it (the D8 close path)
+# and stopping our server leave the core running.
+alive "$CORE" || fail "core ended with our server"
+echo "ok: server stop ended B's program and left the core $CORE running"
 echo "PASS: V10 server half"
