@@ -178,6 +178,8 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// A restored pane's shell with its saved history, always on the PTY
+    /// (core-backend D1; a restored core pane uses `reattach_core`).
     // Wrapper mirrors pane runtime construction arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_initial_history(
@@ -195,7 +197,7 @@ impl TerminalRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<Self> {
-        crate::pane::PaneRuntime::spawn_with_initial_history(
+        crate::pane::PaneRuntime::spawn_restored(
             pane_id,
             rows,
             cols,

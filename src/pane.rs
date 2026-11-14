@@ -384,6 +384,9 @@ enum PaneLaunch {
     Command {
         cmd: CommandBuilder,
         spawn_error_message: &'static str,
+        /// A restored pane stays on the PTY; only new panes consult
+        /// `[experimental] runtime` (core-backend D1).
+        pty_only: bool,
     },
     #[cfg(unix)]
     ReattachCore {
@@ -2752,15 +2755,19 @@ impl PaneRuntime {
             shell_config,
             launch_env,
             None,
+            false,
             events,
             render_notify,
             render_dirty,
         )
     }
 
+    /// A restored pane's shell, seeded with its saved history. It always runs
+    /// on the PTY: only new panes consult `[experimental] runtime`, and a
+    /// restored core pane reattaches through `reattach_core` (core-backend D1).
     // Runtime construction needs to thread PTY size, environment, theme, and render hooks together.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn_with_initial_history(
+    pub(crate) fn spawn_restored(
         pane_id: PaneId,
         rows: u16,
         cols: u16,
@@ -2771,6 +2778,42 @@ impl PaneRuntime {
         shell_config: PaneShellConfig<'_>,
         launch_env: &PaneLaunchEnv,
         initial_history_ansi: Option<&str>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_initial_history(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            shell_config,
+            launch_env,
+            initial_history_ansi,
+            true,
+            events,
+            render_notify,
+            render_dirty,
+        )
+    }
+
+    // Runtime construction needs to thread PTY size, environment, theme, and render hooks together.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_initial_history(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        shell_config: PaneShellConfig<'_>,
+        launch_env: &PaneLaunchEnv,
+        initial_history_ansi: Option<&str>,
+        pty_only: bool,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
@@ -2794,6 +2837,7 @@ impl PaneRuntime {
             PaneLaunch::Command {
                 cmd,
                 spawn_error_message: "failed to spawn shell",
+                pty_only,
             },
             SpawnInitialState {
                 detected_agent: None,
@@ -2838,6 +2882,7 @@ impl PaneRuntime {
             PaneLaunch::Command {
                 cmd,
                 spawn_error_message: "failed to spawn command pane",
+                pty_only: false,
             },
             SpawnInitialState::default(),
             agent_detection,
@@ -2887,6 +2932,7 @@ impl PaneRuntime {
             PaneLaunch::Command {
                 cmd,
                 spawn_error_message: "failed to spawn argv command pane",
+                pty_only: false,
             },
             SpawnInitialState::default(),
             agent_detection,
@@ -3300,18 +3346,32 @@ impl PaneRuntime {
                 PaneLaunch::Command {
                     cmd,
                     spawn_error_message,
-                } => PaneIo::spawn_preferred(
-                    pane_id,
-                    runtime_io::SpawnSpec {
+                    pty_only,
+                } => {
+                    let spec = runtime_io::SpawnSpec {
                         rows,
                         cols,
                         command: cmd,
                         spawn_error_message,
-                    },
-                    sink,
-                    &spawn_child_pid,
-                    child_wait_completed.clone(),
-                )?,
+                    };
+                    if pty_only {
+                        PaneIo::spawn(
+                            pane_id,
+                            spec,
+                            sink,
+                            &spawn_child_pid,
+                            child_wait_completed.clone(),
+                        )?
+                    } else {
+                        PaneIo::spawn_preferred(
+                            pane_id,
+                            spec,
+                            sink,
+                            &spawn_child_pid,
+                            child_wait_completed.clone(),
+                        )?
+                    }
+                }
                 #[cfg(unix)]
                 PaneLaunch::ReattachCore {
                     link,
