@@ -38,6 +38,8 @@ mod terminal;
 mod xtgettcap;
 
 // Pins the PTY-backed runtime before the backend seam (openspec/changes/runtime-seam).
+#[cfg(test)]
+mod program_status_tests;
 #[cfg(all(test, unix))]
 mod runtime_characterization_tests;
 // Live checks of the herdr-core backend (openspec/changes/core-backend).
@@ -135,6 +137,92 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
     for key in HOST_TERMINAL_HANDLE_ENV_VARS {
         cmd.env_remove(key);
     }
+}
+
+/// Turns a program's own status reports (herdr-core's OSC 7501 events) into
+/// the hook report and hint a hook would send (core-backend D9, roundtable R2
+/// and R4). Reports from a program herdr does not know are dropped: detection
+/// decides for it.
+#[cfg_attr(not(unix), allow(dead_code))] // only the Unix core backend reports status
+fn program_status_reporter(
+    pane_id: PaneId,
+    events: mpsc::Sender<AppEvent>,
+) -> runtime_io::StatusCallback {
+    use runtime_io::ProgramState;
+    const SOURCE: &str = "herdr:core";
+    // Hint ttl ceiling of the hint API: a blocked reason shows for at most a
+    // minute, then the pane reads blocked with no reason.
+    const BLOCKED_HINT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    let last_seq = AtomicU64::new(0);
+    let rt = tokio::runtime::Handle::current();
+    Box::new(move |status| {
+        let Some(agent) = status
+            .app
+            .as_deref()
+            .and_then(crate::detect::parse_agent_label)
+        else {
+            return;
+        };
+        let agent_label = crate::detect::agent_label(agent).to_string();
+        let state = match status.state {
+            ProgramState::Working => AgentState::Working,
+            ProgramState::Blocked => AgentState::Blocked,
+            ProgramState::Idle | ProgramState::Done => AgentState::Idle,
+            ProgramState::Error => {
+                warn!(
+                    pane = pane_id.raw(),
+                    agent = %agent_label,
+                    message = status.message.as_deref().unwrap_or(""),
+                    "agent reported an error"
+                );
+                AgentState::Idle
+            }
+        };
+        // A wall-clock base, never a counter from 0: a new server after a
+        // handoff carries the last accepted seq and drops anything lower.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(0);
+        let seq = last_seq
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |prev| {
+                Some(now.max(prev + 1))
+            })
+            .map(|prev| now.max(prev + 1))
+            .unwrap_or(now);
+        let report = AppEvent::HookStateReported {
+            pane_id,
+            source: SOURCE.to_string(),
+            agent_label: agent_label.clone(),
+            state,
+            message: status.message.clone(),
+            seq: Some(seq),
+            session_ref: None,
+        };
+        if let Err(err) = rt.block_on(events.send(report)) {
+            warn!(pane = pane_id.raw(), err = %err, "failed to send a program status report");
+            return;
+        }
+        if state == AgentState::Blocked {
+            let kind = match status.kind.as_deref() {
+                Some("permission") => crate::detect::BlockedReason::Permission,
+                Some("question") => crate::detect::BlockedReason::Question,
+                _ => crate::detect::BlockedReason::Other,
+            };
+            let hint = AppEvent::AgentHintReported {
+                pane_id,
+                report: crate::terminal::AgentHintReport {
+                    source: SOURCE.to_string(),
+                    agent_label,
+                    kind: Some(kind),
+                    id: None,
+                    ttl: BLOCKED_HINT_TTL,
+                    seq: Some(seq),
+                },
+            };
+            let _ = rt.block_on(events.send(hint));
+        }
+    })
 }
 
 /// Host handles that name the outer terminal or multiplexer, never this pane.
@@ -2942,7 +3030,11 @@ impl PaneRuntime {
             PaneIo::adopt_handoff_fd(
                 pane_id,
                 master_fd,
-                runtime_io::PaneIoSink { on_read, on_exit },
+                runtime_io::PaneIoSink {
+                    on_read,
+                    on_exit,
+                    on_status: None,
+                },
             )?
         };
 
@@ -3060,6 +3152,7 @@ impl PaneRuntime {
         };
 
         let spawn_child_pid = Arc::clone(&child_pid);
+        let status_reporter = program_status_reporter(pane_id, events.clone());
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -3132,7 +3225,11 @@ impl PaneRuntime {
                     command: cmd,
                     spawn_error_message,
                 },
-                runtime_io::PaneIoSink { on_read, on_exit },
+                runtime_io::PaneIoSink {
+                    on_read,
+                    on_exit,
+                    on_status: Some(status_reporter),
+                },
                 &spawn_child_pid,
                 child_wait_completed.clone(),
             )?

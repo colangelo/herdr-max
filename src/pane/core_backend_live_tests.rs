@@ -385,3 +385,50 @@ async fn core_v3_reattaches_after_a_core_restart() {
     assert_eq!(died, None, "a core restart is not an exit");
     assert!(alive, "the program kept running across the core restart");
 }
+
+// V8: a program's own OSC 7501 reports reach the pane as hook reports from
+// `herdr:core`, a blocked one with its reason as a hint. A shell stands in for
+// an agent: core reads 7501 from any program.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v8_program_reports_become_hook_reports() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v8");
+    let (runtime, mut events) = spawn_sh(
+        &scratch.0,
+        "sleep 0.5; printf '\\033]7501;state=working:app=claude-code\\007'; sleep 0.5; printf '\\033]7501;state=blocked:kind=permission:app=claude-code\\007'; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    let mut states = Vec::new();
+    let mut hint = None;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while (states.len() < 2 || hint.is_none()) && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Some(AppEvent::HookStateReported {
+                source,
+                agent_label,
+                state,
+                ..
+            })) => {
+                assert_eq!(
+                    (source.as_str(), agent_label.as_str()),
+                    ("herdr:core", "claude")
+                );
+                states.push(state);
+            }
+            Ok(Some(AppEvent::AgentHintReported { report, .. })) => hint = report.kind,
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+    runtime.shutdown();
+    assert_eq!(states, [AgentState::Working, AgentState::Blocked]);
+    assert_eq!(hint, Some(crate::detect::BlockedReason::Permission));
+}

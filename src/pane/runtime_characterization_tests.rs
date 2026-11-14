@@ -541,6 +541,7 @@ async fn v2_on_exit_runs_after_the_wait_is_marked_complete() {
             on_exit: Box::new(move |reason| {
                 let _ = seen_tx.send((flag.load(Ordering::Acquire), reason));
             }),
+            on_status: None,
         },
         &child_pid,
         Arc::clone(&wait_completed),

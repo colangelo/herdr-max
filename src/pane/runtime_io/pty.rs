@@ -28,7 +28,9 @@ impl PaneIo {
             command,
             spawn_error_message,
         } = spec;
-        let PaneIoSink { on_read, on_exit } = sink;
+        let PaneIoSink {
+            on_read, on_exit, ..
+        } = sink;
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, command)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
 
@@ -75,7 +77,9 @@ impl PaneIo {
         master_fd: std::os::fd::OwnedFd,
         sink: PaneIoSink,
     ) -> std::io::Result<Self> {
-        let PaneIoSink { on_read, on_exit } = sink;
+        let PaneIoSink {
+            on_read, on_exit, ..
+        } = sink;
         Ok(PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
             pane_id: pane_id.raw(),
             master_fd,

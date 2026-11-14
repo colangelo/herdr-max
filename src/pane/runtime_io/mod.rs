@@ -28,11 +28,37 @@ pub(in crate::pane) struct SpawnSpec {
 }
 
 /// Where a backend delivers a pane's output and its exit.
+/// A program's own report of its state (OSC 7501, through herdr-core).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::pane) struct ProgramStatus {
+    /// The reporting program (`claude-code`, `codex`, `pi`), as it names itself.
+    pub app: Option<String>,
+    pub state: ProgramState,
+    /// For `Blocked`: `permission`, `question`, `auth`.
+    pub kind: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::pane) enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+}
+
+pub(in crate::pane) type StatusCallback = Box<dyn Fn(ProgramStatus) + Send + Sync>;
+
 pub(in crate::pane) struct PaneIoSink {
     /// Feeds the pane's terminal parser; called for every chunk read.
     pub on_read: ReadCallback,
     /// Called once, after the wait is marked complete.
     pub on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send>,
+    /// The program's own status reports, for a backend that carries them
+    /// (herdr-core's OSC 7501 events). The PTY backend never calls it: its
+    /// programs report through hooks and screen detection.
+    pub on_status: Option<StatusCallback>,
 }
 
 pub(super) enum PaneIo {
@@ -87,9 +113,13 @@ impl PaneIo {
             });
             match started {
                 Ok(started) => {
-                    let PaneIoSink { on_read, on_exit } = sink;
+                    let PaneIoSink {
+                        on_read,
+                        on_exit,
+                        on_status,
+                    } = sink;
                     return started
-                        .into_pane(on_read, on_exit, child_wait_completed)
+                        .into_pane(on_read, on_exit, on_status, child_wait_completed)
                         .map(PaneIo::Core);
                 }
                 Err(err) => core_backend::note_unavailable(&err),

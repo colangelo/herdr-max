@@ -45,7 +45,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 - [x] 4.3 Reattach (D5; no extra reset, core's first paint resets itself); V3 live `core_v3_reattaches_after_a_core_restart`; a core is started only before the first connection (a reconnect once started a second core)
 - [x] 4.4 `terminate_session`: list the session first, kill, then sweep the list (D8; listing after
   the kill found nothing, the session leader was gone); V7 live
-- [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
+- [x] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
   (D9, R2, R4); test: after a handoff or reattach the next report is accepted; V8
 - [ ] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);
   `core_terminal` in the pane snapshot, detach on handoff and `stop_for_restart` (R3),

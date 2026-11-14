@@ -218,6 +218,14 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
                 paint,
             )
         }
+        "events.subscribe" => {
+            let channel = *next_channel;
+            *next_channel += 1;
+            (
+                Ok(json!({"channel": channel, "seq": 0, "terminals": []})),
+                None,
+            )
+        }
         "terminal.get" if params["terminal"] == "t404" => (
             Err(json!({"code": -32000, "message": "no terminal t404",
                         "data": {"kind": "not_found", "hint": ""}})),
