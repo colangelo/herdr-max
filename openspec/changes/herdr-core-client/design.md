@@ -624,6 +624,11 @@ Two side findings:
   (401). `env -u CLAUDE_* -u ANTHROPIC_* -u HERDR_* hc server restart --fresh` fixed it. The adapter
   must start, restart and update the core with a chosen, clean environment, and pass per-terminal
   `env` explicitly.
+- **`hc update` can start the user's default core.** The second `hc update` (the one that finishes
+  the move to the bundle, run with `HC_SESSION=pilot`) also started the default core, which was not
+  running, and its kept terminal from 2026-11-02 came back as an idle shell (found 3.5 h later;
+  stopped again, which parks the kept terminal as before). Any tool that updates `hc` must expect
+  this and check the default session afterwards.
 - **A bare `claude` is not a test agent.** It is ac's direct login with his claude.ai connectors.
   Test Claude Code with `--settings ~/.config/claude/direct-noconnectors.settings.json` or the aiproxy
   settings (house rule a1103-08, ac/security#56).
