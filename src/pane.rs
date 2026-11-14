@@ -34,6 +34,10 @@ mod state;
 mod terminal;
 mod xtgettcap;
 
+// Pins the PTY-backed runtime before the backend seam (openspec/changes/runtime-seam).
+#[cfg(all(test, unix))]
+mod runtime_characterization_tests;
+
 use self::agent_detection::{
     codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
     detection_update_for_publish_with_osc, mark_detection_content_changed,
