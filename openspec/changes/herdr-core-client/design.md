@@ -611,6 +611,12 @@ process macOS holds responsible for privacy prompts).
 | 12 | read quality | **green** | `hc read --lines 0` of Claude Code 2.1.325 gives the same lines that `herdr-beta agent read --source detection` gives for a herdr pane: banner, prompt box between two rules, status lines. Over a 105-sample turn, our `live_turn_working` / `live_prompt_box` rules agreed with Claude's 7501 state 82 times. All 23 misses were `working` read as idle: Claude now draws its busy line with `●` (`● Churning…`), which the rule's spinner class lacks. Today herdr is saved by `osc_title_working`. In core, Claude never animates the title (raw OSC 2 seen: plain text, no glyph; `title` in `hc get` the same) and reports `working`/`done` over 7501 instead, carried raw on the stream. So for Claude, 7501 is the status source under core, and the manifest needs `●` before screen detection can be its fallback (phase 2 task). |
 | 13 | send while a person types | **green, one risk** | A person typing a key every 0.5 s through an attach stream and then pressing Enter: a fleet `hc send` issued meanwhile waited **4.9 s** and landed **0.8 s** after the person's Enter. A person typing and then stopping with no Enter: the send waited exactly **60.0 s** after the last key (`draft_wait` default), then pasted onto the person's unfinished text and pressed Enter, so it submitted their draft with ours. Our tools must keep reading the box first (herdr-compact does) or set `draft_wait` and check before sending. |
 
+**Q2 (identity via labels), 2026-11-14, green.** A program in a core terminal sees `HC_TERMINAL_ID`,
+`HC_TERMINAL_SOCKET`, `HC_SESSION` and `HC_SCOPE`; `hc label "$HC_TERMINAL_ID" herdr.agent_session=...`
+from inside works. Label values with spaces (a whole `claude --resume ... --settings ...` line) and
+5000 characters are accepted, keys are free-form, `key=` removes one. A finished terminal's labels
+are dropped from `hc ls --all`.
+
 Two side findings:
 
 - **The core keeps the environment of whoever updated it.** After `hc update` from inside a Claude

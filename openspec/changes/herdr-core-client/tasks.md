@@ -6,7 +6,9 @@
 ## 2. Live questions (design.md § 5)
 
 - [x] 2.1 Q1: Claude Code 2.1.316 and Codex 0.166.0 emit OSC 7501 (idle, working, done seen)
-- [ ] 2.2 Q2: a Claude Code hook sees `HC_TERMINAL_ID` and can label its terminal with the session id
+- [x] 2.2 Q2: a program in a core terminal sees `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET` and `HC_SESSION`,
+  and `hc label $HC_TERMINAL_ID k=v` works from inside (2026-11-14, hc 0.1.21); a hook inherits that
+  environment
 - [ ] 2.3 Q3: reboot recovery of kept terminals, saved screens and documents
 - [x] 2.4 Q4: 30 idle shells, core+holder 15.1 MB vs herdr 20.4 MB; busy, 0.31 s vs 0.83 s CPU per 30 s; observe +0.07 s, polling +0.38 s (design.md § 5a)
 - [ ] 2.5 Q5: typing latency and frame cost through a raw attach stream with a client-side VT
