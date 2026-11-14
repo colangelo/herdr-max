@@ -27,7 +27,45 @@ pub(in crate::pane) struct SpawnSpec {
     pub spawn_error_message: &'static str,
 }
 
-/// Where a backend delivers a pane's output and its exit.
+/// A pane's program in herdr-core, saved with the pane so the next server
+/// attaches to it instead of starting it again (core-backend D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CoreTerminalLink {
+    /// The core session (`herdr`, `herdr-dev`, `herdr-<name>`; D2).
+    pub session: String,
+    /// The terminal's address in that session (`t7`).
+    pub address: String,
+}
+
+/// Live herdr-core terminals labelled for this session that no pane claimed
+/// (D10 "Orphans"): `(address, pane id label)`. Empty without a core.
+pub(crate) fn unclaimed_core_terminals(claimed: &[String]) -> Vec<(String, Option<String>)> {
+    #[cfg(unix)]
+    {
+        core_backend::unclaimed_terminals(claimed)
+            .into_iter()
+            .map(|terminal| (terminal.address, terminal.pane_id))
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = claimed;
+        Vec::new()
+    }
+}
+
+/// The herdr-core session this herdr session's panes run in (D2).
+pub(crate) fn core_session_name() -> String {
+    #[cfg(unix)]
+    {
+        core_backend::core_session_name()
+    }
+    #[cfg(not(unix))]
+    {
+        String::new()
+    }
+}
+
 /// A program's own report of its state (OSC 7501, through herdr-core).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pane) struct ProgramStatus {
@@ -126,6 +164,77 @@ impl PaneIo {
             }
         }
         Self::spawn(pane_id, spec, sink, child_pid, child_wait_completed)
+    }
+
+    /// Attaches to a program an earlier server left in herdr-core (D10
+    /// "Arriving"). Fails, without touching the terminal, when it is in
+    /// another core session, gone, finished or labelled for another pane; the
+    /// caller then starts the pane fresh.
+    #[cfg(unix)]
+    // The reattach threads the pane's geometry, sink and pid slots, as spawn does.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::pane) fn reattach_core(
+        pane_id: crate::layout::PaneId,
+        link: &CoreTerminalLink,
+        public_pane_id: Option<&str>,
+        rows: u16,
+        cols: u16,
+        sink: PaneIoSink,
+        child_pid: &std::sync::atomic::AtomicU32,
+        child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let session = core_backend::core_session_name();
+        if link.session != session {
+            return Err(std::io::Error::other(format!(
+                "terminal {} is in core session {}, not {session}",
+                link.address, link.session
+            )));
+        }
+        let target = core_backend::CoreReattach {
+            pane_id,
+            address: link.address.clone(),
+            labels: core_backend::pane_labels(public_pane_id),
+            rows,
+            cols,
+        };
+        let started = core_backend::StartedCore::reattach(
+            target,
+            child_pid,
+            core_backend::existing_core_connector(),
+        )
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let PaneIoSink {
+            on_read,
+            on_exit,
+            on_status,
+        } = sink;
+        started
+            .into_pane(on_read, on_exit, on_status, child_wait_completed)
+            .map(PaneIo::Core)
+    }
+
+    /// The core terminal this pane shows, if it runs in herdr-core.
+    pub(super) fn core_terminal(&self) -> Option<CoreTerminalLink> {
+        match self {
+            #[cfg(unix)]
+            PaneIo::Core(core) => Some(CoreTerminalLink {
+                session: core_backend::core_session_name(),
+                address: core.address().to_string(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Whether dropping a core pane leaves its program running, for the next
+    /// server to attach to (D10). A PTY pane is unaffected: its program cannot
+    /// outlive this server.
+    pub(super) fn set_keep_core_terminal(&self, keep: bool) {
+        #[cfg(unix)]
+        if let PaneIo::Core(core) = self {
+            core.set_keep_on_drop(keep);
+        }
+        #[cfg(not(unix))]
+        let _ = keep;
     }
 
     pub(super) fn shutdown(&self) {

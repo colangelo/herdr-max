@@ -161,6 +161,17 @@ pub struct PaneSnapshot {
     /// The run the pane was started for (`HERDR_RUN_ID`), when it had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// The pane's program in herdr-core, for the next server to attach to
+    /// (core-backend D10). Absent for a PTY pane and in older files; an
+    /// older build ignores it and starts the pane fresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_terminal: Option<PaneCoreTerminalSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneCoreTerminalSnapshot {
+    pub session: String,
+    pub address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +505,13 @@ fn capture_tab(
         let pin_order = terminal.and_then(|terminal| terminal.pin_order);
         let pane_key = terminal.map(|terminal| terminal.pane_key.clone());
         let run_id = terminal.and_then(|terminal| terminal.run_id.clone());
+        let core_terminal = terminal_id
+            .and_then(|id| terminal_runtimes.get(id))
+            .and_then(|runtime| runtime.core_terminal())
+            .map(|link| PaneCoreTerminalSnapshot {
+                session: link.session,
+                address: link.address,
+            });
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
         // bottom of the buffer once per capture, only for a Claude record.
@@ -540,6 +558,7 @@ fn capture_tab(
                 former_public_ids: Vec::new(),
                 pane_key,
                 run_id,
+                core_terminal,
             },
         );
     }
@@ -903,6 +922,7 @@ mod tests {
                 former_public_ids: Vec::new(),
                 pane_key: None,
                 run_id: None,
+                core_terminal: None,
             },
         );
         panes.insert(
@@ -923,6 +943,7 @@ mod tests {
                 former_public_ids: Vec::new(),
                 pane_key: None,
                 run_id: None,
+                core_terminal: None,
             },
         );
 
@@ -1800,6 +1821,7 @@ mod tests {
             former_public_ids: Vec::new(),
             pane_key: None,
             run_id: None,
+            core_terminal: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1815,6 +1837,29 @@ mod tests {
         assert_eq!(back.todos[0].link_pane, Some(11));
         assert_eq!(back.todos[0].link_label.as_deref(), Some("infra"));
         assert_eq!(back.next_todo_id, 4);
+    }
+
+    #[test]
+    fn a_core_panes_terminal_round_trips_and_older_files_load_without_it() {
+        // core-backend D10: the link the next server attaches by.
+        let json = r#"{"cwd":"/tmp","core_terminal":{"session":"herdr","address":"t7"}}"#;
+        let pane: PaneSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            pane.core_terminal,
+            Some(PaneCoreTerminalSnapshot {
+                session: "herdr".into(),
+                address: "t7".into()
+            })
+        );
+        let back = serde_json::to_value(&pane).unwrap();
+        assert_eq!(back["core_terminal"]["address"], "t7");
+
+        // A file from before the field, and every PTY pane, has none and
+        // writes none.
+        let old: PaneSnapshot = serde_json::from_str(r#"{"cwd":"/tmp"}"#).unwrap();
+        assert_eq!(old.core_terminal, None);
+        let written = serde_json::to_value(&old).unwrap();
+        assert!(written.get("core_terminal").is_none(), "{written}");
     }
 
     #[test]
@@ -1835,6 +1880,7 @@ mod tests {
             former_public_ids: Vec::new(),
             pane_key: None,
             run_id: None,
+            core_terminal: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1927,6 +1973,7 @@ mod tests {
                 former_public_ids: Vec::new(),
                 pane_key: None,
                 run_id: None,
+                core_terminal: None,
             },
         );
         panes.insert(
@@ -1949,6 +1996,7 @@ mod tests {
                 former_public_ids: Vec::new(),
                 pane_key: None,
                 run_id: None,
+                core_terminal: None,
             },
         );
 

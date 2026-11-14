@@ -80,6 +80,49 @@ impl TerminalRuntime {
         self.0.handoff_history_ansi()
     }
 
+    /// A runtime on a program an earlier server left in herdr-core (D10).
+    #[cfg(unix)]
+    // Wrapper mirrors pane runtime construction arguments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_core(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        link: crate::pane::CoreTerminalLink,
+        public_pane_id: Option<String>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::reattach_core(
+            pane_id,
+            rows,
+            cols,
+            link,
+            public_pane_id,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
+    /// The herdr-core terminal this runtime shows, if any (D10).
+    pub fn core_terminal(&self) -> Option<crate::pane::CoreTerminalLink> {
+        self.0.core_terminal()
+    }
+
+    /// Whether a core program outlives this runtime (D10).
+    pub fn set_keep_core_terminal(&self, keep: bool) {
+        self.0.set_keep_core_terminal(keep);
+    }
+
     #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,

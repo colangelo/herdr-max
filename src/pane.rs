@@ -23,8 +23,10 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
 pub(crate) use runtime_io::set_preferred_runtime;
+pub(crate) use runtime_io::CoreTerminalLink;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
+pub(crate) use runtime_io::{core_session_name, unclaimed_core_terminals};
 
 mod agent_detection;
 mod background_agent;
@@ -374,6 +376,21 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
 struct PendingAgentRelease {
     agent: Agent,
     until: std::time::Instant,
+}
+
+/// What a new pane runtime shows: a program it starts, or one an earlier
+/// server left running in herdr-core (core-backend D10).
+enum PaneLaunch {
+    Command {
+        cmd: CommandBuilder,
+        spawn_error_message: &'static str,
+    },
+    #[cfg(unix)]
+    ReattachCore {
+        link: CoreTerminalLink,
+        /// The pane's public id, which the terminal's labels must name.
+        public_pane_id: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2628,6 +2645,7 @@ impl PaneRuntime {
     #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.preserve_processes_on_drop = false;
+        self.io.set_keep_core_terminal(false);
     }
 
     #[cfg(unix)]
@@ -2773,8 +2791,10 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
-            cmd,
-            "failed to spawn shell",
+            PaneLaunch::Command {
+                cmd,
+                spawn_error_message: "failed to spawn shell",
+            },
             SpawnInitialState {
                 detected_agent: None,
                 history_ansi: initial_history_ansi,
@@ -2815,8 +2835,10 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
-            cmd,
-            "failed to spawn command pane",
+            PaneLaunch::Command {
+                cmd,
+                spawn_error_message: "failed to spawn command pane",
+            },
             SpawnInitialState::default(),
             agent_detection,
         )
@@ -2862,11 +2884,64 @@ impl PaneRuntime {
             events,
             render_notify,
             render_dirty,
-            cmd,
-            "failed to spawn argv command pane",
+            PaneLaunch::Command {
+                cmd,
+                spawn_error_message: "failed to spawn argv command pane",
+            },
             SpawnInitialState::default(),
             agent_detection,
         )
+    }
+
+    /// A pane on a program an earlier server left running in herdr-core
+    /// (core-backend D10 "Arriving"). Its screen and scrollback come from
+    /// core's first paint; nothing is typed into the program (roundtable R6).
+    /// Fails, leaving the terminal alone, when it is not this pane's.
+    #[cfg(unix)]
+    // Runtime construction threads PTY geometry, host context and render hooks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_core(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        link: CoreTerminalLink,
+        public_pane_id: Option<String>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_command_builder(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            host_terminal_appearance,
+            events,
+            render_notify,
+            render_dirty,
+            PaneLaunch::ReattachCore {
+                link,
+                public_pane_id,
+            },
+            SpawnInitialState::default(),
+            AgentDetection::Enabled,
+        )
+    }
+
+    /// The herdr-core terminal this pane shows, saved with the pane (D10).
+    pub fn core_terminal(&self) -> Option<CoreTerminalLink> {
+        self.io.core_terminal()
+    }
+
+    /// Whether a core pane's program outlives this runtime, for the next
+    /// server (`herdr server restart`, a handoff not yet committed; D10). No
+    /// effect on a PTY pane.
+    pub fn set_keep_core_terminal(&self, keep: bool) {
+        self.io.set_keep_core_terminal(keep);
     }
 
     #[cfg(unix)]
@@ -3096,8 +3171,7 @@ impl PaneRuntime {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
-        cmd: CommandBuilder,
-        spawn_error_message: &'static str,
+        launch: PaneLaunch,
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
@@ -3217,22 +3291,42 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneIo::spawn_preferred(
-                pane_id,
-                runtime_io::SpawnSpec {
+            let sink = runtime_io::PaneIoSink {
+                on_read,
+                on_exit,
+                on_status: Some(status_reporter),
+            };
+            match launch {
+                PaneLaunch::Command {
+                    cmd,
+                    spawn_error_message,
+                } => PaneIo::spawn_preferred(
+                    pane_id,
+                    runtime_io::SpawnSpec {
+                        rows,
+                        cols,
+                        command: cmd,
+                        spawn_error_message,
+                    },
+                    sink,
+                    &spawn_child_pid,
+                    child_wait_completed.clone(),
+                )?,
+                #[cfg(unix)]
+                PaneLaunch::ReattachCore {
+                    link,
+                    public_pane_id,
+                } => PaneIo::reattach_core(
+                    pane_id,
+                    &link,
+                    public_pane_id.as_deref(),
                     rows,
                     cols,
-                    command: cmd,
-                    spawn_error_message,
-                },
-                runtime_io::PaneIoSink {
-                    on_read,
-                    on_exit,
-                    on_status: Some(status_reporter),
-                },
-                &spawn_child_pid,
-                child_wait_completed.clone(),
-            )?
+                    sink,
+                    &spawn_child_pid,
+                    child_wait_completed.clone(),
+                )?,
+            }
         };
 
         // --- Detection task ---

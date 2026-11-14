@@ -39,6 +39,8 @@ struct Shared {
     received: Vec<Frame>,
     /// Every JSON-RPC request the client sent.
     requests: Vec<Value>,
+    /// Terminal records by address: run here, or left by an earlier server.
+    terminals: std::collections::HashMap<String, Value>,
 }
 
 pub(crate) struct FakeCore {
@@ -115,6 +117,21 @@ impl FakeCore {
 
     pub(crate) fn requests(&self) -> Vec<Value> {
         lock(&self.shared).requests.clone()
+    }
+
+    /// The methods the client called, in order.
+    pub(crate) fn methods(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .filter_map(|request| request["method"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Adds a terminal as an earlier server would have left it; `terminal.get`
+    /// answers with `record`.
+    pub(crate) fn add_terminal(&self, record: Value) {
+        let address = record["address"].as_str().unwrap_or("t1").to_string();
+        lock(&self.shared).terminals.insert(address, record);
     }
 }
 
@@ -201,19 +218,21 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
             ),
             None,
         ),
-        "terminal.run" => (
-            Ok(json!({"address": "t1", "pid": config.pid, "state": "live",
-                       "labels": params["labels"], "argv": params["argv"]})),
-            None,
-        ),
+        "terminal.run" => {
+            let record = json!({"address": "t1", "pid": config.pid, "state": "live",
+                                 "labels": params["labels"], "argv": params["argv"]});
+            lock(shared).terminals.insert("t1".into(), record.clone());
+            (Ok(record), None)
+        }
         "terminal.attach" => {
             let channel = *next_channel;
             *next_channel += 1;
             let paint = (!config.first_paint.is_empty())
                 .then(|| Frame::new(channel, kind::DATA, config.first_paint.clone()));
+            let address = params["terminal"].as_str().unwrap_or("t1");
             (
                 Ok(
-                    json!({"channel": channel, "automatic_input": true, "terminal": {"address": "t1"}}),
+                    json!({"channel": channel, "automatic_input": true, "terminal": {"address": address}}),
                 ),
                 paint,
             )
@@ -231,7 +250,14 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
                         "data": {"kind": "not_found", "hint": ""}})),
             None,
         ),
-        "terminal.get" => (Ok(json!({"address": "t1", "state": "live"})), None),
+        "terminal.get" => {
+            let address = params["terminal"].as_str().unwrap_or_default();
+            let known = lock(shared).terminals.get(address).cloned();
+            (
+                Ok(known.unwrap_or_else(|| json!({"address": address, "state": "live"}))),
+                None,
+            )
+        }
         _ => (Ok(json!({})), None),
     };
     let reply = match result {

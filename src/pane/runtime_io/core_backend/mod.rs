@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 use tracing::warn;
 
 use client::{CoreClient, CoreError};
-pub(crate) use pane_io::{Connector, CorePaneIo, CoreSpawn, StartedCore};
+pub(crate) use pane_io::{Connector, CorePaneIo, CoreReattach, CoreSpawn, StartedCore};
 
 use crate::layout::PaneId;
 use crate::pane::runtime_io::{ProgramState, ProgramStatus, StatusCallback};
@@ -72,7 +72,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The server's connector: the live connection, or a new one (starting the
 /// core session when its socket is missing).
 pub(crate) fn server_connector() -> Connector {
-    Arc::new(|| {
+    connector(true)
+}
+
+/// Like `server_connector`, but never starts a core: one that is not running
+/// holds no terminal to reattach to (D10).
+pub(crate) fn existing_core_connector() -> Connector {
+    connector(false)
+}
+
+fn connector(may_start: bool) -> Connector {
+    Arc::new(move || {
         let mut slot = lock(&CLIENT);
         if let Some(client) = slot.as_ref() {
             if !client.is_closed() {
@@ -82,7 +92,7 @@ pub(crate) fn server_connector() -> Connector {
         // Start the core only before the first connection. Later, a missing
         // socket means a core restart in progress: starting one then would race
         // the restart and could leave a second core behind.
-        let first = !EVER_CONNECTED.load(Ordering::Acquire);
+        let first = may_start && !EVER_CONNECTED.load(Ordering::Acquire);
         let session = core_session_name();
         let client = client::connect_session(&session, None, first)?;
         // Status for our terminals only (D9). Failing to subscribe costs status
@@ -199,11 +209,10 @@ pub(crate) fn core_spawn_from(
         Some(cwd) => Some(cwd.to_str()?.to_string()),
         None => None,
     };
-    let mut labels = Map::new();
-    labels.insert("herdr.session".into(), Value::String(core_session_name()));
-    if let Some(public) = env.get(crate::integration::HERDR_PANE_ID_ENV_VAR) {
-        labels.insert("herdr.pane_id".into(), public.clone());
-    }
+    let labels = pane_labels(
+        env.get(crate::integration::HERDR_PANE_ID_ENV_VAR)
+            .and_then(Value::as_str),
+    );
     Some(CoreSpawn {
         pane_id,
         argv,
@@ -215,6 +224,74 @@ pub(crate) fn core_spawn_from(
     })
 }
 
+/// A live core terminal labelled for this herdr session that no pane shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnclaimedTerminal {
+    pub address: String,
+    /// The pane it was started for (`herdr.pane_id`), when labelled.
+    pub pane_id: Option<String>,
+}
+
+/// Live terminals labelled `herdr.session=<ours>` whose address is not in
+/// `claimed` (D10 "Orphans"). Never starts a core: with none running there
+/// are none, and an unreachable core answers an empty list.
+pub(crate) fn unclaimed_terminals(claimed: &[String]) -> Vec<UnclaimedTerminal> {
+    // A server that neither prefers core nor attached to a core pane does not
+    // use core: it does not go looking in one. (A saved core pane that failed
+    // to reattach under `runtime = "pty"` is logged at warn by the restore.)
+    if !preferred() && claimed.is_empty() {
+        return Vec::new();
+    }
+    let client = match existing_core_connector()() {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::debug!(err = %err, "no herdr-core to look for unclaimed terminals in");
+            return Vec::new();
+        }
+    };
+    let listed = match client.call(
+        "terminal.list",
+        serde_json::json!({"labels": {"herdr.session": core_session_name()}}),
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(listed) => listed,
+        Err(err) => {
+            warn!(err = %err, "could not list herdr-core terminals to find unclaimed ones");
+            return Vec::new();
+        }
+    };
+    unclaimed_in(&listed, claimed)
+}
+
+fn unclaimed_in(listed: &Value, claimed: &[String]) -> Vec<UnclaimedTerminal> {
+    listed["terminals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|terminal| terminal["state"] == "live")
+        .filter_map(|terminal| {
+            let address = terminal["address"].as_str()?;
+            (!claimed.iter().any(|claimed| claimed == address)).then(|| UnclaimedTerminal {
+                address: address.to_string(),
+                pane_id: terminal["labels"]["herdr.pane_id"]
+                    .as_str()
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// The labels that mark a core terminal as this herdr session's pane (D4,
+/// D10): set on `terminal.run`, checked before a reattach.
+pub(crate) fn pane_labels(public_pane_id: Option<&str>) -> Map<String, Value> {
+    let mut labels = Map::new();
+    labels.insert("herdr.session".into(), Value::String(core_session_name()));
+    if let Some(public) = public_pane_id {
+        labels.insert("herdr.pane_id".into(), Value::String(public.to_string()));
+    }
+    labels
+}
+
 /// Closing a core pane (D8): list the program's session, kill the terminal,
 /// then run the same local sweep as the PTY backend over that list, unless the
 /// session is core's own.
@@ -224,6 +301,10 @@ pub(crate) fn terminate_session(
     child_pid: u32,
     child_wait_completed: Option<&AtomicBool>,
 ) {
+    // The next server takes the program over (`herdr server restart`, D10).
+    if core.kept_on_drop() {
+        return;
+    }
     // List the session before the kill: once core ends the session leader,
     // its session can no longer be looked up, and detached jobs would escape.
     let guarded = sweep_would_reach_core(child_pid, &core.core_pids());
@@ -362,10 +443,85 @@ mod tests {
     }
 
     #[test]
+    fn unclaimed_terminals_are_the_live_ones_no_pane_claimed() {
+        let listed = serde_json::json!({"terminals": [
+            {"address": "t1", "state": "live", "labels": {"herdr.pane_id": "w1-p1"}},
+            {"address": "t2", "state": "live", "labels": {"herdr.pane_id": "w1-p2"}},
+            {"address": "t3", "state": "finished", "labels": {}},
+            {"address": "t4", "state": "live", "labels": {}},
+        ]});
+        assert_eq!(
+            unclaimed_in(&listed, &["t1".to_string()]),
+            vec![
+                UnclaimedTerminal {
+                    address: "t2".into(),
+                    pane_id: Some("w1-p2".into())
+                },
+                UnclaimedTerminal {
+                    address: "t4".into(),
+                    pane_id: None
+                },
+            ]
+        );
+        assert!(unclaimed_in(&serde_json::json!({}), &[]).is_empty());
+    }
+
+    #[test]
     fn the_sweep_guard_refuses_a_session_shared_with_core() {
         let me = std::process::id();
         assert!(sweep_would_reach_core(me, &[me]), "the same process");
         assert!(!sweep_would_reach_core(me, &[]), "no core pids known");
         assert!(!sweep_would_reach_core(0, &[me]), "no program pid");
+    }
+
+    /// A core pane on a fake core, with callbacks that do nothing.
+    fn fake_core_pane(core: &fake::FakeCore) -> CorePaneIo {
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let connector: Connector = Arc::new(move || Ok(client.clone()));
+        let spawn = CoreSpawn {
+            pane_id: PaneId::from_raw(5),
+            argv: vec!["sh".into()],
+            cwd: None,
+            env: Map::new(),
+            labels: pane_labels(Some("w1-p5")),
+            rows: 24,
+            cols: 80,
+        };
+        let pid = std::sync::atomic::AtomicU32::new(0);
+        StartedCore::start(spawn, &pid, connector)
+            .expect("start")
+            .into_pane(
+                Box::new(|_: &[u8]| crate::pty::actor::PtyReadResult {
+                    terminal_responses: Vec::new(),
+                }),
+                Box::new(|_| {}),
+                None,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("pane")
+    }
+
+    fn kills(core: &fake::FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "terminal.kill")
+            .count()
+    }
+
+    #[test]
+    fn a_kept_core_pane_is_detached_not_killed_and_a_normal_one_is_killed() {
+        // `herdr server restart` keeps the program for the next server (D10).
+        let core = fake::FakeCore::start();
+        let pane = fake_core_pane(&core);
+        pane.set_keep_on_drop(true);
+        pane.shutdown();
+        terminate_session(&pane, PaneId::from_raw(5), 0, None);
+        assert_eq!(kills(&core), 0, "kept: {:?}", core.methods());
+
+        // `server.stop`, a pane close, a respawn, and a handoff the next
+        // server took over (`assume_handoff_ownership`) end it (D8).
+        pane.set_keep_on_drop(false);
+        terminate_session(&pane, PaneId::from_raw(5), 0, None);
+        assert_eq!(kills(&core), 1, "{:?}", core.methods());
     }
 }

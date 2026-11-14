@@ -105,6 +105,13 @@ impl HeadlessServer {
             let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
                 continue;
             };
+            // A herdr-core pane has no fd to hand over: it rides in the
+            // snapshot's `core_terminal`, and the next server attaches to it
+            // (core-backend D10). Left out here, before any fd is duplicated,
+            // so the manifest's panes and the fd list still match (R1).
+            if runtime.core_terminal().is_some() {
+                continue;
+            }
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
             let terminal = self.app.state.terminals.get(terminal_id);
             let has_agent_session =
@@ -349,6 +356,11 @@ impl HeadlessServer {
         // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
         if matches!(reason, ShutdownReason::ApiRestart { .. }) {
             self.client_shutdown_reason = crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON;
+            // The next server attaches to herdr-core panes' programs, so they
+            // outlive this one; every other stop ends them (core-backend D10).
+            for (_, runtime) in self.app.terminal_runtimes.iter() {
+                runtime.set_keep_core_terminal(true);
+            }
         }
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.

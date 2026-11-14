@@ -49,6 +49,41 @@ pub(crate) struct CoreSpawn {
     pub cols: u16,
 }
 
+/// A terminal an earlier server left running, to attach to again (D10).
+pub(crate) struct CoreReattach {
+    pub pane_id: PaneId,
+    pub address: String,
+    /// Labels the terminal must carry to be this pane's program.
+    pub labels: serde_json::Map<String, Value>,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+struct Attach {
+    pane_id: PaneId,
+    address: String,
+    pid: u32,
+    rows: u16,
+    cols: u16,
+    /// A terminal this call just started is killed if the attach fails.
+    ours_to_kill: bool,
+}
+
+/// Why a `terminal.get` record is not the pane's program, or `None` if it is.
+pub(crate) fn reattach_refusal(
+    record: &Value,
+    labels: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    let state = record["state"].as_str().unwrap_or("unknown");
+    if state != "live" {
+        return Some(format!("is {state}, not live"));
+    }
+    labels.iter().find_map(|(key, want)| {
+        let have = &record["labels"][key];
+        (have != want).then(|| format!("has label {key}={have}, not {want}"))
+    })
+}
+
 enum WriteCmd {
     User(Bytes),
     Reply(Bytes),
@@ -76,6 +111,9 @@ struct Shared {
     size: Mutex<(u16, u16)>,
     /// Set when the pane shuts down: stream ends are then not reattached.
     closing: AtomicBool,
+    /// Set when the next server takes the program over (`herdr server
+    /// restart`, D10): dropping the pane then detaches without a kill.
+    keep_on_drop: AtomicBool,
 }
 
 impl Shared {
@@ -159,13 +197,79 @@ impl StartedCore {
             })?
             .to_string();
         let pid = record["pid"].as_u64().unwrap_or(0) as u32;
+        Self::attach(
+            client,
+            Attach {
+                pane_id: spawn.pane_id,
+                address,
+                pid,
+                rows: spawn.rows,
+                cols: spawn.cols,
+                ours_to_kill: true,
+            },
+            child_pid,
+            connector,
+        )
+    }
 
+    /// Attaches to a terminal an earlier server left running (D10 "Arriving").
+    /// It must still be live and carry `labels`, or it is not this pane's
+    /// program: the caller then starts the pane fresh. A refusal never kills
+    /// the terminal, since it may be someone else's.
+    pub(crate) fn reattach(
+        target: CoreReattach,
+        child_pid: &AtomicU32,
+        connector: Connector,
+    ) -> Result<Self, CoreError> {
+        let client = connector()?;
+        let record = client.call(
+            "terminal.get",
+            json!({"terminal": target.address}),
+            CALL_TIMEOUT,
+        )?;
+        if let Some(refusal) = reattach_refusal(&record, &target.labels) {
+            return Err(CoreError::Rpc {
+                kind: "not_ours".into(),
+                message: format!("terminal {} {refusal}", target.address),
+            });
+        }
+        let pid = record["pid"].as_u64().unwrap_or(0) as u32;
+        Self::attach(
+            client,
+            Attach {
+                pane_id: target.pane_id,
+                address: target.address,
+                pid,
+                rows: target.rows,
+                cols: target.cols,
+                ours_to_kill: false,
+            },
+            child_pid,
+            connector,
+        )
+    }
+
+    fn attach(
+        client: CoreClient,
+        attach: Attach,
+        child_pid: &AtomicU32,
+        connector: Connector,
+    ) -> Result<Self, CoreError> {
+        let Attach {
+            pane_id,
+            address,
+            pid,
+            rows,
+            cols,
+            ours_to_kill,
+        } = attach;
         let (events_tx, events_rx) = std_mpsc::channel();
         let (channel, automatic_input) = match client.attach(
             // Output printed before this attach has scrolled past the first
             // paint's screen: ask for the history too, or the pane loses it.
-            // A reattach does not, so lines are not shown twice (D5).
-            json!({"terminal": address, "cols": spawn.cols, "rows": spawn.rows,
+            // A reattach inside one pane's life does not, so lines are not
+            // shown twice (D5); a new server's pane starts empty, so it does.
+            json!({"terminal": address, "cols": cols, "rows": rows,
                    "history": FIRST_ATTACH_HISTORY_LINES}),
             events_tx.clone(),
             CALL_TIMEOUT,
@@ -183,23 +287,27 @@ impl StartedCore {
             }
             Err(err) => {
                 // Do not leave a program running that no pane shows.
-                let _ = client.call("terminal.kill", json!({"terminal": address}), CALL_TIMEOUT);
+                if ours_to_kill {
+                    let _ =
+                        client.call("terminal.kill", json!({"terminal": address}), CALL_TIMEOUT);
+                }
                 return Err(err);
             }
         };
         if pid > 0 {
             child_pid.store(pid, Ordering::Release);
-            crate::logging::pane_spawned(spawn.pane_id.raw(), pid);
+            crate::logging::pane_spawned(pane_id.raw(), pid);
         }
         Ok(Self {
             shared: Arc::new(Shared {
-                pane_id: spawn.pane_id,
+                pane_id,
                 address,
                 connector,
                 client: Mutex::new(client),
                 channel: AtomicU32::new(channel),
-                size: Mutex::new((spawn.rows, spawn.cols)),
+                size: Mutex::new((rows, cols)),
                 closing: AtomicBool::new(false),
+                keep_on_drop: AtomicBool::new(false),
             }),
             events_rx,
             events_tx,
@@ -322,6 +430,20 @@ impl CorePaneIo {
         self.shared
             .client()
             .forget_stream(self.shared.channel.load(Ordering::Acquire));
+    }
+
+    /// The terminal's address in core, saved with the pane (D10).
+    pub(crate) fn address(&self) -> &str {
+        &self.shared.address
+    }
+
+    /// Whether dropping the pane leaves the program running (D10).
+    pub(crate) fn set_keep_on_drop(&self, keep: bool) {
+        self.shared.keep_on_drop.store(keep, Ordering::Release);
+    }
+
+    pub(crate) fn kept_on_drop(&self) -> bool {
+        self.shared.keep_on_drop.load(Ordering::Acquire)
     }
 
     /// Ends the program in core (D8's first half; the local sweep follows in
@@ -602,5 +724,106 @@ mod tests {
         }
         assert_eq!(case(json!({})), None, "an empty CLOSE is our own detach");
         assert_eq!(case(Value::Null), None);
+    }
+
+    use super::super::fake::FakeCore;
+
+    /// One connection per fake core: every connector call reuses it.
+    fn connector_to(core: &FakeCore) -> Connector {
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        Arc::new(move || Ok(client.clone()))
+    }
+
+    fn labels(pane: &str) -> serde_json::Map<String, Value> {
+        let mut labels = serde_json::Map::new();
+        labels.insert("herdr.session".into(), json!("herdr-test"));
+        labels.insert("herdr.pane_id".into(), json!(pane));
+        labels
+    }
+
+    fn target(address: &str, pane: &str) -> CoreReattach {
+        CoreReattach {
+            pane_id: PaneId::from_raw(3),
+            address: address.into(),
+            labels: labels(pane),
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    #[test]
+    fn a_reattach_attaches_to_its_own_live_terminal_and_types_nothing() {
+        let core = FakeCore::start_with(|config| config.first_paint = b"the screen".to_vec());
+        core.add_terminal(json!({"address": "t7", "pid": 777, "state": "live",
+                                  "labels": labels("w1-p2")}));
+        let pid = AtomicU32::new(0);
+        let started = StartedCore::reattach(target("t7", "w1-p2"), &pid, connector_to(&core))
+            .expect("reattach");
+
+        assert_eq!(
+            pid.load(Ordering::Acquire),
+            777,
+            "the running program's pid"
+        );
+        assert_eq!(core.methods(), ["terminal.get", "terminal.attach"]);
+        let attach = &core.requests()[1]["params"];
+        assert_eq!(attach["terminal"], "t7");
+        assert!(
+            attach["history"].as_u64().is_some(),
+            "a new server's pane starts empty, so it asks for the scrollback: {attach}"
+        );
+        assert_eq!(
+            started
+                .events_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            StreamEvent::Data(b"the screen".to_vec()),
+            "the first paint repaints the pane"
+        );
+        // Roundtable R6: nothing goes into the running program. Every frame
+        // the client sent is a channel-0 request; none is stream input.
+        assert!(
+            core.received().iter().all(|frame| frame.channel == 0),
+            "{:?}",
+            core.received()
+        );
+    }
+
+    #[test]
+    fn a_reattach_refuses_a_terminal_that_is_not_the_panes_and_leaves_it_alone() {
+        let cases = [
+            (
+                "another pane's program",
+                json!({"address": "t7", "pid": 7, "state": "live", "labels": labels("w1-p9")}),
+                "t7",
+            ),
+            (
+                "a finished program",
+                json!({"address": "t7", "pid": 7, "state": "finished", "labels": labels("w1-p2")}),
+                "t7",
+            ),
+            (
+                "another session's program",
+                json!({"address": "t7", "pid": 7, "state": "live",
+                       "labels": {"herdr.session": "herdr", "herdr.pane_id": "w1-p2"}}),
+                "t7",
+            ),
+            ("a terminal core no longer has", json!({}), "t404"),
+        ];
+        for (case, record, address) in cases {
+            let core = FakeCore::start();
+            if record.get("address").is_some() {
+                core.add_terminal(record);
+            }
+            let pid = AtomicU32::new(0);
+            let result = StartedCore::reattach(target(address, "w1-p2"), &pid, connector_to(&core));
+            assert!(result.is_err(), "{case}: refused");
+            assert_eq!(pid.load(Ordering::Acquire), 0, "{case}: no pid published");
+            assert_eq!(
+                core.methods(),
+                ["terminal.get"],
+                "{case}: never attached, never killed"
+            );
+        }
     }
 }

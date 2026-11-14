@@ -432,3 +432,123 @@ async fn core_v8_program_reports_become_hook_reports() {
     assert_eq!(states, [AgentState::Working, AgentState::Blocked]);
     assert_eq!(hint, Some(crate::detect::BlockedReason::Permission));
 }
+
+async fn wait_for_text(runtime: &PaneRuntime, needle: &str) -> bool {
+    tokio::time::timeout(WAIT, async {
+        while !runtime.visible_text().contains(needle) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+fn reattach(
+    link: &CoreTerminalLink,
+    public_pane_id: &str,
+) -> (std::io::Result<PaneRuntime>, mpsc::Receiver<AppEvent>) {
+    let (events, event_rx) = mpsc::channel(64);
+    let runtime = PaneRuntime::reattach_core(
+        PaneId::alloc(),
+        24,
+        80,
+        link.clone(),
+        Some(public_pane_id.to_string()),
+        0,
+        crate::terminal_theme::TerminalTheme::default(),
+        None,
+        events,
+        Arc::new(Notify::new()),
+        Arc::new(RenderSignal::new()),
+    );
+    (runtime, event_rx)
+}
+
+// V10 (pane half, D10): a core pane kept for the next server outlives its
+// runtime; the next runtime attaches to the same program only when the labels
+// name its pane, shows its screen, types nothing into it (R6), takes input,
+// and ends it when closed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v10_a_kept_pane_is_reattached_by_the_next_server() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v10");
+    let env = PaneLaunchEnv::from_extra(Vec::new()).with_identity(
+        "w9".into(),
+        "w9-1".into(),
+        "w9-p1".into(),
+    );
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "echo V10-READY; while IFS= read -r line; do echo \"$line\" >> in.txt; done",
+        &[],
+        &env,
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    assert!(wait_for_text(&runtime, "V10-READY").await, "first screen");
+    let pid = runtime.child_pid().expect("pid");
+    let link = runtime.core_terminal().expect("a core pane has a link");
+
+    // `herdr server restart`: the old server lets go without a kill.
+    runtime.set_keep_core_terminal(true);
+    drop(runtime);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(crate::platform::process_exists(pid), "kept program alive");
+
+    // Unclaimed while no pane shows it: reported as an orphan, not killed.
+    let unclaimed = crate::pane::unclaimed_core_terminals(&[]);
+    assert!(
+        unclaimed
+            .iter()
+            .any(|(address, pane)| *address == link.address && pane.as_deref() == Some("w9-p1")),
+        "{unclaimed:?}"
+    );
+    assert!(
+        !crate::pane::unclaimed_core_terminals(std::slice::from_ref(&link.address))
+            .iter()
+            .any(|(address, _)| *address == link.address),
+        "a claimed terminal is not an orphan"
+    );
+
+    // Labelled for another pane: refused, and the program is left alone.
+    let (refused, _) = reattach(&link, "w9-p2");
+    assert!(refused.is_err(), "another pane's label is refused");
+    assert!(
+        crate::platform::process_exists(pid),
+        "a refusal kills nothing"
+    );
+
+    let (reattached, mut events) = reattach(&link, "w9-p1");
+    let reattached = reattached.expect("reattach");
+    assert!(is_core(&reattached));
+    assert_eq!(reattached.child_pid(), Some(pid), "the same program");
+    assert!(
+        wait_for_text(&reattached, "V10-READY").await,
+        "the first paint shows the earlier screen: {:?}",
+        reattached.visible_text()
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !scratch.path("in.txt").exists(),
+        "nothing was typed into the running program (R6)"
+    );
+
+    reattached
+        .try_send_bytes(Bytes::from_static(b"after-reattach\r"))
+        .expect("input");
+    let input = wait_for_file(&scratch.path("in.txt"), |text| text.ends_with('\n')).await;
+    assert_eq!(input, "after-reattach\n");
+    assert_eq!(
+        next_pane_died(&mut events, Duration::from_millis(100)).await,
+        None
+    );
+
+    // A pane close ends it (D8).
+    drop(reattached);
+    assert!(wait_until_gone(pid), "closing the reattached pane ends it");
+}

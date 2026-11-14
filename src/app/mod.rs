@@ -19,6 +19,7 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod core_terminals;
 mod creation;
 mod custom_commands;
 mod git_refresh;
@@ -887,6 +888,7 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
+        app.report_unclaimed_core_terminals();
         Ok(app)
     }
 
@@ -952,6 +954,7 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         app.refresh_restored_workspace_git_metadata();
+        app.report_unclaimed_core_terminals();
         Ok(app)
     }
 

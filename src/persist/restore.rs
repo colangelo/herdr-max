@@ -404,6 +404,13 @@ fn restore_with_imports_strict(
         render_notify,
         render_dirty,
     );
+    // Until the old server commits, the programs of herdr-core panes this
+    // import attached to are still the old server's: a failed import must
+    // not end them on its way out. `assume_handoff_ownership` takes them
+    // over (core-backend D10).
+    for runtime in restored.2.values() {
+        runtime.set_keep_core_terminal(true);
+    }
     if failed_imports > 0 {
         return Err(std::io::Error::other(format!(
             "handoff failed to restore {failed_imports} imported pane runtime(s)"
@@ -808,7 +815,26 @@ fn restore_tab(
             .is_some_and(|imported| imported.state.unseen);
         #[cfg(not(unix))]
         let handoff_unseen = false;
-        let pending_native_agent_restore = if was_imported {
+        // A pane whose program an earlier server left in herdr-core attaches
+        // to it again, decided before any restore plan or launch line, so
+        // nothing is typed into the running program (core-backend D10, R6).
+        #[cfg(unix)]
+        let reattached = if was_imported {
+            None
+        } else {
+            saved_pane
+                .and_then(|pane| pane.core_terminal.as_ref())
+                .and_then(|saved| {
+                    reattach_core_pane(*id, rows, cols, saved, public_pane_id, runtime_context)
+                })
+        };
+        #[cfg(not(unix))]
+        let reattached: Option<TerminalRuntime> = None;
+        let was_reattached = reattached.is_some();
+        // The pane goes on running the program it had: handed over by fd, or
+        // still running in herdr-core.
+        let keeps_program = was_imported || was_reattached;
+        let pending_native_agent_restore = if keeps_program {
             None
         } else {
             startup.restore_plan.clone()
@@ -866,7 +892,9 @@ fn restore_tab(
             continue;
         }
 
-        let runtime_result = {
+        let runtime_result = if let Some(runtime) = reattached {
+            Ok(runtime)
+        } else {
             #[cfg(unix)]
             if let Some(imported) = imported_runtime {
                 TerminalRuntime::from_handoff_fd(
@@ -923,7 +951,7 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
-                if was_imported {
+                if keeps_program {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
                     }
@@ -941,11 +969,13 @@ fn restore_tab(
                     terminal.restore_agent_launch(record);
                 }
                 match (saved_agent_name, saved_managed_agent) {
-                    (Some(agent_name), Some(agent)) if was_imported => {
+                    (Some(agent_name), Some(agent)) if keeps_program => {
                         terminal.restore_managed_agent(agent_name, agent)
                     }
                     (Some(_), Some(_)) => {}
-                    (Some(agent_name), None) if was_imported => terminal.set_agent_name(agent_name),
+                    (Some(agent_name), None) if keeps_program => {
+                        terminal.set_agent_name(agent_name)
+                    }
                     (Some(_), None) => {}
                     (None, _) => {}
                 }
@@ -1057,6 +1087,57 @@ fn restore_tab(
         )),
         failed_imports,
     )
+}
+
+/// Attaches a restored pane to the herdr-core terminal saved with it (D10).
+/// `None` when that terminal is gone, finished, in another core session or
+/// labelled for another pane: the pane then starts fresh, as a PTY pane does.
+#[cfg(unix)]
+fn reattach_core_pane(
+    pane_id: PaneId,
+    rows: u16,
+    cols: u16,
+    saved: &super::snapshot::PaneCoreTerminalSnapshot,
+    public_pane_id: Option<&str>,
+    runtime_context: &RestoreRuntimeContext<'_>,
+) -> Option<TerminalRuntime> {
+    let link = crate::pane::CoreTerminalLink {
+        session: saved.session.clone(),
+        address: saved.address.clone(),
+    };
+    match TerminalRuntime::reattach_core(
+        pane_id,
+        rows,
+        cols,
+        link,
+        public_pane_id.map(str::to_string),
+        runtime_context.scrollback_limit_bytes,
+        crate::terminal_theme::TerminalTheme::default(),
+        None,
+        runtime_context.events.clone(),
+        runtime_context.render_notify.clone(),
+        runtime_context.render_dirty.clone(),
+    ) {
+        Ok(runtime) => {
+            tracing::info!(
+                pane_id = pane_id.raw(),
+                session = %saved.session,
+                address = %saved.address,
+                "reattached pane to its herdr-core terminal"
+            );
+            Some(runtime)
+        }
+        Err(err) => {
+            tracing::warn!(
+                pane_id = pane_id.raw(),
+                session = %saved.session,
+                address = %saved.address,
+                err = %err,
+                "saved herdr-core terminal not reattached; starting the pane fresh"
+            );
+            None
+        }
+    }
 }
 
 fn pane_restore_startup<'a>(
@@ -1472,6 +1553,7 @@ mod tests {
             former_public_ids: Vec::new(),
             pane_key: None,
             run_id: None,
+            core_terminal: None,
         };
         let target_pane = super::super::snapshot::PaneSnapshot {
             agent_resume: None,
@@ -1489,6 +1571,7 @@ mod tests {
             former_public_ids: Vec::new(),
             pane_key: None,
             run_id: None,
+            core_terminal: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -2604,6 +2687,7 @@ mod tests {
                             former_public_ids: Vec::new(),
                             pane_key: None,
                             run_id: None,
+                            core_terminal: None,
                         },
                     )]),
                     zoomed: false,
@@ -2695,6 +2779,7 @@ mod tests {
                             former_public_ids: Vec::new(),
                             pane_key: None,
                             run_id: None,
+                            core_terminal: None,
                         },
                     )]),
                     zoomed: false,
@@ -2777,6 +2862,7 @@ mod tests {
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
                                 run_id: None,
+                                core_terminal: None,
                             },
                         ),
                         (
@@ -2797,6 +2883,7 @@ mod tests {
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
                                 run_id: None,
+                                core_terminal: None,
                             },
                         ),
                     ]),
@@ -2880,6 +2967,7 @@ mod tests {
                                 former_public_ids: Vec::new(),
                                 pane_key: None,
                                 run_id: None,
+                                core_terminal: None,
                             },
                         ),
                         (
@@ -2900,6 +2988,7 @@ mod tests {
                                 former_public_ids: vec!["w1:p1".into(), "w9:p7".into()],
                                 pane_key: None,
                                 run_id: None,
+                                core_terminal: None,
                             },
                         ),
                     ]),
@@ -2965,6 +3054,7 @@ mod tests {
                     former_public_ids: Vec::new(),
                     pane_key: None,
                     run_id: None,
+                    core_terminal: None,
                 },
             )
         };
@@ -2989,6 +3079,7 @@ mod tests {
             former_public_ids: Vec::new(),
             pane_key: None,
             run_id: None,
+            core_terminal: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -3153,6 +3244,7 @@ mod tests {
                             former_public_ids: Vec::new(),
                             pane_key: None,
                             run_id: None,
+                            core_terminal: None,
                         },
                     )]),
                     zoomed: false,
@@ -3556,6 +3648,7 @@ mod tests {
                 former_public_ids: Vec::new(),
                 pane_key: None,
                 run_id: None,
+                core_terminal: None,
             },
         );
         let mut history = SessionHistorySnapshot {
