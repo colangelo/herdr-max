@@ -14,7 +14,7 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 ## 2. Roundtable (refactor-risk)
 
-- [ ] 2.1 `roundtable.md`: each protected behaviour, where it lives at the base commit, which test
+- [x] 2.1 `roundtable.md`: each protected behaviour, where it lives at the base commit, which test
   holds it (existing or V1-V8), and what the review found; adjust design.md if it finds a gap
 
 ## 3. Characterization tests, green on the unmodified code
@@ -24,8 +24,8 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 - [x] 3.3 V3 and V4 termination escalation and preserve-on-drop (trap script logs signals)
 - [x] 3.4 V5 output order (20 000 numbered lines; scrollback limit set so all fit, roundtable F5)
 - [x] 3.5 V6 resize reaches the program (`stty size`) and a `CSI 6n` reply keeps its order
-- [x] 3.6 V8 process facts through the `pane.process_info` handler; the first output already sees the
-  shell pid (roundtable F1)
+- [x] 3.6 V8 process facts through the `pane.process_info` handler. The F1 claim (first output
+  already sees the shell pid) has no test that can fail: see design.md D2
 - [x] 3.6a V13 is the existing anchor test (named in design.md); V14 and V15 written
 - [x] 3.6b F2 is named by https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/279, not a test:
   forcing `PtyIoActor::spawn` to fail needs a failure hook in production code, which the fix will
@@ -40,8 +40,9 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 - [x] 4.1 `src/pane/runtime_io/mod.rs`: move `PaneRuntimeIo` as `PaneIo` with its methods, unchanged;
   `TestChannel` moves with it. Commit
-- [x] 4.2 `src/pane/runtime_io/pty.rs`: `PtyPaneIo` wraps `PtyIoActorHandle`; `PaneIo::spawn(SpawnSpec,
-  PaneIoSink)` calls `spawn_with_portable_pty` and `PtyIoActor::spawn`; the child wait moves in
+- [x] 4.2 `src/pane/runtime_io/pty.rs`: `PaneIo::Actor` keeps wrapping `PtyIoActorHandle`;
+  `PaneIo::spawn(pane_id, SpawnSpec, PaneIoSink, &child_pid, child_wait_completed)` calls
+  `spawn_with_portable_pty` and `PtyIoActor::spawn`; the child wait moves in
   and calls `on_exit` once after setting `child_wait_completed`. Commit
 - [x] 4.3 `shutdown_pane_processes` and helpers move to `pty.rs`; `PaneIo::terminate_session`;
   `Drop` keeps its order. Commit
@@ -67,3 +68,16 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
   by build number
 - [ ] 5.3 A day of use with no regression; comment SHAs, beta and notes on issue 277; close it
 - [ ] 5.4 Archive this change; tick 4.1 in `openspec/changes/herdr-core-client/tasks.md`
+
+## 6. Review follow-ups (herdr, 2026-11-14, review of `d7a8212f`, merged as `19c36b2a`)
+
+- [x] 6.1 V2 flag order proved inside `on_exit` (`v2_on_exit_runs_after_the_wait_is_marked_complete`);
+  bites: swapping the store and the callback fails it
+- [x] 6.2 F1: a seam-level test was written and dropped, because it passed with the order reversed
+  (5 of 5); recorded in design.md D2 instead
+- [x] 6.3 V9: test helpers moved into `src/pane/runtime_io/`; `src/pane.rs` off the `crate::pty`
+  list; the scan catches `use crate::pty;` and `pty::actor::`; bites: a `use crate::pty;` probe in
+  `src/sound.rs` fails it
+- [x] 6.4 design.md D1, D2, D4 and task 4.2 match the code; task 2.1 ticked
+- [x] 6.5 D4: the fd-less answers to quiesce, pause and release are a phase 3 decision (design.md D4)
+- [x] 6.6 V2 table row says `kill -KILL`, as the test does

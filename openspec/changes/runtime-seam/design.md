@@ -58,14 +58,18 @@ Non-goals:
 
 `PaneRuntimeIo` becomes `PaneIo` in `src/pane/runtime_io/mod.rs`, still an enum:
 
+As built (`8062df22`); the variants kept their old shapes so the move stayed a move:
+
 ```rust
-pub(crate) enum PaneIo {
-    Pty(pty::PtyPaneIo),          // today's actor, Unix and Windows
+pub(super) enum PaneIo {
+    Actor(PtyIoActorHandle),      // today's PTY actor, Unix and Windows
     #[cfg(test)]
-    TestChannel(test_channel::TestChannelIo),
-    // phase 2: Core(core::CorePaneIo)
+    TestChannel { sender: mpsc::Sender<Bytes>, resize_tx: watch::Sender<(u16, u16, u32, u32)> },
+    // phase 2: Core(..)
 }
 ```
+
+The module is `runtime_io`, not `io`: `src/pane.rs` already imports `std::io`.
 
 Why an enum: the set of backends is closed and in this repo; the existing code already dispatches
 this way, with `TestChannel` as a second variant; no `dyn` and no boxing; the compiler lists every
@@ -77,41 +81,52 @@ not fit a match arm, introduce a trait then, with two real implementers to shape
 
 ### D2. The seam owns spawn, exit, termination and the shell pid
 
+As built (`ecf45229`, `89b1a5ff`, `083264f1`). The pid and the wait flag stay `PaneRuntime`'s
+atomics, which the parser and detection already read; the backend writes into them rather than
+owning them, so there is no `shell_pid()` or `child_wait_completed()` on `PaneIo`.
+
 ```rust
-pub(crate) struct SpawnSpec {
+pub(in crate::pane) struct SpawnSpec {
     pub rows: u16,
     pub cols: u16,
     pub command: portable_pty::CommandBuilder,   // see D5
+    pub spawn_error_message: &'static str,       // logged as before when the spawn fails
 }
 
-pub(crate) struct PaneIoSink {
-    pub on_read: Box<dyn FnMut(&[u8]) -> PtyReadResult + Send>,   // unchanged closure
+pub(in crate::pane) struct PaneIoSink {
+    pub on_read: ReadCallback,                                    // the unchanged boxed closure
     pub on_exit: Box<dyn FnOnce(ChildExitReason) + Send>,         // sends PaneDied
 }
 
 impl PaneIo {
-    pub(crate) fn spawn(pane_id: PaneId, spec: SpawnSpec, sink: PaneIoSink) -> io::Result<Self>;
+    pub(in crate::pane) fn spawn(pane_id: PaneId, spec: SpawnSpec, sink: PaneIoSink,
+                                 child_pid: &AtomicU32, child_wait_completed: Arc<AtomicBool>)
+        -> io::Result<Self>;
     #[cfg(unix)]
-    pub(crate) fn adopt_handoff_fd(pane_id: PaneId, fd: OwnedFd, child_pid: u32,
-                                   sink: PaneIoSink) -> io::Result<Self>;
-
-    pub(crate) fn shell_pid(&self) -> u32;                       // 0 when unknown
-    pub(crate) fn child_wait_completed(&self) -> bool;
-    pub(crate) fn terminate_session(&self);                      // today's shutdown_pane_processes
-    // ...plus every method PaneRuntimeIo already has, unchanged
+    pub(in crate::pane) fn adopt_handoff_fd(pane_id: PaneId, master_fd: OwnedFd,
+                                            sink: PaneIoSink) -> io::Result<Self>;
+    pub(super) fn terminate_session(&self, pane_id: PaneId, child_pid: u32,
+                                    child_wait_completed: Option<&AtomicBool>);
+    // ...plus every method PaneRuntimeIo had, unchanged
 }
 ```
 
-- The child wait moves into `PtyPaneIo::spawn`; it calls `sink.on_exit` exactly once, after it has
-  set `child_wait_completed`, as today. `PaneRuntime` turns that into `AppEvent::PaneDied`.
-- `shutdown_pane_processes` and its helpers move to `src/pane/runtime_io/pty.rs` unchanged. `PaneRuntime`'s
-  `Drop` calls `io.shutdown()`, then `io.terminate_session()` unless it preserves processes.
-- `child_pid: Arc<AtomicU32>` stays where the parser and detection read it; the backend publishes
-  into it (the PTY backend stores `child.process_id()` at spawn, the handoff path stores the
-  manifest pid). The read path keeps its single atomic load.
+- The child wait lives in `PaneIo::spawn` (`src/pane/runtime_io/pty.rs`); it calls `sink.on_exit`
+  exactly once, after it has set `child_wait_completed`, as before. `PaneRuntime` turns that into
+  `AppEvent::PaneDied`. `v2_on_exit_runs_after_the_wait_is_marked_complete` checks the order from
+  inside the callback.
+- `adopt_handoff_fd` takes no pid: `from_handoff_fd` still stores the manifest pid into
+  `PaneRuntime`'s atomic itself. Its `on_exit` gets `Handoff` when the reader ends.
+- `shutdown_pane_processes` and its helpers moved to `pty.rs` unchanged. `Drop` calls
+  `io.shutdown()`, then `io.terminate_session(..)` unless it preserves processes.
 - Order inside `PaneIo::spawn` (roundtable F1, F2): publish the shell pid, start the child wait,
   then start the reader, exactly as today, so the first chunk is parsed with the pid. A failed
-  reader start keeps today's behaviour in phase 1; its fix is a follow-up.
+  reader start keeps today's behaviour in phase 1; its fix is
+  https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/279. **The pid-before-reader order
+  has no test that can fail:** with the order reversed on purpose, the store still beat the new
+  reader thread in 5 of 5 runs, so a black-box test passes either way. It is guarded by the comment
+  on `PaneIo::spawn` and by review; `v8_shell_pid_is_published_when_spawn_returns` only checks the
+  pid is there once spawn returns.
 
 ### D3. The read path does not change
 
@@ -127,6 +142,12 @@ The handoff methods (`begin_handoff`, `duplicate_handoff_fd`, `set_handoff_pause
 A future variant without a master fd must return `io::ErrorKind::Unsupported`, and the server's
 handoff code must treat that pane as "not handed off by fd". That last part is phase 3's job; phase
 1 only fixes the error kind so phase 3 has one thing to match.
+
+As built (`3e22753e`), only `duplicate_handoff_fd` answers `Unsupported`. `TestChannel` still
+answers `Ok(())` to `begin_handoff`, `set_handoff_paused` and `release_after_commit`, and `None` to
+`foreground_process_group_id`. **Phase 3 must decide** what quiesce, pause and release mean for a
+backend without a fd (most likely: `Unsupported` for all of them, or no-ops that are documented as
+such) before the core variant answers them.
 
 ### D5. `SpawnSpec` carries the `CommandBuilder` for now
 
@@ -177,7 +198,7 @@ unmodified code first (characterization), then stays green after the move.
 | # | Proves | Where it meets the system | Answer key | Pass |
 |---|---|---|---|---|
 | V1 | spawn contract: argv, cwd and an env var reach the program | `PaneRuntime::spawn_*` with a real PTY; the program writes them to the screen (`#[cfg(unix)]`, so it runs on macOS through the pane anchor and on Linux without it) | the values passed in | equal, today and after |
-| V2 | exit report: one `PaneDied` per pane, reason `Exited` for `exit 3` and `Interrupted` for a signal death, `child_wait_completed` set first; a pane adopted from a handoff fd reports `Handoff` once when its reader ends | real spawn of `sh -c 'exit 3'` and `sh -c 'kill -TERM $$'`; an adopted fd (as the `from_handoff_fd` test builds it) whose peer closes; events channel | today's classification | same reason, exactly one event, flag set before the event |
+| V2 | exit report: one `PaneDied` per pane, reason `Exited` for `exit 3` and `Interrupted` for a signal death, `child_wait_completed` set first; a pane adopted from a handoff fd reports `Handoff` once when its reader ends | real spawn of `sh -c 'exit 3'` and `sh -c 'kill -KILL $$'`; an adopted fd (as the `from_handoff_fd` test builds it) whose peer closes; events channel | today's classification | same reason, exactly one event, flag set before the event |
 | V3 | termination escalation: HUP, then TERM, then KILL; a HUP-honouring program gets only HUP | drop a `PaneRuntime` whose program traps signals and logs them to a file | today's order | same signals in the same order, and the program is gone afterwards; the elapsed time is logged, not asserted (no wall-clock limit in CI) |
 | V4 | no termination when processes are preserved for handoff | drop with `preserve_processes_on_drop = true` | program still alive | pid alive after drop |
 | V5 | output order: bytes reach the parser in order, `content_seq` moves on every chunk | program prints 20 000 numbered lines; read the history | the numbers 1..20000 | in order, no gap |
@@ -198,14 +219,14 @@ Where each row lives (task 3, 2026-11-14). New unit tests are in
 | Row | Test |
 |---|---|
 | V1 | `v1_spawn_passes_argv_cwd_and_env_to_the_program` (runs on macOS and Linux; the pane anchor is off in unit tests by design, so the anchor path is V13) |
-| V2 | `v2_exit_is_reported_once_as_exited_after_the_wait_completes`, `v2_signal_death_is_reported_as_interrupted`, `v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends` |
+| V2 | `v2_exit_is_reported_once_as_exited_after_the_wait_completes`, `v2_signal_death_is_reported_as_interrupted`, `v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends`, and at the seam `v2_on_exit_runs_after_the_wait_is_marked_complete` (the flag order, read inside `on_exit`) |
 | V3 | `v3_drop_escalates_hangup_terminate_kill_in_order`, `v3_a_program_that_exits_on_hangup_gets_only_hangup` (roundtable F3b: its first hangup is the kernel's) |
 | V4 | `v4_preserved_pane_sends_no_signal_on_drop` |
 | V5 | `v5_output_reaches_the_parser_in_order` |
 | V6 | `v6_resize_reaches_the_program_and_queries_see_the_new_size` (`CSI 6n` after moving to 999;999 answers `30;100`) |
 | V7 | `tests/live_handoff.rs`, unchanged |
 | V8 | `v8_shell_pid_is_published_when_spawn_returns` (F1), plus existing `tests/api_ping.rs::pane_info_reports_foreground_cwd_without_changing_pane_cwd` (Linux: `shell_pid`, foreground group and processes) and the `shell_pid` read in `tests/live_handoff.rs:716` |
-| V9 | `tests/architecture_pty_seam.rs` (three tests; the allow-lists shrink in task 4.6) |
+| V9 | `tests/architecture_pty_seam.rs` (three tests). After herdr's review: it also catches `use crate::pty;` and `pty::actor::` paths, and `src/pane.rs` is off the `crate::pty` list (its test helpers moved into `src/pane/runtime_io/`) |
 | V13 | existing `tests/live_handoff.rs::panes_are_anchored_to_one_process_across_a_live_handoff` (macOS: `responsible_for` the pane shell is the anchor, before and after a handoff) |
 | V14 | `v14_input_and_queued_submission_arrive_in_order` |
 | V15 | `tests/client_mode.rs::restored_pane_program_runs_in_the_saved_cwd` |
