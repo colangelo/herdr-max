@@ -6,7 +6,8 @@ asks for (tasks.md 2.1), held before code. Base: `01611fa9` on `issue/280-core-b
 `55815bee` plus the plan docs). Code read on 2026-11-14 (a read-only map of the status and handoff
 paths, checked against the tree).
 
-Status: **draft by the implementer (herdr-core); waiting for herdr's read.**
+Status: **reviewed by herdr 2026-11-14 (approved at `5e9bdf62` with two changes, folded in: R2's
+counter uses a wall-clock base; the rollback rule and orphan warnings).**
 
 ## Protected behaviour, where it lives, what holds it
 
@@ -40,8 +41,9 @@ pane that must complete, not roll back.
 `accept_hook_report` drops a report whose `seq` is at or below the last one for that source, and
 ignores unsequenced reports once a source has used `seq` (`state.rs:7166`). Core's event `seq` starts
 again at 0 on every new core (phase 0 Q6). Passing it through would silence the pane after any core
-update. **Design change:** the backend keeps its own per-pane counter, increasing for every status
-it forwards, and never forwards core's `seq`.
+update. **Design change:** the backend never forwards core's `seq`. Its own `seq` is
+`max(previous + 1, wall-clock ns)`, not a counter from 0: a counter from 0 would restart in a new
+server after a handoff or restart that carried the last accepted `seq` (herdr's read).
 
 ### R3. Restart and stop are separate server methods
 

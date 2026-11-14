@@ -36,6 +36,11 @@ https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/267 (the migration).
   against the labels (minimal re-adoption, pulled into phase 2 so a beta install does not end every
   agent in a core pane). PTY panes keep handing over by fd.
 
+- **Rollback rule.** An older herdr ignores the saved link and restores a core pane as a new PTY
+  pane while the core terminal keeps running (a duplicate agent). Before rolling back with
+  `runtime = "core"` panes open: close them, or run `hc ls --label herdr.session=<name>` and kill
+  those terminals. Written in the docs too.
+
 ## Capabilities
 
 ### New Capabilities

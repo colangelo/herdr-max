@@ -39,14 +39,14 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 - [ ] 4.2 Exit mapping (D7) and exactly-once; V6
 - [ ] 4.3 Reattach with reset before repaint (D5); V3
 - [ ] 4.4 `terminate_session`: kill, then the local sweep (D8); V7
-- [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported` with a per-pane `seq` (D9,
-  R2, R4); V8
+- [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
+  (D9, R2, R4); test: after a handoff or reattach the next report is accepted; V8
 - [ ] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);
   `core_terminal` in the pane snapshot, detach on handoff and `stop_for_restart` (R3),
   label-checked reattach on restore with no launch line (R6), kill on stop, orphan notice; V10
 - [ ] 4.6a Core lifetime and the sweep guard; V15, V16
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
-  `docs/next` config reference
+  `docs/next` config reference with the rollback rule
 - [ ] 4.8 `just core-live-test` recipe; V11
 - [ ] 4.9 `just check` green; V12 profile, delta recorded
 
