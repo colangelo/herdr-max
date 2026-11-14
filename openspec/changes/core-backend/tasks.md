@@ -24,7 +24,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 3. Client and fake core (tests first)
 
-- [ ] 3.1 Framing codec (`src/pane/runtime_io/core/frame.rs`): encode/decode, 16 MiB cap, partial
+- [x] 3.1 Framing codec (`src/pane/runtime_io/core_backend/frame.rs`): encode/decode, 16 MiB cap, partial
   reads; unit tests
 - [ ] 3.2 Fake core for tests: hello, `terminal.run`, `terminal.attach`, DATA/CREDIT/CLOSE/RESIZE/
   FACTS, `events.subscribe`, scripted exits

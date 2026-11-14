@@ -12,7 +12,7 @@ https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/267 (the migration).
 
 ## What Changes
 
-- A core backend behind the seam: `PaneIo::Core`, in `src/pane/runtime_io/core/` (Unix only). A new
+- A core backend behind the seam: `PaneIo::Core`, in `src/pane/runtime_io/core_backend/` (Unix only). A new
   pane runs as a core terminal (`terminal.run`), and its attach stream feeds the same libghostty-vt
   parser, detection and client protocol as a PTY pane.
 - Off by default: `[experimental] runtime = "core"` (default `"pty"`) selects it for **new panes**.
@@ -54,7 +54,7 @@ None. With `runtime = "pty"` (the default) nothing changes.
 
 ## Impact
 
-- Code: new `src/pane/runtime_io/core/` (client, framing, backend); `src/pane/runtime_io/mod.rs` (the
+- Code: new `src/pane/runtime_io/core_backend/` (client, framing, backend); `src/pane/runtime_io/mod.rs` (the
   `Core` variant); `src/pane.rs` spawn selection; `src/config/model.rs` (`runtime`); the live
   handoff and restore paths (preserve and reattach core panes, `core_terminal` in
   `src/persist/snapshot.rs`); detection authority (status events); docs in `docs/next`.

@@ -13,6 +13,8 @@ pub(in crate::pane) use crate::pty::actor::PtyReadResult;
 /// The read callback a backend calls for every chunk.
 pub(in crate::pane) use crate::pty::actor::ReadCallback;
 
+#[cfg(unix)]
+mod core_backend;
 mod pty;
 
 /// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
