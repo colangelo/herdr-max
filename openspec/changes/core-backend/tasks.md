@@ -75,7 +75,10 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   last client handle now closes the connection (`dropping_the_last_client_closes_the_connection`)
 - [x] 4.8 `just core-live-test` recipe: the live tests and `scripts/core_live_test.sh`; V11 there
   (`herdr pane report-agent` run inside the core pane lands on that pane)
-- [ ] 4.9 `just check` green; V12 profile, delta recorded
+- [ ] 4.9 `just check` green; V12 profile, delta recorded. Recorded in `v12-results.md`: render
+  bench unchanged (median 0.93); the busy profile is about 1.9x the PTY, over the 1.5x target, most
+  of it core's own per-terminal screen (Shape B parses twice). Open: herdr decides whether phase 2
+  ships opt-in over the target
 
 ## 5. Ship
 
