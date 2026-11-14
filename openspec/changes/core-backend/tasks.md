@@ -26,11 +26,13 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 - [x] 3.1 Framing codec (`src/pane/runtime_io/core_backend/frame.rs`): encode/decode, 16 MiB cap, partial
   reads; unit tests
-- [ ] 3.2 Fake core for tests: hello, `terminal.run`, `terminal.attach`, DATA/CREDIT/CLOSE/RESIZE/
+- [x] 3.2 Fake core for tests: hello, `terminal.run`, `terminal.attach`, DATA/CREDIT/CLOSE/RESIZE/
   FACTS, `events.subscribe`, scripted exits
-- [ ] 3.3 `CoreClient`: connect (socket rules, D2), start the core when absent (clean env), hello,
-  version gate, RPC table, reader thread, event routing; V9 against the fake core
-- [ ] 3.4 Architecture test V13 (no `terminal.send`)
+- [x] 3.3 `CoreClient`: connect (socket rules, D2), start the core when absent (clean env), hello,
+  version gate, RPC table, reader thread, event routing; V9 against the fake core. Checked live
+  against the pilot core (`live_client_runs_attaches_and_reads_a_real_core`, ignored unless
+  `HERDR_TEST_HC_SOCKET`): it found that the API takes `labels` as a map, which the fake now enforces
+- [x] 3.4 Architecture test V13 (no `terminal.send`): `tests/architecture_core_send.rs`; bites
 
 ## 4. Backend
 

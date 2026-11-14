@@ -111,7 +111,8 @@ local core anyway.
    exactly what a PTY pane's program would (including `HERDR_PANE_ID`, `HERDR_SOCKET_PATH` and the
    shell integration variables);
 2. calls `terminal.run` with `size {cols, rows}`, `display` (our host theme colors and cell size),
-   `labels {herdr.session, herdr.pane_id}`, `no_parent: true`, `no_notify: true`, `keep: false`,
+   `labels {"herdr.session": ..., "herdr.pane_id": ...}` (a JSON map; the API refuses the CLI's
+   `k=v` list), `no_parent: true`, `no_notify: true`, `keep: false`,
    blocking for at most 5 s (the PTY spawn is blocking too; the macOS anchor can take longer);
 3. publishes `Terminal.pid` into `child_pid`, then calls `terminal.attach` and starts the parse
    thread. The pid is in hand before any stream exists, so runtime-seam's F1 order is structural
