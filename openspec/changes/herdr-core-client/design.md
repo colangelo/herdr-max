@@ -728,12 +728,18 @@ next phase starts.
 - The client endpoint contract (AGENTS.md § Stable client endpoint contract): generation 1 stays.
 - Each phase is reversible by config until phase 6.
 
-### 6.6 Decisions for ac (sent to the desk)
+### 6.6 Decisions (decided by ac, 2026-11-14)
 
-1. **Shape B first** (recommended) or go straight to A.
-2. **Layout home in phase 4:** share the desktop app's `herdr-app` document (one world with
-   herdr-app) or keep our own document (simpler, no coupling). Only matters if ac will ever open
-   herdr-app.
+ac answered on the desk (`6 A, 7 A`, relayed by manager-lab at about 22:1xZ):
+
+1. **gestore-lab.a1114-12, shape: option A** = the herdr-max server stays and swaps its PTY layer
+   for herdr-core behind a config switch, i.e. **Shape B (the adapter) first**, as § 6.3 recommends.
+   Phases 1 and 2 already follow it.
+2. **gestore-lab.a1114-13, layout home: option A** = the layout lives in **herdr-max's own core
+   document** (§ 2d Option 2), not in herdr-app's `herdr-app` document. Phase 4 writes spaces, tabs
+   and splits to a `herdr-max` document whose format we own; no coupling to herdr-app releases.
+   The `herdr.space` / `herdr.tab` labels are not written in phase 4 (herdr-app will not show our
+   spaces; revisit only if ac starts using herdr-app).
 
 ### 6.7 Required tests by phase (verifier table, filled in per phase change)
 

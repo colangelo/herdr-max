@@ -26,7 +26,8 @@
 ## 3. Decision
 
 - [x] 3.1 Bring ac the blockers left after the pilot and a recommended shape: design.md § 6 (Shape B first), decisions on the desk (§ 6.6)
-- [ ] 3.2 On ac's choice, add spec deltas and the build plan to this change
+- [x] 3.2 ac chose Shape B first and our own layout document (2026-11-14, design.md § 6.6); each
+  phase carries its own spec deltas and plan (runtime-seam, core-backend, ...)
 
 ## 4. Migration (design.md § 6.4); each phase gets its own OpenSpec change and Gitea issue
 
@@ -34,6 +35,6 @@
 - [ ] 4.1 Phase 1: runtime seam over `src/pty/` (characterization tests first, roundtable)
 - [ ] 4.2 Phase 2: core backend behind `[experimental] runtime = "core"`; identity via labels (Q2); 7501 + detection
 - [ ] 4.3 Phase 3: restart re-adopts core terminals; mixed sessions; default on, m4m then both Macs
-- [ ] 4.4 Phase 4: layout in a core document (ac's choice § 6.6 item 2; Q15)
+- [ ] 4.4 Phase 4: layout in herdr-max's own core document (ac's choice, § 6.6 item 2; Q15 not needed)
 - [ ] 4.5 Phase 5: remote via core machines; dormancy (issue 260)
 - [ ] 4.6 Phase 6: delete the PTY runtime, live handoff and our remote host
