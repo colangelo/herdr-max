@@ -38,18 +38,20 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 ## 4. The seam (no behaviour change)
 
-- [ ] 4.1 `src/pane/runtime_io/mod.rs`: move `PaneRuntimeIo` as `PaneIo` with its methods, unchanged;
+- [x] 4.1 `src/pane/runtime_io/mod.rs`: move `PaneRuntimeIo` as `PaneIo` with its methods, unchanged;
   `TestChannel` moves with it. Commit
-- [ ] 4.2 `src/pane/runtime_io/pty.rs`: `PtyPaneIo` wraps `PtyIoActorHandle`; `PaneIo::spawn(SpawnSpec,
+- [x] 4.2 `src/pane/runtime_io/pty.rs`: `PtyPaneIo` wraps `PtyIoActorHandle`; `PaneIo::spawn(SpawnSpec,
   PaneIoSink)` calls `spawn_with_portable_pty` and `PtyIoActor::spawn`; the child wait moves in
   and calls `on_exit` once after setting `child_wait_completed`. Commit
-- [ ] 4.3 `shutdown_pane_processes` and helpers move to `pty.rs`; `PaneIo::terminate_session`;
+- [x] 4.3 `shutdown_pane_processes` and helpers move to `pty.rs`; `PaneIo::terminate_session`;
   `Drop` keeps its order. Commit
-- [ ] 4.4 `PaneIo::adopt_handoff_fd`; `from_handoff_fd` calls it. Commit
-- [ ] 4.5 Handoff methods answer `ErrorKind::Unsupported` for a variant without a descriptor (a
+- [x] 4.4 `PaneIo::adopt_handoff_fd`; `from_handoff_fd` calls it. Commit
+- [x] 4.5 Handoff methods answer `ErrorKind::Unsupported` for a variant without a descriptor (a
   unit test with `TestChannel` configured that way). Commit
-- [ ] 4.6 `src/pane.rs` no longer imports `crate::pty` or `portable_pty` (except the command
-  builders, D5); V9 allow-list shrinks to its final form. Commit
+- [x] 4.6 `src/pane.rs` no longer imports `crate::pty` or `portable_pty` (except the command
+  builders, D5); V9 allow-list shrinks to its final form. Commit. Done: the
+  PTY mentions left in `src/pane.rs` and `src/terminal/runtime.rs` are the command builder and
+  test-only constructors
 - [ ] 4.7 `just check` green (V11); `just bench-render-scale` against 1.2 (V10), delta recorded
 
 ## 5. Ship

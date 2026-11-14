@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 /// Files that may name `crate::pty::`. The `src/pty/` tree and the seam,
 /// `src/pane/runtime_io/`, are always allowed.
 const PTY_LAYER_ALLOWED: &[&str] = &[
-    // Shrinks to nothing outside the seam in runtime-seam task 4.6.
+    // Test-only since runtime-seam task 4.6: `PaneRuntime::test_with_actor` and
+    // the handoff import test in `src/pane.rs`, and `TerminalRuntime::
+    // test_with_actor` in `src/terminal/runtime.rs`. Production code reaches
+    // the PTY layer only through `src/pane/runtime_io/`.
     "src/pane.rs",
     "src/terminal/runtime.rs",
     // Tests that build PTY types directly (runtime-seam roundtable F4).
