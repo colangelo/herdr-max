@@ -10,6 +10,7 @@ server herdr-core (`hc`), and what would it get for free?
 
 - `hc` 0.1.17, installed at `~/.local/bin/hc`, read on m4m on 2026-11-02 with `HC_SESSION=pilot`.
   Only these commands were run: `--help`, `<cmd> --help`, `--skill` and `schema`. No core was started.
+  Later live runs: § 4 (2026-11-02, 0.1.17) and § 5a (2026-11-14, 0.1.21).
 - **schema:** `hc schema` (OpenRPC, 31 methods). `schema:Terminal` is a component, and
   `schema:terminal.send` is a method.
 - **skill:** `hc --skill` (the agent manual, `crates/herdr-core/src/SKILL.md` upstream).
@@ -591,6 +592,40 @@ Run with `HC_SESSION=pilot` and scratch XDG paths, as core:AGENTS.md § Traps as
     change. Did the app keep our structure, and did it drop the extra field? Does a terminal started
     with `--label herdr.space=<id> --label herdr.tab=<id>` show in the app's tab?
 
+## 5a. Phase 0 results (2026-11-14, m4m, hc 0.1.21, `HC_SESSION=pilot`)
+
+The pilot core went 0.1.17 → 0.1.21 with `hc update --version 0.1.21`, then a second `hc update` to
+finish the move to a signed bundle (`~/.local/share/herdr-core/current` → `active/Herdr Core.app`,
+`dev.herdr.core`, team `2W9652Q7QR`; `~/.local/bin/hc` is now a link into it). No default core was
+running. Scripts and raw logs: `~/.local/share/herdr-core-pilot/phase0/` (`hcattach.py` is a framed-mode
+attach client, `multiobs.py` puts N attaches or N read polls on one connection, `resp.c` prints the
+process macOS holds responsible for privacy prompts).
+
+| Q | Gate | Result | Numbers |
+|---|---|---|---|
+| 4 | footprint | **green** | 30 idle shells: core 5.1 MB + holder 9.6 MB = **15.1 MB** footprint, against a throwaway herdr-beta server with 30 idle shells, 16.0 MB + pane anchor 3.9 MB = **20.4 MB**. Idle CPU over 30 s: core+holder 0.26 s, herdr 0.23 s. 30 terminals each printing a 90-byte line twice a second, CPU per 30 s: core+holder **0.31 s**, herdr server **0.83 s** (it parses and detects). One `observe` attach per terminal, all on one connection: **+0.07 s** and 514 KB. Polling `terminal.read` for all 30 every 0.5 s: **+0.38 s** and 18.5 MB, 36× the bytes. After the poll run the core's footprint was 21 MB (holder 12 MB). |
+| 6 | update with viewers | **green** | `hc server restart`: the stream got EOF 0.20 s after the call; the socket was missing for about 0.15 s; reattach to first paint 0.36 s after the last byte. `hc update --from <bundle>`: EOF after 0.60 s, back in 0.29 s. The program (a ticker) never stopped, pid unchanged. Event `seq` starts at 0 on the new core, and `hc events` exits instead of reconnecting. The first paint after a reattach is the current screen, not the bytes missed in the gap, so the adapter must treat it as a repaint and request `history` if it wants the lines. |
+| 8 | logout | **unknown, likely red** | The holder runs in the GUI login domain (`launchctl print gui/501` lists `unmanaged.herdr-core.<pid>`); the core is a launchd one-shot (`hc --hc-launchd`). `server.status` reports `keeps_running_after_logout: null` on macOS. herdr-max moved its own server out of that domain because it does not survive a logout (INV:macos-server-context). The 0.1.21 skill says reopening the app after a logout *"keeps surviving terminals"*, which suggests some do not. Proof needs a real logout on a Mac: asked on the desk. |
+| 9 | privacy prompts | **green** | Inside an hc terminal the responsible process is the holder, `Herdr Core.app/Contents/MacOS/herdr-core` (signed `dev.herdr.core`). Every terminal on a holder shares it. After `hc update`, existing terminals keep the old holder (its bundle moves to `versions/<hash>/` and stays while it runs) and new terminals get a new holder with the same signature. So, like our pane anchor, an update does not make open panes ask again; new panes after an update may ask once per new holder. The prompt names Herdr Core, not herdr-max. No real prompt was raised (it would pop up on ac's screen). |
+| 11 | text without Enter | **green (stream only)** | `hc keys` takes named keys (`space`, `enter`, `esc`, `tab`, `shift+tab`, `backspace`, `ctrl+c`, `alt+b`) and unshifted single characters (`a`, `/`, `-`, digits). It refuses shifted ones: ``!"#$%&()*+:<>?@\^_{|}~``, and `é`. Each key is a separate write about 35 ms apart. DATA on an attach stream delivered `hello "world" é/!` byte for byte (é as UTF-8) with no Enter. So `send-text --chunk` maps to stream DATA, which Shape B has anyway. |
+| 12 | read quality | **green** | `hc read --lines 0` of Claude Code 2.1.325 gives the same lines that `herdr-beta agent read --source detection` gives for a herdr pane: banner, prompt box between two rules, status lines. Over a 105-sample turn, our `live_turn_working` / `live_prompt_box` rules agreed with Claude's 7501 state 82 times. All 23 misses were `working` read as idle: Claude now draws its busy line with `●` (`● Churning…`), which the rule's spinner class lacks. Today herdr is saved by `osc_title_working`. In core, Claude never animates the title (raw OSC 2 seen: plain text, no glyph; `title` in `hc get` the same) and reports `working`/`done` over 7501 instead, carried raw on the stream. So for Claude, 7501 is the status source under core, and the manifest needs `●` before screen detection can be its fallback (phase 2 task). |
+| 13 | send while a person types | **green, one risk** | A person typing a key every 0.5 s through an attach stream and then pressing Enter: a fleet `hc send` issued meanwhile waited **4.9 s** and landed **0.8 s** after the person's Enter. A person typing and then stopping with no Enter: the send waited exactly **60.0 s** after the last key (`draft_wait` default), then pasted onto the person's unfinished text and pressed Enter, so it submitted their draft with ours. Our tools must keep reading the box first (herdr-compact does) or set `draft_wait` and check before sending. |
+
+Two side findings:
+
+- **The core keeps the environment of whoever updated it.** After `hc update` from inside a Claude
+  session, a new `claude` in the pilot got `CLAUDE_CODE_CHILD_SESSION` and the gateway URL without a key
+  (401). `env -u CLAUDE_* -u ANTHROPIC_* -u HERDR_* hc server restart --fresh` fixed it. The adapter
+  must start, restart and update the core with a chosen, clean environment, and pass per-terminal
+  `env` explicitly.
+- **A bare `claude` is not a test agent.** It is ac's direct login with his claude.ai connectors.
+  Test Claude Code with `--settings ~/.config/claude/direct-noconnectors.settings.json` or the aiproxy
+  settings (house rule a1103-08, ac/security#56).
+
+**Go/no-go: go for phase 1.** Q4, Q6, Q9, Q11, Q12 and Q13 are green. Q8 stays open; it does not block
+phase 1 (a seam with no behaviour change) or phase 2 (off by default), and it must be answered before
+phase 3 turns the core backend on by default. If it is red, it is filed on herdr-core and phase 3 waits.
+
 ## Appendix: what was not read
 
 - herdr-app beyond the files listed. `herdr.d.ts`, the mod sources and the shape of the layout
@@ -657,7 +692,11 @@ next phase starts.
    (`terminal.run`, an attach stream feeding the same libghostty-vt parser, RESIZE frames, DATA for
    input). Config `[experimental] runtime = "core"`, off by default, new panes only. Agent identity
    moves to labels (pilot Q2): our hooks write `herdr.agent_session`, `herdr.restore_argv`, and the
-   server reads them. Status: a 7501 report wins, our detection fills in (§ 4c).
+   server reads them. Status: a 7501 report wins, our detection fills in (§ 4c). From phase 0
+   (§ 5a): the server starts, restarts and updates the core with a clean environment; one attach
+   per pane on a single connection, as a typing viewer (not `terminal.read` polling); a reattach's first
+   paint resets the pane's parser; the Claude manifest learns the `●` busy line, because Claude does
+   not animate its title under core.
 3. **Restore and update through core.** With the core backend, a herdr-max server restart re-adopts
    live core terminals by address instead of respawning, and our live handoff is not needed for those
    panes. Mixed sessions (some PTY, some core) must restore. Then default the switch on for m4m, then
