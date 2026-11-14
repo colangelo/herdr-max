@@ -19,18 +19,22 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 ## 3. Characterization tests, green on the unmodified code
 
-- [ ] 3.1 V1 spawn contract (argv, cwd, env), `#[cfg(unix)]` module in `src/pane.rs` tests
-- [ ] 3.2 V2 exit report (`exit 3` → `Exited`; signal → `Interrupted`; one event; flag first)
-- [ ] 3.3 V3 and V4 termination escalation and preserve-on-drop (trap script logs signals)
-- [ ] 3.4 V5 output order (20 000 numbered lines; scrollback limit set so all fit, roundtable F5)
-- [ ] 3.5 V6 resize reaches the program (`stty size`) and a `CSI 6n` reply keeps its order
-- [ ] 3.6 V8 process facts through the `pane.process_info` handler; the first output already sees the
+- [x] 3.1 V1 spawn contract (argv, cwd, env), `#[cfg(unix)]` module in `src/pane.rs` tests
+- [x] 3.2 V2 exit report (`exit 3` → `Exited`; signal → `Interrupted`; one event; flag first)
+- [x] 3.3 V3 and V4 termination escalation and preserve-on-drop (trap script logs signals)
+- [x] 3.4 V5 output order (20 000 numbered lines; scrollback limit set so all fit, roundtable F5)
+- [x] 3.5 V6 resize reaches the program (`stty size`) and a `CSI 6n` reply keeps its order
+- [x] 3.6 V8 process facts through the `pane.process_info` handler; the first output already sees the
   shell pid (roundtable F1)
-- [ ] 3.6a V13 pane anchor is the responsible process (macOS); V14 input order; V15 restore cwd
-- [ ] 3.6b A test that names today's failed-actor-start behaviour (roundtable F2); count the
-  raw-actor test constructors (F4)
-- [ ] 3.7 V9 architecture test, with today's offenders listed as the allow-list to shrink
-- [ ] 3.8 Commit: `test(pane): characterize the pty runtime before the backend seam`
+- [x] 3.6a V13 is the existing anchor test (named in design.md); V14 and V15 written
+- [x] 3.6b F2 is named by https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/279, not a test:
+  forcing `PtyIoActor::spawn` to fail needs a failure hook in production code, which the fix will
+  add with its own test. F4 count: `PaneRuntime::test_with_actor` (`src/pane.rs:4643`) via
+  `TerminalRuntime::test_with_actor` (3 callers in `src/platform/macos/input_tests.rs`), and 4
+  `PaneRuntimeIo::TestChannel` literals in `src/pane.rs` tests (6292, 6352, 6406, 6451); 29
+  dispatch arms in production code
+- [x] 3.7 V9 architecture test, with today's offenders listed as the allow-list to shrink
+- [x] 3.8 Commit: `test(pane): characterize the pty runtime before the backend seam`
 
 ## 4. The seam (no behaviour change)
 

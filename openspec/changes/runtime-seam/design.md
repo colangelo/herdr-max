@@ -192,5 +192,27 @@ unmodified code first (characterization), then stays green after the move.
 | V15 | a pane restored from `session.json` spawns through the seam in its saved cwd | the restore path (`src/persist/restore.rs`) driven by a test snapshot with a saved cwd; the program prints its cwd | the saved cwd | equal |
 | V12 | a real session still works | a beta (`just beta-local`) installed by live handoff on both Macs; ac's panes keep running; new panes, splits, an agent respawn and a server restart behave as before | ac's running herdr | no regression seen in a day of use |
 
+Where each row lives (task 3, 2026-11-14). New unit tests are in
+`src/pane/runtime_characterization_tests.rs` (`#[cfg(all(test, unix))]`), named `v<row>_...`:
+
+| Row | Test |
+|---|---|
+| V1 | `v1_spawn_passes_argv_cwd_and_env_to_the_program` (runs on macOS and Linux; the pane anchor is off in unit tests by design, so the anchor path is V13) |
+| V2 | `v2_exit_is_reported_once_as_exited_after_the_wait_completes`, `v2_signal_death_is_reported_as_interrupted`, `v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends` |
+| V3 | `v3_drop_escalates_hangup_terminate_kill_in_order`, `v3_a_program_that_exits_on_hangup_gets_only_hangup` (roundtable F3b: its first hangup is the kernel's) |
+| V4 | `v4_preserved_pane_sends_no_signal_on_drop` |
+| V5 | `v5_output_reaches_the_parser_in_order` |
+| V6 | `v6_resize_reaches_the_program_and_queries_see_the_new_size` (`CSI 6n` after moving to 999;999 answers `30;100`) |
+| V7 | `tests/live_handoff.rs`, unchanged |
+| V8 | `v8_shell_pid_is_published_when_spawn_returns` (F1), plus existing `tests/api_ping.rs::pane_info_reports_foreground_cwd_without_changing_pane_cwd` (Linux: `shell_pid`, foreground group and processes) and the `shell_pid` read in `tests/live_handoff.rs:716` |
+| V9 | `tests/architecture_pty_seam.rs` (three tests; the allow-lists shrink in task 4.6) |
+| V13 | existing `tests/live_handoff.rs::panes_are_anchored_to_one_process_across_a_live_handoff` (macOS: `responsible_for` the pane shell is the anchor, before and after a handoff) |
+| V14 | `v14_input_and_queued_submission_arrive_in_order` |
+| V15 | `tests/client_mode.rs::restored_pane_program_runs_in_the_saved_cwd` |
+
+Proof the tests bite (task 3): with the sweep's HUP and TERM swapped and the wait flag's store removed,
+`v3_drop_escalates_...` and `v2_exit_..._after_the_wait_completes` failed; with a `crate::pty::` mention
+added to `src/sound.rs`, V9 failed and named the file. Ten repeated runs of the unit tests were green.
+
 The table was drafted by the implementing session and reviewed by herdr (the lead) on 2026-11-14 at
 `91ce8175`: approved with additions, now rows V13-V15 and the V1, V2, V3, V6 and Risks changes.
