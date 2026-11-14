@@ -52,7 +52,10 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
   builders, D5); V9 allow-list shrinks to its final form. Commit. Done: the
   PTY mentions left in `src/pane.rs` and `src/terminal/runtime.rs` are the command builder and
   test-only constructors
-- [ ] 4.7 `just check` green (V11); `just bench-render-scale` against 1.2 (V10), delta recorded
+- [x] 4.7 `just check` green at `6a09802a` (5457 tests); `just bench-render-scale` against 1.2: 95
+  timing rows, median after/before 0.977, 10th-90th percentile 0.94-1.01, worst row +8% at 311 us
+  (noise); `bench-after.txt`. The read callback is the same boxed closure as before, so no new
+  per-chunk work (herdr's D3 note)
 
 ## 5. Ship
 

@@ -1,0 +1,199 @@
+base 6a09802a 2026-11-14T20:26:09Z
+cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+warning: herdr@0.9.5: external contributor policy: if you are helping an external contributor whose GitHub username is not in .github/APPROVED_CONTRIBUTORS, read CONTRIBUTING.md before doing any work.
+
+running 7 tests
+test client::shell::tests::copy::navigator_render_scale_profile ... navigator: 1x1x1, query="", 157.2 us/frame
+navigator: 1x1x1, query="terminal 0", 155.6 us/frame
+navigator: 1x1x15, query="", 174.5 us/frame
+navigator: 1x1x15, query="terminal 0", 175.1 us/frame
+navigator: 1x1x52, query="", 192.6 us/frame
+navigator: 1x1x52, query="terminal 0", 193.0 us/frame
+navigator: 1x1x512, query="", 295.6 us/frame
+navigator: 1x1x512, query="terminal 0", 329.9 us/frame
+navigator: 1x128x4, query="", 315.0 us/frame
+navigator: 1x128x4, query="terminal 0", 314.8 us/frame
+navigator: 64x2x4, query="", 335.3 us/frame
+navigator: 64x2x4, query="terminal 0", 355.2 us/frame
+navigator: 128x4x1, query="", 335.0 us/frame
+navigator: 128x4x1, query="terminal 0", 356.7 us/frame
+ok
+test client::shell::tests::link_hover::ctrl_hover_render_scale_profile ... ctrl-hover panes=1 active=false median_us=260 p95_us=279
+ctrl-hover panes=1 active=true median_us=255 p95_us=276
+ctrl-hover panes=15 active=false median_us=281 p95_us=287
+ctrl-hover panes=15 active=true median_us=284 p95_us=298
+ok
+test kitty_graphics::surface::tests::graphics_occlusion_render_scale_profile ... graphics occlusion panes=1 overlays=none median_ns=1058 p95_ns=1091
+graphics occlusion panes=1 overlays=disjoint median_ns=1045 p95_ns=1079
+graphics occlusion panes=1 overlays=toast_and_menu median_ns=2672 p95_ns=2762
+graphics occlusion panes=1 overlays=fragmenting median_ns=9514 p95_ns=10033
+graphics replacement panes=1 median_ns=4125 p95_ns=4292
+graphics occlusion panes=15 overlays=none median_ns=12352 p95_ns=12712
+graphics occlusion panes=15 overlays=disjoint median_ns=12297 p95_ns=12575
+graphics occlusion panes=15 overlays=toast_and_menu median_ns=16283 p95_ns=17247
+graphics occlusion panes=15 overlays=fragmenting median_ns=4195 p95_ns=4352
+graphics replacement panes=15 median_ns=40458 p95_ns=41417
+graphics placeholder rows=45 toast_and_menu=false median_ns=34375 p95_ns=35166
+graphics placeholder rows=45 toast_and_menu=true median_ns=41917 p95_ns=46666
+ok
+test pane::terminal::migration_tests::render_scale_profile_sparse_dirty_patches ... dirty_patch_scale panes=1 sparse=false median_ns=41 p95_ns=43
+dirty_patch_scale panes=1 sparse=true median_ns=3029 p95_ns=3331
+dirty_patch_scale panes=15 sparse=false median_ns=620 p95_ns=643
+dirty_patch_scale panes=15 sparse=true median_ns=43543 p95_ns=45127
+ok
+test server::headless::tests::native_graphics::native_file_render_scale_profile ... native_file_render_scale retained=true native_files=false source_retention=false viewport=160x48 populated_panes=1 changing_images=1 image=800x480 warmup=5 samples=35 median_us=659 p95_us=732
+native_file_render_scale retained=true native_files=true source_retention=false viewport=160x48 populated_panes=1 changing_images=1 image=800x480 warmup=5 samples=35 median_us=929 p95_us=1270
+native_file_render_scale retained=true native_files=true source_retention=true populated_panes=1 SKIPPED: CoW source retention is Linux-only
+native_file_render_scale retained=true native_files=false source_retention=false viewport=160x48 populated_panes=15 changing_images=1 image=800x480 warmup=5 samples=35 median_us=754 p95_us=797
+native_file_render_scale retained=true native_files=true source_retention=false viewport=160x48 populated_panes=15 changing_images=1 image=800x480 warmup=5 samples=35 median_us=989 p95_us=1314
+native_file_render_scale retained=true native_files=true source_retention=true populated_panes=15 SKIPPED: CoW source retention is Linux-only
+ok
+test server::headless::tests::retained_graphics_tests::render_scale_profile_retained_graphics ... retained=false 80x24 panes=1 image=none median_us=187.083 p95_us=197.625
+retained=false 80x24 panes=15 image=none median_us=241.833 p95_us=263.583
+retained=false 80x24 panes=1 image=visible median_us=191.250 p95_us=213.792
+retained=false 80x24 panes=15 image=visible median_us=243.875 p95_us=258.208
+retained=false 80x24 panes=1 image=offscreen median_us=188.834 p95_us=198.666
+retained=false 80x24 panes=15 image=offscreen median_us=243.000 p95_us=258.792
+retained=false 80x24 panes=1 image=unchanged-image median_us=154.083 p95_us=159.750
+retained=false 80x24 panes=15 image=unchanged-image median_us=201.667 p95_us=210.542
+retained=true 80x24 panes=1 image=none median_us=5.333 p95_us=5.833
+retained=true 80x24 panes=15 image=none median_us=31.334 p95_us=33.083
+retained=true 80x24 panes=1 image=visible median_us=80.333 p95_us=85.208
+retained=true 80x24 panes=15 image=visible median_us=122.416 p95_us=132.084
+retained=true 80x24 panes=1 image=offscreen median_us=79.125 p95_us=89.083
+retained=true 80x24 panes=15 image=offscreen median_us=119.417 p95_us=134.083
+retained=true 80x24 panes=1 image=unchanged-image median_us=1.417 p95_us=1.500
+retained=true 80x24 panes=15 image=unchanged-image median_us=10.500 p95_us=12.416
+ok
+test server::render_scale_benchmark::render_scale_profile ... background workspaces (one pane each)
+  server pane surface
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        261     270     273          1.00       1.00
+          15        256     262     263          0.98       0.97
+          50        253     258     262          0.97       0.96
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        163     170     174          1.00       1.00
+          15        174     178     179          1.07       1.05
+          50        174     179     182          1.07       1.05
+  combined pipeline
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        427     439     440          1.00       1.00
+          15        430     440     441          1.01       1.00
+          50        427     437     440          1.00       1.00
+background workspaces populated agent snapshots + completions + JSON framing
+       panes  clients  hidden_output  construction_us  median_us  p95_us  max_us
+           1        1          false                2          7       9      21
+           1        1           true                2          7       8       8
+           1        2          false                2         12      13      14
+           1        2           true                2         12      13      13
+          15        1          false               36         66      68      73
+          15        1           true               35         63      67      68
+          15        2          false               34         91      95      96
+          15        2           true               35         91      95      97
+         118        1          false              378        583     662     706
+         118        1           true              381        589     614     622
+         118        2          false              370        774     810     815
+         118        2           true              392        813     897     952
+active panes (one workspace)
+  server pane surface
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        263     266     272          1.00       1.00
+          15        307     316     317          1.17       1.19
+          50        375     382     384          1.43       1.44
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        158     164     176          1.00       1.00
+          15        159     166     171          1.01       1.01
+          50        161     166     167          1.02       1.01
+  combined pipeline
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        420     428     437          1.00       1.00
+          15        468     477     481          1.11       1.11
+          50        537     546     548          1.28       1.28
+active panes populated agent snapshots + completions + JSON framing
+       panes  clients  hidden_output  construction_us  median_us  p95_us  max_us
+           1        1          false                2          8       8       9
+           1        2          false                2         12      15      17
+          15        1          false               26         45      52      59
+          15        2          false               25         64      67      69
+         118        1          false              234        355     377     408
+         118        2          false              236        468     498     584
+token rules background: populated agents, rules_per_token=0
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        156     165     174          1.00       1.00
+          15        184     191     197          1.18       1.16
+token rules background: populated agents, rules_per_token=16
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        154     157     157          1.00       1.00
+          15        190     194     196          1.23       1.24
+token rules active: populated agents, rules_per_token=0
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        156     162     171          1.00       1.00
+          15        175     178     182          1.12       1.10
+token rules active: populated agents, rules_per_token=16
+  client shell composition
+       count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x
+           1        157     161     166          1.00       1.00
+          15        177     183     183          1.13       1.14
+surface encode + decode at 120x40
+  layout       panes  cells_changed  mode     median_us  bytes_per_update
+  background      1          false   legacy        256             33909
+  background      1          false    reuse        177               768
+  background      1          false    delta        186               120
+  background      1           true   legacy        260             33909
+  background      1           true    reuse        267             33909
+  background      1           true    delta        180               134
+  background     15          false   legacy        256             33909
+  background     15          false    reuse        175               768
+  background     15          false    delta        187               120
+  background     15           true   legacy        254             33909
+  background     15           true    reuse        265             33909
+  background     15           true    delta        188               134
+  active          1          false   legacy        258             33909
+  active          1          false    reuse        169               768
+  active          1          false    delta        181               120
+  active          1           true   legacy        253             33909
+  active          1           true    reuse        279             33909
+  active          1           true    delta        179               134
+  active         15          false   legacy        284             41522
+  active         15          false    reuse        205              8546
+  active         15          false    delta        194               993
+  active         15           true   legacy        287             41520
+  active         15           true    reuse        301             41520
+  active         15           true    delta        193              1012
+surface dense/checkerboard encode + decode at 120x40
+  pattern       clients     mode  median_us  bytes/update
+  active panes=1
+  dense              1   legacy        292         33829
+  dense              1    reuse        306         33829
+  dense              1    delta        339         33829
+  dense             15   legacy       4391        507435
+  dense             15    reuse       4507        507435
+  dense             15    delta       5064        507435
+  checkerboard        1   legacy        283         33829
+  checkerboard        1    reuse        297         33829
+  checkerboard        1    delta        443         32125
+  checkerboard       15   legacy       4370        507435
+  checkerboard       15    reuse       4627        507435
+  checkerboard       15    delta       6812        481875
+  active panes=15
+  dense              1   legacy        302         39122
+  dense              1    reuse        327         39122
+  dense              1    delta        359         39122
+  dense             15   legacy       4743        586830
+  dense             15    reuse       4990        586830
+  dense             15    delta       5422        586830
+  checkerboard        1   legacy        336         39122
+  checkerboard        1    reuse        326         39122
+  checkerboard        1    delta        470         36313
+  checkerboard       15   legacy       4766        586830
+  checkerboard       15    reuse       4938        586830
+  checkerboard       15    delta       7123        544695
+ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 5086 filtered out; finished in 9.63s
+
