@@ -21,7 +21,7 @@
 - [x] 2.12 Q12: `hc read` text equals our detection text; Claude reports 7501 and stops animating the title in core
 - [x] 2.13 Q13: send waits for the person (0.8 s after Enter); an unfinished draft holds it 60 s, then it pastes onto the draft
 - [ ] 2.14 Q14: pilot core and the herdr server side by side (no interference seen so far)
-- [ ] 2.15 Q15: share the `herdr-app` document round trip (needs herdr-app on the pilot session)
+- [x] 2.15 Q15: not needed: ac chose herdr-max's own layout document (design.md § 6.6)
 
 ## 3. Decision
 
