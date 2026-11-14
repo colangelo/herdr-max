@@ -556,6 +556,39 @@ fn spawn_writer(
         .map_err(|err| CoreError::Unavailable(format!("writer thread: {err}")))
 }
 
+/// Bytes a pane consumed but has not credited back yet. Credit goes back in
+/// batches of `CREDIT_BATCH`, not per chunk: each CREDIT frame wakes core, and
+/// a chunk is often one line (V12). Batching cannot stall a stream: core
+/// stops only when `CREDIT_WINDOW` bytes are outstanding, and fewer than
+/// `CREDIT_BATCH` of those are consumed-but-owed, so the rest is still to be
+/// read, and reading it sends the credit.
+#[derive(Default)]
+struct CreditBatch {
+    channel: u32,
+    owed: u32,
+}
+
+/// Core's credit window per stream (hc 0.1.21).
+const CREDIT_WINDOW: u32 = 256 * 1024;
+const CREDIT_BATCH: u32 = CREDIT_WINDOW / 4;
+
+impl CreditBatch {
+    /// Records `bytes` consumed on `channel`; returns the credit to send now.
+    /// Channel 0 is "no stream". A new channel (a reattach) starts with a
+    /// fresh window, so what the old one was owed is dropped.
+    fn consumed(&mut self, channel: u32, bytes: u32) -> Option<u32> {
+        if channel != self.channel {
+            self.channel = channel;
+            self.owed = 0;
+        }
+        if channel == 0 {
+            return None;
+        }
+        self.owed = self.owed.saturating_add(bytes);
+        (self.owed >= CREDIT_BATCH).then(|| std::mem::take(&mut self.owed))
+    }
+}
+
 fn spawn_parser(
     shared: Arc<Shared>,
     events: std_mpsc::Receiver<StreamEvent>,
@@ -577,6 +610,7 @@ fn spawn_parser(
                     on_exit(reason);
                 }
             };
+            let mut credit = CreditBatch::default();
             loop {
                 let event = match events.recv() {
                     Ok(event) => event,
@@ -590,8 +624,8 @@ fn spawn_parser(
                             let _ = writer.try_send(WriteCmd::Reply(reply));
                         }
                         let channel = shared.channel.load(Ordering::Acquire);
-                        if channel != 0 {
-                            let _ = shared.client().send(&Frame::credit(channel, consumed));
+                        if let Some(bytes) = credit.consumed(channel, consumed) {
+                            let _ = shared.client().send(&Frame::credit(channel, bytes));
                         }
                     }
                     StreamEvent::Close(reason) => {
@@ -724,6 +758,21 @@ mod tests {
         }
         assert_eq!(case(json!({})), None, "an empty CLOSE is our own detach");
         assert_eq!(case(Value::Null), None);
+    }
+
+    #[test]
+    fn credit_goes_back_in_batches_and_a_new_channel_starts_fresh() {
+        let mut credit = CreditBatch::default();
+        assert_eq!(credit.consumed(0, CREDIT_BATCH), None, "no stream");
+        assert_eq!(credit.consumed(1, 100), None);
+        assert_eq!(credit.consumed(1, CREDIT_BATCH - 101), None);
+        assert_eq!(credit.consumed(1, 1), Some(CREDIT_BATCH));
+        assert_eq!(credit.consumed(1, 10), None);
+        // A reattach: the new stream's window is fresh; the old debt is gone.
+        assert_eq!(credit.consumed(2, CREDIT_BATCH - 1), None);
+        assert_eq!(credit.consumed(2, 2), Some(CREDIT_BATCH + 1));
+        // One chunk larger than a batch is credited whole, at once.
+        assert_eq!(credit.consumed(2, 3 * CREDIT_BATCH), Some(3 * CREDIT_BATCH));
     }
 
     use super::super::fake::FakeCore;

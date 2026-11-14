@@ -583,3 +583,30 @@ async fn core_v1_a_restored_pane_stays_on_the_pty() {
     assert!(restored.core_terminal().is_none());
     restored.shutdown();
 }
+
+// V3 (flow, D3): output far beyond core's 256 KiB credit window arrives whole
+// with credit sent back in batches; a stall would leave the marker unseen.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v3_a_burst_beyond_the_credit_window_arrives() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v3b");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "head -c 2000000 /dev/zero | tr '\\0' 'x' | fold -w 100; echo; echo V3-BURST-DONE; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        100,
+        0,
+    );
+    assert!(is_core(&runtime));
+    assert!(
+        wait_for_text(&runtime, "V3-BURST-DONE").await,
+        "the end of a 2 MB burst reached the pane: {:?}",
+        runtime.visible_text()
+    );
+    runtime.shutdown();
+}
