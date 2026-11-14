@@ -63,6 +63,19 @@ impl ScratchCore {
     }
 }
 
+impl ScratchCore {
+    fn restart(&self) {
+        let status = std::process::Command::new("hc")
+            .args(["server", "restart"])
+            .env("HC_SESSION", &self.session)
+            .env("XDG_STATE_HOME", &self.state)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("hc server restart");
+        assert!(status.success(), "hc server restart failed");
+    }
+}
+
 impl Drop for ScratchCore {
     fn drop(&mut self) {
         let _ = std::process::Command::new("hc")
@@ -309,4 +322,66 @@ async fn core_v7_close_ends_detached_jobs_and_spares_core() {
         "the other pane's program alive"
     );
     other.shutdown();
+}
+
+fn last_tick(text: &str) -> Option<u64> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix("tick ")?.parse().ok())
+        .max()
+}
+
+// V3 (reattach, D5): a core restart closes the stream; the pane reattaches and
+// keeps receiving the program's output, which never stopped.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v3_reattaches_after_a_core_restart() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v3r");
+    let (runtime, mut events) = spawn_sh(
+        &scratch.0,
+        "i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.1; done",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    let pid = runtime.child_pid().expect("pid");
+    let before = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(tick) = last_tick(&runtime.visible_text()) {
+                if tick >= 3 {
+                    break tick;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ticks before the restart");
+
+    core.restart();
+
+    let after = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(tick) = last_tick(&runtime.visible_text()) {
+                if tick >= before + 10 {
+                    break tick;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("ticks after the restart reach the pane");
+    let died = next_pane_died(&mut events, Duration::from_millis(100)).await;
+    let alive = crate::platform::process_exists(pid);
+    runtime.shutdown();
+
+    assert!(after > before);
+    assert_eq!(died, None, "a core restart is not an exit");
+    assert!(alive, "the program kept running across the core restart");
 }

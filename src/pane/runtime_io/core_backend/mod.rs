@@ -22,6 +22,9 @@ use crate::layout::PaneId;
 static PREFER_CORE: AtomicBool = AtomicBool::new(false);
 /// One unavailability warning per server lifetime (D1).
 static WARNED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/// Set after the first connection: from then on a missing socket is retried,
+/// never answered by starting a core.
+static EVER_CONNECTED: AtomicBool = AtomicBool::new(false);
 /// The server's one connection (D3), replaced when it closes.
 static CLIENT: Mutex<Option<CoreClient>> = Mutex::new(None);
 
@@ -72,7 +75,12 @@ pub(crate) fn server_connector() -> Connector {
                 return Ok(client.clone());
             }
         }
-        let client = client::connect_session(&core_session_name(), None)?;
+        // Start the core only before the first connection. Later, a missing
+        // socket means a core restart in progress: starting one then would race
+        // the restart and could leave a second core behind.
+        let first = !EVER_CONNECTED.load(Ordering::Acquire);
+        let client = client::connect_session(&core_session_name(), None, first)?;
+        EVER_CONNECTED.store(true, Ordering::Release);
         *slot = Some(client.clone());
         Ok(client)
     })

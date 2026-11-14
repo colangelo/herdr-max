@@ -373,14 +373,23 @@ pub(crate) fn core_start_command(
     command
 }
 
-/// Connects to the core session `session`, starting it once when its socket
-/// is missing, and refuses a core older than [`MIN_CORE_VERSION`].
+/// Connects to the core session `session` and refuses a core older than
+/// [`MIN_CORE_VERSION`]. With `start_if_missing`, a missing socket starts the
+/// core; without it (a reconnect while a core restarts, when its socket is
+/// briefly gone), it is an error the caller retries.
 pub(crate) fn connect_session(
     session: &str,
     on_event: Option<EventHandler>,
+    start_if_missing: bool,
 ) -> Result<CoreClient, CoreError> {
     let socket = socket_path(session);
     if !socket.exists() {
+        if !start_if_missing {
+            return Err(CoreError::Unavailable(format!(
+                "no herdr-core socket at {}",
+                socket.display()
+            )));
+        }
         let status = core_start_command(session, std::env::vars())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
