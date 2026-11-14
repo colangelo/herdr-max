@@ -1312,11 +1312,7 @@ impl App {
 
 /// Applies `[experimental] runtime` to new panes (core-backend D1).
 fn apply_pane_runtime_choice(choice: crate::config::PaneRuntimeChoice) {
-    use crate::config::PaneRuntimeChoice;
-    if choice == PaneRuntimeChoice::Unknown {
-        tracing::warn!("unknown [experimental] runtime value; new panes use the PTY");
-    }
-    crate::pane::set_preferred_runtime(choice == PaneRuntimeChoice::Core);
+    crate::pane::set_preferred_runtime(choice == crate::config::PaneRuntimeChoice::Core);
 }
 
 #[cfg(test)]

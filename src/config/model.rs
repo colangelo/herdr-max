@@ -1887,9 +1887,6 @@ pub enum PaneRuntimeChoice {
     #[default]
     Pty,
     Core,
-    /// Any other value: logged, and treated as `pty`.
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3359,8 +3356,7 @@ headless_rows = 50
         );
         let config: Config = toml::from_str("[experimental]\nruntime = \"core\"\n").unwrap();
         assert_eq!(config.experimental.runtime, PaneRuntimeChoice::Core);
-        let config: Config = toml::from_str("[experimental]\nruntime = \"zfs\"\n").unwrap();
-        assert_eq!(config.experimental.runtime, PaneRuntimeChoice::Unknown);
+        assert!(toml::from_str::<Config>("[experimental]\nruntime = \"zfs\"\n").is_err());
     }
 
     #[test]

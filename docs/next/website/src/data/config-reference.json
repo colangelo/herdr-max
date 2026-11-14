@@ -1929,6 +1929,16 @@
           "description": "Persist pane screen history to session-history.json."
         },
         {
+          "key": "experimental.runtime",
+          "type": "enum",
+          "default": "\"pty\"",
+          "description": "Which backend new panes run on: \"pty\" or \"core\" (a herdr-core terminal; Unix only; falls back to the PTY when herdr-core is not usable). Restored panes keep their backend. Before rolling back to an older herdr with core panes open, close them, or kill their terminals (hc ls --label herdr.session=<name>): an older herdr does not see them and their programs keep running.",
+          "values": [
+            "pty",
+            "core"
+          ]
+        },
+        {
           "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
           "type": "boolean",
           "default": "false",
