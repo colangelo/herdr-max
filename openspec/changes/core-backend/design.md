@@ -53,7 +53,8 @@ uses the labels added here); layout in a core document (phase 4); remote machine
 
 `[experimental] runtime = "pty" | "core"`, default `"pty"`, read at each spawn (a config reload
 applies to the next new pane). Only new panes, splits, API spawns, agent starts and respawns
-consult it; restore from `session.json` and handoff adoption stay PTY in phase 2.
+consult it. A restored pane with a saved `core_terminal` reattaches to it (D10); any other restored
+pane, and a pane adopted by fd, stays PTY.
 
 When `"core"` is selected and the core client is not usable (no `hc` on `PATH`, `hello` fails, the
 protocol generation is not 1, `server.status.version` is below 0.1.21, or `terminal.run` fails), the
@@ -71,7 +72,15 @@ default core. The socket path follows core's endpoint rules (Context). When the 
 the server runs `hc server start` with `HC_SESSION` set and its own environment, minus inherited
 agent-session variables (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `HERDR_PANE_ID`, `HERDR_TAB_ID`,
 `HERDR_WORKSPACE_ID`), because core keeps the environment of whoever started or updated it (phase 0
-side finding). Our server never runs `hc update`, `hc server stop` or `hc server restart`.
+side finding). The core is never started with a launching pane's environment. Our server never
+runs `hc update`, `hc server stop` or `hc server restart`.
+
+**Core lifetime.** A core our server starts outlives our server: on macOS `hc server start` goes
+through core's one-shot launchd job (the pilot core runs with parent pid 1, in its own session, as
+does its holder), so neither our server's exit, our live handoff, our session sweep (D8) nor closing
+the pane that caused the start reaches it. A start that falls back to a direct child (core logs the
+reason in `core.log`) would not have that guarantee; the server detects it (`server.status` pid's
+parent is our pid) and logs a warning. V15 checks the lifetime.
 
 ### D3. One framed connection per server, one parse thread per pane
 
@@ -152,6 +161,14 @@ terminal and ends its own program and foreground job but does not sweep delibera
 processes (core skill); our sweep ends them, so a pane close means the same thing on both backends.
 This is local only: the pid lives on this host. Phase 5 (remote) must decide again.
 
+**The sweep never reaches core.** Checked live on hc 0.1.21 (2026-11-14, `getsid`): a core
+terminal's program is its own session leader (sid = its pid), the holder and the core server each
+lead their own sessions, and a `nohup ... &` child of the program stays in the program's session. So
+`session_processes(pid)` holds the program and its detached jobs only. As a guard against a future
+core that changes this, the core backend refuses to sweep (and logs at warn) when the program's
+session id equals the core's or any holder's (`server.status` pids), and the sweep list drops those
+pids if present. V7 asserts the core and the core's other terminals survive the close.
+
 Alternative: accept core's narrower kill and document that a detached job survives a pane close.
 Rejected: it is user-visible (a dev server keeps its port) and differs between backends.
 
@@ -162,7 +179,8 @@ Rejected: it is user-visible (a dev server keeps its port) and differs between b
   pane, through the same path hook reports take today (exact entry point chosen in the roundtable:
   `src/app/api/panes.rs` report handling and `PaneRuntime`'s `self_reported_agent_active` /
   `full_lifecycle_authority_active` flags). `state` maps: idle → idle, working → working, done →
-  done, blocked → blocked with `kind` as `blocked_reason`, error → idle with the message logged.
+  done, blocked → blocked with `kind` as `blocked_reason`, error → idle, with the message logged at warn (so an `error` report is visible in the server log
+  and not silently idle).
   `status.app` maps to our agent kind (`claude-code` → claude, `codex`, `pi`, `opencode`; unknown →
   detection decides).
 - When no `status` has arrived, screen detection runs as today (the Claude `●` busy line counts since
@@ -170,15 +188,33 @@ Rejected: it is user-visible (a dev server keeps its port) and differs between b
 - Labels `herdr.session` and `herdr.pane_id` (the public pane id) are written at `terminal.run`.
   Hooks need no change in phase 2: they reach our socket through the environment we pass.
 
-### D10. Live handoff and restart with core panes
+### D10. Live handoff and restart keep core panes running (minimal re-adoption)
 
-A core pane has no fd. In a live handoff the old server sends only PTY panes by fd; for a core pane
-`duplicate_handoff_fd` answers `Unsupported` and the handoff code treats it as not handed over: the
-old server kills its core terminal at shutdown (D8 semantics), and the new server restores it from
-`session.json` as a fresh pane, as a restart does today. The other `PaneIo` handoff steps
-(`begin_handoff`, `set_handoff_paused`, `release_after_commit`) answer `Ok(())` as no-ops for the
-core variant, and the handoff code must not count a core pane as handed over (runtime-seam D4's
-open point, decided here). Phase 3 replaces "kill and restore" with re-adoption by label.
+Chosen per herdr's review: (a) re-adopt in phase 2, not (b) kill and restore. Every beta install is
+a live handoff; with (b), everyone running `runtime = "core"` would lose every agent conversation in
+a core pane on each install, and keeping programs alive across our own replacement is the point of
+the migration.
+
+- **Persisted link.** A core pane's record in `session.json` (and in the handoff snapshot) gains an
+  optional field `core_terminal: {session, address}`. Older binaries ignore it (the persist structs
+  do not deny unknown fields); a PTY pane omits it.
+- **Leaving.** On live handoff and on `herdr server restart`, the old server detaches from core
+  panes (closes their attach channels and the connection) without killing them: a core pane counts
+  as preserved, like a PTY pane handed over by fd. On `herdr server stop`, on pane close and on a
+  pane respawn it kills them (D8), as today's semantics for those actions.
+- **Arriving.** While restoring, a pane with `core_terminal` calls `terminal.get` on that address and
+  checks `state: live` and the labels `herdr.session` and `herdr.pane_id` match. If they do, the pane
+  attaches (D5: reset, then the first paint) and publishes the terminal's pid; detection and status
+  resume. If not (terminal gone, labels differ, core unreachable), the pane is restored as today (a
+  fresh program, agent resume through `restore_argv`).
+- **Handoff steps.** For a core pane, `duplicate_handoff_fd` stays `Unsupported` (it is not sent by
+  fd); `begin_handoff`, `set_handoff_paused` and `release_after_commit` stop and resume the pane's
+  stream locally and return `Ok(())`. The handoff code must count a core pane as preserved through
+  `core_terminal`, not through an fd (runtime-seam D4's open point, decided here).
+- **Orphans.** After restore, live terminals labelled `herdr.session=<ours>` that no pane claimed are
+  left running (never killed: they may hold an agent's work) and listed in one notice with the
+  command to see them (`hc ls --label herdr.session=<name>`).
+- **Mixed sessions.** PTY panes keep handing over by fd, unchanged.
 
 ### D11. Process facts
 
@@ -192,11 +228,16 @@ does not apply: macOS privacy prompts name Herdr Core (Q9).
 - **Detection authority.** Routing `status` events as authoritative reports changes who decides a
   core pane's state. The roundtable must name the exact entry point and the tests that hold today's
   precedence for PTY panes.
-- **Handoff with mixed panes.** A bug in D10 could drop PTY panes in a handoff. `tests/live_handoff.rs`
-  plus a mixed-session test guard it.
+- **Handoff with mixed panes.** A bug in D10 could drop PTY panes in a handoff, or attach a pane to
+  the wrong terminal. `tests/live_handoff.rs`, the label check, and V10 guard it.
+- **Persisted state.** `core_terminal` is a new optional field in `session.json`: refactor-risk
+  under AGENTS.md (persisted state). Roundtable item.
 - **Hot path.** One extra channel hop per chunk per core pane. Profiled (V12).
 - **Core lifecycle.** A core we start keeps running after our server stops (by design: it owns the
-  programs). In phase 2 we kill our core terminals on shutdown, so nothing is left running.
+  programs). `herdr server stop` kills our core terminals; a handoff or restart leaves them for the
+  next server (D10).
+- **Security.** A new socket client that starts programs and passes full environments (D2-D4).
+  Two-vendor security review before the beta (house rule `security-review-two-vendors`), task 5.1.
 - **Logout (Q8, open).** Off by default; must be answered before phase 3 defaults it on.
 
 ## Roundtable
@@ -220,13 +261,17 @@ against a real hc 0.1.21+ in a scratch `HC_SESSION` and scratch XDG dirs; those 
 | V4 | input order: plain writes then a queued submission arrive text, then Enter | live: runtime-seam V14's program | the bytes | equal |
 | V5 | resize and replies: `stty size` sees the new size; `CSI 6n` after `999;999H` answers the new size; replies go as AUTOMATIC_INPUT when negotiated | live; fake core asserts the frame kind | runtime-seam V6 | equal; kind 6 seen |
 | V6 | exit mapping per D7, exactly one `PaneDied`, flag set first | fake core sends each CLOSE/`finished` case; live for `exit 3` and a signal | D7 table | each case maps as the table; one event |
-| V7 | close ends detached processes (D8) | live: the program starts `nohup sleep 300 &` and a trap logger; close the pane | the PTY backend's result for the same program | the detached pid is gone on both backends; signal logs match |
+| V7 | close ends detached processes (D8) and never reaches core | live: the program starts `nohup sleep 300 &` and a trap logger; a second core terminal runs alongside; close the pane | the PTY backend's result for the same program | the detached pid is gone on both backends; signal logs match; the core server, its holder and the second terminal are still alive |
 | V8 | status events are authoritative and detection fills in | fake core sends `status` working/idle/blocked; live Claude Code with `--settings ~/.config/claude/direct-noconnectors.settings.json` | D9 mapping; detection for a shell with no reports | pane state follows the events; a plain shell still reads idle by detection |
 | V9 | fallback: no `hc`, old version, refused connection, failed `run` → PTY pane plus one notice | fake core / no socket | D1 | pane alive on PTY; exactly one notice |
-| V10 | mixed live handoff: PTY panes survive by fd, core panes restore fresh, nothing orphaned | `tests/live_handoff.rs` style test with one PTY and one core pane (live) | D10 | PTY pid unchanged; core pane present with a new pid; old core terminal finished |
+| V10 | mixed live handoff and restart keep programs (D10) | `tests/live_handoff.rs` style test with one PTY and one core pane (live), then `herdr server restart`, then `herdr server stop` | D10 | after handoff and restart: both programs keep their pids and the core pane's screen equals `hc read`; after stop: the core terminal is finished; a pane whose terminal vanished restores fresh; an unclaimed labelled terminal survives and is named in one notice |
 | V11 | hooks still report through our API from a core pane | live: `herdr pane report-agent` from inside a core pane | today's report path | the report lands on the right pane |
-| V12 | hot path cost | `just bench-render-scale` plus phase 0's 30-terminal busy test, PTY vs core backend | the PTY numbers | core within 1.5× of PTY server CPU; scaling delta reported |
+| V12 | hot path cost | `just bench-render-scale` plus phase 0's 30-terminal busy test (30 terminals printing a 90-byte line twice a second, 30 s), PTY vs core backend | PTY baseline: herdr server 0.83 s CPU per 30 s busy and 0.23 s idle with 30 panes, server+anchor 20.4 MB footprint (phase 0 Q4); render bench in `openspec/changes/runtime-seam/bench-after.txt` | our server + core + holder within 1.5× of 0.83 s busy; render bench median within noise; scaling 1 vs 15 panes reported |
 | V13 | no `terminal.send` anywhere | architecture test over `src/` | none allowed | no match |
-| V14 | live use | a beta with `runtime = "core"` on m4m for a day (herdr installs), agents started in core panes | ac's normal day | no lost pane, no wrong state seen |
+| V15 | core lifetime (D2) | live: our server starts the core, then exits, live-hands-off and restarts; a pane that triggered the start is closed | none of those | the core pid is unchanged throughout and is not in our server's session or process group; the core's environment has no `HERDR_PANE_ID` or `CLAUDE_CODE_*` |
+| V16 | the sweep guard (D8) | unit: a fake process table where the program shares the holder's session | D8 guard | no signal sent; one warn logged |
+| V14 | live use, in a throwaway session first | a beta with `runtime = "core"` in a named throwaway herdr session `herdr-core-trial` on m4m, with herdr-core's own agent work for a day; only then an ask on the desk for ac to opt his own session in | that day | no lost pane, no wrong state, programs kept across one beta install |
 
-The table was drafted by the implementer; herdr (the lead) reviews it before code (task 1.2).
+The table was drafted by the implementer and reviewed by herdr (the lead) on 2026-11-14 at
+`99f21b7c`: approved with changes, now the D2 lifetime, D8 guard, D10 re-adoption, the error log, V7
+and V10 widened, V12 with baseline numbers, V14 in a throwaway session, and V15-V16.

@@ -4,8 +4,9 @@
 
 The server SHALL spawn new panes on the herdr-core backend only when `[experimental] runtime` is
 `"core"`. With the key unset or `"pty"`, every pane SHALL use the PTY backend and the server SHALL NOT
-connect to herdr-core. Panes restored from `session.json` or adopted by live handoff SHALL use the PTY
-backend in this phase.
+connect to herdr-core. A restored pane SHALL
+reattach to its saved core terminal when it has one; any other restored or fd-adopted pane SHALL use the
+PTY backend.
 
 #### Scenario: Default configuration
 - **WHEN** `runtime` is unset and a pane is created
@@ -73,12 +74,37 @@ authoritative report. When no report has arrived, screen detection SHALL decide 
 - **WHEN** a plain shell runs in a core pane and reports nothing
 - **THEN** the pane's state comes from screen detection
 
-### Requirement: Live handoff keeps PTY panes in a mixed session
+### Requirement: Core panes survive live handoff and restart
 
-In a live handoff, PTY panes SHALL be handed over by file descriptor as before. Core panes SHALL NOT be
-counted as handed over; the old server SHALL end their terminals and the new server SHALL restore them
-as fresh panes.
+On a live handoff or `herdr server restart`, the old server SHALL leave core panes' programs running,
+and the new server SHALL reattach each pane to its saved terminal when that terminal is live and its
+labels match the pane. PTY panes SHALL keep handing over by file descriptor.
 
-#### Scenario: Mixed session
+#### Scenario: Beta install with a core pane
 - **WHEN** a session with one PTY pane and one core pane is live-handed-off
-- **THEN** the PTY pane's program keeps its pid and the core pane is present again with a new program
+- **THEN** both programs keep their pids and the core pane shows its terminal's current screen
+
+#### Scenario: Terminal gone
+- **WHEN** a restored pane's saved terminal is no longer live
+- **THEN** the pane starts a fresh program, resuming its agent as a restore does today
+
+### Requirement: Stop ends core terminals, orphans are kept
+
+On `herdr server stop`, the session's core terminals SHALL be killed. Live terminals labelled with the
+session that no pane claims SHALL be left running and named in one notice.
+
+#### Scenario: Server stop
+- **WHEN** `herdr server stop` runs
+- **THEN** the session's core terminals are finished
+
+#### Scenario: Unclaimed terminal
+- **WHEN** a live terminal labelled with this session matches no restored pane
+- **THEN** it keeps running and one notice names it
+
+### Requirement: The session sweep never reaches herdr-core
+
+Closing a core pane SHALL NOT signal the herdr-core server, its holders or other terminals' programs.
+
+#### Scenario: Close next to another terminal
+- **WHEN** one core pane is closed while another core pane runs
+- **THEN** the core server, its holders and the other program are still running

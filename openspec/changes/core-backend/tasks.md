@@ -10,7 +10,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 ## 1. Before code
 
 - [x] 1.1 Gitea issue 280; worktree `issue/280-core-backend` from master `55815bee`
-- [ ] 1.2 Verifier review by herdr (not the implementer); record changes or sign-off in design.md
+- [x] 1.2 Verifier review by herdr: approved with changes (2026-11-14), folded into design.md
 - [ ] 1.3 Live checks that shape the design: core's first paint starts with a reset or not (D5);
   `env` in `terminal.run` replaces the core's environment fully (D4); a Claude Code hook in a core
   pane reaches our socket (V11 assumption)
@@ -18,8 +18,8 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 ## 2. Roundtable (refactor-risk)
 
 - [ ] 2.1 `roundtable.md`: protected behaviour (PTY panes unchanged; detection precedence; handoff
-  of PTY panes; client protocol), the exact entry point for status reports (D9), the handoff code
-  path for an `Unsupported` pane (D10), findings
+  of PTY panes; client protocol; the new `core_terminal` field in persisted state), the exact entry
+  point for status reports (D9), the handoff code path for a core pane (D10), findings
 
 ## 3. Client and fake core (tests first)
 
@@ -39,7 +39,9 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 - [ ] 4.3 Reattach with reset before repaint (D5); V3
 - [ ] 4.4 `terminate_session`: kill, then the local sweep (D8); V7
 - [ ] 4.5 Status events as authoritative reports (D9); V8
-- [ ] 4.6 Handoff with core panes (D10); V10
+- [ ] 4.6 Re-adoption (D10): `core_terminal` in the pane snapshot, detach on handoff and restart,
+  label-checked reattach on restore, kill on stop, orphan notice; V10
+- [ ] 4.6a Core lifetime and the sweep guard; V15, V16
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
   `docs/next` config reference
 - [ ] 4.8 `just core-live-test` recipe; V11
@@ -47,7 +49,10 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 5. Ship
 
-- [ ] 5.1 CI green on Linux, macOS, Windows (draft PR for CI)
-- [ ] 5.2 herdr merges, cuts the beta, installs; `runtime = "core"` turned on for m4m only (V14)
+- [ ] 5.1 Two-vendor security review of D2-D4 (ask the security session); fix or answer findings
+- [ ] 5.1a CI green on Linux, macOS, Windows (draft PR for CI)
+- [ ] 5.2 herdr merges, cuts the beta, installs; `runtime = "core"` only in the throwaway session
+  `herdr-core-trial` on m4m for a day of herdr-core's agent work (V14)
+- [ ] 5.2a Then an ask on the desk: does ac want `runtime = "core"` in his own session
 - [ ] 5.3 A day of use; SHAs, beta and notes on issue 280; close it
 - [ ] 5.4 Archive; tick 4.2 in `openspec/changes/herdr-core-client/tasks.md`

@@ -31,8 +31,10 @@ https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/267 (the migration).
     stream (phase 0 Q13: `send` pastes onto a person's unfinished draft after 60 s).
 - If core is unavailable (no `hc`, too old, cannot connect), the pane starts on the PTY backend and
   the client shows one notice.
-- Live handoff with core panes in the session keeps every PTY pane; core panes are not handed over
-  by fd (they answer `Unsupported`) and are restored as fresh panes until phase 3.
+- Live handoff and `herdr server restart` keep core panes' programs running: the old server
+  detaches, the new one reattaches through a `core_terminal` link saved with the pane and checked
+  against the labels (minimal re-adoption, pulled into phase 2 so a beta install does not end every
+  agent in a core pane). PTY panes keep handing over by fd.
 
 ## Capabilities
 
@@ -49,9 +51,11 @@ None. With `runtime = "pty"` (the default) nothing changes.
 
 - Code: new `src/pane/runtime_io/core/` (client, framing, backend); `src/pane/runtime_io/mod.rs` (the
   `Core` variant); `src/pane.rs` spawn selection; `src/config/model.rs` (`runtime`); the live
-  handoff path (skip core panes); detection authority (status events); docs in `docs/next`.
+  handoff and restore paths (preserve and reattach core panes, `core_terminal` in
+  `src/persist/snapshot.rs`); detection authority (status events); docs in `docs/next`.
 - Dependencies: none new (std Unix sockets, `serde_json`, existing threads).
 - Hot path: per chunk, one channel hop from the connection's reader to the pane's parse thread.
   Profiled with 1 and 15 panes, and with phase 0's 30-terminal busy test, against the PTY backend.
 - Platforms: Unix only; `runtime = "core"` on Windows logs a warning and uses the PTY backend.
-- Risk: refactor-risk (pane runtime, handoff, detection authority). Roundtable before code.
+- Risk: refactor-risk (pane runtime, handoff, detection authority, a new optional `session.json`
+  field). Roundtable before code. Two-vendor security review before the beta.
