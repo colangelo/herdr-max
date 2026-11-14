@@ -83,6 +83,18 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct CoreClient {
     inner: Arc<Inner>,
+    _handle: Arc<Handle>,
+}
+
+/// Shuts the connection when the last client handle goes. The reader thread
+/// keeps `Inner`, so without this a dropped client (one refused for its
+/// version, say) would leave its thread and connection behind for good.
+struct Handle(UnixStream);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 impl CoreClient {
@@ -132,6 +144,11 @@ impl CoreClient {
         stream
             .set_read_timeout(None)
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
+        let handle = Arc::new(Handle(
+            stream
+                .try_clone()
+                .map_err(|err| CoreError::Unavailable(err.to_string()))?,
+        ));
 
         let inner = Arc::new(Inner {
             writer: Mutex::new(stream),
@@ -150,7 +167,10 @@ impl CoreClient {
             .name("herdr-core-reader".into())
             .spawn(move || read_loop(reader_inner, socket, leftover))
             .map_err(|err| CoreError::Unavailable(format!("reader thread: {err}")))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            _handle: handle,
+        })
     }
 
     /// Whether core negotiated AUTOMATIC_INPUT frames (terminal replies that
@@ -674,6 +694,30 @@ mod tests {
             "launchd or init leads its own session"
         );
         assert!(!shares_our_session(0), "no pid");
+    }
+
+    #[test]
+    fn dropping_the_last_client_closes_the_connection() {
+        let core = FakeCore::start();
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let other = client.clone();
+        drop(client);
+        assert!(!other.is_closed(), "a clone keeps the connection");
+        drop(other);
+        // The fake core serves one client; once it hung up, the next connect
+        // is refused at once instead of waiting out a hello timeout.
+        let started = std::time::Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        loop {
+            match CoreClient::connect(&core.socket, None) {
+                Err(_) => break,
+                Ok(_) if std::time::Instant::now() > deadline => {
+                    panic!("the dropped client's connection stayed open")
+                }
+                Ok(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
