@@ -153,6 +153,29 @@ impl EndpointAgentPresentation {
         changed
     }
 
+    /// The user asked to mark agents read: acknowledge every completion in
+    /// `workspace_id` (or all, when `None`) on this client only, then
+    /// re-project statuses.
+    pub(super) fn acknowledge_agents(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        workspace_id: Option<&str>,
+    ) {
+        for agent in &snapshot.agents {
+            if workspace_id.is_some_and(|id| agent.workspace_id != id) {
+                continue;
+            }
+            let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
+            *acknowledged = (*acknowledged).max(agent.state_change_seq);
+        }
+        // Always re-project: the same acknowledgement is applied to more than
+        // one copy of the snapshot, and only the first sees a change.
+        for agent in &mut snapshot.agents {
+            agent.agent_status = self.projected_status(agent);
+        }
+        project_aggregate_status(snapshot);
+    }
+
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
         self.completed.get(&agent.pane_id).is_none_or(|completion| {
             self.acknowledged

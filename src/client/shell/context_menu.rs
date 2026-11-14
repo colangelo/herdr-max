@@ -260,13 +260,37 @@ impl ClientShellState {
             && self.supports_endpoint_method(&method)
     }
 
+    /// Acknowledge locally, then ask the server, so the JSON API agrees.
     fn mark_seen(&mut self, workspace_id: Option<String>, outcome: &mut ClientShellInput) {
+        self.acknowledge_agents_locally(workspace_id.as_deref());
         self.push_endpoint_method(
             crate::api::schema::Method::PaneMarkSeen(crate::api::schema::PaneMarkSeenParams {
                 workspace_id,
             }),
             outcome,
         );
+    }
+
+    /// `done` is per client: clear this client's own completion bookkeeping
+    /// for the agents in scope (all agents when `workspace_id` is `None`).
+    fn acknowledge_agents_locally(&mut self, workspace_id: Option<&str>) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        else {
+            return;
+        };
+        if let Some(snapshot) = endpoint.snapshot.as_deref_mut() {
+            endpoint
+                .agent_presentation
+                .acknowledge_agents(snapshot, workspace_id);
+        }
+        if let Some(snapshot) = self.snapshot.as_deref_mut() {
+            endpoint
+                .agent_presentation
+                .acknowledge_agents(snapshot, workspace_id);
+        }
     }
 
     /// A shared list chord: a row, half the menu, or an end; clamped.

@@ -1,7 +1,7 @@
 //! Fork issue 276: the "Mark space read" / "Mark all read" context-menu items.
 
 use super::*;
-use crate::api::schema::Method;
+use crate::api::schema::{AgentStatus, Method};
 
 fn agent(pane: &str, workspace: &str, status: &str) -> crate::protocol::ClientShellAgent {
     serde_json::from_value(serde_json::json!({
@@ -13,36 +13,54 @@ fn agent(pane: &str, workspace: &str, status: &str) -> crate::protocol::ClientSh
     .unwrap()
 }
 
-/// Two spaces, `ws_1` with a working agent and `ws_2` with agents in `ws2_status`.
+/// Two spaces; each agent is `working`, `idle` or `done`. A `done` agent is
+/// driven through the client's real completion projection: it is shown working
+/// in one snapshot and idle with a newer sequence in the next.
 fn state_with(
     ws1_status: &str,
     ws2_status: &str,
     methods: Option<Vec<String>>,
 ) -> ClientShellState {
-    let mut projected = snapshot();
-    let mut second = projected.workspaces[0].clone();
-    second.workspace_id = "ws_2".into();
-    second.focused = false;
-    projected.workspaces.push(second);
-    projected.agents = vec![
-        agent("w1:p1", "ws_1", ws1_status),
-        agent("w2:p1", "ws_2", ws2_status),
-    ];
+    let build = |second_pass: bool| {
+        let mut projected = snapshot();
+        let mut second = projected.workspaces[0].clone();
+        second.workspace_id = "ws_2".into();
+        second.focused = false;
+        projected.workspaces.push(second);
+        let wire = |status: &str| {
+            match (status, second_pass) {
+                ("done", false) => "working",
+                ("done", true) => "idle",
+                (other, _) => other,
+            }
+            .to_owned()
+        };
+        let mut agents = vec![
+            agent("w1:p1", "ws_1", &wire(ws1_status)),
+            agent("w2:p1", "ws_2", &wire(ws2_status)),
+        ];
+        for agent in &mut agents {
+            agent.state_change_seq = if second_pass { 2 } else { 1 };
+        }
+        projected.agents = agents;
+        projected
+    };
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(projected));
-    // Setting a snapshot re-projects `done` from the client's own completion
-    // bookkeeping; the menu reads the projected status, so pin it directly.
-    for agent in &mut state.snapshot.as_deref_mut().unwrap().agents {
-        agent.agent_status =
-            serde_json::from_value(serde_json::json!(if agent.workspace_id == "ws_1" {
-                ws1_status
-            } else {
-                ws2_status
-            }))
-            .unwrap();
-    }
+    state.set_snapshot(Box::new(build(false)));
+    state.set_snapshot(Box::new(build(true)));
     state.set_endpoint_methods(methods);
     state
+}
+
+fn statuses(state: &ClientShellState) -> Vec<AgentStatus> {
+    state
+        .snapshot
+        .as_deref()
+        .unwrap()
+        .agents
+        .iter()
+        .map(|agent| agent.agent_status)
+        .collect()
 }
 
 fn advertised() -> Option<Vec<String>> {
@@ -89,6 +107,7 @@ fn space_menu_offers_both_items_when_its_space_is_unread() {
     );
     // It renders as real rows.
     state.set_pane_surface(surface());
+    assert!(state.overlay.is_some(), "overlay survives the surface");
     state.compose(106, 24).unwrap();
     assert_eq!(state.hits.context_menu_rows.len(), labels.len());
 }
@@ -181,4 +200,38 @@ fn agent_menu_mark_all_read_sends_the_session_scope() {
         sent(&outcome),
         vec![Method::PaneMarkSeen(Default::default())]
     );
+}
+
+#[test]
+fn choosing_an_item_acknowledges_the_in_scope_agents_on_this_client() {
+    use AgentStatus::{Done, Idle};
+    // Both spaces hold a finished, unread agent.
+    let cases = [
+        (ClientContextMenuAction::MarkSpaceRead, vec![Idle, Done]),
+        (ClientContextMenuAction::MarkAllRead, vec![Idle, Idle]),
+    ];
+    for (action, expected) in cases {
+        let mut state = state_with("done", "done", advertised());
+        // Setup: both agents finished work this client has not shown yet.
+        assert_eq!(statuses(&state), vec![Done, Done]);
+        state.open_workspace_context_menu("ws_1".into(), 5, 3);
+        // "Mark space read" is for ws_1 here; ws_2 stays unread.
+        let index = menu_actions(&state)
+            .iter()
+            .position(|a| *a == action)
+            .unwrap();
+        let mut outcome = ClientShellInput::default();
+        state.activate_context_menu_item(index, &mut outcome);
+        assert_eq!(statuses(&state), expected, "{action:?}");
+        let workspace_statuses: Vec<_> = state
+            .snapshot
+            .as_deref()
+            .unwrap()
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.agent_status)
+            .collect();
+        assert_eq!(workspace_statuses, expected, "{action:?} aggregates");
+        assert_eq!(sent(&outcome).len(), 1, "{action:?} still asks the server");
+    }
 }
