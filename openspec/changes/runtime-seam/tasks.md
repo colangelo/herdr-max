@@ -59,7 +59,10 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 
 ## 5. Ship
 
-- [ ] 5.1 Push the branch; CI green on Linux, macOS and Windows (V11)
+- [x] 5.1 Push the branch; CI green on Linux, macOS and Windows (V11): draft
+  https://github.com/colangelo/herdr-max/pull/45 at `d7a8212f`, all five jobs pass. The first
+  `Windows ConPTY package` run died starting `powershell.exe` (0xC0000142, before any herdr code);
+  the rerun passed, and the job passes on master
 - [ ] 5.2 `just beta-local`, installed by live handoff on both Macs at once (V12); report the beta
   by build number
 - [ ] 5.3 A day of use with no regression; comment SHAs, beta and notes on issue 277; close it
