@@ -21,8 +21,9 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
-use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadResult};
 use crate::render_signal::RenderSignal;
+use runtime_io::PaneIo;
+use runtime_io::PtyReadResult;
 
 mod agent_detection;
 mod background_agent;
@@ -30,9 +31,14 @@ mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;
+mod runtime_io;
 mod state;
 mod terminal;
 mod xtgettcap;
+
+// Pins the PTY-backed runtime before the backend seam (openspec/changes/runtime-seam).
+#[cfg(all(test, unix))]
+mod runtime_characterization_tests;
 
 use self::agent_detection::{
     codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
@@ -1972,7 +1978,7 @@ async fn run_terminal_compression_task(
 pub struct PaneRuntime {
     pane_id: PaneId,
     terminal: Arc<PaneTerminal>,
-    io: PaneRuntimeIo,
+    io: PaneIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
     /// Process group an agent was identified in one PTY below this pane's own,
@@ -2021,177 +2027,6 @@ impl PaneRuntime {
     }
 }
 
-enum PaneRuntimeIo {
-    Actor(PtyIoActorHandle),
-    #[cfg(test)]
-    TestChannel {
-        sender: mpsc::Sender<Bytes>,
-        resize_tx: watch::Sender<(u16, u16, u32, u32)>,
-    },
-}
-
-impl PaneRuntimeIo {
-    fn shutdown(&self) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.shutdown(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {}
-        }
-    }
-
-    #[cfg(unix)]
-    fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {
-                Err(std::io::Error::other("test runtime has no PTY master fd"))
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn foreground_process_group_id(&self) -> Option<u32> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => None,
-        }
-    }
-
-    #[cfg(unix)]
-    fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    #[cfg(unix)]
-    fn set_handoff_paused(&self, paused: bool) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                if paused {
-                    actor.begin_handoff(std::time::Duration::from_secs(1))
-                } else {
-                    actor.rollback_handoff()
-                }
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    #[cfg(unix)]
-    fn release_after_commit(&self) -> std::io::Result<()> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
-    }
-
-    fn resize(
-        &self,
-        rows: u16,
-        cols: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-        terminal_responses: Vec<Bytes>,
-    ) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                actor.resize(
-                    rows,
-                    cols,
-                    cell_width_px,
-                    cell_height_px,
-                    terminal_responses,
-                );
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { resize_tx, .. } => {
-                let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn nudge_child_redraw_after_handoff(
-        &self,
-        rows: u16,
-        cols: u16,
-        cell_width_px: u32,
-        cell_height_px: u32,
-    ) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => {}
-        }
-    }
-
-    fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
-        }
-    }
-
-    fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
-        match self {
-            PaneRuntimeIo::Actor(actor) => actor.write_terminal_response(response),
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
-                if let Some(bytes) = response() {
-                    let _ = sender.try_send(bytes);
-                }
-            }
-        }
-    }
-
-    fn queue_user_input_submission(
-        &self,
-        text: Bytes,
-        enter: Bytes,
-        delay: std::time::Duration,
-        deadline: Option<std::time::Instant>,
-    ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
-        match self {
-            PaneRuntimeIo::Actor(actor) => {
-                #[cfg(windows)]
-                return actor.queue_user_input_submission(text, enter, delay, deadline);
-                #[cfg(unix)]
-                {
-                    let _ = deadline;
-                    actor.queue_user_input_submission(text, enter, delay)
-                }
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { sender, .. } => {
-                let _ = deadline;
-                let sender = sender.clone();
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let result = sender
-                        .try_send(text)
-                        .map_err(std::io::Error::other)
-                        .and_then(|()| {
-                            std::thread::sleep(delay);
-                            sender.try_send(enter).map_err(std::io::Error::other)
-                        });
-                    let _ = reply_tx.send(result);
-                });
-                Ok(reply_rx)
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WheelRouting {
     HostScroll,
@@ -2209,102 +2044,13 @@ impl Drop for PaneRuntime {
         self.compression.abort();
         self.io.shutdown();
         if !self.preserve_processes_on_drop {
-            shutdown_pane_processes(
+            self.io.terminate_session(
                 self.pane_id,
                 self.child_pid.load(Ordering::Acquire),
                 self.child_wait_completed.as_deref(),
             );
         }
     }
-}
-
-fn process_alive_for_shutdown(
-    pid: u32,
-    child_pid: u32,
-    child_wait_completed: bool,
-    process_exists: impl FnOnce(u32) -> bool,
-) -> bool {
-    if pid == child_pid && child_wait_completed {
-        return false;
-    }
-    process_exists(pid)
-}
-
-fn wait_for_processes_to_exit(
-    pids: &[u32],
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let child_wait_completed =
-            child_wait_completed.is_some_and(|flag| flag.load(Ordering::Acquire));
-        if pids.iter().all(|pid| {
-            !process_alive_for_shutdown(
-                *pid,
-                child_pid,
-                child_wait_completed,
-                crate::platform::process_exists,
-            )
-        }) {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-fn shutdown_pane_processes(
-    pane_id: PaneId,
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-) {
-    if child_pid == 0 {
-        return;
-    }
-
-    let mut pids = crate::platform::session_processes(child_pid);
-    if pids.is_empty() {
-        pids.push(child_pid);
-    }
-    pids.sort_unstable();
-    pids.dedup();
-
-    for (signal, grace) in [
-        (
-            crate::platform::Signal::Hangup,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Terminate,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Kill,
-            std::time::Duration::from_millis(250),
-        ),
-    ] {
-        crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
-            info!(
-                pane = pane_id.raw(),
-                pid = child_pid,
-                ?signal,
-                "pane session terminated"
-            );
-            return;
-        }
-    }
-
-    warn!(
-        pane = pane_id.raw(),
-        pid = child_pid,
-        pids = ?pids,
-        "pane session still alive after forced shutdown"
-    );
 }
 
 #[cfg(unix)]
@@ -2737,7 +2483,7 @@ impl PaneRuntime {
         }
         self.compression.abort();
         self.io.shutdown();
-        shutdown_pane_processes(
+        self.io.terminate_session(
             self.pane_id,
             self.child_pid.load(Ordering::Acquire),
             self.child_wait_completed.as_deref(),
@@ -3156,23 +2902,23 @@ impl PaneRuntime {
             });
             let exit_events = events.clone();
             let cwd_process_exited = cwd_process_exited.clone();
-            let on_reader_exit = Box::new(move || {
-                cwd_process_exited.store(true, Ordering::Release);
-                // Imported handoff panes have no child wait handle, so their exit cause is
-                // unknowable. Checkpoint conservatively; normal autosave settles clean exits.
-                let _ = rt.block_on(exit_events.send(AppEvent::PaneDied {
-                    pane_id,
-                    exit_reason: crate::platform::ChildExitReason::Handoff,
-                }));
-                debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
-            });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
-                pane_id: pane_id.raw(),
+            let on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send> =
+                Box::new(move |exit_reason| {
+                    cwd_process_exited.store(true, Ordering::Release);
+                    // Imported handoff panes have no child wait handle, so their exit cause is
+                    // unknowable (the backend reports `Handoff`). Checkpoint conservatively;
+                    // normal autosave settles clean exits.
+                    let _ = rt.block_on(exit_events.send(AppEvent::PaneDied {
+                        pane_id,
+                        exit_reason,
+                    }));
+                    debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
+                });
+            PaneIo::adopt_handoff_fd(
+                pane_id,
                 master_fd,
-                initially_quiesced: true,
-                on_read,
-                on_reader_exit: Some(on_reader_exit),
-            })?)
+                runtime_io::PaneIoSink { on_read, on_exit },
+            )?
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -3262,9 +3008,6 @@ impl PaneRuntime {
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
         let content_write_lock = Arc::new(Mutex::new(()));
 
-        let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
-            .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
-
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
         #[cfg(unix)]
@@ -3277,30 +3020,10 @@ impl PaneRuntime {
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let self_reported_agent_active = Arc::new(AtomicBool::new(false));
         let managed_start_probe_window = Arc::new(Mutex::new(None));
-        {
-            let child_pid = child_pid.clone();
-            let child_wait_completed = child_wait_completed.clone();
+        let on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send> = {
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
-            let mut child = spawned.child;
-            if let Some(pid) = child.process_id() {
-                child_pid.store(pid, Ordering::Release);
-                crate::logging::pane_spawned(pane_id.raw(), pid);
-            }
-            tokio::task::spawn_blocking(move || {
-                let exit_reason = match child.wait() {
-                    Ok(status) => {
-                        let exit_reason = crate::platform::classify_child_exit(&status);
-                        let status_text = format!("{status:?}");
-                        crate::logging::pane_exited(pane_id.raw(), &status_text);
-                        exit_reason
-                    }
-                    Err(e) => {
-                        crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string());
-                        crate::platform::ChildExitReason::WaitFailed
-                    }
-                };
-                child_wait_completed.store(true, Ordering::Release);
+            Box::new(move |exit_reason| {
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied {
                     pane_id,
@@ -3308,9 +3031,10 @@ impl PaneRuntime {
                 })) {
                     error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
                 }
-            });
-        }
+            })
+        };
 
+        let spawn_child_pid = Arc::clone(&child_pid);
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -3375,16 +3099,18 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneRuntimeIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
-                pane_id: pane_id.raw(),
-                #[cfg(unix)]
-                master_fd: spawned.master_fd,
-                #[cfg(windows)]
-                master: spawned.master,
-                initially_quiesced: false,
-                on_read,
-                on_reader_exit: None,
-            })?)
+            PaneIo::spawn(
+                pane_id,
+                runtime_io::SpawnSpec {
+                    rows,
+                    cols,
+                    command: cmd,
+                    spawn_error_message,
+                },
+                runtime_io::PaneIoSink { on_read, on_exit },
+                &spawn_child_pid,
+                child_wait_completed.clone(),
+            )?
         };
 
         // --- Detection task ---
@@ -4370,17 +4096,7 @@ impl PaneRuntime {
 
     /// Preflight a complete API command without changing input queue semantics.
     pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
-        match &self.io {
-            #[cfg(unix)]
-            PaneRuntimeIo::Actor(actor) => actor.validate_input_submission(bytes),
-            #[cfg(windows)]
-            PaneRuntimeIo::Actor(_) => {
-                let _ = bytes;
-                Ok(())
-            }
-            #[cfg(test)]
-            PaneRuntimeIo::TestChannel { .. } => Ok(()),
-        }
+        self.io.validate_input_submission(bytes)
     }
 
     pub fn queue_user_input_submission(
@@ -4636,9 +4352,9 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
-    pub(crate) fn test_with_actor(actor: PtyIoActorHandle) -> Self {
+    pub(crate) fn test_with_actor(actor: crate::pty::actor::PtyIoActorHandle) -> Self {
         let (mut runtime, _) = Self::test_with_channel(80, 24);
-        runtime.io = PaneRuntimeIo::Actor(actor);
+        runtime.io = PaneIo::Actor(actor);
         runtime
     }
 
@@ -4804,7 +4520,7 @@ impl PaneRuntime {
             Self {
                 pane_id,
                 terminal,
-                io: PaneRuntimeIo::TestChannel {
+                io: PaneIo::TestChannel {
                     sender: tx,
                     resize_tx,
                 },
@@ -5365,26 +5081,6 @@ mod tests {
             "a pane with no nested identification reports its own facts"
         );
         assert_eq!(wrapped, Some(expected_cwd));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
-        assert!(!process_alive_for_shutdown(42, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_unreaped_direct_child_alive() {
-        assert!(process_alive_for_shutdown(42, 42, false, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_other_session_processes_alive() {
-        assert!(process_alive_for_shutdown(43, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_missing_process_as_gone() {
-        assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
     }
 
     #[cfg(unix)]
@@ -6285,7 +5981,7 @@ mod tests {
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6345,7 +6041,7 @@ mod tests {
             pane_id: PaneId::from_raw(0),
             terminal,
             compression,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6399,7 +6095,7 @@ mod tests {
             persistence_cwd: Mutex::new(None),
             pane_id,
             terminal,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },
@@ -6444,7 +6140,7 @@ mod tests {
             persistence_cwd: Mutex::new(None),
             pane_id,
             terminal,
-            io: PaneRuntimeIo::TestChannel {
+            io: PaneIo::TestChannel {
                 sender: tx,
                 resize_tx,
             },

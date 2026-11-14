@@ -1995,6 +1995,76 @@ fn unavailable_restored_pane_keeps_saved_cwd_in_server() {
     cleanup_spawned_herdr(restarted, base);
 }
 
+/// runtime-seam V15: a pane restored from `session.json` runs its program in
+/// the saved directory, not only reports it (the spawn goes through the pane
+/// backend seam like a new pane).
+#[test]
+fn restored_pane_program_runs_in_the_saved_cwd() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let data_dir = config_home.join(app_dir_name());
+    let saved_cwd = base.join("saved-cwd-for-test");
+    fs::create_dir_all(&saved_cwd).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+    let saved_cwd_text = saved_cwd.to_str().expect("test cwd should be UTF-8");
+    let session = serde_json::json!({
+        "version": 2,
+        "workspaces": [{
+            "custom_name": "saved-cwd",
+            "layout": { "Pane": 0 },
+            "panes": { "0": { "cwd": saved_cwd_text } },
+            "zoomed": false,
+            "focused": 0,
+            "root_pane": 0
+        }],
+        "active": 0,
+        "selected": 0
+    });
+    fs::write(
+        data_dir.join("session.json"),
+        serde_json::to_vec_pretty(&session).unwrap(),
+    )
+    .unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket);
+    let workspaces = send_json_request(
+        &api_socket,
+        r#"{"id":"workspace_list","method":"workspace.list","params":{}}"#,
+    );
+    let workspace_id = workspaces["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["label"] == "saved-cwd")
+        .and_then(|workspace| workspace["workspace_id"].as_str())
+        .expect("server should restore the saved workspace")
+        .to_owned();
+    let pane_id = first_pane_id_in_workspace(&api_socket, &workspace_id);
+
+    let marker = base.join("restored-pwd.txt");
+    send_pane_shell_command(
+        &api_socket,
+        &pane_id,
+        &format!("pwd -P > '{}'", marker.display()),
+    );
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            fs::read_to_string(&marker).is_ok_and(|text| text.ends_with('\n'))
+        }),
+        "the restored pane's shell never wrote its directory"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().trim_end(),
+        fs::canonicalize(&saved_cwd).unwrap().to_str().unwrap()
+    );
+    cleanup_spawned_herdr(spawned, base);
+}
+
 #[test]
 fn graceful_shutdown_sends_server_shutdown_to_client() {
     // Issue 2 fix: SIGINT triggers initiate_shutdown → ServerShutdown
