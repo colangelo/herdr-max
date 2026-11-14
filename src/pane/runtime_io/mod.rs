@@ -202,6 +202,25 @@ impl PaneIo {
         }
     }
 
+    /// Ends the pane's program and everything in its session. Callers stop
+    /// I/O first (`shutdown`); a pane preserved for a handoff never calls it.
+    pub(super) fn terminate_session(
+        &self,
+        pane_id: crate::layout::PaneId,
+        child_pid: u32,
+        child_wait_completed: Option<&std::sync::atomic::AtomicBool>,
+    ) {
+        match self {
+            PaneIo::Actor(_) => {
+                pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed)
+            }
+            #[cfg(test)]
+            PaneIo::TestChannel { .. } => {
+                pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed)
+            }
+        }
+    }
+
     /// Preflight a complete API command without changing input queue semantics.
     pub(super) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
         match self {

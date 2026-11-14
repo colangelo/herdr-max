@@ -2044,102 +2044,13 @@ impl Drop for PaneRuntime {
         self.compression.abort();
         self.io.shutdown();
         if !self.preserve_processes_on_drop {
-            shutdown_pane_processes(
+            self.io.terminate_session(
                 self.pane_id,
                 self.child_pid.load(Ordering::Acquire),
                 self.child_wait_completed.as_deref(),
             );
         }
     }
-}
-
-fn process_alive_for_shutdown(
-    pid: u32,
-    child_pid: u32,
-    child_wait_completed: bool,
-    process_exists: impl FnOnce(u32) -> bool,
-) -> bool {
-    if pid == child_pid && child_wait_completed {
-        return false;
-    }
-    process_exists(pid)
-}
-
-fn wait_for_processes_to_exit(
-    pids: &[u32],
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let child_wait_completed =
-            child_wait_completed.is_some_and(|flag| flag.load(Ordering::Acquire));
-        if pids.iter().all(|pid| {
-            !process_alive_for_shutdown(
-                *pid,
-                child_pid,
-                child_wait_completed,
-                crate::platform::process_exists,
-            )
-        }) {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-fn shutdown_pane_processes(
-    pane_id: PaneId,
-    child_pid: u32,
-    child_wait_completed: Option<&AtomicBool>,
-) {
-    if child_pid == 0 {
-        return;
-    }
-
-    let mut pids = crate::platform::session_processes(child_pid);
-    if pids.is_empty() {
-        pids.push(child_pid);
-    }
-    pids.sort_unstable();
-    pids.dedup();
-
-    for (signal, grace) in [
-        (
-            crate::platform::Signal::Hangup,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Terminate,
-            std::time::Duration::from_millis(250),
-        ),
-        (
-            crate::platform::Signal::Kill,
-            std::time::Duration::from_millis(250),
-        ),
-    ] {
-        crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
-            info!(
-                pane = pane_id.raw(),
-                pid = child_pid,
-                ?signal,
-                "pane session terminated"
-            );
-            return;
-        }
-    }
-
-    warn!(
-        pane = pane_id.raw(),
-        pid = child_pid,
-        pids = ?pids,
-        "pane session still alive after forced shutdown"
-    );
 }
 
 #[cfg(unix)]
@@ -2572,7 +2483,7 @@ impl PaneRuntime {
         }
         self.compression.abort();
         self.io.shutdown();
-        shutdown_pane_processes(
+        self.io.terminate_session(
             self.pane_id,
             self.child_pid.load(Ordering::Acquire),
             self.child_wait_completed.as_deref(),
@@ -5170,26 +5081,6 @@ mod tests {
             "a pane with no nested identification reports its own facts"
         );
         assert_eq!(wrapped, Some(expected_cwd));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
-        assert!(!process_alive_for_shutdown(42, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_unreaped_direct_child_alive() {
-        assert!(process_alive_for_shutdown(42, 42, false, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_keeps_other_session_processes_alive() {
-        assert!(process_alive_for_shutdown(43, 42, true, |_| true));
-    }
-
-    #[test]
-    fn shutdown_liveness_treats_missing_process_as_gone() {
-        assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
     }
 
     #[cfg(unix)]
