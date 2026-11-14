@@ -36,11 +36,15 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 4. Backend
 
-- [ ] 4.1 One shared strip list for the PTY builder and the core `env -u` wrapper; `PaneIo::Core`: spawn (D4), parse thread with credit after `on_read` (D3), input and
-  submission, replies as AUTOMATIC_INPUT, resize and FACTS (D6); V2, V4, V5
-- [ ] 4.2 Exit mapping (D7) and exactly-once; V6
+- [x] 4.1 One shared strip list for the PTY builder and the core `env -u` wrapper; `PaneIo::Core`: spawn (D4), parse thread with credit after `on_read` (D3), input and
+  submission, replies as AUTOMATIC_INPUT, resize and FACTS (D6); V2, V4, V5 live
+  (`src/pane/core_backend_live_tests.rs`, `HERDR_TEST_HC=1`). The first attach asks for the whole
+  history: without it, output printed before the attach was lost (V3 live caught it)
+- [x] 4.2 Exit mapping (D7) and exactly-once; V6 (live `core_v6_exit_is_reported_once`). A program that
+  ends before the attach (core answers `finished`) still opens: its last screen and exit are queued
 - [ ] 4.3 Reattach with reset before repaint (D5); V3
-- [ ] 4.4 `terminate_session`: kill, then the local sweep (D8); V7
+- [x] 4.4 `terminate_session`: list the session first, kill, then sweep the list (D8; listing after
+  the kill found nothing, the session leader was gone); V7 live
 - [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
   (D9, R2, R4); test: after a handoff or reattach the next report is accepted; V8
 - [ ] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);

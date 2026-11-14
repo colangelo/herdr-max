@@ -37,6 +37,9 @@ pub(in crate::pane) struct PaneIoSink {
 
 pub(super) enum PaneIo {
     Actor(PtyIoActorHandle),
+    /// The program runs in a herdr-core terminal (openspec/changes/core-backend).
+    #[cfg(unix)]
+    Core(core_backend::CorePaneIo),
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
@@ -44,10 +47,62 @@ pub(super) enum PaneIo {
     },
 }
 
+/// Which backend new panes prefer (`[experimental] runtime`, core-backend D1).
+/// On a platform without the core backend, `core` warns once and the PTY is used.
+pub(crate) fn set_preferred_runtime(core: bool) {
+    #[cfg(unix)]
+    core_backend::set_preferred(core);
+    #[cfg(not(unix))]
+    if core {
+        tracing::warn!("[experimental] runtime = \"core\" is Unix only; panes use the PTY");
+    }
+}
+
 impl PaneIo {
+    /// Starts `spec.command` on the preferred backend: a herdr-core terminal
+    /// when `runtime = "core"` and core is usable, else a PTY (D1).
+    pub(in crate::pane) fn spawn_preferred(
+        pane_id: crate::layout::PaneId,
+        spec: SpawnSpec,
+        sink: PaneIoSink,
+        child_pid: &std::sync::atomic::AtomicU32,
+        child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        if core_backend::preferred() {
+            let started = core_backend::core_spawn_from(
+                pane_id,
+                &spec.command,
+                spec.rows,
+                spec.cols,
+                super::pane_stripped_env_keys(),
+            )
+            .ok_or_else(|| {
+                core_backend::client::CoreError::Unavailable(
+                    "the command has a non-UTF-8 argument, folder or variable".into(),
+                )
+            })
+            .and_then(|spawn| {
+                core_backend::StartedCore::start(spawn, child_pid, core_backend::server_connector())
+            });
+            match started {
+                Ok(started) => {
+                    let PaneIoSink { on_read, on_exit } = sink;
+                    return started
+                        .into_pane(on_read, on_exit, child_wait_completed)
+                        .map(PaneIo::Core);
+                }
+                Err(err) => core_backend::note_unavailable(&err),
+            }
+        }
+        Self::spawn(pane_id, spec, sink, child_pid, child_wait_completed)
+    }
+
     pub(super) fn shutdown(&self) {
         match self {
             PaneIo::Actor(actor) => actor.shutdown(),
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.shutdown(),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => {}
         }
@@ -57,6 +112,8 @@ impl PaneIo {
     pub(super) fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneIo::Actor(actor) => actor.duplicate_for_handoff(),
+            #[cfg(unix)]
+            PaneIo::Core(_) => Err(no_master_fd()),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Err(no_master_fd()),
         }
@@ -66,6 +123,8 @@ impl PaneIo {
     pub(super) fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneIo::Actor(actor) => actor.foreground_process_group_id(),
+            #[cfg(unix)]
+            PaneIo::Core(_) => None,
             #[cfg(test)]
             PaneIo::TestChannel { .. } => None,
         }
@@ -75,6 +134,8 @@ impl PaneIo {
     pub(super) fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneIo::Actor(actor) => actor.begin_handoff(timeout),
+            #[cfg(unix)]
+            PaneIo::Core(_) => Ok(()),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Ok(()),
         }
@@ -90,6 +151,8 @@ impl PaneIo {
                     actor.rollback_handoff()
                 }
             }
+            #[cfg(unix)]
+            PaneIo::Core(_) => Ok(()),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Ok(()),
         }
@@ -99,6 +162,8 @@ impl PaneIo {
     pub(super) fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneIo::Actor(actor) => actor.release_after_commit(),
+            #[cfg(unix)]
+            PaneIo::Core(_) => Ok(()),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Ok(()),
         }
@@ -122,6 +187,14 @@ impl PaneIo {
                     terminal_responses,
                 );
             }
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.resize(
+                rows,
+                cols,
+                cell_width_px,
+                cell_height_px,
+                terminal_responses,
+            ),
             #[cfg(test)]
             PaneIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
@@ -141,6 +214,8 @@ impl PaneIo {
             PaneIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            #[cfg(unix)]
+            PaneIo::Core(_) => {}
             #[cfg(test)]
             PaneIo::TestChannel { .. } => {}
         }
@@ -152,6 +227,8 @@ impl PaneIo {
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneIo::Actor(actor) => actor.try_write_user_input(bytes),
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.try_send_bytes(bytes),
             #[cfg(test)]
             PaneIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -160,6 +237,8 @@ impl PaneIo {
     pub(super) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
         match self {
             PaneIo::Actor(actor) => actor.write_terminal_response(response),
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.write_terminal_response(response),
             #[cfg(test)]
             PaneIo::TestChannel { sender, .. } => {
                 if let Some(bytes) = response() {
@@ -185,6 +264,11 @@ impl PaneIo {
                     let _ = deadline;
                     actor.queue_user_input_submission(text, enter, delay)
                 }
+            }
+            #[cfg(unix)]
+            PaneIo::Core(core) => {
+                let _ = deadline;
+                core.queue_user_input_submission(text, enter, delay)
             }
             #[cfg(test)]
             PaneIo::TestChannel { sender, .. } => {
@@ -218,6 +302,10 @@ impl PaneIo {
             PaneIo::Actor(_) => {
                 pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed)
             }
+            #[cfg(unix)]
+            PaneIo::Core(core) => {
+                core_backend::terminate_session(core, pane_id, child_pid, child_wait_completed)
+            }
             #[cfg(test)]
             PaneIo::TestChannel { .. } => {
                 pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed)
@@ -235,6 +323,8 @@ impl PaneIo {
                 let _ = bytes;
                 Ok(())
             }
+            #[cfg(unix)]
+            PaneIo::Core(_) => Ok(()),
             #[cfg(test)]
             PaneIo::TestChannel { .. } => Ok(()),
         }
@@ -244,7 +334,7 @@ impl PaneIo {
 /// The answer a backend without a PTY master fd gives to a handoff by fd
 /// (runtime-seam design D4). Phase 3 matches on this kind to hand such a pane
 /// over another way.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 fn no_master_fd() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,

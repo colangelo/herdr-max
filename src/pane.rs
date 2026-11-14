@@ -22,6 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
+pub(crate) use runtime_io::set_preferred_runtime;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
 
@@ -39,6 +40,9 @@ mod xtgettcap;
 // Pins the PTY-backed runtime before the backend seam (openspec/changes/runtime-seam).
 #[cfg(all(test, unix))]
 mod runtime_characterization_tests;
+// Live checks of the herdr-core backend (openspec/changes/core-backend).
+#[cfg(all(test, unix))]
+mod core_backend_live_tests;
 
 use self::agent_detection::{
     codex_prompt_ready, decide_detection_screen_read, decide_screen_detection_publish,
@@ -148,6 +152,20 @@ const HOST_TERMINAL_HANDLE_ENV_VARS: [&str; 12] = [
     "ZELLIJ_SESSION_NAME",
     "ZELLIJ_PANE_ID",
 ];
+
+/// Every variable a pane's environment may be built without on purpose. A
+/// backend that cannot clear its runtime's own environment (herdr-core merges
+/// ours into its own) unsets those of them the pane's environment lacks
+/// (openspec/changes/core-backend, design D4).
+#[cfg_attr(not(unix), allow(dead_code))] // only the Unix core backend reads it
+pub(in crate::pane) fn pane_stripped_env_keys() -> impl Iterator<Item = &'static str> {
+    HOST_TERMINAL_HANDLE_ENV_VARS
+        .into_iter()
+        .chain(OUTER_AGENT_ENV_VARS)
+        .chain(STALE_SSH_CONNECTION_ENV_VARS)
+        .chain(STALE_PTY_PROXY_ENV_VARS)
+        .chain([crate::integration::HERDR_PANE_ID_ENV_VAR])
+}
 
 /// Identity of an agent session the server was started from. A new pane is not
 /// its child; explicit launch env can opt back in.
@@ -3106,7 +3124,7 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneIo::spawn(
+            PaneIo::spawn_preferred(
                 pane_id,
                 runtime_io::SpawnSpec {
                     rows,

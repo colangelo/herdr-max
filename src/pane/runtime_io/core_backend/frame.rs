@@ -15,7 +15,6 @@ pub(crate) mod kind {
     pub(crate) const CREDIT: u8 = 1;
     pub(crate) const CLOSE: u8 = 2;
     pub(crate) const RESIZE: u8 = 3;
-    pub(crate) const FOCUS: u8 = 4;
     pub(crate) const FACTS: u8 = 5;
     pub(crate) const AUTOMATIC_INPUT: u8 = 6;
 }

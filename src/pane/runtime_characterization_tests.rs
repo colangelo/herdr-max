@@ -9,12 +9,12 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const WAIT: Duration = Duration::from_secs(10);
+pub(super) const WAIT: Duration = Duration::from_secs(10);
 
-struct Scratch(PathBuf);
+pub(super) struct Scratch(pub(super) PathBuf);
 
 impl Scratch {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -26,7 +26,7 @@ impl Scratch {
         Self(dir.canonicalize().unwrap())
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
 }
@@ -37,7 +37,7 @@ impl Drop for Scratch {
     }
 }
 
-fn spawn_sh(
+pub(super) fn spawn_sh(
     cwd: &Path,
     script: &str,
     extra_args: &[&str],
@@ -68,7 +68,7 @@ fn spawn_sh(
     (runtime, event_rx)
 }
 
-async fn wait_for_file(path: &Path, done: impl Fn(&str) -> bool) -> String {
+pub(super) async fn wait_for_file(path: &Path, done: impl Fn(&str) -> bool) -> String {
     tokio::time::timeout(WAIT, async {
         loop {
             if let Ok(text) = std::fs::read_to_string(path) {
@@ -83,7 +83,7 @@ async fn wait_for_file(path: &Path, done: impl Fn(&str) -> bool) -> String {
     .unwrap_or_else(|_| panic!("{} never completed", path.display()))
 }
 
-async fn next_pane_died(
+pub(super) async fn next_pane_died(
     event_rx: &mut mpsc::Receiver<AppEvent>,
     within: Duration,
 ) -> Option<(PaneId, crate::platform::ChildExitReason)> {
@@ -104,7 +104,7 @@ async fn next_pane_died(
     .flatten()
 }
 
-fn wait_until_gone(pid: u32) -> bool {
+pub(super) fn wait_until_gone(pid: u32) -> bool {
     let deadline = Instant::now() + WAIT;
     while crate::platform::process_exists(pid) {
         if Instant::now() >= deadline {
@@ -274,7 +274,7 @@ async fn v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends() {
     assert_eq!(again, None, "PaneDied is sent once");
 }
 
-const SIGNAL_LOGGER: &str = r#"trap 'echo HUP >> sig.log' HUP
+pub(super) const SIGNAL_LOGGER: &str = r#"trap 'echo HUP >> sig.log' HUP
 trap 'echo TERM >> sig.log' TERM
 echo $$ > ready
 while :; do sleep 0.05; done"#;

@@ -114,8 +114,11 @@ local core anyway.
    `labels {"herdr.session": ..., "herdr.pane_id": ...}` (a JSON map; the API refuses the CLI's
    `k=v` list), `no_parent: true`, `no_notify: true`, `keep: false`,
    blocking for at most 5 s (the PTY spawn is blocking too; the macOS anchor can take longer);
-3. publishes `Terminal.pid` into `child_pid`, then calls `terminal.attach` and starts the parse
-   thread. The pid is in hand before any stream exists, so runtime-seam's F1 order is structural
+3. calls `terminal.attach` with `history` (all of it: output printed between `run` and the attach
+   has already scrolled off the first paint's screen; found by V3 live), publishes `Terminal.pid`
+   into `child_pid`, and starts the parse thread. A program that ended before the attach (core
+   answers `finished`) still gets a pane: its last screen (`terminal.read`) and its exit record
+   are queued to the parser. The pid is in hand before any stream exists, so runtime-seam's F1 order is structural
    here, not a matter of thread timing.
 
 **Stripped variables stay stripped.** Checked live (task 1.3, 2026-11-14): `terminal.run`'s `env`

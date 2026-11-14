@@ -138,14 +138,29 @@ pub(super) fn shutdown_pane_processes(
     if child_pid == 0 {
         return;
     }
+    let pids = session_pids(child_pid);
+    signal_session(pane_id, child_pid, &pids, child_wait_completed);
+}
 
+/// The program's session, the program included. Taken before anything ends the
+/// session leader: once it is gone, its session can no longer be looked up.
+pub(super) fn session_pids(child_pid: u32) -> Vec<u32> {
     let mut pids = crate::platform::session_processes(child_pid);
     if pids.is_empty() {
         pids.push(child_pid);
     }
     pids.sort_unstable();
     pids.dedup();
+    pids
+}
 
+/// Hangup, then terminate, then kill `pids`, stopping as soon as all are gone.
+pub(super) fn signal_session(
+    pane_id: PaneId,
+    child_pid: u32,
+    pids: &[u32],
+    child_wait_completed: Option<&AtomicBool>,
+) {
     for (signal, grace) in [
         (
             crate::platform::Signal::Hangup,
@@ -160,8 +175,8 @@ pub(super) fn shutdown_pane_processes(
             std::time::Duration::from_millis(250),
         ),
     ] {
-        crate::platform::signal_processes(&pids, signal);
-        if wait_for_processes_to_exit(&pids, child_pid, child_wait_completed, grace) {
+        crate::platform::signal_processes(pids, signal);
+        if wait_for_processes_to_exit(pids, child_pid, child_wait_completed, grace) {
             info!(
                 pane = pane_id.raw(),
                 pid = child_pid,

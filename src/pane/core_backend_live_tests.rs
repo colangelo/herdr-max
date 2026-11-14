@@ -1,0 +1,312 @@
+//! Live checks of the herdr-core backend against a real `hc`
+//! (openspec/changes/core-backend, design.md § Verifier). Ignored unless
+//! `HERDR_TEST_HC=1`: they start a throwaway core of their own, with its state
+//! under a short `/tmp` folder, and never touch a user's core. Nextest runs
+//! each test in its own process, so the process-wide backend choice and
+//! `HC_SOCKET` set here stay inside one test.
+
+use super::runtime_characterization_tests::{
+    next_pane_died, spawn_sh, wait_for_file, wait_until_gone, Scratch, WAIT,
+};
+use super::*;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// A throwaway core: its own session and state folder, started with
+/// variables herdr strips (`TMUX`, `CLAUDECODE`) so V2 can check they stay
+/// stripped.
+struct ScratchCore {
+    state: PathBuf,
+    session: String,
+}
+
+impl ScratchCore {
+    fn start() -> Option<Self> {
+        std::env::var_os("HERDR_TEST_HC")?;
+        let state = PathBuf::from(format!("/tmp/hct-{}", std::process::id()));
+        std::fs::create_dir_all(&state).expect("scratch core state");
+        let session = format!("t{}", std::process::id());
+        let status = std::process::Command::new("hc")
+            .args(["server", "start"])
+            .env("HC_SESSION", &session)
+            .env("XDG_STATE_HOME", &state)
+            .env_remove("XDG_RUNTIME_DIR")
+            .env("TMUX", "/tmp/tmux-leak,1,0")
+            .env("CLAUDECODE", "1")
+            .status()
+            .expect("run hc");
+        assert!(status.success(), "hc server start failed");
+        let socket = state
+            .join("herdr-core")
+            .join(&session)
+            .join(format!("{session}.sock"));
+        std::env::set_var("HC_SOCKET", &socket);
+        crate::pane::set_preferred_runtime(true);
+        Some(Self { state, session })
+    }
+
+    fn pids(&self) -> (u32, Vec<u32>) {
+        let out = std::process::Command::new("hc")
+            .args(["server", "status", "--json"])
+            .env("HC_SESSION", &self.session)
+            .env("XDG_STATE_HOME", &self.state)
+            .output()
+            .expect("hc server status");
+        let status: serde_json::Value = serde_json::from_slice(&out.stdout).expect("status json");
+        let holders = status["holders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|holder| holder["pid"].as_u64().map(|pid| pid as u32))
+            .collect();
+        (status["pid"].as_u64().unwrap_or(0) as u32, holders)
+    }
+}
+
+impl Drop for ScratchCore {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("hc")
+            .args(["server", "stop"])
+            .env("HC_SESSION", &self.session)
+            .env("XDG_STATE_HOME", &self.state)
+            .status();
+        let _ = std::fs::remove_dir_all(&self.state);
+    }
+}
+
+fn is_core(runtime: &PaneRuntime) -> bool {
+    matches!(runtime.io, PaneIo::Core(_))
+}
+
+// V2: argv, cwd and env reach a core pane's program, and variables herdr
+// strips stay stripped although the core's own environment has them.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v2_spawn_contract_and_stripped_keys() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v2");
+    let env = PaneLaunchEnv::from_extra(vec![("HERDR_SEAM_PROBE".into(), "v2-probe".into())]);
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        r#"printf '%s|%s|%s|%s|%s\n' "$0" "$(pwd -P)" "$HERDR_SEAM_PROBE" "${TMUX-unset}" "${CLAUDECODE-unset}" > out.txt"#,
+        &["seam-arg0"],
+        &env,
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime), "the pane runs on the core backend");
+    let out = wait_for_file(&scratch.path("out.txt"), |text| text.ends_with('\n')).await;
+    runtime.shutdown();
+    assert_eq!(
+        out,
+        format!("seam-arg0|{}|v2-probe|unset|unset\n", scratch.0.display())
+    );
+}
+
+// V3 (order): 20 000 numbered lines reach the parser in order through core.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v3_output_reaches_the_parser_in_order() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    const LINES: usize = 20_000;
+    let scratch = Scratch::new("core-v3");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "i=1; while [ $i -le 20000 ]; do echo $i; i=$((i+1)); done; echo SEAM-DONE; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        16 * 1024 * 1024,
+    );
+    assert!(is_core(&runtime));
+    let text = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let text = runtime.recent_text_snapshot(LINES + 100).text;
+            if text.contains("SEAM-DONE") {
+                break text;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the program finished printing");
+    runtime.shutdown();
+    let numbers: Vec<usize> = text
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    assert_eq!(numbers, (1..=LINES).collect::<Vec<_>>());
+}
+
+// V4: plain writes, then a queued submission, arrive text then Enter.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v4_input_and_queued_submission_arrive_in_order() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v4");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "stty raw -echo\necho ready > ready\ndd bs=1 count=5 2>/dev/null > in.bin\nexec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    wait_for_file(&scratch.path("ready"), |text| text.ends_with('\n')).await;
+    runtime
+        .try_send_bytes(Bytes::from_static(b"ab"))
+        .expect("plain write");
+    let submitted = runtime
+        .queue_user_input_submission(
+            Bytes::from_static(b"cd"),
+            Bytes::from_static(b"\r"),
+            Duration::from_millis(50),
+            None,
+        )
+        .expect("queue submission");
+    let result = tokio::task::spawn_blocking(move || submitted.recv_timeout(WAIT))
+        .await
+        .unwrap();
+    let input = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Ok(bytes) = std::fs::read(scratch.path("in.bin")) {
+                if bytes.len() == 5 {
+                    break bytes;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the program read five bytes");
+    runtime.shutdown();
+    assert!(
+        matches!(result, Ok(Ok(()))),
+        "submission reported {result:?}"
+    );
+    assert_eq!(input, b"abcd\r");
+}
+
+// V5: a resize reaches the program, and a cursor query after it sees the size.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v5_resize_and_queries_see_the_new_size() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v5");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "echo ready > ready\nwhile [ ! -e go ]; do sleep 0.02; done\nstty size > size.txt\nstty raw -echo\nprintf '\\033[999;999H\\033[6n'\ndd bs=1 count=9 2>/dev/null | od -An -c > reply.txt\nexec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    wait_for_file(&scratch.path("ready"), |text| text.ends_with('\n')).await;
+    runtime.resize(30, 100, 0, 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    std::fs::write(scratch.path("go"), "").unwrap();
+    let size = wait_for_file(&scratch.path("size.txt"), |text| text.ends_with('\n')).await;
+    let reply = wait_for_file(&scratch.path("reply.txt"), |text| text.contains('R')).await;
+    runtime.shutdown();
+    assert_eq!(size, "30 100\n");
+    let reply: String = reply.split_whitespace().collect();
+    assert_eq!(reply, r"033[30;100R");
+}
+
+// V6: a normal exit is reported once, as Exited.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v6_exit_is_reported_once() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v6");
+    let (runtime, mut events) = spawn_sh(
+        &scratch.0,
+        "sleep 0.2; exit 3",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    let died = next_pane_died(&mut events, WAIT).await;
+    let again = next_pane_died(&mut events, Duration::from_millis(300)).await;
+    let pane_id = runtime.pane_id;
+    runtime.shutdown();
+    assert_eq!(
+        died,
+        Some((pane_id, crate::platform::ChildExitReason::Exited))
+    );
+    assert_eq!(again, None);
+}
+
+// V7: closing a core pane ends its detached job and never reaches core.
+#[tokio::test]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v7_close_ends_detached_jobs_and_spares_core() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v7");
+    let (other, _other_events) = spawn_sh(
+        &scratch.0,
+        "exec sleep 60",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "nohup sleep 300 >/dev/null 2>&1 & echo $! > detached; exec sleep 60",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime) && is_core(&other));
+    let detached: u32 = wait_for_file(&scratch.path("detached"), |text| text.ends_with('\n'))
+        .await
+        .trim()
+        .parse()
+        .unwrap();
+    let (core_pid, holders) = core.pids();
+    let other_pid = other.child_pid().expect("other pane pid");
+
+    drop(runtime);
+
+    assert!(wait_until_gone(detached), "the detached job ended");
+    assert!(
+        crate::platform::process_exists(core_pid),
+        "core server alive"
+    );
+    for holder in holders {
+        assert!(
+            crate::platform::process_exists(holder),
+            "holder {holder} alive"
+        );
+    }
+    assert!(
+        crate::platform::process_exists(other_pid),
+        "the other pane's program alive"
+    );
+    other.shutdown();
+}

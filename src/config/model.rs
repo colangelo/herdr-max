@@ -1880,6 +1880,18 @@ impl Default for CodexAgentConfig {
 pub const DEFAULT_CODEX_APP_SERVER_SOCKET: &str =
     "~/.codex/app-server-control/app-server-control.sock";
 
+/// `[experimental] runtime` (openspec/changes/core-backend, D1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneRuntimeChoice {
+    #[default]
+    Pty,
+    Core,
+    /// Any other value: logged, and treated as `pty`.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ExperimentalConfig {
@@ -1889,6 +1901,10 @@ pub struct ExperimentalConfig {
     pub kitty_graphics: Option<bool>,
     /// Persist pane screen history to session-history.json. Default: false.
     pub pane_history: bool,
+    /// Which backend new panes run on: `"pty"` (default) or `"core"`, a
+    /// herdr-core terminal (Unix only; falls back to the PTY when core is not
+    /// usable). Existing and restored panes keep their backend.
+    pub runtime: PaneRuntimeChoice,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -3333,6 +3349,18 @@ headless_rows = 50
             config.advanced.scrollback_limit_bytes,
             DEFAULT_SCROLLBACK_LIMIT_BYTES
         );
+    }
+
+    #[test]
+    fn pane_runtime_defaults_to_pty_and_reads_core() {
+        assert_eq!(
+            Config::default().experimental.runtime,
+            PaneRuntimeChoice::Pty
+        );
+        let config: Config = toml::from_str("[experimental]\nruntime = \"core\"\n").unwrap();
+        assert_eq!(config.experimental.runtime, PaneRuntimeChoice::Core);
+        let config: Config = toml::from_str("[experimental]\nruntime = \"zfs\"\n").unwrap();
+        assert_eq!(config.experimental.runtime, PaneRuntimeChoice::Unknown);
     }
 
     #[test]

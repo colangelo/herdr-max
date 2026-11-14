@@ -555,6 +555,7 @@ impl App {
         event_hub: crate::api::EventHub,
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
+        apply_pane_runtime_choice(config.experimental.runtime);
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
@@ -1198,6 +1199,7 @@ impl App {
             self.state.cjk_ime_agents = parse_cjk_ime_agents(&config.experimental.cjk_ime_agents);
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
+            apply_pane_runtime_choice(config.experimental.runtime);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();
@@ -1307,6 +1309,16 @@ impl App {
         }
     }
 }
+
+/// Applies `[experimental] runtime` to new panes (core-backend D1).
+fn apply_pane_runtime_choice(choice: crate::config::PaneRuntimeChoice) {
+    use crate::config::PaneRuntimeChoice;
+    if choice == PaneRuntimeChoice::Unknown {
+        tracing::warn!("unknown [experimental] runtime value; new panes use the PTY");
+    }
+    crate::pane::set_preferred_runtime(choice == PaneRuntimeChoice::Core);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
