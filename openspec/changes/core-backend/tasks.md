@@ -66,8 +66,13 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   `HERDR_WORKSPACE_ID`, `CLAUDE_CODE_*`, `ANTHROPIC_*`, `CLAUDECODE` (control: a core started from
   an agent's shell hands on 11 of them). D2's warning for a core in our own session is in
   `connect_session`. V16: `the_sweep_guard_refuses_a_session_shared_with_core`
-- [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
-  `docs/next` config reference with the rollback rule
+- [x] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
+  `docs/next` config reference with the rollback rule. The notice is `AppEvent::CoreUnavailable`,
+  sent the first time a spawn falls back, shown as a toast and kept in the notification log; V9:
+  `an_unusable_core_falls_back_to_the_pty_with_one_notice` (too old, then refused) and
+  `an_unavailable_core_raises_a_notice_naming_the_reason`. It found a leak: a client refused for its
+  version kept its reader thread and connection, so each later spawn waited 5 s on a hello; the
+  last client handle now closes the connection (`dropping_the_last_client_closes_the_connection`)
 - [ ] 4.8 `just core-live-test` recipe (done: the live tests and the V10 server script); V11 open
 - [ ] 4.9 `just check` green; V12 profile, delta recorded
 
