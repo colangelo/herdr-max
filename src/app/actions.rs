@@ -1472,6 +1472,17 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::CoreUnavailable { reason } => {
+                self.post_notification(ToastNotification {
+                    kind: ToastKind::NeedsAttention,
+                    title: "herdr-core unavailable".into(),
+                    context: format!("{reason}. New panes use the PTY."),
+                    position: None,
+                    target: None,
+                    anchor_pane: None,
+                });
+                Vec::new()
+            }
             AppEvent::AgentDetectionManifestsUpdated {
                 updated, status, ..
             } => {
@@ -2372,6 +2383,23 @@ mod tests {
             state.pane_display_label(0, pane),
             "pane 1",
             "unavailable terminal keeps the stable pane number"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_core_raises_a_notice_naming_the_reason() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        state.handle_app_event(AppEvent::CoreUnavailable {
+            reason: "herdr-core 0.1.17 is older than 0.1.21".into(),
+        });
+
+        let toast = state.toast.as_ref().expect("a notice");
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "herdr-core unavailable");
+        assert_eq!(
+            toast.context,
+            "herdr-core 0.1.17 is older than 0.1.21. New panes use the PTY."
         );
     }
 

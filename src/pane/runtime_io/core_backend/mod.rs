@@ -163,11 +163,15 @@ fn parse_status(status: &Value) -> Option<ProgramStatus> {
 }
 
 /// Logs the first reason core could not be used; later ones are debug only.
-pub(crate) fn note_unavailable(err: &CoreError) {
+/// True the first time in this server's life, when the caller raises the
+/// one notice (D1).
+pub(crate) fn note_unavailable(err: &CoreError) -> bool {
     if !WARNED_UNAVAILABLE.swap(true, Ordering::AcqRel) {
         warn!(err = %err, "herdr-core unavailable; new panes use the PTY");
+        true
     } else {
         tracing::debug!(err = %err, "herdr-core unavailable; pane uses the PTY");
+        false
     }
 }
 
@@ -440,6 +444,43 @@ mod tests {
             Some(&Value::String("w1:p2".into()))
         );
         assert!(spawn.labels.contains_key("herdr.session"));
+    }
+
+    // V9 (D1): with `runtime = "core"` and a core that cannot be used (here
+    // too old, then refusing the connection), panes run on the PTY and the
+    // server raises exactly one notice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unusable_core_falls_back_to_the_pty_with_one_notice() {
+        use crate::pane::runtime_characterization_tests::{spawn_sh, Scratch};
+        let core = fake::FakeCore::start_with(|config| config.version = "0.1.17".into());
+        // Nextest runs each test in its own process, so this stays here.
+        std::env::set_var("HC_SOCKET", &core.socket);
+        set_preferred(true);
+        let scratch = Scratch::new("core-v9");
+        let mut notices = Vec::new();
+        for _ in 0..2 {
+            let (runtime, mut events) = spawn_sh(
+                &scratch.0,
+                "exec sleep 30",
+                &[],
+                &crate::pane::PaneLaunchEnv::default(),
+                24,
+                80,
+                0,
+            );
+            assert!(
+                matches!(runtime.io, crate::pane::runtime_io::PaneIo::Actor(_)),
+                "the pane runs on the PTY"
+            );
+            while let Ok(event) = events.try_recv() {
+                if let crate::events::AppEvent::CoreUnavailable { reason } = event {
+                    notices.push(reason);
+                }
+            }
+            runtime.shutdown();
+        }
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("older than"), "{notices:?}");
     }
 
     #[test]

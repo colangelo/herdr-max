@@ -124,13 +124,16 @@ pub(crate) fn set_preferred_runtime(core: bool) {
 
 impl PaneIo {
     /// Starts `spec.command` on the preferred backend: a herdr-core terminal
-    /// when `runtime = "core"` and core is usable, else a PTY (D1).
+    /// when `runtime = "core"` and core is usable, else a PTY (D1). The first
+    /// time core cannot be used, `on_unavailable` gets the reason, for the
+    /// server's one notice.
     pub(in crate::pane) fn spawn_preferred(
         pane_id: crate::layout::PaneId,
         spec: SpawnSpec,
         sink: PaneIoSink,
         child_pid: &std::sync::atomic::AtomicU32,
         child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        on_unavailable: impl FnOnce(String),
     ) -> std::io::Result<Self> {
         #[cfg(unix)]
         if core_backend::preferred() {
@@ -160,9 +163,15 @@ impl PaneIo {
                         .into_pane(on_read, on_exit, on_status, child_wait_completed)
                         .map(PaneIo::Core);
                 }
-                Err(err) => core_backend::note_unavailable(&err),
+                Err(err) => {
+                    if core_backend::note_unavailable(&err) {
+                        on_unavailable(err.to_string());
+                    }
+                }
             }
         }
+        #[cfg(not(unix))]
+        let _ = on_unavailable;
         Self::spawn(pane_id, spec, sink, child_pid, child_wait_completed)
     }
 

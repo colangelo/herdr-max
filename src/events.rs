@@ -211,6 +211,9 @@ pub enum AppEvent {
         known_agent: Option<Agent>,
         seq: Option<u64>,
     },
+    /// `[experimental] runtime = "core"` is set but herdr-core cannot be used,
+    /// so new panes run on the PTY (core-backend D1). Sent once per server.
+    CoreUnavailable { reason: String },
     /// A new version is available through the active installation manager.
     UpdateReady {
         version: String,

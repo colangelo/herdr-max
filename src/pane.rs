@@ -3273,6 +3273,7 @@ impl PaneRuntime {
 
         let spawn_child_pid = Arc::clone(&child_pid);
         let status_reporter = program_status_reporter(pane_id, events.clone());
+        let unavailable_events = events.clone();
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -3369,6 +3370,10 @@ impl PaneRuntime {
                             sink,
                             &spawn_child_pid,
                             child_wait_completed.clone(),
+                            move |reason| {
+                                let _ = unavailable_events
+                                    .try_send(AppEvent::CoreUnavailable { reason });
+                            },
                         )?
                     }
                 }
