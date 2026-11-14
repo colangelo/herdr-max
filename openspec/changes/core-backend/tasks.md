@@ -73,7 +73,8 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   `an_unavailable_core_raises_a_notice_naming_the_reason`. It found a leak: a client refused for its
   version kept its reader thread and connection, so each later spawn waited 5 s on a hello; the
   last client handle now closes the connection (`dropping_the_last_client_closes_the_connection`)
-- [ ] 4.8 `just core-live-test` recipe (done: the live tests and the V10 server script); V11 open
+- [x] 4.8 `just core-live-test` recipe: the live tests and `scripts/core_live_test.sh`; V11 there
+  (`herdr pane report-agent` run inside the core pane lands on that pane)
 - [ ] 4.9 `just check` green; V12 profile, delta recorded
 
 ## 5. Ship
