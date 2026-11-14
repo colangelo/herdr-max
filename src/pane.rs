@@ -3097,9 +3097,6 @@ impl PaneRuntime {
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
         let content_write_lock = Arc::new(Mutex::new(()));
 
-        let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
-            .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
-
         // --- Child watcher task ---
         let child_pid = Arc::new(AtomicU32::new(0));
         #[cfg(unix)]
@@ -3112,30 +3109,10 @@ impl PaneRuntime {
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let self_reported_agent_active = Arc::new(AtomicBool::new(false));
         let managed_start_probe_window = Arc::new(Mutex::new(None));
-        {
-            let child_pid = child_pid.clone();
-            let child_wait_completed = child_wait_completed.clone();
+        let on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send> = {
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
-            let mut child = spawned.child;
-            if let Some(pid) = child.process_id() {
-                child_pid.store(pid, Ordering::Release);
-                crate::logging::pane_spawned(pane_id.raw(), pid);
-            }
-            tokio::task::spawn_blocking(move || {
-                let exit_reason = match child.wait() {
-                    Ok(status) => {
-                        let exit_reason = crate::platform::classify_child_exit(&status);
-                        let status_text = format!("{status:?}");
-                        crate::logging::pane_exited(pane_id.raw(), &status_text);
-                        exit_reason
-                    }
-                    Err(e) => {
-                        crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string());
-                        crate::platform::ChildExitReason::WaitFailed
-                    }
-                };
-                child_wait_completed.store(true, Ordering::Release);
+            Box::new(move |exit_reason| {
                 // Use blocking send — PaneDied is critical, must not be dropped
                 if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied {
                     pane_id,
@@ -3143,9 +3120,10 @@ impl PaneRuntime {
                 })) {
                     error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
                 }
-            });
-        }
+            })
+        };
 
+        let spawn_child_pid = Arc::clone(&child_pid);
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -3210,16 +3188,18 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
-                pane_id: pane_id.raw(),
-                #[cfg(unix)]
-                master_fd: spawned.master_fd,
-                #[cfg(windows)]
-                master: spawned.master,
-                initially_quiesced: false,
-                on_read,
-                on_reader_exit: None,
-            })?)
+            PaneIo::spawn(
+                pane_id,
+                runtime_io::SpawnSpec {
+                    rows,
+                    cols,
+                    command: cmd,
+                    spawn_error_message,
+                },
+                runtime_io::PaneIoSink { on_read, on_exit },
+                &spawn_child_pid,
+                child_wait_completed.clone(),
+            )?
         };
 
         // --- Detection task ---

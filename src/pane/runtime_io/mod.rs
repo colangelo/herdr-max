@@ -7,7 +7,27 @@ use tokio::sync::mpsc;
 #[cfg(test)]
 use tokio::sync::watch;
 
-use crate::pty::actor::PtyIoActorHandle;
+use crate::pty::actor::{PtyIoActorHandle, ReadCallback};
+
+mod pty;
+
+/// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
+/// for now (runtime-seam design D5).
+pub(in crate::pane) struct SpawnSpec {
+    pub rows: u16,
+    pub cols: u16,
+    pub command: portable_pty::CommandBuilder,
+    /// Logged when the program cannot be started.
+    pub spawn_error_message: &'static str,
+}
+
+/// Where a backend delivers a pane's output and its exit.
+pub(in crate::pane) struct PaneIoSink {
+    /// Feeds the pane's terminal parser; called for every chunk read.
+    pub on_read: ReadCallback,
+    /// Called once, after the wait is marked complete.
+    pub on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send>,
+}
 
 pub(super) enum PaneIo {
     Actor(PtyIoActorHandle),

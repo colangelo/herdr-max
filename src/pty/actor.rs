@@ -19,7 +19,7 @@ mod windows {
         pub terminal_responses: Vec<Bytes>,
     }
 
-    type ReadCallback = Box<dyn FnMut(&[u8]) -> PtyReadResult + Send + 'static>;
+    pub(crate) type ReadCallback = Box<dyn FnMut(&[u8]) -> PtyReadResult + Send + 'static>;
     type ReaderExitCallback = Box<dyn FnOnce() + Send + 'static>;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
