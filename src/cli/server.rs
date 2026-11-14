@@ -99,11 +99,13 @@ fn server_restart(args: &[String]) -> std::io::Result<i32> {
     if crate::server::autodetect::is_server_listening()? {
         if !assume_yes {
             if !std::io::stdin().is_terminal() {
-                eprintln!("herdr server restart ends every pane's process; pass --yes to confirm");
+                eprintln!(
+                    "herdr server restart ends every pane's process (panes in herdr-core keep theirs); pass --yes to confirm"
+                );
                 return Ok(2);
             }
             eprint!(
-                "Restart the herdr server? Every pane's running process ends. Workspaces, tabs, panes and todos come back, agents resume their sessions, and open windows reattach. [y/N] "
+                "Restart the herdr server? Every pane's running process ends, except in panes that run in herdr-core. Workspaces, tabs, panes and todos come back, agents resume their sessions, and open windows reattach. [y/N] "
             );
             std::io::stderr().flush()?;
             let mut answer = String::new();
