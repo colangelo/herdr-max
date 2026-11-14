@@ -42,7 +42,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   history: without it, output printed before the attach was lost (V3 live caught it)
 - [x] 4.2 Exit mapping (D7) and exactly-once; V6 (live `core_v6_exit_is_reported_once`). A program that
   ends before the attach (core answers `finished`) still opens: its last screen and exit are queued
-- [ ] 4.3 Reattach with reset before repaint (D5); V3
+- [x] 4.3 Reattach (D5; no extra reset, core's first paint resets itself); V3 live `core_v3_reattaches_after_a_core_restart`; a core is started only before the first connection (a reconnect once started a second core)
 - [x] 4.4 `terminate_session`: list the session first, kill, then sweep the list (D8; listing after
   the kill found nothing, the session leader was gone); V7 live
 - [ ] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
