@@ -430,7 +430,8 @@ pub(crate) fn connect_session(
     start_if_missing: bool,
 ) -> Result<CoreClient, CoreError> {
     let socket = socket_path(session);
-    if !socket.exists() {
+    let started = !socket.exists();
+    if started {
         if !start_if_missing {
             return Err(CoreError::Unavailable(format!(
                 "no herdr-core socket at {}",
@@ -450,15 +451,36 @@ pub(crate) fn connect_session(
         }
     }
     let client = CoreClient::connect(&socket, on_event)?;
-    check_version(&client)?;
+    let status = check_version(&client)?;
+    // core-backend D2: a core we start must outlive us. On macOS `hc server
+    // start` goes through launchd; a start that fell back to our own child
+    // would end with this server.
+    let core_pid = status["pid"].as_u64().unwrap_or(0) as u32;
+    if started && shares_our_session(core_pid) {
+        tracing::warn!(
+            core_pid,
+            session,
+            "herdr-core runs in this server's session; it may end when this server does, and core panes with it"
+        );
+    }
     Ok(client)
 }
 
-fn check_version(client: &CoreClient) -> Result<(), CoreError> {
+/// True when `pid` is in this process's session: a core started as our
+/// child would be (D2), a launchd-started one is not.
+fn shares_our_session(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let theirs = unsafe { libc::getsid(pid as libc::pid_t) };
+    theirs > 0 && theirs == unsafe { libc::getsid(0) }
+}
+
+fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
     let status = client.call("server.status", json!({}), Duration::from_secs(5))?;
     let text = status["version"].as_str().unwrap_or_default();
     match parse_version(text) {
-        Some(version) if version >= MIN_CORE_VERSION => Ok(()),
+        Some(version) if version >= MIN_CORE_VERSION => Ok(status),
         _ => Err(CoreError::Unavailable(format!(
             "herdr-core {text} is older than {}.{}.{}",
             MIN_CORE_VERSION.0, MIN_CORE_VERSION.1, MIN_CORE_VERSION.2
@@ -642,6 +664,16 @@ mod tests {
             .err()
             .expect("refused");
         assert!(matches!(err, CoreError::Unavailable(_)));
+    }
+
+    #[test]
+    fn a_core_in_our_own_session_is_told_apart_from_a_detached_one() {
+        assert!(shares_our_session(std::process::id()), "this process");
+        assert!(
+            !shares_our_session(1),
+            "launchd or init leads its own session"
+        );
+        assert!(!shares_our_session(0), "no pid");
     }
 
     #[test]
