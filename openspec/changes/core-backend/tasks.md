@@ -54,12 +54,16 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   live `core_v10_a_kept_pane_is_reattached_by_the_next_server` (same pid, earlier screen, nothing
   typed, input works, orphan listed, close ends it). Also: a handoff import keeps the core
   programs it attached to until `assume_handoff_ownership`, so a failed import cannot end them
-- [ ] 4.6b V10 (server half) through a throwaway herdr with `runtime = "core"`: a mixed live
-  handoff completes, then `herdr server restart`, then `herdr server stop`; runs in 4.8's recipe
+- [x] 4.6b V10 (server half) through a throwaway herdr with `runtime = "core"`: a mixed live
+  handoff completes, then `herdr server restart`, then `herdr server stop`
+  (`scripts/core_live_test.sh`, in `just core-live-test`). It found that a pane restored fresh went
+  to core, against D1: restored panes now always start on the PTY (live
+  `core_v1_a_restored_pane_stays_on_the_pty`); the restart warning now says core panes keep their
+  programs
 - [ ] 4.6a Core lifetime and the sweep guard; V15, V16
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
   `docs/next` config reference with the rollback rule
-- [ ] 4.8 `just core-live-test` recipe; V11
+- [ ] 4.8 `just core-live-test` recipe (done: the live tests and the V10 server script); V11 open
 - [ ] 4.9 `just check` green; V12 profile, delta recorded
 
 ## 5. Ship
