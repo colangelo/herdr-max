@@ -47,9 +47,15 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   the kill found nothing, the session leader was gone); V7 live
 - [x] 4.5 Status events as `HookStateReported` + `AgentHintReported`, `seq = max(prev + 1, now_ns)`
   (D9, R2, R4); test: after a handoff or reattach the next report is accepted; V8
-- [ ] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);
+- [x] 4.6 Re-adoption (D10): core panes left out of the handoff fd list before any dup (R1);
   `core_terminal` in the pane snapshot, detach on handoff and `stop_for_restart` (R3),
   label-checked reattach on restore with no launch line (R6), kill on stop, orphan notice; V10
+  (pane half): fake-core tests `a_reattach_*`, `a_kept_core_pane_*`, the snapshot field test, and
+  live `core_v10_a_kept_pane_is_reattached_by_the_next_server` (same pid, earlier screen, nothing
+  typed, input works, orphan listed, close ends it). Also: a handoff import keeps the core
+  programs it attached to until `assume_handoff_ownership`, so a failed import cannot end them
+- [ ] 4.6b V10 (server half) through a throwaway herdr with `runtime = "core"`: a mixed live
+  handoff completes, then `herdr server restart`, then `herdr server stop`; runs in 4.8's recipe
 - [ ] 4.6a Core lifetime and the sweep guard; V15, V16
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
   `docs/next` config reference with the rollback rule
