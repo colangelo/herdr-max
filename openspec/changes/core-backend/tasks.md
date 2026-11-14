@@ -11,9 +11,10 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 - [x] 1.1 Gitea issue 280; worktree `issue/280-core-backend` from master `55815bee`
 - [x] 1.2 Verifier review by herdr: approved with changes (2026-11-14), folded into design.md
-- [ ] 1.3 Live checks that shape the design: core's first paint starts with a reset or not (D5);
-  `env` in `terminal.run` replaces the core's environment fully (D4); a Claude Code hook in a core
-  pane reaches our socket (V11 assumption)
+- [x] 1.3 Live checks that shape the design: the first paint starts with CAN + soft reset, so no
+  extra reset (D5); `env` merges into the core's environment and cannot unset, so programs start
+  under `/usr/bin/env -u ...` (D4); the hook-to-our-socket check moves to V11 (it needs a throwaway
+  herdr, not ac's)
 
 ## 2. Roundtable (refactor-risk)
 
@@ -33,7 +34,7 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 4. Backend
 
-- [ ] 4.1 `PaneIo::Core`: spawn (D4), parse thread with credit after `on_read` (D3), input and
+- [ ] 4.1 One shared strip list for the PTY builder and the core `env -u` wrapper; `PaneIo::Core`: spawn (D4), parse thread with credit after `on_read` (D3), input and
   submission, replies as AUTOMATIC_INPUT, resize and FACTS (D6); V2, V4, V5
 - [ ] 4.2 Exit mapping (D7) and exactly-once; V6
 - [ ] 4.3 Reattach with reset before repaint (D5); V3

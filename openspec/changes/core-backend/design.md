@@ -117,16 +117,29 @@ local core anyway.
    thread. The pid is in hand before any stream exists, so runtime-seam's F1 order is structural
    here, not a matter of thread timing.
 
+**Stripped variables stay stripped.** Checked live (task 1.3, 2026-11-14): `terminal.run`'s `env`
+is merged into the core's own environment (a probe program saw our one variable plus the ~100 the
+core started with), and its values are strings only, so it cannot unset anything. herdr strips
+variables from every pane (outer agent identity such as `CLAUDECODE` and
+`CLAUDE_CODE_CHILD_SESSION`, multiplexer markers such as `TMUX` and `ZELLIJ_*`, stale SSH and PTY
+proxy variables, and `HERDR_PANE_ID` for a pane that omits it; `src/pane.rs` around 138-255). A core
+started from such an environment would hand them back (phase 0's 401 leak). So the backend runs every
+program as `/usr/bin/env -u K1 -u K2 ... -- <argv>`, with one `-u` per key herdr strips (one shared
+list, used by the PTY path too, so the two cannot drift), and D2 still starts the core with them
+removed. `env` replaces itself with the program (same pid), so pid-based facts are unaffected;
+core's `argv` for the terminal starts with `/usr/bin/env` (cosmetic, `hc ls` only). V2 checks a
+variable present in the core's environment and stripped by herdr is absent in the program.
+
 ### D5. Output, reattach and repaint
 
 Stream DATA, including the first paint, goes through `on_read` like PTY bytes. When the stream
 closes without an exit (connection loss, core restart or update, CLOSE with no exit reason), the
 backend reconnects and reattaches with backoff (50 ms, doubling to 2 s, while the terminal is
-`live` in `terminal.get`). Before the new first paint it feeds the parser a full reset (`ESC c`)
-so the repaint is authoritative, as Q6 showed the first paint is the screen, not the missed bytes.
-Scrollback printed during the gap is lost; requesting `history` on reattach is a later improvement.
-Whether core's first paint already starts with a reset is checked live (task 3.2) and the extra
-reset kept or dropped accordingly.
+`live` in `terminal.get`). The first paint is authoritative on its own: checked live (task 1.3), it
+starts with CAN (`0x18`, cancels any half-parsed sequence), a soft reset (`CSI ! p`) and mode
+resets, then repaints the whole screen. So the backend adds no reset of its own (a full `ESC c`
+could also clear the pane's scrollback). Scrollback printed during the gap is lost; requesting
+`history` on reattach is a later improvement.
 
 ### D6. Input, replies, resize
 
@@ -256,7 +269,7 @@ against a real hc 0.1.21+ in a scratch `HC_SESSION` and scratch XDG dirs; those 
 | # | Proves | Where it meets the system | Answer key | Pass |
 |---|---|---|---|---|
 | V1 | default unchanged: `runtime` unset or `"pty"` spawns PTY panes only | config + spawn unit test; the whole existing suite | today's behaviour | no core connection opened; suite green |
-| V2 | spawn contract on core: argv, cwd and env (incl. `HERDR_PANE_ID`) reach the program | live: runtime-seam V1's program, on the core backend | the values passed in | equal |
+| V2 | spawn contract on core: argv, cwd and env (incl. `HERDR_PANE_ID`) reach the program, and a variable herdr strips stays absent even when the core's environment has it | live: runtime-seam V1's program on the core backend, with the scratch core started with `CLAUDECODE=1` and `TMUX=x` | the values passed in; the strip list | equal; stripped keys absent |
 | V3 | output order and repaint: 20 000 numbered lines in order; after a core restart mid-run, the pane's screen equals `hc read` | live; plus fake core for the reset-before-repaint order | runtime-seam V5; `hc read --lines 0` | in order; screens equal after reattach |
 | V4 | input order: plain writes then a queued submission arrive text, then Enter | live: runtime-seam V14's program | the bytes | equal |
 | V5 | resize and replies: `stty size` sees the new size; `CSI 6n` after `999;999H` answers the new size; replies go as AUTOMATIC_INPUT when negotiated | live; fake core asserts the frame kind | runtime-seam V6 | equal; kind 6 seen |
