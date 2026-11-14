@@ -9,7 +9,7 @@ CARGO_BUILD_JOBS=6 NEXTEST_TEST_THREADS=6 ZIG=/opt/homebrew/opt/zig@0.16/bin/zig
 ## 1. Before any code moves
 
 - [x] 1.1 Task worktree and branch `issue/277-runtime-seam` (wt), from current `master`
-- [ ] 1.2 Baseline: `just bench-render-scale` (1 and 15 panes), numbers saved in this change (V10)
+- [x] 1.2 Baseline: `just bench-render-scale` (1 and 15 panes), numbers saved in this change (V10)
 - [x] 1.3 Verifier review: herdr approved with additions (V13-V15; V1, V2, V3, V6, Risks)
 
 ## 2. Roundtable (refactor-risk)
