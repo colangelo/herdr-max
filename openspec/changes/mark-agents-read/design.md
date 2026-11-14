@@ -20,7 +20,9 @@ set `seen = true`, count it. Reuse the state helper style of `mark_active_tab_se
 unit-testable with `AppState::test_new()`). When `changed > 0`, mark the session dirty
 and go through the same revision/publish path a focus-driven seen sweep uses, so every
 attached client and the JSON event stream see the new `agent_status` (`done` → `idle`).
-Idempotent: a second call returns `changed: 0` and publishes nothing.
+A pane also counts as unread while its terminal still carries a completion marker
+(`last_agent_completion_seq`): clients derive their `done` indicator from that
+marker, not from `seen`, so `mark_panes_seen` clears both. Idempotent: a second call returns `changed: 0` and publishes nothing.
 
 No new socket message: the TUI calls it through the existing endpoint method path
 (`push_endpoint_method`), like `agent.pin`.

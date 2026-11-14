@@ -281,6 +281,7 @@ herdr pane move <pane_id> --tab <tab_id> --split right|down [--target-pane ID] [
 herdr pane move <pane_id> --new-tab [--workspace ID] [--label TEXT] [--focus|--no-focus]
 herdr pane move <pane_id> --new-workspace [--label TEXT] [--tab-label TEXT] [--focus|--no-focus]
 herdr pane clear [<pane_id>|--pane ID|--current]
+herdr pane mark-seen [--workspace ID]
 herdr pane close <pane_id> [--force]
 herdr pane respawn <pane_id> [--resume] [--force]
 ```
@@ -295,6 +296,12 @@ screen. When the close would drop open todos, the command returns
 `.result.closed_todos` (one entry per pane, with its `pane_id` and `todos`), so a
 script can keep them. For `pane close` and `tab close`, `--force` also answers
 the worktree group question below. Closing from the TUI still asks in a dialog.
+
+`pane mark-seen` marks every unread pane read, so finished agents stop showing
+as `done` and their spaces lose the unread mark. Without `--workspace` it covers
+the whole session; with it, only that space. The result reports `changed`, the
+number of panes that were unread, and a second run reports `0`. It sends
+`pane.mark_seen`. An unknown space fails with `workspace_not_found`.
 
 `pane respawn` restarts a pane's process in place. The pane keeps its ID,
 position, size, label, and todos; only the process is replaced. A pane launched

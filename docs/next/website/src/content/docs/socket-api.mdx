@@ -107,7 +107,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.close`, `pane.respawn`, `pane.respawn_agent`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.mark_seen`, `pane.close`, `pane.respawn`, `pane.respawn_agent`, `pane.wait_for_output` |
 | Popup | `popup.close`, `plugin.popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset`, `layout.apply_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.message`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -394,6 +394,20 @@ is a safe no-op when the scrollback is already empty:
 ```
 
 Both respond `type: "ok"`. Unknown pane ids fail with `pane_not_found`.
+
+`pane.mark_seen` (CLI `herdr pane mark-seen`) marks every unread pane read, so
+agents that finished while their tab was hidden report `agent_status` `idle`
+instead of `done` to every client. `workspace_id` limits it to one space; without
+it the whole session is cleared. The response is `type: "pane_mark_seen"` with
+`changed`, the number of panes that were unread. A second call returns
+`changed: 0` and publishes nothing. An unknown `workspace_id` fails with
+`workspace_not_found` and changes nothing. The client shell offers it as
+"Mark space read" and "Mark all read" on its right-click menus, and hides those
+items when the server does not advertise `pane.mark_seen`:
+
+```json
+{"id":"req_seen","method":"pane.mark_seen","params":{"workspace_id":"w1"}}
+```
 
 A pane's `agent_session` carries `restore_argv` when a restore would start an agent there: the exact command, resume command plus the launch flags Herdr kept (Herdr adds `--remote` for Codex panes on its app server). It is absent when the pane would come back as a plain shell, for example when the session on record belongs to an agent that no longer runs there.
 
