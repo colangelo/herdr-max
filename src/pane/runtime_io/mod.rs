@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 #[cfg(test)]
 use tokio::sync::watch;
 
+/// What the pane's read callback returns to the backend: replies to write back.
+pub(in crate::pane) use crate::pty::actor::PtyReadResult;
 use crate::pty::actor::{PtyIoActorHandle, ReadCallback};
 
 mod pty;

@@ -21,9 +21,9 @@ use tracing::{error, info, warn};
 use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
-use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyReadResult};
 use crate::render_signal::RenderSignal;
 use runtime_io::PaneIo;
+use runtime_io::PtyReadResult;
 
 mod agent_detection;
 mod background_agent;
@@ -2902,23 +2902,23 @@ impl PaneRuntime {
             });
             let exit_events = events.clone();
             let cwd_process_exited = cwd_process_exited.clone();
-            let on_reader_exit = Box::new(move || {
-                cwd_process_exited.store(true, Ordering::Release);
-                // Imported handoff panes have no child wait handle, so their exit cause is
-                // unknowable. Checkpoint conservatively; normal autosave settles clean exits.
-                let _ = rt.block_on(exit_events.send(AppEvent::PaneDied {
-                    pane_id,
-                    exit_reason: crate::platform::ChildExitReason::Handoff,
-                }));
-                debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
-            });
-            PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
-                pane_id: pane_id.raw(),
+            let on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send> =
+                Box::new(move |exit_reason| {
+                    cwd_process_exited.store(true, Ordering::Release);
+                    // Imported handoff panes have no child wait handle, so their exit cause is
+                    // unknowable (the backend reports `Handoff`). Checkpoint conservatively;
+                    // normal autosave settles clean exits.
+                    let _ = rt.block_on(exit_events.send(AppEvent::PaneDied {
+                        pane_id,
+                        exit_reason,
+                    }));
+                    debug!(pane = pane_id.raw(), "handoff PTY actor exiting");
+                });
+            PaneIo::adopt_handoff_fd(
+                pane_id,
                 master_fd,
-                initially_quiesced: true,
-                on_read,
-                on_reader_exit: Some(on_reader_exit),
-            })?)
+                runtime_io::PaneIoSink { on_read, on_exit },
+            )?
         };
 
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));

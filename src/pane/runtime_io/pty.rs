@@ -65,6 +65,27 @@ impl PaneIo {
             on_reader_exit: None,
         })?))
     }
+
+    /// Takes over a PTY whose master fd came from a live handoff. The reader
+    /// starts quiesced, as the handoff protocol expects. There is no child
+    /// handle, so the exit is reported as `Handoff` when the reader ends.
+    #[cfg(unix)]
+    pub(in crate::pane) fn adopt_handoff_fd(
+        pane_id: PaneId,
+        master_fd: std::os::fd::OwnedFd,
+        sink: PaneIoSink,
+    ) -> std::io::Result<Self> {
+        let PaneIoSink { on_read, on_exit } = sink;
+        Ok(PaneIo::Actor(PtyIoActor::spawn(PtyIoActorConfig {
+            pane_id: pane_id.raw(),
+            master_fd,
+            initially_quiesced: true,
+            on_read,
+            on_reader_exit: Some(Box::new(move || {
+                on_exit(crate::platform::ChildExitReason::Handoff)
+            })),
+        })?))
+    }
 }
 
 /// Ends a pane's process session: hangup, then terminate, then kill, each
