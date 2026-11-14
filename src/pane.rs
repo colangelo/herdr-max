@@ -4351,13 +4351,6 @@ impl PaneRuntime {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
     }
 
-    #[cfg(unix)]
-    pub(crate) fn test_with_actor(actor: crate::pty::actor::PtyIoActorHandle) -> Self {
-        let (mut runtime, _) = Self::test_with_channel(80, 24);
-        runtime.io = PaneIo::Actor(actor);
-        runtime
-    }
-
     pub(crate) fn test_with_channel_capacity(
         cols: u16,
         rows: u16,
@@ -7932,11 +7925,7 @@ mod tests {
                     pixel_height: 0,
                 })
                 .expect("openpty");
-            let master_fd = pair
-                .master
-                .as_raw_fd()
-                .expect("pty master fd is available in tests");
-            let owned = crate::pty::fd::duplicate_cloexec_fd(master_fd).expect("dup master fd");
+            let owned = runtime_io::test_dup_master_fd(&pair);
             let pane_id = PaneId::alloc();
             let state = crate::handoff_runtime::HandoffRuntimeState {
                 pane_id: pane_id.raw(),

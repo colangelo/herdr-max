@@ -7,9 +7,11 @@ use tokio::sync::mpsc;
 #[cfg(test)]
 use tokio::sync::watch;
 
+use crate::pty::actor::PtyIoActorHandle;
 /// What the pane's read callback returns to the backend: replies to write back.
 pub(in crate::pane) use crate::pty::actor::PtyReadResult;
-use crate::pty::actor::{PtyIoActorHandle, ReadCallback};
+/// The read callback a backend calls for every chunk.
+pub(in crate::pane) use crate::pty::actor::ReadCallback;
 
 mod pty;
 
@@ -262,4 +264,26 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
     }
+}
+
+/// A pane runtime whose backend is an existing PTY actor, for tests that drive
+/// the actor themselves.
+#[cfg(all(test, unix))]
+impl super::PaneRuntime {
+    pub(crate) fn test_with_actor(actor: PtyIoActorHandle) -> Self {
+        let (mut runtime, _) = Self::test_with_channel(80, 24);
+        runtime.io = PaneIo::Actor(actor);
+        runtime
+    }
+}
+
+/// A close-on-exec duplicate of a test PTY's master fd, as a live handoff
+/// delivers one to the replacement server.
+#[cfg(all(test, unix))]
+pub(in crate::pane) fn test_dup_master_fd(pair: &portable_pty::PtyPair) -> std::os::fd::RawFd {
+    let master_fd = pair
+        .master
+        .as_raw_fd()
+        .expect("pty master fd is available in tests");
+    crate::pty::fd::duplicate_cloexec_fd(master_fd).expect("dup master fd")
 }

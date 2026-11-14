@@ -5,19 +5,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Files that may name `crate::pty::`. The `src/pty/` tree and the seam,
+/// Files that may reach `crate::pty`. The `src/pty/` tree and the seam,
 /// `src/pane/runtime_io/`, are always allowed.
 const PTY_LAYER_ALLOWED: &[&str] = &[
-    // Test-only since runtime-seam task 4.6: `PaneRuntime::test_with_actor` and
-    // the handoff import test in `src/pane.rs`, and `TerminalRuntime::
-    // test_with_actor` in `src/terminal/runtime.rs`. Production code reaches
-    // the PTY layer only through `src/pane/runtime_io/`.
-    "src/pane.rs",
+    // Test-only: `TerminalRuntime::test_with_actor`, and the macOS input
+    // guard tests that drive the PTY actor themselves.
     "src/terminal/runtime.rs",
-    // Tests that build PTY types directly (runtime-seam roundtable F4).
-    "src/pane/runtime_characterization_tests.rs",
     "src/platform/macos/input_tests.rs",
 ];
+
+/// Ways a file can reach the PTY layer: a path, a `use crate::pty;` import, or
+/// a path through that import (`pty::actor::...`).
+const PTY_LAYER_NEEDLES: &[&str] = &["crate::pty", "pty::actor", "pty::fd", "pty::backend"];
 
 /// Files that may name `portable_pty`, besides `src/pty/`, `src/platform/` and
 /// the seam.
@@ -43,7 +42,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn offenders(needle: &str, always: &[&str], allowed: &[&str]) -> Vec<String> {
+fn offenders(needles: &[&str], always: &[&str], allowed: &[&str]) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rust_files(&root.join("src"), &mut files);
@@ -58,7 +57,8 @@ fn offenders(needle: &str, always: &[&str], allowed: &[&str]) -> Vec<String> {
             let inside = always.iter().any(|prefix| rel.starts_with(prefix));
             let listed = allowed.contains(&rel.as_str());
             let text = fs::read_to_string(path).expect("read source file");
-            (!inside && !listed && text.contains(needle)).then_some(rel)
+            let named = needles.iter().any(|needle| text.contains(needle));
+            (!inside && !listed && named).then_some(rel)
         })
         .collect();
     found.sort();
@@ -68,7 +68,7 @@ fn offenders(needle: &str, always: &[&str], allowed: &[&str]) -> Vec<String> {
 #[test]
 fn only_the_seam_names_the_pty_layer() {
     let found = offenders(
-        "crate::pty::",
+        PTY_LAYER_NEEDLES,
         &["src/pty/", "src/pane/runtime_io/"],
         PTY_LAYER_ALLOWED,
     );
@@ -81,7 +81,7 @@ fn only_the_seam_names_the_pty_layer() {
 #[test]
 fn only_the_seam_and_command_builders_name_portable_pty() {
     let found = offenders(
-        "portable_pty",
+        &["portable_pty"],
         &["src/pty/", "src/platform/", "src/pane/runtime_io/"],
         PORTABLE_PTY_ALLOWED,
     );

@@ -4,6 +4,7 @@
 //! Every program runs under `/bin/sh` directly, so the user's shell cannot
 //! change a result.
 
+use super::runtime_io::{PaneIoSink, ReadCallback, SpawnSpec};
 use super::*;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -224,11 +225,7 @@ async fn v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends() {
             pixel_height: 0,
         })
         .expect("openpty");
-    let master_fd = pair
-        .master
-        .as_raw_fd()
-        .expect("pty master fd is available in tests");
-    let owned = crate::pty::fd::duplicate_cloexec_fd(master_fd).expect("dup master fd");
+    let owned = runtime_io::test_dup_master_fd(&pair);
     let pane_id = PaneId::alloc();
     let state = crate::handoff_runtime::HandoffRuntimeState {
         pane_id: pane_id.raw(),
@@ -507,4 +504,51 @@ exec sleep 30"#,
         "submission reported {result:?}"
     );
     assert_eq!(input, b"abcd\r");
+}
+
+fn sh_command(script: &str) -> CommandBuilder {
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg(script);
+    command
+}
+
+fn ignore_output() -> ReadCallback {
+    Box::new(|_| PtyReadResult {
+        terminal_responses: Vec::new(),
+    })
+}
+
+// V2, driven at the seam: the wait is marked complete before `on_exit` runs,
+// seen from inside the callback (a pane-level read after PaneDied cannot tell
+// the two orders apart).
+#[tokio::test]
+async fn v2_on_exit_runs_after_the_wait_is_marked_complete() {
+    let child_pid = AtomicU32::new(0);
+    let wait_completed = Arc::new(AtomicBool::new(false));
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+    let flag = Arc::clone(&wait_completed);
+    let io = PaneIo::spawn(
+        PaneId::alloc(),
+        SpawnSpec {
+            rows: 24,
+            cols: 80,
+            command: sh_command("exit 3"),
+            spawn_error_message: "test spawn failed",
+        },
+        PaneIoSink {
+            on_read: ignore_output(),
+            on_exit: Box::new(move |reason| {
+                let _ = seen_tx.send((flag.load(Ordering::Acquire), reason));
+            }),
+        },
+        &child_pid,
+        Arc::clone(&wait_completed),
+    )
+    .expect("spawn");
+
+    let seen = seen_rx.recv_timeout(WAIT).expect("on_exit ran");
+    io.shutdown();
+
+    assert_eq!(seen, (true, crate::platform::ChildExitReason::Exited));
 }
