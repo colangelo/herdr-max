@@ -60,7 +60,12 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
   to core, against D1: restored panes now always start on the PTY (live
   `core_v1_a_restored_pane_stays_on_the_pty`); the restart warning now says core panes keep their
   programs
-- [ ] 4.6a Core lifetime and the sweep guard; V15, V16
+- [x] 4.6a Core lifetime and the sweep guard; V15, V16. V15 in `scripts/core_live_test.sh`: the core
+  our server started keeps one pid through live handoff, restart and stop, is not our child or in
+  our session, and hands its programs none of `HERDR_PANE_ID`, `HERDR_TAB_ID`,
+  `HERDR_WORKSPACE_ID`, `CLAUDE_CODE_*`, `ANTHROPIC_*`, `CLAUDECODE` (control: a core started from
+  an agent's shell hands on 11 of them). D2's warning for a core in our own session is in
+  `connect_session`. V16: `the_sweep_guard_refuses_a_session_shared_with_core`
 - [ ] 4.7 Config `[experimental] runtime`, fallback notice (D1), Windows warning; V1, V9;
   `docs/next` config reference with the rollback rule
 - [ ] 4.8 `just core-live-test` recipe (done: the live tests and the V10 server script); V11 open
