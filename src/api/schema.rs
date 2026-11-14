@@ -157,6 +157,7 @@ operations::define_operations! {
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams) => "pane.clear_agent_authority", true, false;
     PaneReleaseAgent(PaneReleaseAgentParams) => "pane.release_agent", true, false;
     PaneClearScrollback(PaneTarget) => "pane.clear_scrollback", true, true;
+    PaneMarkSeen(PaneMarkSeenParams) => "pane.mark_seen", true, true;
     PaneClose(PaneCloseParams) => "pane.close", true, true;
     PaneRespawn(PaneRespawnParams) => "pane.respawn", true, true;
     PopupClose(EmptyParams) => "popup.close", true, false;

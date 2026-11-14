@@ -6,10 +6,10 @@ use crate::api::schema::{
     PaneCopySearchParams, PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult,
     PaneFocusDirectionParams, PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo,
     PaneInputSetParams, PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot,
-    PaneLayoutSplit, PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason,
-    PaneMoveResult, PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
-    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneLayoutSplit, PaneListParams, PaneMarkSeenParams, PaneMoveDestination, PaneMoveParams,
+    PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult, PaneProcessInfo,
+    PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneRespawnParams, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
@@ -148,6 +148,36 @@ impl App {
             Ok(panes) => encode_success(id, ResponseResult::PaneList { panes }),
             Err((code, message)) => encode_error(id, &code, message),
         }
+    }
+
+    /// Fork issue 276: `pane.mark_seen` reads every unread pane in one space or
+    /// the whole session. The request is UI-changing, so attached clients
+    /// refresh; the session is marked dirty only when a pane actually changed.
+    pub(super) fn handle_pane_mark_seen(
+        &mut self,
+        id: String,
+        params: PaneMarkSeenParams,
+    ) -> String {
+        let scope = match params.workspace_id.as_deref() {
+            Some(workspace_id) => match self.parse_workspace_id(workspace_id) {
+                Some(ws_idx) => Some(ws_idx),
+                None => {
+                    return encode_error(
+                        id,
+                        "workspace_not_found",
+                        format!("workspace {workspace_id} not found"),
+                    )
+                }
+            },
+            None => None,
+        };
+        let changed = self.state.mark_panes_seen(scope);
+        encode_success(
+            id,
+            ResponseResult::PaneMarkSeen {
+                changed: u32::try_from(changed).unwrap_or(u32::MAX),
+            },
+        )
     }
 
     pub(super) fn handle_pane_current(&mut self, id: String, params: PaneCurrentParams) -> String {
@@ -2811,6 +2841,116 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    // Fork issue 276: `pane.mark_seen` over the API.
+    fn app_with_two_unread_done_workspaces() -> App {
+        let (mut app, _) = app_with_test_workspace();
+        app.state.workspaces.push(Workspace::test_new("second"));
+        app.state.ensure_test_terminals();
+        for ws_idx in 0..2 {
+            let pane = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx]
+                .pane_state(pane)
+                .unwrap()
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Idle,
+                );
+            app.state.workspaces[ws_idx].tabs[0]
+                .panes
+                .get_mut(&pane)
+                .unwrap()
+                .seen = false;
+        }
+        app
+    }
+
+    fn mark_seen(app: &mut App, workspace_id: Option<&str>) -> String {
+        app.handle_pane_mark_seen(
+            "req".into(),
+            PaneMarkSeenParams {
+                workspace_id: workspace_id.map(str::to_owned),
+            },
+        )
+    }
+
+    fn pane_statuses(app: &mut App) -> Vec<crate::api::schema::AgentStatus> {
+        let response = app.handle_pane_list("req".into(), PaneListParams::default());
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        match success.result {
+            ResponseResult::PaneList { panes } => {
+                panes.into_iter().map(|pane| pane.agent_status).collect()
+            }
+            other => panic!("expected pane list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_mark_seen_reports_changed_and_turns_done_into_idle() {
+        use crate::api::schema::AgentStatus;
+        let mut app = app_with_two_unread_done_workspaces();
+        assert_eq!(
+            pane_statuses(&mut app),
+            vec![AgentStatus::Done, AgentStatus::Done]
+        );
+        let success: SuccessResponse = serde_json::from_str(&mark_seen(&mut app, None)).unwrap();
+        assert_eq!(success.result, ResponseResult::PaneMarkSeen { changed: 2 });
+        assert_eq!(
+            pane_statuses(&mut app),
+            vec![AgentStatus::Idle, AgentStatus::Idle]
+        );
+    }
+
+    #[test]
+    fn pane_mark_seen_with_workspace_clears_only_that_space() {
+        let mut app = app_with_two_unread_done_workspaces();
+        let workspace_id = app.public_workspace_id(0);
+        let success: SuccessResponse =
+            serde_json::from_str(&mark_seen(&mut app, Some(&workspace_id))).unwrap();
+        assert_eq!(success.result, ResponseResult::PaneMarkSeen { changed: 1 });
+        assert!(
+            !app.state.workspaces[1].tabs[0]
+                .panes
+                .values()
+                .all(|pane| pane.seen),
+            "the other space stays unread"
+        );
+    }
+
+    #[test]
+    fn pane_mark_seen_unknown_workspace_is_not_found_and_changes_nothing() {
+        let mut app = app_with_two_unread_done_workspaces();
+        let response = mark_seen(&mut app, Some("w99"));
+        assert_eq!(metadata_error_code(&response), "workspace_not_found");
+        assert!(app
+            .state
+            .workspaces
+            .iter()
+            .all(|ws| ws.tabs[0].panes.values().all(|pane| !pane.seen)));
+    }
+
+    #[test]
+    fn pane_mark_seen_is_a_client_shell_ui_change_and_saves_only_when_changed() {
+        let request = crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneMarkSeen(PaneMarkSeenParams::default()),
+        };
+        assert!(crate::api::request_changes_ui(&request));
+        let mut app = app_with_two_unread_done_workspaces();
+        app.state.session_dirty = false;
+        mark_seen(&mut app, None);
+        assert!(app.state.session_dirty, "a change marks the session dirty");
+        app.state.session_dirty = false;
+        let success: SuccessResponse = serde_json::from_str(&mark_seen(&mut app, None)).unwrap();
+        assert_eq!(success.result, ResponseResult::PaneMarkSeen { changed: 0 });
+        assert!(!app.state.session_dirty, "no change publishes nothing");
     }
 
     // Fork issue 157: `pane.report_hint` over the API.

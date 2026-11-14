@@ -287,6 +287,12 @@ mod tests {
             actual.remove("pane.clear_scrollback").as_deref(),
             Some("7fae135ef10aeb8ebff20aeaedcb1fac3a560f16a277da00f2866d3ebb2877b8")
         );
+        // Fork issue 276: `pane.mark_seen` is additive, advertised for the space and
+        // agent context menus' "mark read" items.
+        assert_eq!(
+            actual.remove("pane.mark_seen").as_deref(),
+            Some("d5212f7ac49f973768efddf0dfc05524bf60136c1d68662e2552ffd6f0a5c9ae")
+        );
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")

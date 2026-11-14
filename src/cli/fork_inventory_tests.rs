@@ -108,6 +108,7 @@ fn fork_methods_are_in_the_operations_table() {
         "notification.list",
         "notification.mark_seen",
         "pane.clear_scrollback",
+        "pane.mark_seen",
         "pane.report_hint",
         "pane.respawn",
         "pane.respawn_agent",

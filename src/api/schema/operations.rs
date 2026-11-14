@@ -68,6 +68,7 @@ mod tests {
         "notification.clear",
         "notification.mark_seen",
         "pane.clear_scrollback",
+        "pane.mark_seen",
         "pane.report_hint",
         "pane.respawn",
         "pane.respawn_agent",

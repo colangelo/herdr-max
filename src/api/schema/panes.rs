@@ -420,6 +420,14 @@ pub struct PaneListParams {
     pub workspace_id: Option<String>,
 }
 
+/// Params for `pane.mark_seen`: marks every unread pane read, in one space
+/// (`workspace_id`) or, when absent, in the whole session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct PaneMarkSeenParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct PaneCurrentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -235,6 +235,9 @@ pub enum ResponseResult {
         notifications: Vec<super::notifications::NotificationInfo>,
         unread_count: u64,
     },
+    PaneMarkSeen {
+        changed: u32,
+    },
     NotificationMarkSeen {
         changed: bool,
         unread_count: u64,
