@@ -81,6 +81,25 @@ impl ClientContextMenuOverlay {
                 items
             }
         };
+        // Fork issue 276: bulk "mark read" entries, last in the menu.
+        match &self.target {
+            ClientContextMenuTarget::Workspace {
+                space_unread,
+                any_unread,
+                ..
+            } => {
+                if *space_unread {
+                    items.push(item("Mark space read", Action::MarkSpaceRead));
+                }
+                if *any_unread {
+                    items.push(item("Mark all read", Action::MarkAllRead));
+                }
+            }
+            ClientContextMenuTarget::Agent { any_unread, .. } if *any_unread => {
+                items.push(item("Mark all read", Action::MarkAllRead));
+            }
+            _ => {}
+        }
         let pinned = match &self.target {
             ClientContextMenuTarget::Workspace { pinned, .. }
             | ClientContextMenuTarget::Agent { pinned, .. } => *pinned,
@@ -118,6 +137,16 @@ impl ClientShellState {
                 })
         });
         let close_group = super::sidebar::workspace_close_is_group(snapshot, workspace);
+        let can_mark_seen = self.endpoint_advertises_mark_seen();
+        let unread = |in_space: bool| {
+            can_mark_seen
+                && snapshot.agents.iter().any(|agent| {
+                    agent.agent_status == crate::api::schema::AgentStatus::Done
+                        && (!in_space || agent.workspace_id == workspace_id)
+                })
+        };
+        let space_unread = unread(true);
+        let any_unread = unread(false);
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
@@ -134,6 +163,8 @@ impl ClientShellState {
                 has_worktree_children,
                 close_group,
                 collapsed,
+                space_unread,
+                any_unread,
             },
             x,
             y,
@@ -152,8 +183,14 @@ impl ClientShellState {
         else {
             return;
         };
+        let any_unread = self.endpoint_advertises_mark_seen()
+            && snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.agent_status == crate::api::schema::AgentStatus::Done);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Agent {
+                any_unread,
                 workspace_id: agent.workspace_id.clone(),
                 pinned: snapshot
                     .resource_facts
@@ -210,6 +247,26 @@ impl ClientShellState {
             y,
             highlighted: 0,
         }));
+    }
+
+    /// Fork issue 276: whether the connected endpoint advertises `pane.mark_seen`.
+    /// A missing method list cannot promise an additive method, so it hides the items.
+    fn endpoint_advertises_mark_seen(&self) -> bool {
+        let method = crate::api::schema::Method::PaneMarkSeen(Default::default());
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .is_some_and(|endpoint| endpoint.methods.is_some())
+            && self.supports_endpoint_method(&method)
+    }
+
+    fn mark_seen(&mut self, workspace_id: Option<String>, outcome: &mut ClientShellInput) {
+        self.push_endpoint_method(
+            crate::api::schema::Method::PaneMarkSeen(crate::api::schema::PaneMarkSeenParams {
+                workspace_id,
+            }),
+            outcome,
+        );
     }
 
     /// A shared list chord: a row, half the menu, or an end; clamped.
@@ -318,6 +375,8 @@ impl ClientShellState {
             ClientContextMenuAction::RemoveWorktree => {
                 self.begin_worktree_action_for(KeybindAction::RemoveWorktree, workspace_id, outcome)
             }
+            ClientContextMenuAction::MarkSpaceRead => self.mark_seen(Some(workspace_id), outcome),
+            ClientContextMenuAction::MarkAllRead => self.mark_seen(None, outcome),
             ClientContextMenuAction::ToggleGroup => {
                 let key = self.snapshot.as_deref().and_then(|snapshot| {
                     snapshot
@@ -507,6 +566,7 @@ impl ClientShellState {
                 outcome,
             ),
             ClientContextMenuAction::ClosePane => self.request_pane_close(pane_id, outcome),
+            ClientContextMenuAction::MarkAllRead => self.mark_seen(None, outcome),
             _ => {}
         }
     }

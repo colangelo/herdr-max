@@ -750,6 +750,8 @@ fn context_menu() -> ClientShellOverlay {
             has_worktree_children: false,
             close_group: false,
             collapsed: false,
+            space_unread: false,
+            any_unread: false,
         },
         x: 10,
         y: 5,

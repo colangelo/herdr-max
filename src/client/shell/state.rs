@@ -619,6 +619,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    MarkSpaceRead,
+    MarkAllRead,
 }
 
 #[derive(Debug)]
@@ -631,6 +633,10 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        /// The space has an unread pane and the endpoint can clear it.
+        space_unread: bool,
+        /// Any pane is unread and the endpoint can clear it.
+        any_unread: bool,
     },
     Tab {
         tab_id: String,
@@ -640,6 +646,8 @@ pub(super) enum ClientContextMenuTarget {
         pane_id: String,
         workspace_id: String,
         pinned: Option<bool>,
+        /// Any pane is unread and the endpoint can clear it.
+        any_unread: bool,
     },
     Pane {
         pane_id: String,

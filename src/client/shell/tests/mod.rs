@@ -277,6 +277,7 @@ mod input_conformance;
 mod input_domain;
 mod keybindings_settings;
 mod link_hover;
+mod mark_read;
 mod mobile;
 mod mouse_selection;
 mod move_picker;
