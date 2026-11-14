@@ -12,6 +12,10 @@ herdr-max to become one client of herdr-core, so the cut from upstream is cleane
 
 Record: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/267
 
+ac (2026-11-14) asked to start planning the migration and the split. design.md § 6 holds the staged
+plan: herdr-core owns the runtime as an installed dependency, herdr-max keeps the adapter, client and
+fleet API, starting with an adapter (Shape B) behind a config switch.
+
 ## What Changes
 
 Nothing ships yet. This change holds the exploration and the decision it leads to:

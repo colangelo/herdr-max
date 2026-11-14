@@ -597,3 +597,106 @@ Run with `HC_SESSION=pilot` and scratch XDG paths, as core:AGENTS.md § Traps as
   files were not read. The herdr.dev/mods page was not opened (its facts come from the coordinator).
 - The OSC 7501 wire format. Only the doc comments of core's `status.rs` were read.
 - The core source beyond `status.rs`, for example `viewers.rs` and `terminals.rs`.
+
+## 6. Migration plan (started 2026-11-14)
+
+ac, 2026-11-14: *"start planning for the migration / split to herdr core and our herdr max"*. This
+section turns the research above into a staged plan. It is the plan, not yet the build: each phase
+gets its own OpenSpec change (with a verifier table) and a Gitea issue before it starts.
+
+### 6.1 Why now (facts read 2026-11-14)
+
+- Upstream TUI (`herdrdev/herdr`): last commit 2026-10-29 (`2713feb5`). Two weeks with none.
+- Upstream core (`herdrdev/herdr-core`): version 0.1.21 (`crates/herdr-core/Cargo.toml`), 100+
+  commits since 2026-11-02, the newest `c84d6e76` on 2026-11-14. The pilot ran 0.1.17.
+- So the code we fork is going quiet and the runtime is where upstream work lands. Staying a TUI
+  fork means we carry the runtime (PTYs, handoff, remote) alone.
+
+### 6.2 The split: who owns what at the end
+
+| Layer | Owner at the end | Today |
+|---|---|---|
+| Processes, PTYs, survival across updates and restarts, remote machines, OSC 7501 status, docs, labels | **upstream herdr-core** (`hc`), used as an installed binary and its OpenRPC socket, never forked | our `src/pty/`, live handoff, `src/remote/` |
+| Detection for programs that do not report 7501, agent identity and resume facts, todos, tasks, plugins, metadata tokens, notifications, the herdr JSON API and CLI the fleet drives | **herdr-max** (adapter layer) | our server |
+| Rendering, input, sidebar, overlays, layout editing | **herdr-max** client (TUI) | our client |
+| Layout (spaces, tabs, splits) | a core document (§ 2d), so every client and machine shares it | `session.json` |
+
+Repo split: herdr-max stops being a fork of the TUI repo's runtime. It becomes our own client and
+adapter that depends on `hc` at a pinned minimum version. Upstream fixes we want in the runtime go to
+herdr-core as PRs (AGENTS.md: upstream contribution objective), not into a fork.
+
+### 6.3 Shape: B first (adapter), A optional later
+
+**Recommendation: Shape B.** The herdr-max server stays and becomes a core client. Its PTY layer is
+replaced by core terminals behind one seam. Everything above the seam (VT parsing with
+libghostty-vt, detection, `AppState`, the client wire protocol, the JSON API, the CLI) stays, so the
+TUI, fleet tools and plugins keep working unchanged while the runtime moves under them. Shape A (TUI
+talks to core alone) can follow once B is stable; it is optional, not a goal.
+
+Why B: blockers 2 (bytes, not cells), 3 (no layout or client verbs) and 5 (no store for todos and
+tasks) disappear in B because our server still does those jobs. Only blockers 1 (status) and 4
+(identity) remain, and 1 is already resolved for Claude Code and Codex (§ 4, live pilot).
+
+### 6.4 Phases
+
+Each phase ends in a beta that ac runs (`herdr-dogfood`), and the old path stays selectable until the
+next phase starts.
+
+0. **Pilot gates (go/no-go for phase 1).** Finish the pilot questions that can kill the plan, on
+   `HC_SESSION=pilot`, upgraded to core 0.1.21 first: Q4 footprint (30 terminals vs our server), Q6
+   `hc update` with viewers attached, Q8 logout survival, Q9 which process macOS privacy prompts name
+   (our pane anchor, gap row 16), Q11 text without Enter, Q12 read quality for manifests, Q13 `send`
+   while a person types. Q2 (hook label) and Q15 (shared layout doc) belong to phases 2 and 4. Any
+   red gate is filed upstream on herdr-core and the plan waits on it, not around it.
+1. **Runtime seam.** Define one trait for "a terminal the server drives" (spawn, write, resize,
+   read bytes, exit, process facts) at the point where `src/pane.rs` and `src/terminal/runtime.rs`
+   create PTYs through `src/pty/backend.rs`. The current PTY code becomes implementation one, with no
+   behaviour change (characterization tests first: AGENTS.md § broad refactors). Refactor-risk change:
+   run a roundtable before moving code.
+2. **Core backend behind a switch.** Implementation two: each pane is a core terminal
+   (`terminal.run`, an attach stream feeding the same libghostty-vt parser, RESIZE frames, DATA for
+   input). Config `[experimental] runtime = "core"`, off by default, new panes only. Agent identity
+   moves to labels (pilot Q2): our hooks write `herdr.agent_session`, `herdr.restore_argv`, and the
+   server reads them. Status: a 7501 report wins, our detection fills in (§ 4c).
+3. **Restore and update through core.** With the core backend, a herdr-max server restart re-adopts
+   live core terminals by address instead of respawning, and our live handoff is not needed for those
+   panes. Mixed sessions (some PTY, some core) must restore. Then default the switch on for m4m, then
+   both Macs.
+4. **Layout in a core document.** Move spaces, tabs and splits from `session.json` to a core doc, per
+   § 2d (shared `herdr-app` doc plus a `herdr-max` sibling, or our own doc only: ac's decision, see
+   6.6). Several herdr-max clients and Macs then see one world.
+5. **Remote through core machines.** Replace our SSH remote (`src/remote/`) with core machines
+   (`--on`, `vm/t3`), which also gives the VM harness goal (§ 4d). Remote dormancy (issue 260) must
+   carry over.
+6. **Delete the old runtime.** Remove the PTY implementation, live handoff and our remote host code
+   once nothing selects them for one release. Sync with upstream TUI stops being needed for the
+   runtime.
+
+### 6.5 What stays compatible the whole way
+
+- The fleet CLI and JSON API (`agent list`, `pane read`, `send-text --chunk`, `todo`, `agent-bell`
+  integration, `herdr-compact`, shepherd, gestore): unchanged names and fields through phase 5.
+  Pane ids stay ours; the core address is an extra field.
+- The client endpoint contract (AGENTS.md § Stable client endpoint contract): generation 1 stays.
+- Each phase is reversible by config until phase 6.
+
+### 6.6 Decisions for ac (sent to the desk)
+
+1. **Shape B first** (recommended) or go straight to A.
+2. **Layout home in phase 4:** share the desktop app's `herdr-app` document (one world with
+   herdr-app) or keep our own document (simpler, no coupling). Only matters if ac will ever open
+   herdr-app.
+
+### 6.7 Required tests by phase (verifier table, filled in per phase change)
+
+| Phase | Gate | Test |
+|---|---|---|
+| 0 | each pilot question | recorded answer in § 5 / tasks.md with numbers |
+| 1 | PTY behaviour unchanged behind the seam | existing suite green plus new characterization tests for spawn, resize, exit, process facts |
+| 2 | a core-backed pane renders, takes input, resizes, detects | integration tests against a scratch `HC_SESSION` core; live beta check |
+| 2 | identity via labels survives a server restart | test plus live check |
+| 3 | server restart re-adopts core terminals, programs untouched | pid unchanged across restart, test plus live |
+| 3 | mixed PTY/core session restores | test |
+| 4 | layout round-trips through the core doc, CAS conflict handled | tests; Q15 live |
+| 5 | remote pane on ac-mbm5 via core machine, dormancy | live check on both Macs |
+| 6 | no code path reaches `src/pty/` | build without it |

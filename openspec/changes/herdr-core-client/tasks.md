@@ -23,5 +23,15 @@
 
 ## 3. Decision
 
-- [ ] 3.1 Bring ac the blockers left after the pilot and a recommended shape (direct client or adapter)
+- [x] 3.1 Bring ac the blockers left after the pilot and a recommended shape: design.md § 6 (Shape B first), decisions on the desk (§ 6.6)
 - [ ] 3.2 On ac's choice, add spec deltas and the build plan to this change
+
+## 4. Migration (design.md § 6.4); each phase gets its own OpenSpec change and Gitea issue
+
+- [ ] 4.0 Phase 0: upgrade the pilot core to 0.1.21; answer Q4, Q6, Q8, Q9, Q11, Q12, Q13 (go/no-go)
+- [ ] 4.1 Phase 1: runtime seam over `src/pty/` (characterization tests first, roundtable)
+- [ ] 4.2 Phase 2: core backend behind `[experimental] runtime = "core"`; identity via labels (Q2); 7501 + detection
+- [ ] 4.3 Phase 3: restart re-adopts core terminals; mixed sessions; default on, m4m then both Macs
+- [ ] 4.4 Phase 4: layout in a core document (ac's choice § 6.6 item 2; Q15)
+- [ ] 4.5 Phase 5: remote via core machines; dormancy (issue 260)
+- [ ] 4.6 Phase 6: delete the PTY runtime, live handoff and our remote host
