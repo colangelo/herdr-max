@@ -109,6 +109,9 @@ impl PaneIo {
 - `child_pid: Arc<AtomicU32>` stays where the parser and detection read it; the backend publishes
   into it (the PTY backend stores `child.process_id()` at spawn, the handoff path stores the
   manifest pid). The read path keeps its single atomic load.
+- Order inside `PaneIo::spawn` (roundtable F1, F2): publish the shell pid, start the child wait,
+  then start the reader, exactly as today, so the first chunk is parsed with the pid. A failed
+  reader start keeps today's behaviour in phase 1; its fix is a follow-up.
 
 ### D3. The read path does not change
 
@@ -151,7 +154,9 @@ argument of `queue_user_input_submission`.
   `shutdown_pane_processes` reads it to skip a reaped pid (`process_alive_for_shutdown`). Moving the
   wait must keep that order. Covered by V2 and the existing `shutdown_liveness_*` tests.
 - **Drop order.** Today `Drop` aborts detection, aborts compression, shuts the actor down, then
-  terminates the session. Keep it. Covered by V3.
+  terminates the session. **No test covers this order** (V3 checks the signals, not the aborts), and
+  a test hook in production code to observe it is not worth adding. It is guarded by keeping the
+  body of `Drop` unchanged apart from renamed calls, checked in review of task 4.3.
 - **Handoff.** `tests/live_handoff.rs` is the guard; it must pass unchanged (V7).
 - **Hidden callers.** A spawn that bypasses `spawn_command_builder` would escape the seam. The
   architecture test (V9) fails on any `crate::pty::` or `portable_pty::` use outside the allowed
@@ -171,18 +176,21 @@ unmodified code first (characterization), then stays green after the move.
 
 | # | Proves | Where it meets the system | Answer key | Pass |
 |---|---|---|---|---|
-| V1 | spawn contract: argv, cwd and an env var reach the program | `PaneRuntime::spawn_*` with a real PTY; the program writes them to the screen (`#[cfg(unix)]`) | the values passed in | equal, today and after |
-| V2 | exit report: one `PaneDied` per pane, reason `Exited` for `exit 3` and `Interrupted` for a signal death, `child_wait_completed` set first | real spawn of `sh -c 'exit 3'` and `sh -c 'kill -TERM $$'`, events channel | today's classification | same reason, exactly one event, flag set before the event |
-| V3 | termination escalation: HUP, then TERM, then KILL, 250 ms apart; a HUP-honouring program gets only HUP | drop a `PaneRuntime` whose program traps signals and logs them to a file | today's order and timing | same signals in order; total under 1 s |
+| V1 | spawn contract: argv, cwd and an env var reach the program | `PaneRuntime::spawn_*` with a real PTY; the program writes them to the screen (`#[cfg(unix)]`, so it runs on macOS through the pane anchor and on Linux without it) | the values passed in | equal, today and after |
+| V2 | exit report: one `PaneDied` per pane, reason `Exited` for `exit 3` and `Interrupted` for a signal death, `child_wait_completed` set first; a pane adopted from a handoff fd reports `Handoff` once when its reader ends | real spawn of `sh -c 'exit 3'` and `sh -c 'kill -TERM $$'`; an adopted fd (as the `from_handoff_fd` test builds it) whose peer closes; events channel | today's classification | same reason, exactly one event, flag set before the event |
+| V3 | termination escalation: HUP, then TERM, then KILL; a HUP-honouring program gets only HUP | drop a `PaneRuntime` whose program traps signals and logs them to a file | today's order | same signals in the same order, and the program is gone afterwards; the elapsed time is logged, not asserted (no wall-clock limit in CI) |
 | V4 | no termination when processes are preserved for handoff | drop with `preserve_processes_on_drop = true` | program still alive | pid alive after drop |
 | V5 | output order: bytes reach the parser in order, `content_seq` moves on every chunk | program prints 20 000 numbered lines; read the history | the numbers 1..20000 | in order, no gap |
-| V6 | resize reaches the program and replies keep their order | resize, then the program runs `stty size` | the new size | equal |
+| V6 | resize reaches the program, and terminal replies keep their order | resize, then the program runs `stty size`; then it sends a cursor-position query (`CSI 6n`) followed by a marker line and reads the reply | the new size; the reply `CSI <row>;<col>R` arrives before anything typed after it | equal |
 | V7 | live handoff unchanged | `tests/live_handoff.rs`, all of it | today's suite | green, no test edited |
 | V8 | process facts unchanged: `shell_pid` is the spawned shell, `shell_at_prompt` true at an idle shell, foreground job seen while `sleep` runs | `pane.process_info` handler against a real spawn | today's answers | equal |
 | V9 | no code outside the seam names the PTY layer | architecture test over `src/` (text scan by file) | allow-list: `src/pane/io/`, `src/pty/`, `src/platform/`, the command builders (`src/integration/env.rs`, the builder functions in `src/pane.rs`, D5), and today's test-only users (`src/detect/mod.rs` tests, `src/pane/terminal/migration_tests.rs`, `src/server/headless/tests/mod.rs`, `src/terminal/runtime.rs::test_with_actor`, which becomes `test_with_pane_io`) | no other file matches `crate::pty::` or `portable_pty` |
 | V10 | the read path costs the same | `just bench-render-scale`, 1 and 15 panes, before and after | before numbers | within run-to-run noise; delta reported in the PR |
 | V11 | the whole suite and every platform build | `just check`; CI on Linux, macOS and Windows (Windows lint is skipped on macOS by design) | green | green |
+| V13 | macOS: the pane anchor stays the responsible process (the privacy-prompt fix, `openspec/changes/pane-anchor`) | `#[cfg(target_os = "macos")]` test: the pane's program asks `responsibility_get_pid_responsible_for_pid` for itself (as phase 0's `resp.c` did) | the anchor's pid, not the server's | equal, today and after |
+| V14 | input order: plain writes, then a queued submission, arrive as written, text then Enter after the delay | a program that logs raw input bytes (`stty raw`); `try_send_bytes` then `queue_user_input_submission` | the bytes in order | equal; the Windows `deadline` argument stays (Windows CI build, V11) |
+| V15 | a pane restored from `session.json` spawns through the seam in its saved cwd | the restore path (`src/persist/restore.rs`) driven by a test snapshot with a saved cwd; the program prints its cwd | the saved cwd | equal |
 | V12 | a real session still works | a beta (`just beta-local`) installed by live handoff on both Macs; ac's panes keep running; new panes, splits, an agent respawn and a server restart behave as before | ac's running herdr | no regression seen in a day of use |
 
-The table was drafted by the implementing session; rule `spec-with-verifier-table` wants it
-written or reviewed by someone else. Task 1.3 asks for that review.
+The table was drafted by the implementing session and reviewed by herdr (the lead) on 2026-11-14 at
+`91ce8175`: approved with additions, now rows V13-V15 and the V1, V2, V3, V6 and Risks changes.
