@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# V10, server half (openspec/changes/core-backend, D10): a throwaway herdr
-# with one PTY pane and one herdr-core pane goes through a live handoff, then
-# `herdr server restart`, then `herdr server stop`.
+# Server-level herdr-core checks (openspec/changes/core-backend): a throwaway
+# herdr with one PTY pane and one herdr-core pane. V15: the core it starts is
+# not tied to it; V11: a hook in the core pane reports through our API; V10:
+# a live handoff, then `herdr server restart`, then `herdr server stop`.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdr-dev-<session>` it starts there (core follows
@@ -159,6 +160,17 @@ if grep -Eq '^(HERDR_PANE_ID|HERDR_TAB_ID|HERDR_WORKSPACE_ID|CLAUDE_CODE_[A-Z_]*
 fi
 echo "ok: core $CORE runs outside our server's session, without pane or agent variables"
 
+# V11: a hook inside a core pane still reports through our API, to its pane.
+pane_get() {
+  api "{\"id\":\"v10\",\"method\":\"pane.get\",\"params\":{\"pane_id\":\"$1\"}}"
+}
+send_line "$B" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state working > $BASE/report.out 2>&1; echo \$? > $BASE/report.rc"
+wait_until "the hook report from inside B" file_has_line "$BASE/report.rc"
+[[ "$(cat "$BASE/report.rc")" == 0 ]] || fail "report-agent failed in B: $(cat "$BASE/report.out")"
+B_AGENT="$(pane_get "$B" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); p=r.get("pane", r); print(p.get("agent"), p.get("agent_status"))')"
+[[ "$B_AGENT" == "pi working" ]] || fail "B's hook report did not land on B: $B_AGENT ($(pane_get "$B"))"
+echo "ok: a hook in core pane B reported to B through our API"
+
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
   || fail "live handoff with a core pane did not complete (R1)"
@@ -194,4 +206,4 @@ fi
 # and stopping our server leave the core running.
 alive "$CORE" || fail "core ended with our server"
 echo "ok: server stop ended B's program and left the core $CORE running"
-echo "PASS: V10 server half"
+echo "PASS: core live test (V10 server half, V11, V15)"
