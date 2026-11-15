@@ -407,6 +407,15 @@ pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<
     super::socket_peer_pid(socket.as_fd().as_raw_fd())
 }
 
+/// The session `pid` belongs to, when it exists.
+pub(crate) fn process_session(pid: u32) -> Option<u32> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return None;
+    }
+    let session = unsafe { libc::getsid(pid as libc::pid_t) };
+    (session > 0).then_some(session as u32)
+}
+
 /// The parent of process `pid`, when it can be read.
 pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     super::process_name_and_parent(pid).map(|(_, parent)| parent)

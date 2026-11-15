@@ -69,6 +69,15 @@ struct Attach {
     ours_to_kill: bool,
 }
 
+/// A pid from core, or 0 when it is missing or out of range (a pid_t is
+/// signed; security review M2).
+fn core_pid(value: &Value) -> u32 {
+    value
+        .as_u64()
+        .filter(|pid| (1..=i32::MAX as u64).contains(pid))
+        .unwrap_or(0) as u32
+}
+
 /// Why a `terminal.get` record is not the pane's program, or `None` if it is.
 pub(crate) fn reattach_refusal(
     record: &Value,
@@ -196,7 +205,7 @@ impl StartedCore {
                 message: format!("terminal.run returned no address: {record}"),
             })?
             .to_string();
-        let pid = record["pid"].as_u64().unwrap_or(0) as u32;
+        let pid = core_pid(&record["pid"]);
         Self::attach(
             client,
             Attach {
@@ -233,7 +242,7 @@ impl StartedCore {
                 message: format!("terminal {} {refusal}", target.address),
             });
         }
-        let pid = record["pid"].as_u64().unwrap_or(0) as u32;
+        let pid = core_pid(&record["pid"]);
         Self::attach(
             client,
             Attach {
@@ -469,11 +478,12 @@ impl CorePaneIo {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|holder| holder["pid"].as_u64())
-            .map(|pid| pid as u32)
+            .map(|holder| core_pid(&holder["pid"]))
+            .filter(|pid| *pid != 0)
             .collect();
-        if let Some(pid) = status["pid"].as_u64() {
-            pids.push(pid as u32);
+        let server = core_pid(&status["pid"]);
+        if server != 0 {
+            pids.push(server);
         }
         pids
     }

@@ -1258,7 +1258,9 @@ pub fn signal_processes(pids: &[u32], signal: Signal) {
     };
 
     for &pid in pids {
-        if pid == 0 {
+        // 1 is init or launchd; above i32::MAX a pid_t is negative, which
+        // kill reads as a process group.
+        if pid <= 1 || pid > i32::MAX as u32 {
             continue;
         }
         unsafe {

@@ -311,19 +311,31 @@ pub(crate) fn terminate_session(
     }
     // List the session before the kill: once core ends the session leader,
     // its session can no longer be looked up, and detached jobs would escape.
-    let guarded = sweep_would_reach_core(child_pid, &core.core_pids());
-    let pids = if guarded || child_pid == 0 {
+    // Without core's pids the guard cannot tell core's session from the
+    // program's, so no sweep (security review M2): core's own kill still runs.
+    let core_pids = core.core_pids();
+    let unknown = core_pids.is_empty();
+    let guarded = unknown || sweep_would_reach_core(child_pid, &core_pids);
+    let pids = if guarded {
         Vec::new()
     } else {
-        super::pty::session_pids(child_pid)
+        super::pty::session_pids(child_pid, child_wait_completed)
     };
     core.kill();
     if guarded {
-        warn!(
-            pane = pane_id.raw(),
-            pid = child_pid,
-            "herdr-core program shares a session with core; not sweeping it"
-        );
+        if unknown {
+            warn!(
+                pane = pane_id.raw(),
+                pid = child_pid,
+                "herdr-core did not say which processes are its own; not sweeping the pane's session"
+            );
+        } else {
+            warn!(
+                pane = pane_id.raw(),
+                pid = child_pid,
+                "herdr-core program shares a session with core; not sweeping it"
+            );
+        }
         return;
     }
     if !pids.is_empty() {
