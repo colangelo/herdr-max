@@ -888,7 +888,11 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
-        app.report_unclaimed_core_terminals();
+        // A handoff replacement restores nothing here; `new_from_handoff`
+        // reports once its panes are back, or every terminal looks unclaimed.
+        if app.policy.restore_session {
+            app.report_unclaimed_core_terminals();
+        }
         Ok(app)
     }
 

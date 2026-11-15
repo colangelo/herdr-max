@@ -48,6 +48,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# D10: a pane that was reattached is never reported as an orphan
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/284).
+no_orphan_report() {
+  if grep -h "has no pane" "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.log 2>/dev/null; then
+    fail "$1 reported a reattached core terminal as having no pane"
+  fi
+}
+
 fail() {
   echo "FAIL: $*" >&2
   echo "--- server log tail ---" >&2
@@ -181,6 +189,7 @@ alive "$B_PID" || fail "core pane's program ended in the handoff"
 send_line "$B" "echo after-handoff > $BASE/b.handoff"
 wait_until "input to B after the handoff" file_has_line "$BASE/b.handoff"
 [[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the handoff"
+no_orphan_report "the live handoff"
 echo "ok: live handoff kept both programs and the core; B reattached to $ADDR and takes input"
 
 # 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
@@ -194,6 +203,7 @@ alive "$B_PID" || fail "core pane's program ended in the restart"
 send_line "$B" "echo after-restart > $BASE/b.restart"
 wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
 [[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the restart"
+no_orphan_report "the restart"
 echo "ok: server restart kept the core and B's program in $ADDR, and reattached it"
 
 # 4. herdr server stop ends the core pane's program.
