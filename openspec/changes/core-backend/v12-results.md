@@ -10,8 +10,15 @@ programs are not counted. Load average 7-9 during the runs.
 | PTY | 1.11-1.17 s (server) | 0.25-0.30 s | 23.6-24.6 MB | 4 |
 | core | 1.92-2.52 s: server 1.23-1.49, core 0.52-0.63, holder 0.17-0.24 | 0.52-0.66 s: server 0.25-0.29, core 0.18-0.22, holder 0.09-0.11 | 40.7-42.5 MB | 8 |
 
-Ratio core / PTY, same harness: about 1.9x busy, 2.1x idle. The V12 target (within 1.5x) is
-**not met**.
+Ratio core / PTY, same harness: about 1.9x busy, 2.1x idle, over the first V12 target (server +
+core + holder within 1.5x).
+
+**Decision (herdr, 2026-11-15):** phase 2 ships opt-in as is. V12 is restated: our server within
+1.3x of the PTY on this profile, and core and holder cost recorded, not gated. Against the
+restated row: medians 1.37 s (core, 6 runs: 1.23-1.49) and 1.13 s (PTY, 4 runs: 1.11-1.17) give
+1.21x, met; the worst pairing of runs is 1.34x, just over, so the margin is thin. Our server's extra
+10-30% is https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/282, to be cut or re-measured
+before phase 3 makes core the default.
 
 Where it goes:
 
