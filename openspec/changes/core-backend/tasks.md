@@ -83,7 +83,9 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 ## 5. Ship
 
 - [ ] 5.1 Two-vendor security review of D2-D4 (ask the security session); fix or answer findings
-- [ ] 5.1a CI green on Linux, macOS, Windows (draft PR for CI)
+- [x] 5.1a CI green on Linux, macOS, Windows (draft PR https://github.com/colangelo/herdr-max/pull/46,
+  head 96113389). It found a unix-only `iter()`, status types dead on Windows, and the D2 warning
+  comparing sessions (a launchd-started herdr shares launchd's); now a parent check
 - [ ] 5.2 herdr merges, cuts the beta, installs; `runtime = "core"` only in the throwaway session
   `herdr-core-trial` on m4m for a day of herdr-core's agent work (V14)
 - [ ] 5.2a Then an ask on the desk: does ac want `runtime = "core"` in his own session
