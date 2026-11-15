@@ -476,7 +476,7 @@ pub(crate) fn connect_session(
     // start` goes through launchd; a start that fell back to our own child
     // would end with this server.
     let core_pid = status["pid"].as_u64().unwrap_or(0) as u32;
-    if started && shares_our_session(core_pid) {
+    if started && is_our_child(core_pid) {
         tracing::warn!(
             core_pid,
             session,
@@ -486,14 +486,11 @@ pub(crate) fn connect_session(
     Ok(client)
 }
 
-/// True when `pid` is in this process's session: a core started as our
-/// child would be (D2), a launchd-started one is not.
-fn shares_our_session(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let theirs = unsafe { libc::getsid(pid as libc::pid_t) };
-    theirs > 0 && theirs == unsafe { libc::getsid(0) }
+/// True when `pid` is this process's child: a core that fell back to a
+/// direct child would be (D2); a launchd-started one has parent 1. (Comparing
+/// sessions would not do: a herdr launchd started is in launchd's session.)
+fn is_our_child(pid: u32) -> bool {
+    pid != 0 && crate::platform::parent_pid(pid) == Some(std::process::id())
 }
 
 fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
@@ -687,13 +684,20 @@ mod tests {
     }
 
     #[test]
-    fn a_core_in_our_own_session_is_told_apart_from_a_detached_one() {
-        assert!(shares_our_session(std::process::id()), "this process");
+    fn a_core_that_is_our_child_is_told_apart_from_a_detached_one() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(is_our_child(child.id()), "a direct child");
+        let _ = child.kill();
+        let _ = child.wait();
         assert!(
-            !shares_our_session(1),
-            "launchd or init leads its own session"
+            !is_our_child(std::process::id()),
+            "this process is not its own child"
         );
-        assert!(!shares_our_session(0), "no pid");
+        assert!(!is_our_child(1), "launchd or init");
+        assert!(!is_our_child(0), "no pid");
     }
 
     #[test]

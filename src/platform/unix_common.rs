@@ -407,6 +407,11 @@ pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<
     super::socket_peer_pid(socket.as_fd().as_raw_fd())
 }
 
+/// The parent of process `pid`, when it can be read.
+pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
+    super::process_name_and_parent(pid).map(|(_, parent)| parent)
+}
+
 /// Describes the process on the other end of a local socket, for logs.
 pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
     use std::os::fd::{AsFd as _, AsRawFd as _};

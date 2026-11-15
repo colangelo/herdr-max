@@ -67,6 +67,8 @@ pub(crate) fn core_session_name() -> String {
 }
 
 /// A program's own report of its state (OSC 7501, through herdr-core).
+// Only the core backend, which is Unix only, builds these.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::pane) struct ProgramStatus {
     /// The reporting program (`claude-code`, `codex`, `pi`), as it names itself.
@@ -77,6 +79,8 @@ pub(in crate::pane) struct ProgramStatus {
     pub message: Option<String>,
 }
 
+// Only the core backend, which is Unix only, builds these.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::pane) enum ProgramState {
     Idle,
@@ -96,6 +100,8 @@ pub(in crate::pane) struct PaneIoSink {
     /// The program's own status reports, for a backend that carries them
     /// (herdr-core's OSC 7501 events). The PTY backend never calls it: its
     /// programs report through hooks and screen detection.
+    // Only the core backend, which is Unix only, reads it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub on_status: Option<StatusCallback>,
 }
 
