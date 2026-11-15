@@ -175,6 +175,23 @@ pub(crate) fn note_unavailable(err: &CoreError) -> bool {
     }
 }
 
+/// The names of the variables a core pane keeps, space-separated (M1).
+const KEEP_ENV_VAR: &str = "HERDR_CORE_KEEP_ENV";
+
+/// Starts the program with exactly the variables named in `KEEP_ENV_VAR`:
+/// every other variable in the environment core gives it is unset with
+/// `env -u`, `KEEP_ENV_VAR` included. Names are read from `env`'s output;
+/// a value with a newline can only add a bogus name, which is unset harmlessly.
+const KEEP_ENV_SCRIPT: &str = r#"keep=" $HERDR_CORE_KEEP_ENV "
+set -- -- "$@"
+for name in $(/usr/bin/env | /usr/bin/sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+  case "$keep" in
+    *" $name "*) ;;
+    *) set -- -u "$name" "$@" ;;
+  esac
+done
+exec /usr/bin/env "$@""#;
+
 /// Turns a pane's command into a core spawn (D4). `None` when the command
 /// cannot be passed to core faithfully (a non-UTF-8 argument or variable); the
 /// pane then uses the PTY.
@@ -183,7 +200,6 @@ pub(crate) fn core_spawn_from(
     command: &portable_pty::CommandBuilder,
     rows: u16,
     cols: u16,
-    stripped_keys: impl Iterator<Item = &'static str>,
 ) -> Option<CoreSpawn> {
     let program: Vec<String> = if command.is_default_prog() {
         vec![command.get_shell()]
@@ -198,16 +214,20 @@ pub(crate) fn core_spawn_from(
     for (key, value) in command.iter_full_env_as_str() {
         env.insert(key.to_string(), Value::String(value.to_string()));
     }
-    // core merges `env` into its own environment and cannot unset (task 1.3):
-    // unset every key herdr strips that this pane's environment lacks.
-    let mut argv = vec!["/usr/bin/env".to_string()];
-    for key in stripped_keys {
-        if !env.contains_key(key) {
-            argv.push("-u".into());
-            argv.push(key.into());
-        }
-    }
-    argv.push("--".into());
+    // core merges `env` over its own environment, which is whoever started
+    // or updated it, and cannot unset (task 1.3; security review M1). The
+    // wrapper keeps exactly the keys named in `KEEP_ENV_VAR` and drops every
+    // other one core would hand on. Only names travel in it, never values.
+    let mut keep: Vec<&str> = env.keys().map(String::as_str).collect();
+    keep.sort_unstable();
+    let keep = keep.join(" ");
+    env.insert(KEEP_ENV_VAR.into(), Value::String(keep));
+    let mut argv = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        KEEP_ENV_SCRIPT.to_string(),
+        "herdr-core-env".to_string(),
+    ];
     argv.extend(program);
     let cwd = match command.get_cwd() {
         Some(cwd) => Some(cwd.to_str()?.to_string()),
@@ -416,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn a_core_spawn_unsets_stripped_keys_the_pane_lacks_and_keeps_its_own() {
+    fn a_core_spawn_names_the_panes_keys_and_runs_through_the_keep_wrapper() {
         let mut command = portable_pty::CommandBuilder::new("/bin/sh");
         command.arg("-c");
         command.arg("echo hi");
@@ -424,27 +444,23 @@ mod tests {
         command.env_clear();
         command.env("PATH", "/usr/bin:/bin");
         command.env(crate::integration::HERDR_PANE_ID_ENV_VAR, "w1:p2");
-        let stripped = [
-            "TMUX",
-            "CLAUDECODE",
-            crate::integration::HERDR_PANE_ID_ENV_VAR,
-        ];
-        let spawn = core_spawn_from(PaneId::from_raw(1), &command, 24, 80, stripped.into_iter())
-            .expect("spawn");
+        let spawn = core_spawn_from(PaneId::from_raw(1), &command, 24, 80).expect("spawn");
 
         assert_eq!(
             spawn.argv,
             [
-                "/usr/bin/env",
-                "-u",
-                "TMUX",
-                "-u",
-                "CLAUDECODE",
-                "--",
+                "/bin/sh",
+                "-c",
+                KEEP_ENV_SCRIPT,
+                "herdr-core-env",
                 "/bin/sh",
                 "-c",
                 "echo hi"
             ]
+        );
+        assert_eq!(
+            spawn.env.get(KEEP_ENV_VAR),
+            Some(&Value::String("HERDR_PANE_ID PATH".into()))
         );
         assert_eq!(spawn.cwd.as_deref(), Some("/tmp"));
         assert_eq!(
@@ -456,6 +472,58 @@ mod tests {
             Some(&Value::String("w1:p2".into()))
         );
         assert!(spawn.labels.contains_key("herdr.session"));
+    }
+
+    // Security review M1: whatever core's own environment holds (its starter's
+    // tokens), the program sees exactly the keys the pane named, with the
+    // pane's values, even keys that look like credentials on purpose.
+    #[test]
+    fn the_keep_wrapper_drops_every_variable_the_pane_did_not_name() {
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", KEEP_ENV_SCRIPT, "herdr-core-env", "/usr/bin/env"])
+            .env_clear()
+            .env(KEEP_ENV_VAR, "PATH ANTHROPIC_API_KEY ODD_VALUE")
+            .env("PATH", "/usr/bin:/bin")
+            .env("ANTHROPIC_API_KEY", "set-by-the-pane")
+            .env("ODD_VALUE", "line one\nANTHROPIC_AUTH_TOKEN=forged")
+            .env("ANTHROPIC_AUTH_TOKEN", "canary-auth")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "canary-oauth")
+            .env("HC_SESSION", "herdr")
+            .output()
+            .expect("run the wrapper");
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut names: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .filter(|name| !name.contains(' '))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert!(!text.contains("canary"), "{text}");
+        assert!(!text.contains("HC_SESSION"), "{text}");
+        assert!(!text.contains(KEEP_ENV_VAR), "{text}");
+        assert!(text.contains("ANTHROPIC_API_KEY=set-by-the-pane"), "{text}");
+        assert!(
+            text.contains("ODD_VALUE=line one\nANTHROPIC_AUTH_TOKEN=forged"),
+            "{text}"
+        );
+        // What remains is the pane's keys plus what the shell itself sets.
+        for name in names {
+            assert!(
+                [
+                    "PATH",
+                    "ANTHROPIC_API_KEY",
+                    "ODD_VALUE",
+                    "ANTHROPIC_AUTH_TOKEN",
+                    "PWD",
+                    "SHLVL",
+                    "_"
+                ]
+                .contains(&name),
+                "unexpected {name} in {text}"
+            );
+        }
     }
 
     // V9 (D1): with `runtime = "core"` and a core that cannot be used (here

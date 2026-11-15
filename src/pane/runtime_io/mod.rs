@@ -143,21 +143,20 @@ impl PaneIo {
     ) -> std::io::Result<Self> {
         #[cfg(unix)]
         if core_backend::preferred() {
-            let started = core_backend::core_spawn_from(
-                pane_id,
-                &spec.command,
-                spec.rows,
-                spec.cols,
-                super::pane_stripped_env_keys(),
-            )
-            .ok_or_else(|| {
-                core_backend::client::CoreError::Unavailable(
-                    "the command has a non-UTF-8 argument, folder or variable".into(),
-                )
-            })
-            .and_then(|spawn| {
-                core_backend::StartedCore::start(spawn, child_pid, core_backend::server_connector())
-            });
+            let started =
+                core_backend::core_spawn_from(pane_id, &spec.command, spec.rows, spec.cols)
+                    .ok_or_else(|| {
+                        core_backend::client::CoreError::Unavailable(
+                            "the command has a non-UTF-8 argument, folder or variable".into(),
+                        )
+                    })
+                    .and_then(|spawn| {
+                        core_backend::StartedCore::start(
+                            spawn,
+                            child_pid,
+                            core_backend::server_connector(),
+                        )
+                    });
             match started {
                 Ok(started) => {
                     let PaneIoSink {

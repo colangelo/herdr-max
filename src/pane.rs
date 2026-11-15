@@ -243,20 +243,6 @@ const HOST_TERMINAL_HANDLE_ENV_VARS: [&str; 12] = [
     "ZELLIJ_PANE_ID",
 ];
 
-/// Every variable a pane's environment may be built without on purpose. A
-/// backend that cannot clear its runtime's own environment (herdr-core merges
-/// ours into its own) unsets those of them the pane's environment lacks
-/// (openspec/changes/core-backend, design D4).
-#[cfg_attr(not(unix), allow(dead_code))] // only the Unix core backend reads it
-pub(in crate::pane) fn pane_stripped_env_keys() -> impl Iterator<Item = &'static str> {
-    HOST_TERMINAL_HANDLE_ENV_VARS
-        .into_iter()
-        .chain(OUTER_AGENT_ENV_VARS)
-        .chain(STALE_SSH_CONNECTION_ENV_VARS)
-        .chain(STALE_PTY_PROXY_ENV_VARS)
-        .chain([crate::integration::HERDR_PANE_ID_ENV_VAR])
-}
-
 /// Identity of an agent session the server was started from. A new pane is not
 /// its child; explicit launch env can opt back in.
 const OUTER_AGENT_ENV_VARS: [&str; 6] = [

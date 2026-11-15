@@ -33,6 +33,10 @@ impl ScratchCore {
             .env_remove("XDG_RUNTIME_DIR")
             .env("TMUX", "/tmp/tmux-leak,1,0")
             .env("CLAUDECODE", "1")
+            // An agent's credentials, as a core an agent started would keep
+            // (security review M1).
+            .env("ANTHROPIC_AUTH_TOKEN", "canary-auth")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "canary-oauth")
             .status()
             .expect("run hc");
         assert!(status.success(), "hc server start failed");
@@ -100,10 +104,13 @@ async fn core_v2_spawn_contract_and_stripped_keys() {
         return;
     };
     let scratch = Scratch::new("core-v2");
-    let env = PaneLaunchEnv::from_extra(vec![("HERDR_SEAM_PROBE".into(), "v2-probe".into())]);
+    let env = PaneLaunchEnv::from_extra(vec![
+        ("HERDR_SEAM_PROBE".into(), "v2-probe".into()),
+        ("ANTHROPIC_API_KEY".into(), "set-by-the-pane".into()),
+    ]);
     let (runtime, _events) = spawn_sh(
         &scratch.0,
-        r#"printf '%s|%s|%s|%s|%s\n' "$0" "$(pwd -P)" "$HERDR_SEAM_PROBE" "${TMUX-unset}" "${CLAUDECODE-unset}" > out.txt"#,
+        r#"printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$0" "$(pwd -P)" "$HERDR_SEAM_PROBE" "${TMUX-unset}" "${CLAUDECODE-unset}" "${ANTHROPIC_AUTH_TOKEN-unset}" "${CLAUDE_CODE_OAUTH_TOKEN-unset}" "${ANTHROPIC_API_KEY-unset}" > out.txt"#,
         &["seam-arg0"],
         &env,
         24,
@@ -115,7 +122,10 @@ async fn core_v2_spawn_contract_and_stripped_keys() {
     runtime.shutdown();
     assert_eq!(
         out,
-        format!("seam-arg0|{}|v2-probe|unset|unset\n", scratch.0.display())
+        format!(
+            "seam-arg0|{}|v2-probe|unset|unset|unset|unset|set-by-the-pane\n",
+            scratch.0.display()
+        )
     );
 }
 
