@@ -7,7 +7,6 @@ pub(crate) mod fake;
 pub(crate) mod frame;
 mod pane_io;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,7 +17,6 @@ use client::{CoreClient, CoreError};
 pub(crate) use pane_io::{Connector, CorePaneIo, CoreReattach, CoreSpawn, StartedCore};
 
 use crate::layout::PaneId;
-use crate::pane::runtime_io::{ProgramState, ProgramStatus, StatusCallback};
 
 /// `[experimental] runtime = "core"` (design D1), set at startup and on reload.
 static PREFER_CORE: AtomicBool = AtomicBool::new(false);
@@ -27,8 +25,6 @@ static WARNED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Set after the first connection: from then on a missing socket is retried,
 /// never answered by starting a core.
 static EVER_CONNECTED: AtomicBool = AtomicBool::new(false);
-/// Each core pane's status callback, by terminal address (D9).
-static STATUS: Mutex<Option<HashMap<String, Arc<StatusCallback>>>> = Mutex::new(None);
 /// The server's one connection (D3), replaced when it closes.
 static CLIENT: Mutex<Option<CoreClient>> = Mutex::new(None);
 
@@ -95,70 +91,12 @@ fn connector(may_start: bool) -> Connector {
         let first = may_start && !EVER_CONNECTED.load(Ordering::Acquire);
         let session = core_session_name();
         let client = client::connect_session(&session, None, first)?;
-        // Status for our terminals only (D9). Failing to subscribe costs status
-        // reports, not the pane: detection still runs.
-        if let Err(err) = client.subscribe_events(
-            serde_json::json!({"labels": {"herdr.session": session}}),
-            Box::new(route_event),
-            std::time::Duration::from_secs(5),
-        ) {
-            warn!(err = %err, "herdr-core events not subscribed; status comes from detection only");
-        }
+        // No events subscription: core's status comes only from bytes a
+        // program prints, which any printed file can forge, so herdr does not
+        // use it (security review M3; design D9). Detection and hooks decide.
         EVER_CONNECTED.store(true, Ordering::Release);
         *slot = Some(client.clone());
         Ok(client)
-    })
-}
-
-pub(crate) fn register_status(address: &str, callback: StatusCallback) {
-    lock(&STATUS)
-        .get_or_insert_with(HashMap::new)
-        .insert(address.to_string(), Arc::new(callback));
-}
-
-pub(crate) fn forget_status(address: &str) {
-    if let Some(map) = lock(&STATUS).as_mut() {
-        map.remove(address);
-    }
-}
-
-/// Routes a core notification: a `status` event for one of our terminals goes
-/// to its pane (D9). Everything else is ignored here.
-fn route_event(message: &Value) {
-    if message["method"] != "event" || message["params"]["type"] != "status" {
-        return;
-    }
-    let Some(address) = message["params"]["terminal"].as_str() else {
-        return;
-    };
-    let Some(status) = parse_status(&message["params"]["data"]["status"]) else {
-        return;
-    };
-    // Call outside the lock: a callback may wait on the app's event queue.
-    let callback = lock(&STATUS)
-        .as_ref()
-        .and_then(|map| map.get(address).cloned());
-    if let Some(callback) = callback {
-        callback(status);
-    }
-}
-
-/// A core status record as a `ProgramStatus`; `None` when cleared or unknown.
-fn parse_status(status: &Value) -> Option<ProgramStatus> {
-    let state = match status["state"].as_str()? {
-        "idle" => ProgramState::Idle,
-        "working" => ProgramState::Working,
-        "done" => ProgramState::Done,
-        "blocked" => ProgramState::Blocked,
-        "error" => ProgramState::Error,
-        _ => return None,
-    };
-    let text = |key: &str| status[key].as_str().map(str::to_string);
-    Some(ProgramStatus {
-        app: text("app"),
-        state,
-        kind: text("kind"),
-        message: text("msg"),
     })
 }
 
@@ -381,53 +319,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_records_parse_and_cleared_ones_are_ignored() {
-        let status = parse_status(&serde_json::json!({
-            "app": "claude-code", "state": "blocked", "kind": "permission", "msg": "Run tests?"
-        }))
-        .expect("status");
-        assert_eq!(
-            status,
-            ProgramStatus {
-                app: Some("claude-code".into()),
-                state: ProgramState::Blocked,
-                kind: Some("permission".into()),
-                message: Some("Run tests?".into()),
-            }
-        );
-        assert_eq!(parse_status(&Value::Null), None, "a cleared status");
-        assert_eq!(parse_status(&serde_json::json!({"state": "dancing"})), None);
-    }
-
-    #[test]
-    fn status_events_reach_the_registered_pane_only() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let tx = Mutex::new(tx);
-        register_status(
-            "t-status-test",
-            Box::new(move |status| {
-                let _ = lock(&tx).send(status.state);
-            }),
-        );
-        let event = |terminal: &str, state: &str| {
-            serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
-                "seq": 1, "type": "status", "terminal": terminal,
-                "data": {"status": {"app": "codex", "state": state}, "records": {}, "reported": true}
-            }})
-        };
-        route_event(&event("t-other", "working"));
-        route_event(&event("t-status-test", "working"));
-        assert_eq!(rx.try_recv(), Ok(ProgramState::Working));
-        assert!(
-            rx.try_recv().is_err(),
-            "the other terminal's event went nowhere"
-        );
-        forget_status("t-status-test");
-        route_event(&event("t-status-test", "idle"));
-        assert!(rx.try_recv().is_err(), "a forgotten pane gets nothing");
-    }
-
-    #[test]
     fn core_session_names_follow_design_d2() {
         assert_eq!(session_name_for(None, false), "herdr");
         assert_eq!(session_name_for(None, true), "herdr-dev");
@@ -616,7 +507,6 @@ mod tests {
                     terminal_responses: Vec::new(),
                 }),
                 Box::new(|_| {}),
-                None,
                 Arc::new(AtomicBool::new(false)),
             )
             .expect("pane")

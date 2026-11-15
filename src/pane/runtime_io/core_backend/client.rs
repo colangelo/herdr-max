@@ -232,53 +232,6 @@ impl CoreClient {
         }
     }
 
-    /// `events.subscribe`: in framed mode core sends the events on a channel of
-    /// their own (core `schema/README.md` § Events). Each DATA frame on it holds
-    /// JSON-RPC notifications; `handler` gets each one, and the bytes are
-    /// credited back after it ran.
-    pub(crate) fn subscribe_events(
-        &self,
-        params: Value,
-        handler: EventHandler,
-        timeout: Duration,
-    ) -> Reply {
-        let (sink, events) = mpsc::channel();
-        let reply = self.attach_like("events.subscribe", params, sink, timeout)?;
-        let channel = reply["channel"].as_u64().unwrap_or(0) as u32;
-        let client = self.clone();
-        std::thread::Builder::new()
-            .name("herdr-core-events".into())
-            .spawn(move || {
-                while let Ok(event) = events.recv() {
-                    let StreamEvent::Data(bytes) = event else {
-                        return;
-                    };
-                    for line in bytes.split(|byte| *byte == b'\n') {
-                        if line.iter().all(u8::is_ascii_whitespace) {
-                            continue;
-                        }
-                        match serde_json::from_slice::<Value>(line) {
-                            Ok(message) => handler(&message),
-                            Err(err) => debug!(err = %err, "herdr-core event is not JSON"),
-                        }
-                    }
-                    let _ = client.send(&Frame::credit(channel, bytes.len() as u32));
-                }
-            })
-            .map_err(|err| CoreError::Unavailable(format!("event thread: {err}")))?;
-        Ok(reply)
-    }
-
-    fn attach_like(
-        &self,
-        method: &str,
-        params: Value,
-        sink: StreamSink,
-        timeout: Duration,
-    ) -> Reply {
-        self.call_inner(method, params, timeout, Some(sink))
-    }
-
     /// Writes one frame. Frames are written whole under the writer lock, so
     /// streams interleave only at frame boundaries.
     pub(crate) fn send(&self, frame: &Frame) -> Result<(), CoreError> {
@@ -775,47 +728,6 @@ mod tests {
         let event = rx.recv_timeout(Duration::from_secs(5)).expect("event");
         assert_eq!(event["params"]["data"]["state"], "working");
         drop(client);
-    }
-
-    #[test]
-    fn subscribed_events_arrive_on_their_channel_and_are_credited() {
-        let core = FakeCore::start();
-        let client = CoreClient::connect(&core.socket, None).expect("connect");
-        let (tx, rx) = mpsc::channel();
-        let tx = Mutex::new(tx);
-        let reply = client
-            .subscribe_events(
-                json!({"labels": {"herdr.session": "test"}}),
-                Box::new(move |message: &Value| {
-                    let _ = lock(&tx).send(message.clone());
-                }),
-                Duration::from_secs(5),
-            )
-            .expect("subscribe");
-        let channel = reply["channel"].as_u64().expect("channel") as u32;
-        let two = concat!(
-            r#"{"jsonrpc":"2.0","method":"event","params":{"seq":1,"type":"status","terminal":"t1","data":{}}}"#,
-            "\n",
-            r#"{"jsonrpc":"2.0","method":"heartbeat","params":{"seq":1}}"#,
-            "\n"
-        );
-        core.send(Frame::new(channel, kind::DATA, two.as_bytes().to_vec()));
-        let first = rx.recv_timeout(Duration::from_secs(5)).expect("event");
-        let second = rx.recv_timeout(Duration::from_secs(5)).expect("heartbeat");
-        assert_eq!(first["params"]["type"], "status");
-        assert_eq!(second["method"], "heartbeat");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !core.received().iter().any(|frame| {
-            frame.channel == channel
-                && frame.kind == kind::CREDIT
-                && frame.payload == (two.len() as u32).to_le_bytes()
-        }) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "no credit for the events"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 
     #[test]

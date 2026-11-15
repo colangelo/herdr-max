@@ -82,7 +82,13 @@ Claude Code only with `--settings ~/.config/claude/direct-noconnectors.settings.
 
 ## 5. Ship
 
-- [ ] 5.1 Two-vendor security review of D2-D4 (ask the security session); fix or answer findings
+- [ ] 5.1 Two-vendor security review of D2-D4 (ask the security session); fix or answer findings.
+  Review: ac/security `docs/reviews/2026-11-15-herdr-core-backend.md` (b59f448): no P0/P1, beta OK
+  for the throwaway session. Fixed on `issue/280-security-fixes`: M2 (no signal for an exited
+  program, recheck before each signal, pid range, no sweep without core's pids; shared PTY helper
+  too), M1 (keep-list wrapper: a core pane gets exactly its own variables; live V2 with canary
+  tokens), M3 (core status not used; D9 and V8 restated). P3s in issue 283. Open: security's
+  single-reader re-check before ac's own session opts in
 - [x] 5.1a CI green on Linux, macOS, Windows (draft PR https://github.com/colangelo/herdr-max/pull/46,
   head 96113389). It found a unix-only `iter()`, status types dead on Windows, and the D2 warning
   comparing sessions (a launchd-started herdr shares launchd's); now a parent check

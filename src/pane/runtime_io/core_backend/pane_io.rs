@@ -22,7 +22,6 @@ use tracing::{debug, warn};
 use super::client::{CoreClient, CoreError, StreamEvent, StreamSink};
 use super::frame::{kind, Frame};
 use crate::layout::PaneId;
-use crate::pane::runtime_io::StatusCallback;
 use crate::platform::ChildExitReason;
 use crate::pty::actor::{PtyReadResult, ReadCallback};
 
@@ -329,12 +328,8 @@ impl StartedCore {
         self,
         on_read: ReadCallback,
         on_exit: Box<dyn FnOnce(ChildExitReason) + Send>,
-        on_status: Option<StatusCallback>,
         child_wait_completed: Arc<AtomicBool>,
     ) -> std::io::Result<CorePaneIo> {
-        if let Some(on_status) = on_status {
-            super::register_status(&self.shared.address, on_status);
-        }
         let Self {
             shared,
             events_rx,
@@ -434,7 +429,6 @@ impl CorePaneIo {
         if self.shared.closing.swap(true, Ordering::AcqRel) {
             return;
         }
-        super::forget_status(&self.shared.address);
         let _ = self.shared.send(kind::CLOSE, Vec::new());
         self.shared
             .client()
@@ -614,7 +608,6 @@ fn spawn_parser(
         .spawn(move || {
             let mut on_exit = Some(on_exit);
             let mut finish = |reason: ChildExitReason| {
-                super::forget_status(&shared.address);
                 child_wait_completed.store(true, Ordering::Release);
                 if let Some(on_exit) = on_exit.take() {
                     on_exit(reason);

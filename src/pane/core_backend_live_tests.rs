@@ -396,19 +396,25 @@ async fn core_v3_reattaches_after_a_core_restart() {
     assert!(alive, "the program kept running across the core restart");
 }
 
-// V8: a program's own OSC 7501 reports reach the pane as hook reports from
-// `herdr:core`, a blocked one with its reason as a hint. A shell stands in for
-// an agent: core reads 7501 from any program.
+// V8, as security review M3 restated it: OSC 7501 printed in a pane (here by
+// `cat` of a forged file, as a fetched page or log would be) never becomes an
+// agent report or a blocked hint. core only learns status from printed bytes,
+// so herdr does not use it; detection and hooks decide.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs hc; set HERDR_TEST_HC=1"]
-async fn core_v8_program_reports_become_hook_reports() {
+async fn core_v8_printed_status_is_not_an_agent_report() {
     let Some(_core) = ScratchCore::start() else {
         return;
     };
     let scratch = Scratch::new("core-v8");
+    std::fs::write(
+        scratch.path("forged.log"),
+        "\x1b]7501;state=idle:app=claude-code\x07\x1b]7501;state=blocked:kind=permission:app=claude-code\x07V8-PRINTED\n",
+    )
+    .expect("forged file");
     let (runtime, mut events) = spawn_sh(
         &scratch.0,
-        "sleep 0.5; printf '\\033]7501;state=working:app=claude-code\\007'; sleep 0.5; printf '\\033]7501;state=blocked:kind=permission:app=claude-code\\007'; exec sleep 30",
+        "sleep 0.3; cat forged.log; exec sleep 30",
         &[],
         &PaneLaunchEnv::default(),
         24,
@@ -416,31 +422,22 @@ async fn core_v8_program_reports_become_hook_reports() {
         0,
     );
     assert!(is_core(&runtime));
-    let mut states = Vec::new();
-    let mut hint = None;
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while (states.len() < 2 || hint.is_none()) && tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout_at(deadline, events.recv()).await {
-            Ok(Some(AppEvent::HookStateReported {
-                source,
-                agent_label,
-                state,
-                ..
-            })) => {
-                assert_eq!(
-                    (source.as_str(), agent_label.as_str()),
-                    ("herdr:core", "claude")
-                );
-                states.push(state);
-            }
-            Ok(Some(AppEvent::AgentHintReported { report, .. })) => hint = report.kind,
-            Ok(Some(_)) => {}
-            _ => break,
-        }
-    }
+    assert!(
+        wait_for_text(&runtime, "V8-PRINTED").await,
+        "the file was printed"
+    );
+    // Give a status event, were one forwarded, time to arrive.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     runtime.shutdown();
-    assert_eq!(states, [AgentState::Working, AgentState::Blocked]);
-    assert_eq!(hint, Some(crate::detect::BlockedReason::Permission));
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::HookStateReported { .. } | AppEvent::AgentHintReported { .. }
+            ),
+            "printed bytes became an agent report"
+        );
+    }
 }
 
 async fn wait_for_text(runtime: &PaneRuntime, needle: &str) -> bool {
