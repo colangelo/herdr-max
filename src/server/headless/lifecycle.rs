@@ -358,7 +358,7 @@ impl HeadlessServer {
             self.client_shutdown_reason = crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON;
             // The next server attaches to herdr-core panes' programs, so they
             // outlive this one; every other stop ends them (core-backend D10).
-            for (_, runtime) in self.app.terminal_runtimes.iter() {
+            for runtime in self.app.terminal_runtimes.values() {
                 runtime.set_keep_core_terminal(true);
             }
         }

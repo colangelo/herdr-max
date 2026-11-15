@@ -12,8 +12,8 @@ impl App {
     pub(crate) fn report_unclaimed_core_terminals(&mut self) {
         let claimed: Vec<String> = self
             .terminal_runtimes
-            .iter()
-            .filter_map(|(_, runtime)| runtime.core_terminal())
+            .values()
+            .filter_map(|runtime| runtime.core_terminal())
             .map(|link| link.address)
             .collect();
         let unclaimed = crate::pane::unclaimed_core_terminals(&claimed);
