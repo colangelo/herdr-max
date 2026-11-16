@@ -1012,6 +1012,12 @@ mod tests {
         for _ in 0..(3 * CREDIT_WINDOW as usize / chunk.len()) {
             core.send(Frame::new(channel, kind::DATA, chunk.clone()));
         }
+        // The reader handles frames in order, so once this reply is back every
+        // data frame above has been queued or refused; only then drain, or a
+        // fast drain keeps the queue under the bound.
+        client
+            .call("server.status", json!({}), Duration::from_secs(5))
+            .expect("the reader serves calls");
         let mut queued = 0;
         let lost = loop {
             match events.recv_timeout(Duration::from_secs(5)) {
