@@ -195,6 +195,8 @@ pub(super) fn signal_session(
     pids: &[u32],
     child_wait_completed: Option<&AtomicBool>,
 ) {
+    // Mutable only where targets are rechecked by session (unix).
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut pids: Vec<u32> = pids
         .iter()
         .copied()
