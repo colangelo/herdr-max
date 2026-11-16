@@ -117,6 +117,9 @@ struct Shared {
     connector: Connector,
     client: Mutex<CoreClient>,
     channel: AtomicU32,
+    /// Where the client routes this pane's stream; shutdown also uses it to
+    /// end the parser without waiting for core's CLOSE.
+    sink: StreamSink,
     /// The size last asked for, for a reattach.
     size: Mutex<(u16, u16)>,
     /// Set when the pane shuts down: stream ends are then not reattached.
@@ -140,7 +143,8 @@ impl Shared {
 
 pub(crate) struct CorePaneIo {
     shared: Arc<Shared>,
-    writer: mpsc::Sender<WriteCmd>,
+    /// Taken on shutdown, so the writer thread ends with the parser.
+    writer: Mutex<Option<mpsc::Sender<WriteCmd>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -171,7 +175,6 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
 pub(crate) struct StartedCore {
     shared: Arc<Shared>,
     events_rx: StreamEvents,
-    events_tx: StreamSink,
     automatic_input: bool,
 }
 
@@ -315,12 +318,12 @@ impl StartedCore {
                 connector,
                 client: Mutex::new(client),
                 channel: AtomicU32::new(channel),
+                sink: events_tx,
                 size: Mutex::new((rows, cols)),
                 closing: AtomicBool::new(false),
                 keep_on_drop: AtomicBool::new(false),
             }),
             events_rx,
-            events_tx,
             automatic_input,
         })
     }
@@ -335,7 +338,6 @@ impl StartedCore {
         let Self {
             shared,
             events_rx,
-            events_tx,
             automatic_input,
         } = self;
         let (writer, writer_rx) = mpsc::channel(WRITE_QUEUE);
@@ -344,7 +346,6 @@ impl StartedCore {
                 spawn_parser(
                     Arc::clone(&shared),
                     events_rx,
-                    events_tx,
                     writer.clone(),
                     on_read,
                     on_exit,
@@ -359,34 +360,42 @@ impl StartedCore {
             );
             return Err(std::io::Error::other(err.to_string()));
         }
-        Ok(CorePaneIo { shared, writer })
+        Ok(CorePaneIo {
+            shared,
+            writer: Mutex::new(Some(writer)),
+        })
     }
 }
 
 impl CorePaneIo {
+    fn queue(&self, cmd: WriteCmd) -> Result<(), mpsc::error::TrySendError<WriteCmd>> {
+        match lock(&self.writer).as_ref() {
+            Some(writer) => writer.try_send(cmd),
+            None => Err(mpsc::error::TrySendError::Closed(cmd)),
+        }
+    }
+
     pub(crate) fn try_send_bytes(
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
-        self.writer
-            .try_send(WriteCmd::User(bytes))
-            .map_err(|err| match err {
-                mpsc::error::TrySendError::Full(WriteCmd::User(bytes)) => {
-                    mpsc::error::TrySendError::Full(bytes)
-                }
-                mpsc::error::TrySendError::Closed(WriteCmd::User(bytes)) => {
-                    mpsc::error::TrySendError::Closed(bytes)
-                }
-                // Only User commands are sent here.
-                mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_) => {
-                    mpsc::error::TrySendError::Closed(Bytes::new())
-                }
-            })
+        self.queue(WriteCmd::User(bytes)).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(WriteCmd::User(bytes)) => {
+                mpsc::error::TrySendError::Full(bytes)
+            }
+            mpsc::error::TrySendError::Closed(WriteCmd::User(bytes)) => {
+                mpsc::error::TrySendError::Closed(bytes)
+            }
+            // Only User commands are sent here.
+            mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_) => {
+                mpsc::error::TrySendError::Closed(Bytes::new())
+            }
+        })
     }
 
     pub(crate) fn write_terminal_response(&self, response: impl FnOnce() -> Option<Bytes>) {
         if let Some(bytes) = response() {
-            let _ = self.writer.try_send(WriteCmd::Reply(bytes));
+            let _ = self.queue(WriteCmd::Reply(bytes));
         }
     }
 
@@ -397,14 +406,13 @@ impl CorePaneIo {
         delay: Duration,
     ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
         let (reply, reply_rx) = std_mpsc::channel();
-        self.writer
-            .try_send(WriteCmd::Submit {
-                text,
-                enter,
-                delay,
-                reply,
-            })
-            .map_err(|_| std::io::Error::other("herdr-core pane input queue is full or closed"))?;
+        self.queue(WriteCmd::Submit {
+            text,
+            enter,
+            delay,
+            reply,
+        })
+        .map_err(|_| std::io::Error::other("herdr-core pane input queue is full or closed"))?;
         Ok(reply_rx)
     }
 
@@ -417,7 +425,7 @@ impl CorePaneIo {
         replies: Vec<Bytes>,
     ) {
         *lock(&self.shared.size) = (rows, cols);
-        let _ = self.writer.try_send(WriteCmd::Resize {
+        let _ = self.queue(WriteCmd::Resize {
             rows,
             cols,
             cell: (cell_width_px, cell_height_px),
@@ -425,8 +433,10 @@ impl CorePaneIo {
         });
     }
 
-    /// Stops this pane's streams without ending the program (a shutdown or a
-    /// handoff detach). The program keeps running in core.
+    /// Stops this pane's streams and threads without ending the program (a
+    /// shutdown or a handoff detach). The program keeps running in core.
+    /// The parser and writer end here, not on core's CLOSE: once the stream
+    /// is forgotten, that CLOSE is never routed to the pane.
     pub(crate) fn shutdown(&self) {
         if self.shared.closing.swap(true, Ordering::AcqRel) {
             return;
@@ -435,6 +445,8 @@ impl CorePaneIo {
         self.shared
             .client()
             .forget_stream(self.shared.channel.load(Ordering::Acquire));
+        let _ = self.shared.sink.send(StreamEvent::Close(Value::Null));
+        lock(&self.writer).take();
     }
 
     /// The terminal's address in core, saved with the pane (D10).
@@ -596,7 +608,6 @@ impl CreditBatch {
 fn spawn_parser(
     shared: Arc<Shared>,
     events: StreamEvents,
-    sink: StreamSink,
     writer: mpsc::Sender<WriteCmd>,
     mut on_read: ReadCallback,
     on_exit: Box<dyn FnOnce(ChildExitReason) + Send>,
@@ -639,7 +650,7 @@ fn spawn_parser(
                         if shared.closing.load(Ordering::Acquire) {
                             return;
                         }
-                        if let Some(exit) = reattach(&shared, &sink) {
+                        if let Some(exit) = reattach(&shared) {
                             finish(exit);
                             return;
                         }
@@ -654,7 +665,7 @@ fn spawn_parser(
                         if !shared.client().is_closed() {
                             let _ = shared.send(kind::CLOSE, Vec::new());
                         }
-                        if let Some(exit) = reattach(&shared, &sink) {
+                        if let Some(exit) = reattach(&shared) {
                             finish(exit);
                             return;
                         }
@@ -668,14 +679,14 @@ fn spawn_parser(
 
 /// Reaches the terminal again after its stream ended without an exit (D5).
 /// `Some(reason)`: the program is gone, report it. `None`: reattached.
-fn reattach(shared: &Shared, sink: &StreamSink) -> Option<ChildExitReason> {
+fn reattach(shared: &Shared) -> Option<ChildExitReason> {
     let deadline = Instant::now() + REATTACH_LIMIT;
     let mut backoff = Duration::from_millis(50);
     loop {
         if shared.closing.load(Ordering::Acquire) {
             return None;
         }
-        match try_reattach(shared, sink) {
+        match try_reattach(shared) {
             Ok(None) => return None,
             Ok(Some(exit)) => return Some(exit),
             Err(err) => {
@@ -695,7 +706,7 @@ fn reattach(shared: &Shared, sink: &StreamSink) -> Option<ChildExitReason> {
     }
 }
 
-fn try_reattach(shared: &Shared, sink: &StreamSink) -> Result<Option<ChildExitReason>, CoreError> {
+fn try_reattach(shared: &Shared) -> Result<Option<ChildExitReason>, CoreError> {
     let client = {
         let current = shared.client();
         if current.is_closed() {
@@ -725,7 +736,7 @@ fn try_reattach(shared: &Shared, sink: &StreamSink) -> Result<Option<ChildExitRe
     let (rows, cols) = *lock(&shared.size);
     let attach = client.attach(
         json!({"terminal": shared.address, "cols": cols, "rows": rows, "resumed": true}),
-        sink.clone(),
+        shared.sink.clone(),
         CALL_TIMEOUT,
     )?;
     let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
@@ -844,6 +855,59 @@ mod tests {
             core.received().iter().all(|frame| frame.channel == 0),
             "{:?}",
             core.received()
+        );
+    }
+
+    #[test]
+    fn a_shut_down_pane_ends_its_threads_without_waiting_for_cores_close() {
+        // The fake core never answers a detach with CLOSE.
+        let core = FakeCore::start();
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let (pane_alive, pane_gone) = std_mpsc::channel::<()>();
+        let connector: Connector = Arc::new(move || {
+            let _held = &pane_alive;
+            Ok(client.clone())
+        });
+        let (parser_alive, parser_gone) = std_mpsc::channel::<()>();
+        let on_read: ReadCallback = Box::new(move |_: &[u8]| {
+            let _held = &parser_alive;
+            PtyReadResult {
+                terminal_responses: Vec::new(),
+            }
+        });
+        let spawn = CoreSpawn {
+            pane_id: PaneId::from_raw(4),
+            argv: vec!["sh".into()],
+            cwd: None,
+            env: serde_json::Map::new(),
+            labels: labels("w1-p4"),
+            rows: 24,
+            cols: 80,
+        };
+        let pid = AtomicU32::new(0);
+        let pane = StartedCore::start(spawn, &pid, connector)
+            .expect("start")
+            .into_pane(on_read, Box::new(|_| {}), Arc::new(AtomicBool::new(false)))
+            .expect("pane");
+
+        pane.shutdown();
+        assert_eq!(
+            parser_gone.recv_timeout(Duration::from_secs(5)),
+            Err(std_mpsc::RecvTimeoutError::Disconnected),
+            "the parser ended"
+        );
+        assert!(
+            matches!(
+                pane.try_send_bytes(Bytes::from_static(b"x")),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ),
+            "input after shutdown is refused"
+        );
+        drop(pane);
+        assert_eq!(
+            pane_gone.recv_timeout(Duration::from_secs(5)),
+            Err(std_mpsc::RecvTimeoutError::Disconnected),
+            "no thread still holds the pane"
         );
     }
 
