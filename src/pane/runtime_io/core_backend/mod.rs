@@ -119,7 +119,10 @@ const KEEP_ENV_VAR: &str = "HERDR_CORE_KEEP_ENV";
 /// every other variable in the environment core gives it is unset with
 /// `env -u`, `KEEP_ENV_VAR` included. Names are read from `env`'s output;
 /// a value with a newline can only add a bogus name, which is unset harmlessly.
-const KEEP_ENV_SCRIPT: &str = r#"keep=" $HERDR_CORE_KEEP_ENV "
+/// `unset IFS; set -f` first: an `IFS` or glob characters in core's own
+/// environment must not change how the names split.
+const KEEP_ENV_SCRIPT: &str = r#"unset IFS; set -f
+keep=" $HERDR_CORE_KEEP_ENV "
 set -- -- "$@"
 for name in $(/usr/bin/env | /usr/bin/sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
   case "$keep" in
@@ -418,6 +421,28 @@ mod tests {
                 .contains(&name),
                 "unexpected {name} in {text}"
             );
+        }
+    }
+
+    // Shells that import `IFS` from the environment (dash does) would split
+    // the names on it; the wrapper resets it first.
+    #[test]
+    fn the_keep_wrapper_is_not_misled_by_an_ifs_in_cores_environment() {
+        for ifs in ["N", "_", "T"] {
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", KEEP_ENV_SCRIPT, "herdr-core-env", "/usr/bin/env"])
+                .env_clear()
+                .env(KEEP_ENV_VAR, "PATH")
+                .env("PATH", "/usr/bin:/bin")
+                .env("IFS", ifs)
+                .env("ANTHROPIC_AUTH_TOKEN", "canary-auth")
+                .env("CLAUDE_CODE_OAUTH_TOKEN", "canary-oauth")
+                .output()
+                .expect("run the wrapper");
+            assert!(output.status.success(), "{output:?}");
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(!text.contains("canary"), "IFS={ifs}: {text}");
+            assert!(text.contains("PATH=/usr/bin:/bin"), "IFS={ifs}: {text}");
         }
     }
 
