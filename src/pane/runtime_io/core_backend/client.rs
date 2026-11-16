@@ -523,13 +523,65 @@ const CORE_START_ENV_REMOVE: &[&str] = &[
 ];
 const CORE_START_ENV_REMOVE_PREFIXES: &[&str] = &["CLAUDE_CODE_", "ANTHROPIC_"];
 
+/// The `hc` binary: found on `PATH` once, then used by that absolute path,
+/// so a later `PATH` cannot swap it. Its path and version are logged then.
+fn hc_binary() -> Result<&'static Path, CoreError> {
+    static HC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(path) = HC.get() {
+        return Ok(path);
+    }
+    let path = find_on_path("hc", std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| CoreError::Unavailable("no hc on PATH".into()))?;
+    let version = binary_version(&path).unwrap_or_else(|| "unknown".into());
+    info!(path = %path.display(), version, "herdr-core is started with this hc");
+    Ok(HC.get_or_init(|| path))
+}
+
+/// The first executable file `name` in an absolute `PATH` folder.
+fn find_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::env::split_paths(path?)
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join(name))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// What `<binary> --version` prints, waiting at most two seconds.
+fn binary_version(binary: &Path) -> Option<String> {
+    let mut child = std::process::Command::new(binary)
+        .arg("--version")
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while child.try_wait().ok()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out.trim().to_string())
+}
+
 /// The `hc server start` command for `session`, with the environment D2 asks
-/// for. `hc` is looked up on `PATH`.
+/// for.
 pub(crate) fn core_start_command(
+    hc: &Path,
     session: &str,
     inherited: impl IntoIterator<Item = (String, String)>,
 ) -> std::process::Command {
-    let mut command = std::process::Command::new("hc");
+    let mut command = std::process::Command::new(hc);
     command.args(["server", "start"]);
     command.env_clear();
     for (key, value) in inherited {
@@ -564,7 +616,7 @@ pub(crate) fn connect_session(
                 socket.display()
             )));
         }
-        let status = core_start_command(session, std::env::vars())
+        let status = core_start_command(hc_binary()?, session, std::env::vars())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -797,7 +849,7 @@ mod tests {
             ("HC_TERMINAL_ID", "t7"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()));
-        let command = core_start_command("herdr", inherited);
+        let command = core_start_command(Path::new("/opt/hc/bin/hc"), "herdr", inherited);
         let env: Vec<(String, Option<String>)> = command
             .get_envs()
             .map(|(k, v)| {
@@ -819,7 +871,31 @@ mod tests {
             assert!(!keys.contains(&stripped), "{stripped} leaked: {keys:?}");
         }
         assert!(env.contains(&("HC_SESSION".into(), Some("herdr".into()))));
+        assert_eq!(command.get_program(), "/opt/hc/bin/hc");
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["server", "start"]);
+    }
+
+    #[test]
+    fn hc_is_the_first_executable_in_an_absolute_path_folder() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("hcpath-{}", std::process::id()));
+        let (plain, exec, later) = (root.join("a"), root.join("b"), root.join("c"));
+        for (folder, mode) in [(&plain, 0o644), (&exec, 0o755), (&later, 0o755)] {
+            std::fs::create_dir_all(folder).expect("folder");
+            let hc = folder.join("hc");
+            std::fs::write(&hc, "#!/bin/sh\n").expect("hc");
+            std::fs::set_permissions(&hc, std::fs::Permissions::from_mode(mode)).expect("mode");
+        }
+        let path = std::env::join_paths([
+            "relative",
+            plain.to_str().unwrap(),
+            exec.to_str().unwrap(),
+            later.to_str().unwrap(),
+        ])
+        .expect("PATH");
+        assert_eq!(find_on_path("hc", Some(&path)), Some(exec.join("hc")));
+        assert_eq!(find_on_path("hc", None), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

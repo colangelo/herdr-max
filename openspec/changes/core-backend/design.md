@@ -70,12 +70,14 @@ The core session name is `herdr` for the default herdr session and `herdr-<name>
 so a test or throwaway herdr never shares a core with ac's sessions and never touches the user's
 default core. A debug build uses `herdrdev` and `herdrdev-<name>`, which no release name can equal
 (a release session named `dev` is `herdr-dev`). `HC_SOCKET` overrides the socket for every session;
-the server logs once, at info, that it is in effect. The socket path follows core's endpoint rules (Context). When the socket is missing,
-the server runs `hc server start` with `HC_SESSION` set and its own environment, minus inherited
+the server logs once, at info, that it is in effect. The socket path follows core's endpoint rules
+(Context). When the socket is missing, the server runs `hc server start` with `HC_SESSION` set and its own environment, minus inherited
 agent-session variables (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `HERDR_PANE_ID`, `HERDR_TAB_ID`,
 `HERDR_WORKSPACE_ID`), because core keeps the environment of whoever started or updated it (phase 0
 side finding). The core is never started with a launching pane's environment. Our server never
-runs `hc update`, `hc server stop` or `hc server restart`.
+runs `hc update`, `hc server stop` or `hc server restart`. `hc` is found on `PATH` once, at its
+first use, and run by that absolute path afterwards; the server logs the path and `hc --version` at
+info.
 
 **Core lifetime.** A core our server starts outlives our server: on macOS `hc server start` goes
 through core's one-shot launchd job (the pilot core runs with parent pid 1, in its own session, as
