@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +21,14 @@ use super::frame::{kind, Frame, FrameDecoder};
 /// The oldest core this client speaks to (phase 0 ran 0.1.21).
 pub(crate) const MIN_CORE_VERSION: (u64, u64, u64) = (0, 1, 21);
 const PROTOCOL_GENERATION: u64 = 1;
+/// The longest `hello` reply line this client reads.
+const HELLO_LIMIT: u64 = 64 * 1024;
+/// Core's credit window per stream (hc 0.1.21): a core that honours credit
+/// never has more than this in flight on one stream.
+pub(crate) const CREDIT_WINDOW: u32 = 256 * 1024;
+/// What one stream may hold queued for its parser. More means core ignored
+/// credit, a protocol error for that stream.
+const STREAM_QUEUE_LIMIT: usize = 2 * CREDIT_WINDOW as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CoreError {
@@ -59,7 +67,71 @@ pub(crate) enum StreamEvent {
     ConnectionLost,
 }
 
-pub(crate) type StreamSink = mpsc::Sender<StreamEvent>;
+/// Where the reader queues a stream's events, counting the queued bytes so a
+/// core that ignores credit cannot grow the queue without bound.
+#[derive(Clone)]
+pub(crate) struct StreamSink {
+    tx: mpsc::Sender<StreamEvent>,
+    queued: Arc<AtomicUsize>,
+}
+
+/// The receiving end of a [`StreamSink`].
+pub(crate) struct StreamEvents {
+    rx: mpsc::Receiver<StreamEvent>,
+    queued: Arc<AtomicUsize>,
+}
+
+pub(crate) fn stream_channel() -> (StreamSink, StreamEvents) {
+    let (tx, rx) = mpsc::channel();
+    let queued = Arc::new(AtomicUsize::new(0));
+    (
+        StreamSink {
+            tx,
+            queued: Arc::clone(&queued),
+        },
+        StreamEvents { rx, queued },
+    )
+}
+
+impl StreamSink {
+    pub(crate) fn send(&self, event: StreamEvent) -> Result<(), mpsc::SendError<StreamEvent>> {
+        let bytes = match &event {
+            StreamEvent::Data(bytes) => bytes.len(),
+            _ => 0,
+        };
+        self.queued.fetch_add(bytes, Ordering::AcqRel);
+        self.tx.send(event).inspect_err(|_| {
+            self.queued.fetch_sub(bytes, Ordering::AcqRel);
+        })
+    }
+
+    fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
+}
+
+impl StreamEvents {
+    pub(crate) fn recv(&self) -> Result<StreamEvent, mpsc::RecvError> {
+        self.rx.recv().inspect(|event| self.taken(event))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<StreamEvent, mpsc::RecvTimeoutError> {
+        self.rx
+            .recv_timeout(timeout)
+            .inspect(|event| self.taken(event))
+    }
+
+    fn taken(&self, event: &StreamEvent) {
+        if let StreamEvent::Data(bytes) = event {
+            self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+        }
+    }
+}
+
 type Reply = Result<Value, CoreError>;
 type EventHandler = Box<dyn Fn(&Value) + Send + Sync>;
 
@@ -142,9 +214,16 @@ impl CoreClient {
                 .map_err(|err| CoreError::Unavailable(err.to_string()))?,
         );
         let mut reply = String::new();
-        reader
+        let read = (&mut reader)
+            .take(HELLO_LIMIT)
             .read_line(&mut reply)
             .map_err(|err| CoreError::Unavailable(format!("no hello reply: {err}")))?;
+        if read as u64 == HELLO_LIMIT && !reply.ends_with('\n') {
+            return Err(CoreError::Unavailable(format!(
+                "hello reply longer than {} KiB",
+                HELLO_LIMIT / 1024
+            )));
+        }
         let reply: Value = serde_json::from_str(reply.trim())
             .map_err(|err| CoreError::Unavailable(format!("bad hello reply: {err}")))?;
         let result = reply
@@ -368,10 +447,25 @@ fn route(inner: &Inner, frame: Frame) {
     };
     let closing = matches!(event, StreamEvent::Close(_));
     let mut streams = lock(&inner.streams);
-    if let Some(sink) = streams.get(&frame.channel) {
-        if sink.send(event).is_err() || closing {
-            streams.remove(&frame.channel);
+    let Some(sink) = streams.get(&frame.channel) else {
+        return;
+    };
+    // Never wait on the parser here: this thread serves every stream.
+    if let StreamEvent::Data(bytes) = &event {
+        if sink.queued().saturating_add(bytes.len()) > STREAM_QUEUE_LIMIT {
+            warn!(
+                channel = frame.channel,
+                queued = sink.queued(),
+                "herdr-core sent past the stream's credit; dropping the stream"
+            );
+            if let Some(sink) = streams.remove(&frame.channel) {
+                let _ = sink.send(StreamEvent::ConnectionLost);
+            }
+            return;
         }
+    }
+    if sink.send(event).is_err() || closing {
+        streams.remove(&frame.channel);
     }
 }
 
@@ -795,7 +889,7 @@ mod tests {
     fn stream_frames_sent_right_after_the_attach_reply_are_not_lost() {
         let core = FakeCore::start_with(|config| config.first_paint = b"first-paint".to_vec());
         let client = CoreClient::connect(&core.socket, None).expect("connect");
-        let (sink, events) = mpsc::channel();
+        let (sink, events) = stream_channel();
         let reply = client
             .attach(json!({"terminal": "t1"}), sink, Duration::from_secs(5))
             .expect("attach");
@@ -804,6 +898,51 @@ mod tests {
             events.recv_timeout(Duration::from_secs(5)).unwrap(),
             StreamEvent::Data(b"first-paint".to_vec())
         );
+    }
+
+    #[test]
+    fn a_hello_reply_longer_than_the_limit_is_refused() {
+        let mut padded = vec![b' '; HELLO_LIMIT as usize];
+        padded.extend_from_slice(br#"{"jsonrpc":"2.0","id":0,"result":{"generation":1}}"#);
+        padded.push(b'\n');
+        let core = FakeCore::start_with(|config| config.hello_line = Some(padded));
+        let err = CoreClient::connect(&core.socket, None)
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&err, CoreError::Unavailable(reason) if reason.contains("hello reply longer")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_stream_sent_past_its_credit_is_dropped_and_the_connection_stays() {
+        let core = FakeCore::start();
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let (sink, events) = stream_channel();
+        let reply = client
+            .attach(json!({"terminal": "t1"}), sink, Duration::from_secs(5))
+            .expect("attach");
+        let channel = reply["channel"].as_u64().expect("channel") as u32;
+        // Nothing reads the stream and nothing credits it: a core that
+        // honours credit would stop at CREDIT_WINDOW.
+        let chunk = vec![b'x'; 16 * 1024];
+        for _ in 0..(3 * CREDIT_WINDOW as usize / chunk.len()) {
+            core.send(Frame::new(channel, kind::DATA, chunk.clone()));
+        }
+        let mut queued = 0;
+        let lost = loop {
+            match events.recv_timeout(Duration::from_secs(5)) {
+                Ok(StreamEvent::Data(bytes)) => queued += bytes.len(),
+                other => break other,
+            }
+        };
+        assert_eq!(lost, Ok(StreamEvent::ConnectionLost));
+        assert!(queued <= STREAM_QUEUE_LIMIT, "{queued} bytes queued");
+        assert!(!client.is_closed(), "other streams keep the connection");
+        client
+            .call("server.status", json!({}), Duration::from_secs(5))
+            .expect("the reader still serves calls");
     }
 
     #[test]
@@ -828,7 +967,7 @@ mod tests {
     fn a_dropped_connection_ends_pending_calls_and_streams() {
         let core = FakeCore::start();
         let client = CoreClient::connect(&core.socket, None).expect("connect");
-        let (sink, events) = mpsc::channel();
+        let (sink, events) = stream_channel();
         client
             .attach(json!({"terminal": "t1"}), sink, Duration::from_secs(5))
             .expect("attach");
@@ -878,7 +1017,7 @@ mod tests {
             terminal["pid"].as_u64().is_some_and(|pid| pid > 0),
             "{terminal}"
         );
-        let (sink, events) = mpsc::channel();
+        let (sink, events) = stream_channel();
         let reply = client
             .attach(
                 json!({"terminal": terminal["address"], "cols": 80, "rows": 24}),

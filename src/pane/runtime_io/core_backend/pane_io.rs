@@ -19,7 +19,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use super::client::{CoreClient, CoreError, StreamEvent, StreamSink};
+use super::client::{
+    stream_channel, CoreClient, CoreError, StreamEvent, StreamEvents, StreamSink, CREDIT_WINDOW,
+};
 use super::frame::{kind, Frame};
 use crate::layout::PaneId;
 use crate::platform::ChildExitReason;
@@ -168,7 +170,7 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
 /// caller until core has said yes, so a refusal can fall back to the PTY.
 pub(crate) struct StartedCore {
     shared: Arc<Shared>,
-    events_rx: std_mpsc::Receiver<StreamEvent>,
+    events_rx: StreamEvents,
     events_tx: StreamSink,
     automatic_input: bool,
 }
@@ -271,7 +273,7 @@ impl StartedCore {
             cols,
             ours_to_kill,
         } = attach;
-        let (events_tx, events_rx) = std_mpsc::channel();
+        let (events_tx, events_rx) = stream_channel();
         let (channel, automatic_input) = match client.attach(
             // Output printed before this attach has scrolled past the first
             // paint's screen: ask for the history too, or the pane loses it.
@@ -572,8 +574,6 @@ struct CreditBatch {
     owed: u32,
 }
 
-/// Core's credit window per stream (hc 0.1.21).
-const CREDIT_WINDOW: u32 = 256 * 1024;
 const CREDIT_BATCH: u32 = CREDIT_WINDOW / 4;
 
 impl CreditBatch {
@@ -595,7 +595,7 @@ impl CreditBatch {
 
 fn spawn_parser(
     shared: Arc<Shared>,
-    events: std_mpsc::Receiver<StreamEvent>,
+    events: StreamEvents,
     sink: StreamSink,
     writer: mpsc::Sender<WriteCmd>,
     mut on_read: ReadCallback,
@@ -647,6 +647,12 @@ fn spawn_parser(
                     StreamEvent::ConnectionLost => {
                         if shared.closing.load(Ordering::Acquire) {
                             return;
+                        }
+                        // The connection is still up when the client dropped
+                        // only this stream (core sent past its credit):
+                        // detach it in core too before attaching anew.
+                        if !shared.client().is_closed() {
+                            let _ = shared.send(kind::CLOSE, Vec::new());
                         }
                         if let Some(exit) = reattach(&shared, &sink) {
                             finish(exit);

@@ -18,6 +18,8 @@ pub(crate) struct FakeConfig {
     /// Bytes sent on a stream right after its attach reply.
     pub first_paint: Vec<u8>,
     pub pid: u32,
+    /// Sent instead of the hello reply when set.
+    pub hello_line: Option<Vec<u8>>,
 }
 
 impl Default for FakeConfig {
@@ -28,6 +30,7 @@ impl Default for FakeConfig {
             features: vec!["framed", "attach", "events", "status", "automatic_input"],
             first_paint: Vec::new(),
             pid: 4242,
+            hello_line: None,
         }
     }
 }
@@ -175,8 +178,11 @@ fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
         Ok(writer) => writer,
         Err(_) => return,
     };
-    let mut line = serde_json::to_vec(&reply).unwrap_or_default();
-    line.push(b'\n');
+    let line = config.hello_line.clone().unwrap_or_else(|| {
+        let mut line = serde_json::to_vec(&reply).unwrap_or_default();
+        line.push(b'\n');
+        line
+    });
     if writer.write_all(&line).is_err() {
         return;
     }
