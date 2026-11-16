@@ -99,14 +99,32 @@ impl Drop for Handle {
 
 impl CoreClient {
     /// Connects to the core at `socket`, says hello and switches to framed
-    /// mode. Refuses a core of another protocol generation.
+    /// mode. Refuses a socket another user could have placed or serves, and a
+    /// core of another protocol generation.
     pub(crate) fn connect(
         socket: &Path,
         on_event: Option<EventHandler>,
     ) -> Result<Self, CoreError> {
+        let euid = unsafe { libc::geteuid() };
+        check_socket_folder(socket, euid)?;
         let mut stream = UnixStream::connect(socket).map_err(|err| {
             CoreError::Unavailable(format!("cannot connect to {}: {err}", socket.display()))
         })?;
+        match crate::platform::unix_stream_peer_uid(&stream) {
+            Some(uid) if uid == euid => {}
+            Some(uid) => {
+                return Err(CoreError::Unavailable(format!(
+                    "{} is served by uid {uid}, not {euid}",
+                    socket.display()
+                )))
+            }
+            None => {
+                return Err(CoreError::Unavailable(format!(
+                    "cannot tell which user serves {}",
+                    socket.display()
+                )))
+            }
+        }
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
@@ -253,6 +271,41 @@ impl CoreClient {
     pub(crate) fn forget_stream(&self, channel: u32) {
         lock(&self.inner.streams).remove(&channel);
     }
+}
+
+/// Refuses a socket whose folder another user owns or can write to: they
+/// could have put their own socket there.
+fn check_socket_folder(socket: &Path, euid: u32) -> Result<(), CoreError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let folder = match socket.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => folder,
+        _ => Path::new("."),
+    };
+    let metadata = std::fs::metadata(folder).map_err(|err| {
+        CoreError::Unavailable(format!("cannot inspect {}: {err}", folder.display()))
+    })?;
+    match socket_folder_refusal(metadata.uid(), metadata.mode(), euid) {
+        Some(refusal) => Err(CoreError::Unavailable(format!(
+            "the folder of {} {refusal}",
+            socket.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Why a socket folder with this owner and mode is not trusted, or `None`.
+fn socket_folder_refusal(owner: u32, mode: u32, euid: u32) -> Option<String> {
+    if owner != euid {
+        return Some(format!("is owned by uid {owner}, not {euid}"));
+    }
+    if mode & 0o022 != 0 {
+        return Some(format!(
+            "is writable by group or others (mode {:o})",
+            mode & 0o7777
+        ));
+    }
+    None
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -543,6 +596,36 @@ mod tests {
             socket_path_from("herdr", None, None, Some("/st".into()), home, false),
             PathBuf::from("/st/herdr-core/herdr/herdr.sock")
         );
+    }
+
+    #[test]
+    fn only_a_folder_we_own_and_alone_can_write_holds_a_trusted_socket() {
+        assert_eq!(socket_folder_refusal(501, 0o40700, 501), None);
+        assert_eq!(socket_folder_refusal(501, 0o40755, 501), None);
+        assert!(socket_folder_refusal(502, 0o40700, 501).is_some_and(|r| r.contains("uid 502")));
+        assert!(socket_folder_refusal(0, 0o41777, 501).is_some(), "/tmp");
+        for mode in [0o40770, 0o40720, 0o40702, 0o40777] {
+            assert!(
+                socket_folder_refusal(501, mode, 501).is_some_and(|r| r.contains("writable")),
+                "{mode:o}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_core_socket_in_a_folder_others_can_write_is_refused_before_hello() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let core = FakeCore::start();
+        let folder = core.socket.parent().expect("socket folder");
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o770)).expect("chmod");
+        let err = CoreClient::connect(&core.socket, None)
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&err, CoreError::Unavailable(reason) if reason.contains("writable")),
+            "{err}"
+        );
+        assert!(core.requests().is_empty(), "no hello was sent");
     }
 
     #[test]

@@ -711,7 +711,7 @@ pub(crate) mod unix_image_files;
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
     local_stream_peer_description, local_stream_peer_pid, parent_pid, process_session,
-    spawn_server_signal_monitor, ChildPipe, RemoteBridgeWake,
+    spawn_server_signal_monitor, unix_stream_peer_uid, ChildPipe, RemoteBridgeWake,
 };
 
 mod client_state;

@@ -1021,6 +1021,14 @@ pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     (result == 0 && pid > 0).then_some(pid as u32)
 }
 
+/// The effective uid of the process on the other end of a Unix socket.
+pub(super) fn socket_peer_uid(fd: RawFd) -> Option<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let result = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    (result == 0).then_some(uid)
+}
+
 pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     let info = process_bsdinfo(pid)?;
     Some((comm_from_bsdinfo(&info)?, info.pbi_ppid))

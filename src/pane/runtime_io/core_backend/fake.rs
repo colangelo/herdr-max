@@ -64,6 +64,9 @@ impl FakeCore {
         // Short: Unix socket paths have a small length limit.
         let dir = std::env::temp_dir().join(format!("hcf-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fake core dir");
+        // As core's own: a socket folder others can write to is refused.
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("fake core dir mode");
         let socket = dir.join("c.sock");
         let listener = UnixListener::bind(&socket).expect("fake core bind");
         let shared = Arc::new(Mutex::new(Shared::default()));

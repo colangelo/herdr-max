@@ -407,6 +407,13 @@ pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<
     super::socket_peer_pid(socket.as_fd().as_raw_fd())
 }
 
+/// The effective uid of the process serving a Unix socket we connected to.
+pub(crate) fn unix_stream_peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd as _;
+
+    super::socket_peer_uid(stream.as_raw_fd())
+}
+
 /// The session `pid` belongs to, when it exists.
 pub(crate) fn process_session(pid: u32) -> Option<u32> {
     if pid == 0 || pid > i32::MAX as u32 {

@@ -19,6 +19,11 @@ pub(super) fn socket_peer_pid(_fd: std::os::fd::RawFd) -> Option<u32> {
 }
 
 #[cfg(unix)]
+pub(super) fn socket_peer_uid(_fd: std::os::fd::RawFd) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
 pub(super) fn process_name_and_parent(_pid: u32) -> Option<(String, u32)> {
     None
 }
