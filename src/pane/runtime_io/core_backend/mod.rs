@@ -120,7 +120,9 @@ const KEEP_ENV_VAR: &str = "HERDR_CORE_KEEP_ENV";
 /// `env -u`, `KEEP_ENV_VAR` included. Names are read from `env`'s output;
 /// a value with a newline can only add a bogus name, which is unset harmlessly.
 /// `unset IFS; set -f` first: an `IFS` or glob characters in core's own
-/// environment must not change how the names split.
+/// environment must not change how the names split. A variable whose name
+/// is outside `[A-Za-z_][A-Za-z0-9_]*` is not unset: `sed` skips it, and no
+/// real credential uses such a name.
 const KEEP_ENV_SCRIPT: &str = r#"unset IFS; set -f
 keep=" $HERDR_CORE_KEEP_ENV "
 set -- -- "$@"
