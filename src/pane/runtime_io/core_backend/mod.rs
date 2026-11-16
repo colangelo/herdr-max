@@ -36,9 +36,11 @@ pub(crate) fn preferred() -> bool {
     PREFER_CORE.load(Ordering::Acquire)
 }
 
-/// The core session for this herdr session (D2): `herdr`, `herdr-dev` for a
-/// debug build, and `-<name>` for a named session, so a throwaway or test herdr
-/// never shares a core with ac's sessions or touches the default core.
+/// The core session for this herdr session (D2): `herdr` (`herdrdev` for a
+/// debug build), and `-<name>` for a named session, so a throwaway or test
+/// herdr never shares a core with ac's sessions or touches the default core.
+/// No release name can equal a debug one: release names never start with
+/// `herdrdev`.
 pub(crate) fn core_session_name() -> String {
     session_name_for(
         crate::session::active_name().as_deref(),
@@ -47,10 +49,7 @@ pub(crate) fn core_session_name() -> String {
 }
 
 fn session_name_for(herdr_session: Option<&str>, debug_build: bool) -> String {
-    let mut name = String::from("herdr");
-    if debug_build {
-        name.push_str("-dev");
-    }
+    let mut name = String::from(if debug_build { "herdrdev" } else { "herdr" });
     if let Some(session) = herdr_session {
         name.push('-');
         name.push_str(session);
@@ -321,9 +320,14 @@ mod tests {
     #[test]
     fn core_session_names_follow_design_d2() {
         assert_eq!(session_name_for(None, false), "herdr");
-        assert_eq!(session_name_for(None, true), "herdr-dev");
+        assert_eq!(session_name_for(None, true), "herdrdev");
         assert_eq!(session_name_for(Some("trial"), false), "herdr-trial");
-        assert_eq!(session_name_for(Some("trial"), true), "herdr-dev-trial");
+        assert_eq!(session_name_for(Some("trial"), true), "herdrdev-trial");
+        // A release session named `dev` must not reach a debug build's core.
+        assert_ne!(
+            session_name_for(Some("dev"), false),
+            session_name_for(None, true)
+        );
     }
 
     #[test]

@@ -27,13 +27,13 @@ case "$BASE" in
   *) echo "refusing scratch folder $BASE" >&2; exit 1 ;;
 esac
 
-# A debug build keeps its state under herdr-dev and names its core herdr-dev-*.
+# A debug build keeps its state under herdr-dev and names its core herdrdev-*.
 case "$HERDR_BIN" in
-  */target/debug/*) DEV="-dev" ;;
-  *) DEV="" ;;
+  */target/debug/*) DEV="-dev" CORE_PREFIX="herdrdev" ;;
+  *) DEV="" CORE_PREFIX="herdr" ;;
 esac
 SOCKET="$CONFIG_HOME/herdr$DEV/sessions/$SESSION/herdr.sock"
-CORE_SESSION="herdr$DEV-$SESSION"
+CORE_SESSION="$CORE_PREFIX-$SESSION"
 
 run_herdr() {
   env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \

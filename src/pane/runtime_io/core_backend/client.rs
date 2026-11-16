@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::frame::{kind, Frame, FrameDecoder};
 
@@ -514,9 +514,20 @@ fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
 /// The client socket for a core session, by core's endpoint rules
 /// (`docs/security.md` § State and endpoints).
 pub(crate) fn socket_path(session: &str) -> PathBuf {
+    let hc_socket = std::env::var_os("HC_SOCKET").map(PathBuf::from);
+    if let Some(path) = &hc_socket {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| {
+            info!(
+                socket = %path.display(),
+                session,
+                "HC_SOCKET is set: herdr-core is reached there, not at the session's own socket"
+            );
+        });
+    }
     socket_path_from(
         session,
-        std::env::var_os("HC_SOCKET").map(PathBuf::from),
+        hc_socket,
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
         std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
         std::env::var_os("HOME").map(PathBuf::from),

@@ -68,7 +68,9 @@ rejects the pane (AGENTS.md § Stable client endpoint contract, by analogy).
 
 The core session name is `herdr` for the default herdr session and `herdr-<name>` for a named one,
 so a test or throwaway herdr never shares a core with ac's sessions and never touches the user's
-default core. The socket path follows core's endpoint rules (Context). When the socket is missing,
+default core. A debug build uses `herdrdev` and `herdrdev-<name>`, which no release name can equal
+(a release session named `dev` is `herdr-dev`). `HC_SOCKET` overrides the socket for every session;
+the server logs once, at info, that it is in effect. The socket path follows core's endpoint rules (Context). When the socket is missing,
 the server runs `hc server start` with `HC_SESSION` set and its own environment, minus inherited
 agent-session variables (`CLAUDE_CODE_*`, `ANTHROPIC_*`, `HERDR_PANE_ID`, `HERDR_TAB_ID`,
 `HERDR_WORKSPACE_ID`), because core keeps the environment of whoever started or updated it (phase 0

@@ -5,7 +5,7 @@
 # a live handoff, then `herdr server restart`, then `herdr server stop`.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
-# the herdr-core session `herdr-dev-<session>` it starts there (core follows
+# the herdr-core session `herdrdev-<session>` it starts there (core follows
 # XDG_RUNTIME_DIR and XDG_STATE_HOME). A user's herdr and core are never
 # reached.
 set -euo pipefail
@@ -17,7 +17,7 @@ CONFIG_HOME="$BASE/c"
 RUNTIME_DIR="$BASE/r"
 STATE_DIR="$BASE/s"
 SESSION="v10"
-CORE_SESSION="herdr-dev-$SESSION"
+CORE_SESSION="herdrdev-$SESSION"
 SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
 
 case "$BASE" in
