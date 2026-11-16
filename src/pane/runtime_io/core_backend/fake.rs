@@ -20,6 +20,8 @@ pub(crate) struct FakeConfig {
     pub pid: u32,
     /// Sent instead of the hello reply when set.
     pub hello_line: Option<Vec<u8>>,
+    /// False: after hello, never read again, as a stalled core.
+    pub reads_after_hello: bool,
 }
 
 impl Default for FakeConfig {
@@ -31,6 +33,7 @@ impl Default for FakeConfig {
             first_paint: Vec::new(),
             pid: 4242,
             hello_line: None,
+            reads_after_hello: true,
         }
     }
 }
@@ -187,6 +190,11 @@ fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
         return;
     }
     lock(&shared).stream = Some(stream);
+    if !config.reads_after_hello {
+        loop {
+            std::thread::park();
+        }
+    }
 
     let mut decoder = FrameDecoder::default();
     decoder.push(reader.buffer());

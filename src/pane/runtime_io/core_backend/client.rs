@@ -21,6 +21,8 @@ use super::frame::{kind, Frame, FrameDecoder};
 /// The oldest core this client speaks to (phase 0 ran 0.1.21).
 pub(crate) const MIN_CORE_VERSION: (u64, u64, u64) = (0, 1, 21);
 const PROTOCOL_GENERATION: u64 = 1;
+/// How long one frame's write may block before the connection is given up.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest `hello` reply line this client reads.
 const HELLO_LIMIT: u64 = 64 * 1024;
 /// Core's credit window per stream (hc 0.1.21): a core that honours credit
@@ -199,6 +201,7 @@ impl CoreClient {
         }
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
+            .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)))
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
         let hello =
             json!({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {"framed": true}});
@@ -330,7 +333,9 @@ impl CoreClient {
     }
 
     /// Writes one frame. Frames are written whole under the writer lock, so
-    /// streams interleave only at frame boundaries.
+    /// streams interleave only at frame boundaries. A failed or stalled write
+    /// (core not reading for `WRITE_TIMEOUT`) may have sent part of a frame,
+    /// so it shuts the connection: every stream then sees ConnectionLost.
     pub(crate) fn send(&self, frame: &Frame) -> Result<(), CoreError> {
         let mut bytes = Vec::new();
         frame
@@ -341,7 +346,8 @@ impl CoreClient {
             })?;
         let mut writer = lock(&self.inner.writer);
         writer.write_all(&bytes).map_err(|err| {
-            debug!(err = %err, "herdr-core write failed");
+            warn!(err = %err, "herdr-core write failed; closing the connection");
+            let _ = writer.shutdown(std::net::Shutdown::Both);
             CoreError::Closed
         })
     }
@@ -943,6 +949,32 @@ mod tests {
         client
             .call("server.status", json!({}), Duration::from_secs(5))
             .expect("the reader still serves calls");
+    }
+
+    #[test]
+    fn a_core_that_stops_reading_is_disconnected_after_the_write_deadline() {
+        let core = FakeCore::start_with(|config| config.reads_after_hello = false);
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let frame = Frame::new(1, kind::DATA, vec![0u8; 1024 * 1024]);
+        let started = std::time::Instant::now();
+        let err = loop {
+            if let Err(err) = client.send(&frame) {
+                break err;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "writes never stalled"
+            );
+        };
+        assert_eq!(err, CoreError::Closed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !client.is_closed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stalled connection stayed open"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
