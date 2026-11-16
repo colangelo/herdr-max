@@ -7,6 +7,8 @@
 # footprint. The panes' own programs are not counted.
 #
 # usage: scripts/core_busy_profile.sh pty|core   (HERDR_BIN: a release build)
+# options: V12_ONE_PROCESS=1 (one printer per pane, no child per line),
+#          V12_TOP=<file> (kernel counters), V12_SAMPLE=<file> (a profile)
 set -euo pipefail
 
 RUNTIME="${1:?usage: core_busy_profile.sh pty|core}"
@@ -160,7 +162,12 @@ for _ in $(seq 1 "$PANES"); do
     | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')")
 done
 for pane in "${PANE_IDS[@]}"; do
-  send_line "$pane" "touch $BASE/busy; while [ -e $BASE/busy ]; do printf '%090d\\n' 0; sleep 0.5; done"
+  if [[ -n "${V12_ONE_PROCESS:-}" ]]; then
+    # One long-running printer: no new process per line (no sleep child).
+    send_line "$pane" "touch $BASE/busy; perl -e 'use Time::HiRes qw(sleep); \$|=1; while (-e \$ARGV[0]) { printf(\"%090d\\n\", 0); sleep 0.5 }' $BASE/busy"
+  else
+    send_line "$pane" "touch $BASE/busy; while [ -e $BASE/busy ]; do printf '%090d\\n' 0; sleep 0.5; done"
+  fi
 done
 if [[ "$RUNTIME" == core ]]; then
   live="$(hc_scratch ls --json --label "herdr.session=$CORE_SESSION" \
@@ -169,6 +176,17 @@ if [[ "$RUNTIME" == core ]]; then
 fi
 sleep 5
 
+# V12_SAMPLE=<file>: also take a macOS `sample` (V12_SAMPLE_S seconds, default 10) of the server inside
+# the busy window (for a profile only; it slows the server, so do not report
+# that run's CPU).
+if [[ -n "${V12_SAMPLE:-}" ]]; then
+  (sleep 5; sample "$SERVER_PID" ${V12_SAMPLE_S:-10} -file "$V12_SAMPLE" >/dev/null 2>&1) &
+fi
+# V12_TOP=<file>: context switches and system calls of the server over 20 s
+# of the busy window (`top`), to tell what kind of kernel work grows.
+if [[ -n "${V12_TOP:-}" ]]; then
+  (sleep 3; top -l 2 -s 20 -pid "$SERVER_PID" -stats pid,cpu,csw,sysbsd,sysmach,msgsent,msgrecv,th > "$V12_TOP" 2>&1) &
+fi
 read -r BUSY BUSY_BY <<<"$(window_cpu)"
 rm -f "$BASE/busy"
 sleep 3
