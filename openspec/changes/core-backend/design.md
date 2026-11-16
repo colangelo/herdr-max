@@ -191,6 +191,16 @@ core that changes this, the core backend refuses to sweep (and logs at warn) whe
 session id equals the core's or any holder's (`server.status` pids), and the sweep list drops those
 pids if present. V7 asserts the core and the core's other terminals survive the close.
 
+**Narrowed after the security review (M2, 2026-11-15): a program that already exited.** When the
+pane's program has exited before its pane closes, the close signals nothing, so the program's
+detached jobs keep running (`sweep_targets` in `src/pane/runtime_io/pty.rs`; the PTY backend shares
+the rule). The reason is pid reuse: once the program has exited, its pid is free, and a process that
+holds it now is a stranger whose session the sweep would end. A close while the program runs is
+unchanged. Sweeping the remaining members of the old session is possible later: they still carry
+its session id, and on macOS and Linux the kernel does not reuse a pid that a live session still
+uses as its id, so the sweep could list processes by that session id, never signal the old pid
+itself, and stay safe. That kernel rule must be checked on each platform before relying on it.
+
 Alternative: accept core's narrower kill and document that a detached job survives a pane close.
 Rejected: it is user-visible (a dev server keeps its port) and differs between backends.
 
