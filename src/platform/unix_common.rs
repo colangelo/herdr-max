@@ -407,6 +407,13 @@ pub(crate) fn local_stream_peer_pid(stream: &crate::ipc::LocalStream) -> Option<
     super::socket_peer_pid(socket.as_fd().as_raw_fd())
 }
 
+/// The process on the other end of a Unix socket.
+pub(crate) fn unix_stream_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd as _;
+
+    super::socket_peer_pid(stream.as_raw_fd())
+}
+
 /// The effective uid of the process serving a Unix socket we connected to.
 pub(crate) fn unix_stream_peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;

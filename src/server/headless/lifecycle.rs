@@ -148,18 +148,18 @@ impl HeadlessServer {
             Some(export_size),
             self.host_shutdown_intent.get(),
         );
-        let import_pid = match crate::server::handoff::spawn_handoff_import(
+        let mut import_server = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
             &token,
         ) {
-            Ok(pid) => pid,
+            Ok(server) => server,
             Err(err) => {
                 self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                 return Err(err);
             }
         };
-        info!(pid = import_pid, socket = %socket_path.display(), "spawned handoff import server");
+        info!(pid = ?import_server.pid(), socket = %socket_path.display(), "spawned handoff import server");
 
         let mut fds = Vec::new();
         let duplicate_result = (|| {
@@ -175,7 +175,7 @@ impl HeadlessServer {
             for fd in fds {
                 let _ = unsafe { libc::close(fd) };
             }
-            crate::server::handoff::cleanup_failed_import_child(import_pid);
+            crate::server::handoff::cleanup_failed_import_server(import_server);
             self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
             return Err(err);
         }
@@ -187,12 +187,17 @@ impl HeadlessServer {
             &manifest,
             importer_batches,
         ) {
-            Ok(validated) => validated,
+            Ok(validated) => {
+                import_server =
+                    import_server.with_peer(crate::platform::unix_stream_peer_pid(&validated.0));
+                info!(pid = ?import_server.pid(), "handoff import server connected");
+                validated
+            }
             Err(err) => {
                 for fd in fds {
                     let _ = unsafe { libc::close(fd) };
                 }
-                crate::server::handoff::cleanup_failed_import_child(import_pid);
+                crate::server::handoff::cleanup_failed_import_server(import_server);
                 self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                 return Err(err);
             }
@@ -204,7 +209,7 @@ impl HeadlessServer {
             let _ = unsafe { libc::close(fd) };
         }
         if let Err(err) = send_result {
-            crate::server::handoff::cleanup_failed_import_child(import_pid);
+            crate::server::handoff::cleanup_failed_import_server(import_server);
             self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
             return Err(err);
         }
@@ -216,7 +221,7 @@ impl HeadlessServer {
         }
         let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
-            crate::server::handoff::cleanup_failed_import_child(import_pid);
+            crate::server::handoff::cleanup_failed_import_server(import_server);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
@@ -247,7 +252,7 @@ impl HeadlessServer {
         };
         if let Err(err) = commit_result {
             self.app.start_task_store();
-            crate::server::handoff::cleanup_failed_import_child(import_pid);
+            crate::server::handoff::cleanup_failed_import_server(import_server);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
                 Ok(()) => {
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);

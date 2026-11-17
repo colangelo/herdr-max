@@ -203,12 +203,77 @@ pub(crate) fn handoff_socket_path() -> PathBuf {
     crate::session::data_dir().join(format!("herdr-handoff-{}.sock", std::process::id()))
 }
 
+/// The replacement server a handoff started, as far as rollback may touch it.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImportServer {
+    /// Our own child, which rollback kills and reaps.
+    Child(u32),
+    /// Started through launchd, so not our child. Its pid is the handoff
+    /// socket's peer, known once it has connected and shown the token.
+    Detached(Option<u32>),
+}
+
+#[cfg(unix)]
+impl ImportServer {
+    /// `pid` as `platform::spawn_handoff_server` returns it, 0 for launchd.
+    fn from_spawn(pid: u32) -> Self {
+        if pid == 0 {
+            Self::Detached(None)
+        } else {
+            Self::Child(pid)
+        }
+    }
+
+    /// Records the peer of the handoff connection that presented the token.
+    pub(crate) fn with_peer(self, peer: Option<u32>) -> Self {
+        match self {
+            Self::Child(pid) => Self::Child(pid),
+            Self::Detached(known) => Self::Detached(known.or(peer)),
+        }
+    }
+
+    pub(crate) fn pid(self) -> Option<u32> {
+        match self {
+            Self::Child(pid) => Some(pid),
+            Self::Detached(pid) => pid,
+        }
+    }
+}
+
+/// What rollback does to the replacement server.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rollback {
+    KillAndReap(u32),
+    Kill(u32),
+    /// The replacement cannot be identified, so nothing is signalled.
+    Leave(Option<u32>),
+}
+
+/// A detached replacement is signalled only when it leads its own session,
+/// as the server does once it has left its launchd job, and is not us.
+#[cfg(unix)]
+fn rollback_for(
+    server: ImportServer,
+    own_pid: u32,
+    session_of: impl Fn(u32) -> Option<u32>,
+) -> Rollback {
+    match server {
+        ImportServer::Child(pid) => Rollback::KillAndReap(pid),
+        ImportServer::Detached(Some(pid)) if pid != own_pid && session_of(pid) == Some(pid) => {
+            Rollback::Kill(pid)
+        }
+        ImportServer::Detached(pid) => Rollback::Leave(pid),
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
     socket_path: &Path,
     token: &str,
-) -> io::Result<u32> {
+) -> io::Result<ImportServer> {
     let fallback_exe;
     let exe = if let Some(import_exe) = import_exe {
         import_exe
@@ -237,19 +302,44 @@ pub(crate) fn spawn_handoff_import(
             .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
             .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
     }
-    crate::platform::spawn_handoff_server(&mut command).map_err(|err| {
-        io::Error::new(
-            err.kind(),
-            format!(
-                "failed to spawn handoff import server at {}: {err}",
-                exe.display()
-            ),
-        )
-    })
+    crate::platform::spawn_handoff_server(&mut command)
+        .map(ImportServer::from_spawn)
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to spawn handoff import server at {}: {err}",
+                    exe.display()
+                ),
+            )
+        })
 }
 
 #[cfg(unix)]
-pub(crate) fn cleanup_failed_import_child(pid: u32) {
+pub(crate) fn cleanup_failed_import_server(server: ImportServer) {
+    match rollback_for(server, std::process::id(), crate::platform::process_session) {
+        Rollback::KillAndReap(pid) => kill_and_reap_import_child(pid),
+        Rollback::Kill(pid) => {
+            // SAFETY: plain syscall; the pid is the handoff peer that showed
+            // the token and leads its own session.
+            if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+                info!(pid, "killed handoff import server during rollback");
+            } else {
+                let err = io::Error::last_os_error();
+                warn!(pid, err = %err, "failed to kill handoff import server during rollback");
+            }
+        }
+        Rollback::Leave(pid) => {
+            warn!(
+                ?pid,
+                "handoff import server started through launchd cannot be identified; not signalling it during rollback"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn kill_and_reap_import_child(pid: u32) {
     use std::os::unix::process::ExitStatusExt;
 
     let raw_pid = pid as libc::pid_t;
@@ -733,6 +823,55 @@ pub(crate) fn take_user_context_request(socket_path: &Path) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    const OWN_PID: u32 = 100;
+
+    fn leads_own_session(pid: u32) -> Option<u32> {
+        Some(pid)
+    }
+
+    #[test]
+    fn a_launchd_replacement_is_rolled_back_by_its_socket_peer() {
+        let server = ImportServer::from_spawn(0).with_peer(Some(4242));
+        assert_eq!(server.pid(), Some(4242));
+        assert_eq!(
+            rollback_for(server, OWN_PID, leads_own_session),
+            Rollback::Kill(4242)
+        );
+    }
+
+    #[test]
+    fn a_child_replacement_keeps_its_spawn_pid() {
+        let server = ImportServer::from_spawn(77).with_peer(Some(4242));
+        assert_eq!(
+            rollback_for(server, OWN_PID, leads_own_session),
+            Rollback::KillAndReap(77)
+        );
+    }
+
+    #[test]
+    fn rollback_signals_no_process_it_cannot_identify_as_the_replacement() {
+        let unknown = ImportServer::from_spawn(0);
+        assert_eq!(
+            rollback_for(unknown, OWN_PID, leads_own_session),
+            Rollback::Leave(None)
+        );
+        let in_another_session = ImportServer::from_spawn(0).with_peer(Some(4242));
+        assert_eq!(
+            rollback_for(in_another_session, OWN_PID, |_| Some(1)),
+            Rollback::Leave(Some(4242))
+        );
+        let gone = ImportServer::from_spawn(0).with_peer(Some(4242));
+        assert_eq!(
+            rollback_for(gone, OWN_PID, |_| None),
+            Rollback::Leave(Some(4242))
+        );
+        let ourselves = ImportServer::from_spawn(0).with_peer(Some(OWN_PID));
+        assert_eq!(
+            rollback_for(ourselves, OWN_PID, leads_own_session),
+            Rollback::Leave(Some(OWN_PID))
+        );
+    }
 
     fn request_dir(name: &str) -> PathBuf {
         let dir =
