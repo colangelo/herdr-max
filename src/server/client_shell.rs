@@ -307,6 +307,7 @@ fn resource_facts(
     let mut pane_tasks = BTreeMap::new();
     let mut background_activity = BTreeMap::new();
     let mut background_count = BTreeMap::new();
+    let mut pane_process = BTreeMap::new();
     for public in &snapshot.panes {
         let Some((ws_idx, pane_id)) = app.parse_pane_id(&public.pane_id) else {
             continue;
@@ -352,6 +353,12 @@ fn resource_facts(
         background_activity.insert(public.pane_id.clone(), terminal.background_work());
         if terminal.background_count() > 0 {
             background_count.insert(public.pane_id.clone(), terminal.background_count());
+        }
+        if terminal.suspended {
+            pane_process.insert(
+                public.pane_id.clone(),
+                protocol::ClientPaneProcessState::Suspended,
+            );
         }
     }
     let mut tab_sync = BTreeMap::new();
@@ -411,6 +418,7 @@ fn resource_facts(
                 .clone()
         },
         macos_services_lost: app.macos_services_lost().then_some(true),
+        pane_process: (!pane_process.is_empty()).then_some(pane_process),
     }
 }
 
@@ -787,6 +795,36 @@ mod tests {
         let (shell, _) = snapshot_with_completions(&app, "boot", 1, None, None);
         let facts = shell.resource_facts.expect("optional facts");
         assert_eq!(facts.macos_services_lost, Some(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_suspended_pane_is_named_to_clients_and_a_running_one_is_not() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+
+        let (shell, _) = snapshot_with_completions(&app, "boot", 1, None, None);
+        assert_eq!(shell.resource_facts.unwrap().pane_process, None);
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.suspend_pane(pane_id, std::time::Instant::now()));
+        let (shell, _) = snapshot_with_completions(&app, "boot", 2, None, None);
+        let public = app.public_pane_id(0, pane_id).unwrap();
+        assert_eq!(
+            shell.resource_facts.unwrap().pane_process,
+            Some(std::collections::BTreeMap::from([(
+                public,
+                protocol::ClientPaneProcessState::Suspended
+            )]))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -351,6 +351,54 @@ mod tests {
         );
     }
 
+    /// V14 (fork issue 288): the suspended state is optional JSON beside the
+    /// frozen generation-1 snapshot, and a state a client does not know reads
+    /// as `Unknown`.
+    #[test]
+    fn a_suspended_pane_reaches_clients_without_touching_the_frozen_snapshot() {
+        use super::super::ClientPaneProcessState;
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-snapshot-v1.json"
+        ));
+        let frozen: ClientShellSnapshot = serde_json::from_str(fixture).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        value["resource_facts"] = serde_json::json!({
+            "pane_todos": {"w1:p1": {"total": 1, "open": 1}},
+            "pane_process": {"w1:p1": "suspended", "w1:p2": "a_future_state"},
+        });
+        let json = value.to_string();
+
+        // A client that knows only the core reads the fixture's snapshot.
+        let core_only: ClientShellSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(core_only, frozen);
+
+        let decoded = decode_snapshot(&json).unwrap();
+        let facts = decoded.resource_facts.clone().unwrap();
+        assert_eq!(
+            facts.pane_process,
+            Some(
+                [
+                    ("w1:p1".to_string(), ClientPaneProcessState::Suspended),
+                    ("w1:p2".to_string(), ClientPaneProcessState::Unknown),
+                ]
+                .into_iter()
+                .collect()
+            )
+        );
+        assert_eq!(facts.pane_todos.unwrap()["w1:p1"].open, 1);
+        assert_eq!(
+            bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap(),
+            bincode::serde::encode_to_vec(&frozen, bincode::config::standard()).unwrap(),
+            "the binary core codec does not carry the fact"
+        );
+        let ServerMessage::EndpointControl { data, .. } = snapshot_message(&decoded).unwrap()
+        else {
+            panic!("snapshot JSON");
+        };
+        assert_eq!(decode_snapshot(&data).unwrap(), decoded);
+    }
+
     #[test]
     fn snapshot_message_uses_named_json_control() {
         let snapshot = snapshot();

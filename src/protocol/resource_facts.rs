@@ -38,6 +38,22 @@ pub struct ClientShellResourceFacts {
     /// Mach bootstrap, as after a logout took its login session (fork issue 228).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_services_lost: Option<bool>,
+    /// Panes whose program does not run as usual, by pane id (fork issue
+    /// 288). A running pane is absent. A client that does not know a state
+    /// shows the pane as it shows any other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_process: Option<BTreeMap<String, ClientPaneProcessState>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientPaneProcessState {
+    /// The session ended the pane's program (a logout, or its pane job was
+    /// stopped); the pane starts again in place.
+    Suspended,
+    /// A state from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +149,7 @@ impl ClientShellResourceFacts {
             host_label: get("host_label").and_then(|v| serde_json::from_value(v).ok()),
             macos_services_lost: get("macos_services_lost")
                 .and_then(|v| serde_json::from_value(v).ok()),
+            pane_process: map(get("pane_process")),
         })
     }
 }
