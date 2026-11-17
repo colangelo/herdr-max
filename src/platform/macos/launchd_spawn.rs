@@ -9,6 +9,9 @@
 //! launchd domain, which gives it a coalition of its own. The job immediately
 //! forks the real server and exits, so the server is not a running GUI job that
 //! logout would stop; it keeps the lifetime a directly spawned server had.
+//!
+//! A pane keeper (`pane_job`) is submitted the same way but stays its job's
+//! process, so each pane has a live coalition of its own (fork issue 288).
 
 use std::ffi::{CString, OsStr};
 use std::io::{self, Write};
@@ -18,7 +21,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LAUNCHCTL: &str = "/bin/launchctl";
-const LABEL_PREFIX: &str = "dev.herdr.server.";
+const SERVER_LABEL_PREFIX: &str = "dev.herdr.server.";
+pub(crate) const PANE_LABEL_PREFIX: &str = "dev.herdr.pane.";
 /// Tells the job process to fork the server and exit; never inherited by panes.
 const DETACH_ENV: &str = "HERDR_LAUNCHD_DETACH";
 /// Finished jobs stay loaded until logout; older ones are removed on the next launch.
@@ -29,30 +33,76 @@ const STALE_JOB_AGE: Duration = Duration::from_secs(60);
 /// the caller can spawn directly, when there is no GUI domain or the command
 /// cannot be represented exactly in a launchd job. Returns the job label.
 pub(crate) fn spawn_launchd_job(command: &Command) -> io::Result<String> {
+    let domain = gui_domain()?;
+    let now = since_epoch()?;
+    let label = format!(
+        "{SERVER_LABEL_PREFIX}{}.{}",
+        std::process::id(),
+        now.as_nanos()
+    );
+    let mut env = resolved_environment(command);
+    env.push((DETACH_ENV.into(), "1".into()));
+    remove_stale_jobs(&domain, now, SERVER_LABEL_PREFIX);
+    bootstrap(&domain, &label, command, &env)?;
+    Ok(label)
+}
+
+/// Submits a pane keeper as a run-once job labelled `label`. Its environment
+/// is the command's explicit variables only: the pane program's own
+/// environment travels to the keeper over its socket.
+pub(crate) fn submit_pane_job(label: &str, command: &Command) -> io::Result<()> {
+    let domain = gui_domain()?;
+    let env: Vec<_> = command
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_os_string(), value?.to_os_string())))
+        .collect();
+    bootstrap(&domain, label, command, &env)
+}
+
+/// Removes a pane job, ending its keeper if it still runs.
+pub(crate) fn remove_pane_job(label: &str) -> io::Result<()> {
+    launchctl(&["bootout", &format!("{}/{label}", gui_domain()?)]).map(drop)
+}
+
+/// Removes finished pane jobs older than `STALE_JOB_AGE`.
+pub(crate) fn remove_stale_pane_jobs() {
+    if let (Ok(domain), Ok(now)) = (gui_domain(), since_epoch()) {
+        remove_stale_jobs(&domain, now, PANE_LABEL_PREFIX);
+    }
+}
+
+/// The caller's GUI launchd domain, unless it was started over SSH.
+fn gui_domain() -> io::Result<String> {
     if std::env::var_os("SSH_CONNECTION").is_some() {
         // SSH logins already run outside any terminal app; keep them out of
         // the desktop session too.
         return Err(io::Error::other("started over SSH"));
     }
     // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
-    let domain = format!("gui/{uid}");
-    let now = SystemTime::now()
+    Ok(format!("gui/{}", unsafe { libc::getuid() }))
+}
+
+fn since_epoch() -> io::Result<Duration> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?;
-    let label = format!("{LABEL_PREFIX}{}.{}", std::process::id(), now.as_nanos());
+        .map_err(io::Error::other)
+}
+
+fn bootstrap(
+    domain: &str,
+    label: &str,
+    command: &Command,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> io::Result<()> {
     let working_dir = match command.get_current_dir() {
         Some(dir) => Some(dir.to_path_buf()),
         None => std::env::current_dir().ok(),
     };
-    let plist = job_plist(&label, command, working_dir.as_deref(), current_umask())?;
-    remove_stale_jobs(&domain, now);
-
+    let plist = job_plist(label, command, env, working_dir.as_deref(), current_umask())?;
     let dir = PrivateDir::create()?;
     let plist_path = dir.path().join("job.plist");
     write_private_file(&plist_path, plist.as_bytes())?;
-    launchctl(&["bootstrap", &domain, &plist_path.to_string_lossy()])?;
-    Ok(label)
+    launchctl(&["bootstrap", domain, &plist_path.to_string_lossy()]).map(drop)
 }
 
 /// Called first thing in the server process. Inside the launchd job, forks
@@ -146,24 +196,25 @@ fn job_is_running(target: &str) -> bool {
     })
 }
 
-/// Removes finished herdr server jobs from earlier launches. Running jobs and
-/// recent ones (which may still be starting) are left alone.
-fn remove_stale_jobs(domain: &str, now: Duration) {
+/// Removes finished herdr jobs whose label starts with `prefix` from earlier
+/// launches. Running jobs and recent ones (which may still be starting) are
+/// left alone.
+fn remove_stale_jobs(domain: &str, now: Duration, prefix: &str) {
     let Ok(list) = launchctl(&["list"]) else {
         return;
     };
-    for label in stale_job_labels(&list, now) {
+    for label in stale_job_labels(&list, now, prefix) {
         let target = format!("{domain}/{label}");
         if job_is_running(&target) {
             continue;
         }
         if let Err(err) = launchctl(&["bootout", &target]) {
-            tracing::debug!(%err, label, "could not remove finished server job");
+            tracing::debug!(%err, label, "could not remove a finished herdr job");
         }
     }
 }
 
-fn stale_job_labels(list_output: &str, now: Duration) -> Vec<&str> {
+fn stale_job_labels<'a>(list_output: &'a str, now: Duration, prefix: &str) -> Vec<&'a str> {
     list_output
         .lines()
         .filter_map(|line| {
@@ -171,7 +222,7 @@ fn stale_job_labels(list_output: &str, now: Duration) -> Vec<&str> {
             let pid = fields.next()?.trim();
             let label = fields.nth(1)?.trim();
             let started = label
-                .strip_prefix(LABEL_PREFIX)?
+                .strip_prefix(prefix)?
                 .rsplit_once('.')?
                 .1
                 .parse::<u128>()
@@ -197,6 +248,7 @@ fn current_umask() -> libc::mode_t {
 fn job_plist(
     label: &str,
     command: &Command,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
     working_dir: Option<&Path>,
     umask: libc::mode_t,
 ) -> io::Result<String> {
@@ -212,11 +264,10 @@ fn job_plist(
         push_string(&mut plist, arg)?;
     }
     plist.push_str("</array>\n<key>EnvironmentVariables</key>\n<dict>\n");
-    for (key, value) in resolved_environment(command) {
-        push_key(&mut plist, &key)?;
-        push_string(&mut plist, &value)?;
+    for (key, value) in env {
+        push_key(&mut plist, key)?;
+        push_string(&mut plist, value)?;
     }
-    push_key_string(&mut plist, DETACH_ENV, "1")?;
     plist.push_str("</dict>\n");
     if let Some(dir) = working_dir {
         push_key(&mut plist, OsStr::new("WorkingDirectory"))?;
@@ -226,7 +277,8 @@ fn job_plist(
         push_key_string(&mut plist, key, "/dev/null")?;
     }
     // Run once and never restart. The forked server must survive the job
-    // process exiting, and keeps normal scheduling priority.
+    // process exiting, and keeps normal scheduling priority; so does a pane
+    // program, which runs in a session of its own.
     plist.push_str(concat!(
         "<key>RunAtLoad</key>\n<true/>\n",
         "<key>KeepAlive</key>\n<false/>\n",
@@ -309,12 +361,20 @@ mod tests {
              -\t0\tdev.herdr.server.12.{old}\n\
              42\t0\tdev.herdr.server.13.{old}\n\
              -\t0\tdev.herdr.server.14.{recent}\n\
-             -\t0\tcom.example.other.{old}\n"
+             -\t0\tcom.example.other.{old}\n\
+             -\t0\tdev.herdr.pane.12.3.{old}\n\
+             77\t0\tdev.herdr.pane.12.4.{old}\n\
+             -\t1\tdev.herdr.pane.12.5.{recent}\n"
         );
 
         assert_eq!(
-            stale_job_labels(&list, now),
+            stale_job_labels(&list, now, SERVER_LABEL_PREFIX),
             vec![format!("dev.herdr.server.12.{old}").as_str()]
+        );
+        assert_eq!(
+            stale_job_labels(&list, now, PANE_LABEL_PREFIX),
+            vec![format!("dev.herdr.pane.12.3.{old}").as_str()],
+            "a running keeper and a recent one stay"
         );
     }
 
@@ -325,9 +385,12 @@ mod tests {
             .arg("a&b")
             .env("HERDR_TEST_VALUE", "\"q\"\tx")
             .env_remove("HOME");
+        let mut env = resolved_environment(&command);
+        env.push((DETACH_ENV.into(), "1".into()));
         let plist = job_plist(
             "dev.herdr.server.1.2",
             &command,
+            &env,
             Some(Path::new("/tmp")),
             0o077,
         )
@@ -352,8 +415,9 @@ mod tests {
         ] {
             let mut command = Command::new("/bin/true");
             command.env("HERDR_TEST_VALUE", &value);
+            let env = resolved_environment(&command);
             assert!(
-                job_plist("dev.herdr.server.1.2", &command, None, 0o022).is_err(),
+                job_plist("dev.herdr.server.1.2", &command, &env, None, 0o022).is_err(),
                 "{value:?}"
             );
         }
