@@ -1483,6 +1483,17 @@ impl AppState {
                 });
                 Vec::new()
             }
+            AppEvent::PaneJobsUnavailable { reason } => {
+                self.post_notification(ToastNotification {
+                    kind: ToastKind::NeedsAttention,
+                    title: "pane jobs unavailable".into(),
+                    context: format!("{reason}. New panes start without their own launchd job."),
+                    position: None,
+                    target: None,
+                    anchor_pane: None,
+                });
+                Vec::new()
+            }
             AppEvent::AgentDetectionManifestsUpdated {
                 updated, status, ..
             } => {
@@ -2400,6 +2411,24 @@ mod tests {
         assert_eq!(
             toast.context,
             "herdr-core 0.1.17 is older than 0.1.21. New panes use the PTY."
+        );
+    }
+
+    #[test]
+    fn panes_without_their_job_raise_a_notice_naming_the_reason() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        state.handle_app_event(AppEvent::PaneJobsUnavailable {
+            reason: "launchd did not take the pane job: exit status 5".into(),
+        });
+
+        let toast = state.toast.as_ref().expect("a notice");
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "pane jobs unavailable");
+        assert_eq!(
+            toast.context,
+            "launchd did not take the pane job: exit status 5. New panes start without their \
+             own launchd job."
         );
     }
 

@@ -618,19 +618,20 @@ pub(crate) fn spawn(
     }
     let path = socket_path();
     if path.as_os_str().len() > super::pane_anchor::MAX_SOCKET_PATH {
-        tracing::warn!(path = %path.display(), "no pane jobs: socket path too long");
-        return None;
+        return fall_back(format!(
+            "the pane-job socket path {} is too long",
+            path.display()
+        ));
     }
     if let Err(err) = ensure_listening(&path) {
-        tracing::warn!(%err, path = %path.display(), "no pane jobs: cannot listen");
-        return None;
+        return fall_back(format!(
+            "cannot listen on the pane-job socket {}: {err}",
+            path.display()
+        ));
     }
     let exe = match super::pane_anchor::helper_executable() {
         Ok(exe) => exe,
-        Err(err) => {
-            tracing::warn!(%err, "no pane jobs: no keeper executable");
-            return None;
-        }
+        Err(err) => return fall_back(format!("no keeper executable: {err}")),
     };
     let label = new_label();
     let token = new_token();
@@ -653,8 +654,7 @@ pub(crate) fn spawn(
     let started = Instant::now();
     if let Err(err) = super::launchd_spawn::submit_pane_job(&label, &job) {
         lock(jobs()).waiting.remove(&label);
-        tracing::info!(%err, "pane starts without a launchd job");
-        return None;
+        return fall_back(format!("launchd did not take the pane job: {err}"));
     }
     sweep_stale_jobs();
     let timeout = if super::pane_anchor::is_serving() {
@@ -670,11 +670,12 @@ pub(crate) fn spawn(
             jobs.retry_at = Some(Instant::now() + RETRY_AFTER);
             drop(jobs);
             remove_job_in_background(label);
-            tracing::warn!(
-                ?timeout,
-                "a pane keeper did not connect; panes start without launchd jobs for a while"
-            );
-            return None;
+            return fall_back(format!(
+                "a pane keeper did not connect within {} s; panes start without launchd \
+                 jobs for {} s",
+                timeout.as_secs(),
+                RETRY_AFTER.as_secs()
+            ));
         }
     };
     let child = start_on(
@@ -698,6 +699,26 @@ pub(crate) fn spawn(
     child
 }
 
+/// The first reason a pane started another way although pane jobs are on,
+/// until the app takes it for its one notice.
+static FALLBACK_NOTICE: Mutex<Option<String>> = Mutex::new(None);
+static FALLBACK_NOTED: AtomicBool = AtomicBool::new(false);
+
+/// A pane starts without a job although `[experimental] pane_jobs` is on.
+fn fall_back<T>(reason: String) -> Option<T> {
+    tracing::warn!(reason, "pane starts without a launchd job");
+    if !FALLBACK_NOTED.swap(true, Ordering::AcqRel) {
+        *lock(&FALLBACK_NOTICE) = Some(reason);
+    }
+    None
+}
+
+/// The reason for the one notice that panes start without jobs, once per
+/// server.
+pub(crate) fn take_fallback_notice() -> Option<String> {
+    lock(&FALLBACK_NOTICE).take()
+}
+
 fn remove_job_in_background(label: String) {
     let _ = std::thread::Builder::new()
         .name("pane-job-remove".into())
@@ -718,8 +739,10 @@ fn start_on(
     let slave = match open_slave(tty) {
         Ok(slave) => slave,
         Err(err) => {
-            tracing::warn!(%err, tty = %tty.display(), "could not open the pane's tty for its keeper");
-            return None;
+            return fall_back(format!(
+                "could not open the pane's terminal {} for its keeper: {err}",
+                tty.display()
+            ))
         }
     };
     let line = match encode(&ToKeeper::Spawn {
@@ -729,8 +752,7 @@ fn start_on(
         Err(err) => return Some(Err(err)),
     };
     if let Err(err) = send_with_fds(&stream, &line, &[slave.as_raw_fd()]) {
-        tracing::warn!(%err, "a pane keeper did not take its program");
-        return None;
+        return fall_back(format!("a pane keeper did not take its program: {err}"));
     }
     drop(slave);
     let mut pending = Vec::new();
@@ -1059,6 +1081,18 @@ mod tests {
             "the keeper exits with the program's status"
         );
         assert_eq!(super::link(pid), None, "forgotten after the exit");
+    }
+
+    #[test]
+    fn panes_that_start_without_their_job_give_one_notice_with_the_first_reason() {
+        assert!(fall_back::<()>("launchd did not take the pane job".into()).is_none());
+        assert!(fall_back::<()>("a pane keeper did not connect".into()).is_none());
+
+        assert_eq!(
+            take_fallback_notice().as_deref(),
+            Some("launchd did not take the pane job")
+        );
+        assert_eq!(take_fallback_notice(), None, "once per server");
     }
 
     #[test]

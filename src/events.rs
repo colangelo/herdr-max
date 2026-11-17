@@ -214,6 +214,9 @@ pub enum AppEvent {
     /// `[experimental] runtime = "core"` is set but herdr-core cannot be used,
     /// so new panes run on the PTY (core-backend D1). Sent once per server.
     CoreUnavailable { reason: String },
+    /// `[experimental] pane_jobs` is on but a pane started without its own
+    /// launchd job (fork issue 288). Sent once per server.
+    PaneJobsUnavailable { reason: String },
     /// A new version is available through the active installation manager.
     UpdateReady {
         version: String,

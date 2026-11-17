@@ -592,6 +592,15 @@ pub(crate) fn spawn_pane_program(
     None
 }
 
+/// Why panes start without their own launchd job although `[experimental]
+/// pane_jobs` is on; given once per server, for its one notice.
+pub(crate) fn take_pane_jobs_unavailable() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return macos::pane_job::take_fallback_notice();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// `[experimental] pane_jobs`: start new macOS panes under launchd jobs.
 pub(crate) fn set_pane_jobs(enabled: bool) {
     #[cfg(target_os = "macos")]

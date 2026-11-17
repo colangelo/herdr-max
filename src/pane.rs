@@ -3288,6 +3288,9 @@ impl PaneRuntime {
                 )?,
             }
         };
+        if let Some(reason) = crate::platform::take_pane_jobs_unavailable() {
+            let _ = events.try_send(AppEvent::PaneJobsUnavailable { reason });
+        }
 
         // --- Detection task ---
         let (detect_handle, detect_reset_notify, pending_release) = if agent_detection
