@@ -209,3 +209,40 @@ verification:
 ```sh
 python3 -m unittest scripts.test_vendor_portable_pty
 ```
+
+## 0006 expose the resolved unix command for a caller's own spawn
+
+status: active
+
+patch: `vendor/patches/portable-pty/0006-expose-the-resolved-unix-command.patch`
+
+herdr issue: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/288 (fork)
+
+upstream discussion: none
+
+upstream pr: none
+
+vendored base: `portable-pty 0.9.0`
+
+local files:
+
+- `vendor/portable-pty/src/cmdbuilder.rs`
+- `vendor/portable-pty/src/lib.rs`
+
+reason: on macOS each pane program can run under a keeper that is its own
+launchd job. The keeper starts the program with `posix_spawn` and
+`responsibility_spawnattrs_setdisclaim`, so the program, not the keeper's herdr
+binary, owns its privacy (TCC) answers. `CommandBuilder::unix_spawn_parts`
+returns what `as_command` starts (resolved program, argv with argv[0], full
+environment, working directory, umask, controlling-terminal choice), and
+`as_command` is built from it, so the keeper and the library start the same
+program.
+
+remove when: upstream `portable-pty` exposes the resolved command, or Herdr
+drops the pane keeper.
+
+verification:
+
+```sh
+python3 -m unittest scripts.test_vendor_portable_pty
+```

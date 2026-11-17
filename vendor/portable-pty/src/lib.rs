@@ -49,6 +49,8 @@ use std::os::windows::prelude::{AsRawHandle, RawHandle};
 
 pub mod cmdbuilder;
 pub use cmdbuilder::CommandBuilder;
+#[cfg(unix)]
+pub use cmdbuilder::UnixSpawnParts;
 
 #[cfg(unix)]
 pub mod unix;

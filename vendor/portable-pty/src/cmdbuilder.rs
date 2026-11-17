@@ -455,6 +455,18 @@ impl CommandBuilder {
     }
 }
 
+/// A unix command resolved for spawning; see `CommandBuilder::unix_spawn_parts`.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnixSpawnParts {
+    pub program: OsString,
+    pub argv: Vec<OsString>,
+    pub env: Vec<(OsString, OsString)>,
+    pub cwd: OsString,
+    pub umask: Option<libc::mode_t>,
+    pub controlling_tty: bool,
+}
+
 #[cfg(unix)]
 impl CommandBuilder {
     pub fn umask(&mut self, mask: Option<libc::mode_t>) {
@@ -546,10 +558,10 @@ impl CommandBuilder {
         }
     }
 
-    /// Convert the CommandBuilder to a `std::process::Command` instance.
-    pub(crate) fn as_command(&self) -> anyhow::Result<std::process::Command> {
-        use std::os::unix::process::CommandExt;
-
+    /// What `as_command` starts: the resolved program, the full argv (argv\[0\]
+    /// included), the complete environment, the working directory and the
+    /// umask, for a caller that starts the program itself.
+    pub fn unix_spawn_parts(&self) -> anyhow::Result<UnixSpawnParts> {
         let home = self.get_home_dir()?;
         let dir: &OsStr = self
             .cwd
@@ -559,33 +571,50 @@ impl CommandBuilder {
             .unwrap_or(home.as_ref());
         let shell = self.get_shell();
 
-        let mut cmd = if self.is_default_prog() {
-            let mut cmd = std::process::Command::new(&shell);
-
+        let (program, argv) = if self.is_default_prog() {
             // Run the shell as a login shell by prefixing the shell's
             // basename with `-` and setting that as argv0
             let basename = shell.rsplit('/').next().unwrap_or(&shell);
-            cmd.arg0(&format!("-{}", basename));
-            cmd
+            (
+                OsString::from(&shell),
+                vec![OsString::from(format!("-{}", basename))],
+            )
         } else {
-            let resolved = self.search_path(&self.args[0], dir)?;
-            let mut cmd = std::process::Command::new(&resolved);
-            cmd.arg0(&self.args[0]);
-            cmd.args(&self.args[1..]);
-            cmd
+            (self.search_path(&self.args[0], dir)?, self.args.clone())
         };
 
-        cmd.current_dir(dir);
+        let mut env = vec![(OsString::from("SHELL"), OsString::from(&shell))];
+        for EnvEntry {
+            is_from_base_env: _,
+            preferred_key,
+            value,
+        } in self.envs.values()
+        {
+            env.retain(|(key, _)| key != preferred_key);
+            env.push((preferred_key.clone(), value.clone()));
+        }
 
+        Ok(UnixSpawnParts {
+            program,
+            argv,
+            env,
+            cwd: dir.to_owned(),
+            umask: self.umask,
+            controlling_tty: self.controlling_tty,
+        })
+    }
+
+    /// Convert the CommandBuilder to a `std::process::Command` instance.
+    pub(crate) fn as_command(&self) -> anyhow::Result<std::process::Command> {
+        use std::os::unix::process::CommandExt;
+
+        let parts = self.unix_spawn_parts()?;
+        let mut cmd = std::process::Command::new(&parts.program);
+        cmd.arg0(&parts.argv[0]);
+        cmd.args(&parts.argv[1..]);
+        cmd.current_dir(&parts.cwd);
         cmd.env_clear();
-        cmd.env("SHELL", shell);
-        cmd.envs(self.envs.values().map(
-            |EnvEntry {
-                 is_from_base_env: _,
-                 preferred_key,
-                 value,
-             }| (preferred_key.as_os_str(), value.as_os_str()),
-        ));
+        cmd.envs(parts.env.iter().map(|(key, value)| (key, value)));
 
         Ok(cmd)
     }
