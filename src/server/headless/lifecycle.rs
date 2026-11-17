@@ -34,8 +34,8 @@ impl HeadlessServer {
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         // A target from before batched descriptors takes them in one message.
         // Refuse a session too big for that now, before anything is paused.
-        let importer_batches =
-            crate::server::handoff::importer_receives_batches(import_exe.as_deref());
+        let import_target = crate::server::handoff::probe_import_target(import_exe.as_deref());
+        let importer_batches = import_target.batches;
         if !importer_batches {
             let panes = self
                 .app
@@ -150,6 +150,7 @@ impl HeadlessServer {
         );
         let mut import_server = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
+            import_target,
             &socket_path,
             &token,
         ) {

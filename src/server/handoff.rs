@@ -51,6 +51,12 @@ pub(crate) const COMMIT_TIMEOUT: Duration = READY_TIMEOUT;
 /// unlike the arguments, is not visible to other users (security review H5).
 const IMPORT_TOKEN_ENV: &str = "HERDR_HANDOFF_TOKEN";
 
+/// Asks `--version` to list, on a line of its own, the handoff features of
+/// this build; a build from before the variable ignores it.
+pub(crate) const HANDOFF_FEATURES_ENV: &str = "HERDR_HANDOFF_FEATURES";
+/// This build takes the import token from [`IMPORT_TOKEN_ENV`].
+pub(crate) const HANDOFF_FEATURES: &str = "handoff-features: token-env";
+
 /// The import token of `herdr server --handoff-import <socket>`, taken out of
 /// the environment so panes never inherit it. An exporter from before the
 /// variable passes it as the next argument instead.
@@ -104,16 +110,35 @@ pub(crate) enum FdTransport {
     SingleMessage,
 }
 
-/// Whether the build at `import_exe` receives descriptors in batches, judged
-/// by its `--version`. `None` is this build. A version that can't be read
-/// counts as batching: every build since v0.9.1 is, and up to one batch reaches
-/// an older importer intact either way.
+/// What the build a handoff starts can take, judged by its `--version`.
 #[cfg(unix)]
-pub(crate) fn importer_receives_batches(import_exe: Option<&Path>) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ImportTarget {
+    /// It receives descriptors in batches. A version that can't be read
+    /// counts as batching: every build since v0.9.1 is, and up to one batch
+    /// reaches an older importer intact either way.
+    pub(crate) batches: bool,
+    /// It takes the import token from [`IMPORT_TOKEN_ENV`]. A build that
+    /// does not say so also gets it as an argument, as before.
+    pub(crate) token_in_env: bool,
+}
+
+/// The build at `import_exe`; `None` is this build.
+#[cfg(unix)]
+pub(crate) fn probe_import_target(import_exe: Option<&Path>) -> ImportTarget {
     let Some(exe) = import_exe else {
-        return true;
+        return ImportTarget {
+            batches: true,
+            token_in_env: true,
+        };
     };
-    version_receives_batches(probe_version(exe).as_deref())
+    let output = probe_version(exe);
+    ImportTarget {
+        batches: version_receives_batches(output.as_deref()),
+        token_in_env: output
+            .as_deref()
+            .is_some_and(|output| output.lines().any(|line| line == HANDOFF_FEATURES)),
+    }
 }
 
 #[cfg(unix)]
@@ -129,6 +154,7 @@ fn version_receives_batches(version_output: Option<&str>) -> bool {
 fn probe_version(exe: &Path) -> Option<String> {
     let mut child = Command::new(exe)
         .arg("--version")
+        .env(HANDOFF_FEATURES_ENV, "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -173,7 +199,7 @@ pub(crate) fn check_single_message_fits(panes: usize) -> io::Result<()> {
 
 /// The transport an importer's validation line allows for `panes` panes;
 /// `importer_batches` is what its version says (see
-/// [`importer_receives_batches`]). A pre-batching importer that could not take
+/// [`probe_import_target`]). A pre-batching importer that could not take
 /// them all in one message is refused here, before any descriptor moves, so
 /// the exporter rolls back with every pane intact.
 #[cfg(unix)]
@@ -309,6 +335,7 @@ fn rollback_for(
 #[cfg(unix)]
 pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
+    target: ImportTarget,
     socket_path: &Path,
     token: &str,
 ) -> io::Result<ImportServer> {
@@ -324,7 +351,7 @@ pub(crate) fn spawn_handoff_import(
         })?;
         &fallback_exe
     };
-    let mut command = handoff_import_command(exe, socket_path, token);
+    let mut command = handoff_import_command(exe, socket_path, token, target.token_in_env);
     crate::platform::spawn_handoff_server(&mut command)
         .map(ImportServer::from_spawn)
         .map_err(|err| {
@@ -339,7 +366,12 @@ pub(crate) fn spawn_handoff_import(
 }
 
 #[cfg(unix)]
-fn handoff_import_command(exe: &Path, socket_path: &Path, token: &str) -> Command {
+fn handoff_import_command(
+    exe: &Path,
+    socket_path: &Path,
+    token: &str,
+    token_in_env: bool,
+) -> Command {
     let mut command = Command::new(exe);
     command
         .arg("server")
@@ -349,6 +381,10 @@ fn handoff_import_command(exe: &Path, socket_path: &Path, token: &str) -> Comman
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if !token_in_env {
+        // An older build reads it only here (security review H5).
+        command.arg(token);
+    }
     if crate::session::explicit_session_requested() {
         // The import child no longer has the original `--session` argument, so
         // stale socket overrides must not mask the inherited HERDR_SESSION.
@@ -987,8 +1023,23 @@ mod tests {
     /// never its arguments, and the replacement takes it out again.
     #[test]
     fn the_import_token_travels_in_the_environment() {
-        let command =
-            handoff_import_command(Path::new("/bin/herdr"), Path::new("/tmp/h.sock"), "secret");
+        let older = handoff_import_command(
+            Path::new("/bin/herdr"),
+            Path::new("/tmp/h.sock"),
+            "secret",
+            false,
+        );
+        assert_eq!(
+            older.get_args().last(),
+            Some("secret".as_ref()),
+            "a build that reads only the argument still gets it"
+        );
+        let command = handoff_import_command(
+            Path::new("/bin/herdr"),
+            Path::new("/tmp/h.sock"),
+            "secret",
+            true,
+        );
         assert!(
             command.get_args().all(|arg| arg != "secret"),
             "{:?}",
@@ -1375,7 +1426,7 @@ mod tests {
         ] {
             assert_eq!(version_receives_batches(output), batches, "{output:?}");
         }
-        assert!(importer_receives_batches(None), "this build batches");
+        assert!(probe_import_target(None).batches, "this build batches");
     }
 
     #[test]
@@ -1387,10 +1438,39 @@ mod tests {
         let old = dir.join("herdr-old");
         std::fs::write(&old, "#!/bin/sh\necho herdr 0.8.2-ac-beta.146-higuain\n").unwrap();
         std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(!importer_receives_batches(Some(&old)));
+        assert_eq!(
+            probe_import_target(Some(&old)),
+            ImportTarget {
+                batches: false,
+                token_in_env: false
+            }
+        );
+        let current = dir.join("herdr-current");
+        std::fs::write(
+            &current,
+            format!(
+                "#!/bin/sh\necho herdr 0.9.5\n[ -n \"${HANDOFF_FEATURES_ENV}\" ] && echo '{HANDOFF_FEATURES}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            probe_import_target(Some(&current)),
+            ImportTarget {
+                batches: true,
+                token_in_env: true
+            },
+            "it says so when asked"
+        );
         let missing = dir.join("no-such-herdr");
         assert!(probe_version(&missing).is_none());
-        assert!(importer_receives_batches(Some(&missing)));
+        assert_eq!(
+            probe_import_target(Some(&missing)),
+            ImportTarget {
+                batches: true,
+                token_in_env: false
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
