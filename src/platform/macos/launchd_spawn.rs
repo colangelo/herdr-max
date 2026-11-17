@@ -71,6 +71,23 @@ pub(crate) fn remove_stale_pane_jobs() {
     }
 }
 
+/// Whether the caller's GUI launchd domain exists now: it is gone while the
+/// user is logged out.
+// Tests inject their own probe: the real one asks launchd.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn gui_domain_exists() -> bool {
+    let Ok(domain) = gui_domain() else {
+        return false;
+    };
+    Command::new(LAUNCHCTL)
+        .args(["print", &domain])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// The caller's GUI launchd domain, unless it was started over SSH.
 fn gui_domain() -> io::Result<String> {
     if std::env::var_os("SSH_CONNECTION").is_some() {

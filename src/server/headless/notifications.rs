@@ -713,7 +713,9 @@ impl HeadlessServer {
                             .map(|pane| pane.attached_terminal_id.to_string())
                     })
                 });
-                if matches!(&ev, AppEvent::PaneDied { .. })
+                // A suspended pane's agent has not left: releasing it would
+                // drop the session its resume plan names (fork issue 288).
+                if matches!(&ev, AppEvent::PaneDied { exit_reason, .. } if !exit_reason.suspends_pane())
                     && !self
                         .app
                         .pending_worktree_remove_runtime_exits

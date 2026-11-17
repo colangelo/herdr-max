@@ -202,6 +202,7 @@ impl App {
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.next_macos_services_check,
+            self.suspended_pane_resume_deadline(),
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,
             self.pending_host_appearance_deadline,

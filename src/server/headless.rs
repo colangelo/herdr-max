@@ -1945,6 +1945,7 @@ impl HeadlessServer {
                 );
                 connection.pixel_mouse = pixel_mouse;
                 self.clients.insert(client_id, connection);
+                self.app.request_suspended_pane_resume(Instant::now());
                 false
             }
             ServerEvent::ClientShellConnected {
@@ -2060,6 +2061,7 @@ impl HeadlessServer {
                 connection.shell_agent_completions = Some(completion_projection);
                 connection.shell_agent_view = agent_view;
                 self.clients.insert(client_id, connection);
+                self.app.request_suspended_pane_resume(Instant::now());
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
@@ -3337,6 +3339,8 @@ impl HeadlessServer {
         {
             changed |= self.app.run_macos_services_check(now);
         }
+
+        changed |= self.app.resume_suspended_panes_if_due(now);
 
         if self
             .app

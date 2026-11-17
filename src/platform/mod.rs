@@ -228,6 +228,18 @@ impl ChildExitReason {
             _ => false,
         }
     }
+
+    /// The pane stays, suspended, instead of closing.
+    pub(crate) fn suspends_pane(self) -> bool {
+        #[cfg(unix)]
+        {
+            self == Self::Suspended
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -587,6 +599,21 @@ pub(crate) fn set_pane_jobs(enabled: bool) {
     #[cfg(not(target_os = "macos"))]
     if enabled {
         tracing::warn!("[experimental] pane_jobs is macOS only; panes start as before");
+    }
+}
+
+/// Whether a pane suspended by the end of its pane job may start again now
+/// (fork issue 288). Always, where panes have no jobs.
+// Tests inject their own probe: the real one asks launchd.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn pane_jobs_ready_for_resume() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::pane_job::ready_for_resume()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
     }
 }
 
@@ -1106,10 +1133,12 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     #[cfg(unix)]
     assert!(ChildExitReason::Handoff.requires_session_checkpoint());
     assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
+    assert!(!classify_child_exit(&status).suspends_pane());
     #[cfg(unix)]
     for keeper_status in [unix_common::PANE_JOB_STOPPED, unix_common::PANE_KEEPER_LOST] {
         let reason = classify_child_exit(&portable_pty::ExitStatus::with_signal(keeper_status));
         assert_eq!(reason, ChildExitReason::Suspended, "{keeper_status}");
+        assert!(reason.suspends_pane());
         assert!(reason.requires_session_checkpoint());
     }
 }

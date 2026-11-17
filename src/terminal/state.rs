@@ -256,6 +256,11 @@ pub struct TerminalState {
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
+    /// The session ended the pane's program, not the program itself: its
+    /// macOS pane job was stopped, or a logout ended it (fork issue 288). The
+    /// pane has no runtime and keeps its place and resume plan until it is
+    /// started again. Not saved: a restore starts every pane anyway.
+    pub suspended: bool,
 }
 
 impl TerminalState {
@@ -314,6 +319,7 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
             restore_error: None,
+            suspended: false,
         }
     }
 
@@ -2553,6 +2559,25 @@ impl TerminalState {
     /// The command a restore of the current snapshot would run: the reported
     /// resume command, else the built-in one for the saved session, with the
     /// launch flags added. Same order as `persist::restore`.
+    /// Marks the pane suspended (see [`Self::suspended`]). An agent whose
+    /// process the session ended reads as idle until it is resumed, and the
+    /// session it resumes stays on record: this is not the agent leaving.
+    pub(crate) fn suspend(&mut self, now: Instant) {
+        self.suspended = true;
+        if let Some(agent) = self.effective_known_agent().or(self.detected_agent) {
+            let _ = self.set_detected_state_with_screen_signals_at(
+                Some(agent),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                now,
+            );
+        }
+        self.revision = self.revision.saturating_add(1);
+    }
+
     pub fn restore_plan_preview(&self) -> Option<crate::agent_resume::AgentResumePlan> {
         let plan = match self
             .reported_resume_for_snapshot()

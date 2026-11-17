@@ -406,6 +406,22 @@ pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Acquire)
 }
 
+/// Whether a suspended pane may start again now (design D3): at once when
+/// new panes do not start as jobs here, else once launchd accepts pane jobs
+/// again (after a logout, the GUI domain is back).
+// Tests inject their own probe: the real one asks launchd.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn ready_for_resume() -> bool {
+    let over_ssh = std::env::var_os("SSH_CONNECTION").is_some();
+    if unavailable(ENABLED.load(Ordering::Acquire), over_ssh).is_some() {
+        return true;
+    }
+    if lock(jobs()).retry_at.is_some_and(|at| Instant::now() < at) {
+        return false;
+    }
+    super::launchd_spawn::gui_domain_exists()
+}
+
 /// Why new panes do not start as jobs, if they do not.
 fn unavailable(enabled: bool, over_ssh: bool) -> Option<&'static str> {
     if !enabled {

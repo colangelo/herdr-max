@@ -240,7 +240,11 @@ impl App {
         }
 
         let mut worktree_restore_updates = Vec::new();
-        if let AppEvent::PaneDied { pane_id, .. } = &ev {
+        if let AppEvent::PaneDied {
+            pane_id,
+            exit_reason,
+        } = &ev
+        {
             // The exit of a runtime a respawn deliberately replaced. The pane is
             // already running its replacement, so this reports nothing about the
             // pane's current process.
@@ -254,6 +258,9 @@ impl App {
                 .is_some_and(|popup| popup.pane_id == *pane_id)
             {
                 self.close_popup_pane();
+                return Vec::new();
+            }
+            if exit_reason.suspends_pane() && self.suspend_pane_after_exit(*pane_id) {
                 return Vec::new();
             }
             if worktree_restore_failed {
@@ -742,6 +749,7 @@ impl App {
             // The pane is genuinely rooted here now, so the recorded cwd
             // follows it rather than persisting the launch directory.
             terminal.cwd = cwd;
+            terminal.suspended = false;
             terminal.clear_agent_runtime_identity_after_respawn();
             // The clear drops `launch_argv` because the agent-exit path leaves a
             // shell behind. Here the command is what came back, so put it
@@ -832,6 +840,7 @@ impl App {
         let terminal = self.state.terminals.get_mut(&terminal_id)?;
         terminal.cwd = cwd;
         terminal.restore_error = None;
+        terminal.suspended = false;
         terminal.pending_agent_resume_plan = Some(plan);
         // Shown as the agent at once, idle, as a restored pane is.
         if let Some(detected) = detected {

@@ -481,6 +481,9 @@ fn compute_pane_infos(
     )
 }
 
+/// What a suspended pane shows until it starts again (fork issue 288).
+pub(crate) const SUSPENDED_PANE_NOTICE: &str = "Suspended: macOS ended this pane's program (a logout, or its pane job was stopped). It starts again here, and its agent resumes, once macOS accepts new pane jobs.";
+
 pub(super) fn render_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -521,7 +524,13 @@ pub(super) fn render_panes(
             .get(target.tab_index)
             .and_then(|tab| tab.terminal_id(info.id))
             .and_then(|id| app.terminals.get(id))
-            .and_then(|terminal| terminal.restore_error.as_deref())
+            .and_then(|terminal| {
+                if terminal.suspended {
+                    Some(SUSPENDED_PANE_NOTICE)
+                } else {
+                    terminal.restore_error.as_deref()
+                }
+            })
         {
             frame.render_widget(
                 Paragraph::new(reason).wrap(Wrap { trim: false }),
@@ -1137,6 +1146,36 @@ mod tests {
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(text.contains("Saved directory is unavailable."));
         assert!(cursor.is_none_or(|cursor| !cursor.visible));
+    }
+
+    #[test]
+    fn suspended_pane_says_it_starts_again() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("suspended")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert!(app.suspend_pane(pane_id, std::time::Instant::now()));
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = crate::ui::compute_tab_surface_for(
+            &app,
+            &runtimes,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            }),
+            area,
+            false,
+            Default::default(),
+        );
+        let (buffer, _, _, _) =
+            crate::server::render_stream::render_tab_surface_virtual(&app, &runtimes, layout, area);
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            text.contains("Suspended: macOS ended this pane's program"),
+            "{text}"
+        );
     }
 
     #[test]
