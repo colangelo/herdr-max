@@ -22,6 +22,7 @@ pub(crate) use api_helpers::limit_snapshot_lines;
 mod core_terminals;
 mod creation;
 mod custom_commands;
+mod default_workspace;
 mod git_refresh;
 mod ids;
 mod pane_suspension;
@@ -192,6 +193,8 @@ pub struct App {
     server_hangup_probe: fn() -> bool,
     /// When suspended panes start again (fork issue 288).
     pub(crate) pane_suspensions: pane_suspension::PaneSuspensions,
+    /// When to open the next default workspace after one died at once.
+    default_workspace_reopen: default_workspace::DefaultWorkspaceReopen,
     /// Whether launchd accepts pane jobs now, so suspended panes may start.
     pane_jobs_ready_probe: fn() -> bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
@@ -870,6 +873,7 @@ impl App {
             #[cfg(test)]
             server_hangup_probe: || false,
             pane_suspensions: pane_suspension::PaneSuspensions::default(),
+            default_workspace_reopen: default_workspace::DefaultWorkspaceReopen::default(),
             #[cfg(not(test))]
             pane_jobs_ready_probe: crate::platform::pane_jobs_ready_for_resume,
             #[cfg(test)]
@@ -1017,10 +1021,37 @@ impl App {
             return false;
         }
 
+        let now = Instant::now();
+        match self.default_workspace_reopen.poll(now) {
+            default_workspace::Reopen::Now => {}
+            default_workspace::Reopen::Wait => return false,
+            default_workspace::Reopen::StartWaiting { quick_exits } => {
+                tracing::warn!(
+                    quick_exits,
+                    "default workspaces keep exiting at once; waiting before opening another"
+                );
+                let context = format!(
+                    "Their program exited within a second {quick_exits} times in a row. herdr \
+                     now waits longer before opening each new one."
+                );
+                self.state
+                    .post_notification(crate::app::state::ToastNotification {
+                        kind: crate::app::state::ToastKind::NeedsAttention,
+                        title: "new workspaces keep closing".into(),
+                        context,
+                        position: None,
+                        target: None,
+                        anchor_pane: None,
+                    });
+                return true;
+            }
+        }
         let cwd = self.resolve_new_terminal_cwd(None);
         let preserve_checkpoint = self.pane_exit_checkpoint_pending && !self.state.session_dirty;
 
-        match self.create_workspace_with_options(cwd, true) {
+        let created = self.create_workspace_with_options(cwd, true);
+        self.default_workspace_reopen.opened(now);
+        match created {
             Ok(_) => {
                 if preserve_checkpoint {
                     // Automatic replacement is part of pane removal, not a new user mutation.
@@ -4132,6 +4163,21 @@ mod tests {
         releaser.join().unwrap();
         done_rx.try_recv().unwrap();
         assert!(app.session_save_thread.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_workspaces_that_die_at_once_stop_being_reopened_at_once() {
+        let mut app = test_app();
+        for _ in 0..3 {
+            assert!(app.ensure_default_workspace(), "reopened at once");
+            app.state.close_workspaces(vec![0]);
+        }
+
+        assert!(app.ensure_default_workspace(), "the notice is a change");
+        assert!(app.state.workspaces.is_empty(), "no fourth workspace yet");
+        let toast = app.state.toast.as_ref().expect("a notice");
+        assert_eq!(toast.title, "new workspaces keep closing");
+        assert!(!app.ensure_default_workspace(), "still waiting");
     }
 
     #[tokio::test]
