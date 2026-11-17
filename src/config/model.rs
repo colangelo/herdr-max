@@ -1904,7 +1904,9 @@ pub struct ExperimentalConfig {
     pub runtime: PaneRuntimeChoice,
     /// Start each new macOS PTY pane under its own launchd job, so stopping an
     /// app launched from one pane can end at most that pane (fork issue 288).
-    /// Existing panes keep how they started. macOS only. Default: false.
+    /// A pane whose job macOS ends (a logout, a stop) is kept, suspended, and
+    /// starts again in place with its agent resumed. Existing panes keep how
+    /// they started. macOS only. Default: false.
     pub pane_jobs: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking

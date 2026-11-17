@@ -1942,7 +1942,7 @@
           "key": "experimental.pane_jobs",
           "type": "boolean",
           "default": "false",
-          "description": "Start each new macOS PTY pane under its own launchd job, so stopping an app launched from one pane (for example from the Dock) can end at most that pane. Panes already open keep how they started until respawned. macOS only. Default: false."
+          "description": "Start each new macOS PTY pane under its own launchd job, so stopping an app launched from one pane (for example from the Dock) can end at most that pane. A pane whose job macOS ends (a logout, a stop) is kept, shown as suspended, and starts again in place with its agent resumed once macOS accepts new pane jobs. Panes already open keep how they started until respawned. macOS only. Default: false."
         },
         {
           "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
