@@ -126,26 +126,31 @@ fn write_reply(writer: &Mutex<UnixStream>, reply: &Reply) -> io::Result<()> {
     stream.write_all(&line)
 }
 
-/// Sends `bytes` with `fd` attached to the first segment.
-pub(super) fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<()> {
+/// Sends `bytes` with `fds` (at least one) attached to the first segment.
+pub(super) fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
     let mut iov = libc::iovec {
         iov_base: bytes.as_ptr() as *mut libc::c_void,
         iov_len: bytes.len(),
     };
-    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let fds_len = std::mem::size_of_val(fds) as u32;
+    let space = unsafe { libc::CMSG_SPACE(fds_len) } as usize;
     let mut control = vec![0u8; space];
     let mut header: libc::msghdr = unsafe { std::mem::zeroed() };
     header.msg_iov = &mut iov;
     header.msg_iovlen = 1;
     header.msg_control = control.as_mut_ptr().cast();
     header.msg_controllen = space as _;
-    // SAFETY: the control buffer holds exactly one descriptor-sized message.
+    // SAFETY: the control buffer holds exactly one message of `fds`.
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&header);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
-        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+        (*cmsg).cmsg_len = libc::CMSG_LEN(fds_len) as _;
+        std::ptr::copy_nonoverlapping(
+            fds.as_ptr().cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            fds_len as usize,
+        );
     }
     let sent = loop {
         let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &header, 0) };
@@ -169,7 +174,9 @@ pub(super) fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::
     Ok(())
 }
 
-/// Reads into `buf`, queuing any received descriptors.
+/// Reads into `buf`, queuing any received descriptors, each close-on-exec.
+/// A transfer with more descriptors than fit is refused, and what did arrive
+/// of it is closed (security review H6).
 pub(super) fn recv_with_fds(
     stream: &UnixStream,
     buf: &mut [u8],
@@ -196,6 +203,7 @@ pub(super) fn recv_with_fds(
             return Err(err);
         }
     };
+    let mut arrived = Vec::new();
     // SAFETY: walks the control messages recvmsg filled in.
     unsafe {
         let mut cmsg = libc::CMSG_FIRSTHDR(&header);
@@ -205,12 +213,20 @@ pub(super) fn recv_with_fds(
                 let len = (*cmsg).cmsg_len as usize - (data as usize - cmsg as usize);
                 for index in 0..len / std::mem::size_of::<RawFd>() {
                     let fd = std::ptr::read_unaligned(data.cast::<RawFd>().add(index));
-                    fds.push_back(OwnedFd::from_raw_fd(fd));
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    arrived.push(OwnedFd::from_raw_fd(fd));
                 }
             }
             cmsg = libc::CMSG_NXTHDR(&header, cmsg);
         }
     }
+    if header.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "more descriptors arrived than fit",
+        ));
+    }
+    fds.extend(arrived);
     Ok(received)
 }
 
@@ -548,7 +564,7 @@ impl Client {
         })?;
         let (tx, rx) = mpsc::channel();
         lock(&self.pending).insert(id, tx);
-        let sent = send_with_fd(&lock(&self.writer), &line, slave_fd);
+        let sent = send_with_fds(&lock(&self.writer), &line, &[slave_fd]);
         if let Err(err) = sent {
             lock(&self.pending).remove(&id);
             self.broken.store(true, Ordering::Release);

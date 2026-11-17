@@ -30,7 +30,7 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use super::launchd_spawn::PANE_LABEL_PREFIX;
-use super::pane_anchor::{encode, lock, open_slave, recv_with_fds, send_with_fd, MAX_LINE};
+use super::pane_anchor::{encode, lock, open_slave, recv_with_fds, send_with_fds, MAX_LINE};
 use crate::platform::{PaneJobLink, ProcessIdentity};
 // Exit statuses that are not the program's own: the pane is suspended
 // (design D3), not closed.
@@ -228,16 +228,20 @@ fn keep(stream: UnixStream, socket: &Path, label: &str, token: &str) -> i32 {
         Ok(Some(ToKeeper::Spawn { command })) => command,
         _ => return 1,
     };
-    let Some(slave) = fds.pop_front() else {
-        let _ = write_message(
-            &stream,
-            &FromKeeper::Failed {
-                error: "no pty descriptor arrived".into(),
-            },
-        );
-        return 1;
+    // Exactly the slave, nothing else (security review H6).
+    let slave = match (fds.pop_front(), fds.is_empty()) {
+        (Some(slave), true) => slave,
+        (slave, _) => {
+            let arrived = usize::from(slave.is_some()) + fds.len();
+            let _ = write_message(
+                &stream,
+                &FromKeeper::Failed {
+                    error: format!("expected one pty descriptor, {arrived} arrived"),
+                },
+            );
+            return 1;
+        }
     };
-    drop(fds);
     let started = start_program(&command, &slave);
     // The keeper must not keep the slave open, or the server never sees EOF.
     drop(slave);
@@ -726,7 +730,7 @@ fn start_on(
         Ok(line) => line,
         Err(err) => return Some(Err(err)),
     };
-    if let Err(err) = send_with_fd(&stream, &line, slave.as_raw_fd()) {
+    if let Err(err) = send_with_fds(&stream, &line, &[slave.as_raw_fd()]) {
         tracing::warn!(%err, "a pane keeper did not take its program");
         return None;
     }
@@ -1251,7 +1255,7 @@ mod tests {
         command.args(["-c", "trap '' HUP; exec sleep 30"]);
         let slave = open_slave(&tty).unwrap();
         let line = encode(&ToKeeper::Spawn { command }).unwrap();
-        send_with_fd(&server_end, &line, slave.as_raw_fd()).unwrap();
+        send_with_fds(&server_end, &line, &[slave.as_raw_fd()]).unwrap();
         drop(slave);
         let pid = match read_message::<FromKeeper>(&server_end, &mut pending, None).unwrap() {
             Some(FromKeeper::Spawned { pid }) => pid,
@@ -1266,6 +1270,69 @@ mod tests {
         // SAFETY: probes the pid the keeper reported, which it reaped.
         let gone = unsafe { libc::kill(pid as libc::pid_t, 0) } == -1;
         assert!(gone, "the program ended with its keeper");
+    }
+
+    /// Security review H6: a keeper takes exactly one descriptor for its
+    /// program, and none of a transfer cut short.
+    #[test]
+    fn a_keeper_refuses_anything_but_one_descriptor() {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let slave = open_slave(&pair.master.tty_name().unwrap()).unwrap();
+        drop(pair.slave);
+        let fd = slave.as_raw_fd();
+        for count in [0, 2, 9] {
+            let (keeper_end, server_end) = UnixStream::pair().unwrap();
+            let keeper = std::thread::spawn(move || {
+                keep(
+                    keeper_end,
+                    Path::new("/nonexistent/pane-jobs"),
+                    "dev.herdr.pane.test",
+                    "secret",
+                )
+            });
+            let mut pending = Vec::new();
+            let hello = read_message::<FromKeeper>(&server_end, &mut pending, None).unwrap();
+            assert!(matches!(hello, Some(FromKeeper::Hello { .. })), "{hello:?}");
+            let line = encode(&ToKeeper::Spawn {
+                command: CommandBuilder::new("/usr/bin/true"),
+            })
+            .unwrap();
+            // A keeper that refused the transfer may hang up before the rest.
+            let _ = if count == 0 {
+                (&server_end).write_all(&line)
+            } else {
+                send_with_fds(&server_end, &line, &vec![fd; count])
+            };
+            let reply = read_message::<FromKeeper>(&server_end, &mut pending, None);
+            assert!(
+                !matches!(reply, Ok(Some(FromKeeper::Spawned { .. }))),
+                "{count} descriptors started a program"
+            );
+            assert_eq!(keeper.join().unwrap(), 1, "{count} descriptors");
+        }
+    }
+
+    #[test]
+    fn received_descriptors_close_on_exec_and_a_cut_transfer_is_refused() {
+        let devnull = std::fs::File::open("/dev/null").unwrap();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        send_with_fds(&sender, b"x", &[devnull.as_raw_fd()]).unwrap();
+        let mut fds = VecDeque::new();
+        recv_with_fds(&receiver, &mut [0u8; 8], &mut fds).unwrap();
+        assert_eq!(fds.len(), 1);
+        // SAFETY: reads the flags of a descriptor this test owns.
+        let flags = unsafe { libc::fcntl(fds[0].as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "flags {flags:#x}");
+
+        send_with_fds(&sender, b"x", &[devnull.as_raw_fd(); 9]).unwrap();
+        let mut fds = VecDeque::new();
+        assert!(
+            recv_with_fds(&receiver, &mut [0u8; 8], &mut fds).is_err(),
+            "more than fit is refused"
+        );
+        assert!(fds.is_empty());
     }
 
     /// Security review H2: signal forwarding is turned off while the exited
