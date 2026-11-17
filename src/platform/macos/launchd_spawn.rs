@@ -25,6 +25,10 @@ const SERVER_LABEL_PREFIX: &str = "dev.herdr.server.";
 pub(crate) const PANE_LABEL_PREFIX: &str = "dev.herdr.pane.";
 /// Tells the job process to fork the server and exit; never inherited by panes.
 const DETACH_ENV: &str = "HERDR_LAUNCHD_DETACH";
+/// Names the variables the command removed, separated by `=`, which no
+/// variable name contains. launchd adds its domain's environment (`launchctl
+/// setenv`) to the job's, so the server unsets them again first thing.
+const UNSET_ENV: &str = "HERDR_LAUNCHD_UNSET";
 /// Finished jobs stay loaded until logout; older ones are removed on the next launch.
 const STALE_JOB_AGE: Duration = Duration::from_secs(60);
 
@@ -42,6 +46,7 @@ pub(crate) fn spawn_launchd_job(command: &Command) -> io::Result<String> {
     );
     let mut env = resolved_environment(command);
     env.push((DETACH_ENV.into(), "1".into()));
+    env.extend(removed_environment(command));
     remove_stale_jobs(&domain, now, SERVER_LABEL_PREFIX);
     bootstrap(&domain, &label, command, &env)?;
     Ok(label)
@@ -126,6 +131,14 @@ fn bootstrap(
 /// the real server into its own session and lets the job process exit.
 /// Returns a warning to log once logging is up if the server stays in the job.
 pub(crate) fn leave_launchd_job() -> Option<String> {
+    if let Some(names) = std::env::var_os(UNSET_ENV) {
+        std::env::remove_var(UNSET_ENV);
+        for name in names.as_bytes().split(|byte| *byte == b'=') {
+            if !name.is_empty() {
+                std::env::remove_var(OsStr::from_bytes(name));
+            }
+        }
+    }
     std::env::var_os(DETACH_ENV)?;
     std::env::remove_var(DETACH_ENV);
     // launchd names the job here; panes should see what a terminal shell sees.
@@ -318,6 +331,18 @@ fn resolved_environment(command: &Command) -> Vec<(std::ffi::OsString, std::ffi:
     env
 }
 
+/// The variable listing what `command` removes, for `leave_launchd_job`.
+fn removed_environment(command: &Command) -> Option<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut names = std::ffi::OsString::new();
+    for (key, _) in command.get_envs().filter(|(_, value)| value.is_none()) {
+        if !names.is_empty() {
+            names.push("=");
+        }
+        names.push(key);
+    }
+    (!names.is_empty()).then(|| (UNSET_ENV.into(), names))
+}
+
 fn push_key_string(plist: &mut String, key: &str, value: &str) -> io::Result<()> {
     push_key(plist, OsStr::new(key))?;
     push_string(plist, OsStr::new(value))
@@ -421,6 +446,35 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>\n<false/>"));
         assert!(plist.contains("<key>WorkingDirectory</key>\n<string>/tmp</string>"));
         assert!(plist.contains("<key>Umask</key>\n<integer>63</integer>"));
+    }
+
+    /// Security review H4: a variable the command removed stays removed in
+    /// the server, though launchd adds its domain's copy back to the job.
+    #[test]
+    fn a_launchd_server_unsets_what_its_command_removed() {
+        let mut command = Command::new("/bin/true");
+        command
+            .env_remove("HERDR_TEST_REMOVED")
+            .env_remove("HERDR_TEST_ALSO_REMOVED")
+            .env("HERDR_TEST_KEPT", "yes");
+        let (key, names) = removed_environment(&command).expect("removals are listed");
+        // What the job process starts with when the domain has both.
+        std::env::set_var(&key, &names);
+        std::env::set_var("HERDR_TEST_REMOVED", "from launchctl setenv");
+        std::env::set_var("HERDR_TEST_ALSO_REMOVED", "from launchctl setenv");
+        std::env::set_var("HERDR_TEST_KEPT", "yes");
+
+        assert_eq!(leave_launchd_job(), None, "not in a job: no fork");
+        assert_eq!(std::env::var_os("HERDR_TEST_REMOVED"), None);
+        assert_eq!(std::env::var_os("HERDR_TEST_ALSO_REMOVED"), None);
+        assert_eq!(std::env::var_os(UNSET_ENV), None, "never reaches panes");
+        assert_eq!(std::env::var("HERDR_TEST_KEPT").as_deref(), Ok("yes"));
+        std::env::remove_var("HERDR_TEST_KEPT");
+        assert_eq!(
+            removed_environment(&Command::new("/bin/true")),
+            None,
+            "nothing to unset"
+        );
     }
 
     #[test]
