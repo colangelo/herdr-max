@@ -103,6 +103,7 @@ enum ToKeeper {
         #[serde(with = "super::pane_anchor::command_codec")]
         command: CommandBuilder,
     },
+    /// The server took the pane (after `Spawned`) or the exit report.
     Ack,
     /// No pane of this server waits for the keeper.
     Unknown,
@@ -260,7 +261,14 @@ fn keep(stream: UnixStream, socket: &Path, label: &str, token: &str) -> i32 {
         // SAFETY: signals the program this keeper just started.
         unsafe { libc::kill(raw_pid, libc::SIGHUP) };
     }
-    let _ = write_message(&stream, &FromKeeper::Spawned { pid });
+    if !accepted(&stream, &mut pending, pid) {
+        // No pane shows this program (security review H3): end it and what
+        // it started in its session, which it leads, before reaping it.
+        // SAFETY: the group is led by the keeper's own child, not yet reaped.
+        unsafe { libc::kill(-raw_pid, libc::SIGKILL) };
+        wait_for(raw_pid, || PROGRAM.store(0, Ordering::SeqCst));
+        return 1;
+    }
     let status = wait_for(raw_pid, || PROGRAM.store(0, Ordering::SeqCst));
     let report = ExitReport {
         code: status.exit_code(),
@@ -269,6 +277,17 @@ fn keep(stream: UnixStream, socket: &Path, label: &str, token: &str) -> i32 {
     };
     report_exit(&stream, &mut pending, socket, label, token, &report);
     i32::try_from(report.code).unwrap_or(1)
+}
+
+/// Reports the program's pid and waits for the server to take the pane. A
+/// server that gave up on the spawn hung up or never answers.
+fn accepted(stream: &UnixStream, pending: &mut Vec<u8>, pid: u32) -> bool {
+    write_message(stream, &FromKeeper::Spawned { pid }).is_ok()
+        && stream.set_read_timeout(Some(REPLY_TIMEOUT)).is_ok()
+        && matches!(
+            read_message::<ToKeeper>(stream, pending, None),
+            Ok(Some(ToKeeper::Ack))
+        )
 }
 
 fn start_program(command: &CommandBuilder, slave: &OwnedFd) -> io::Result<u32> {
@@ -656,13 +675,23 @@ pub(crate) fn spawn(
             return None;
         }
     };
-    let child = start_on(stream, command, tty, PaneJobLink { label, token });
-    if let Some(Ok(child)) = &child {
-        tracing::debug!(
+    let child = start_on(
+        stream,
+        command,
+        tty,
+        PaneJobLink {
+            label: label.clone(),
+            token,
+        },
+    );
+    match &child {
+        Some(Ok(child)) => tracing::debug!(
             pid = child.process_id(),
             elapsed_ms = started.elapsed().as_millis() as u64,
             "pane started in its own launchd job"
-        );
+        ),
+        // A keeper no pane took ends its program; the job goes with it.
+        _ => remove_job_in_background(label),
     }
     child
 }
@@ -708,7 +737,10 @@ fn start_on(
         .and_then(|()| read_message::<FromKeeper>(&stream, &mut pending, None));
     match reply {
         Ok(Some(FromKeeper::Spawned { pid })) => {
-            if let Err(err) = stream.set_read_timeout(None) {
+            if let Err(err) = stream
+                .set_read_timeout(None)
+                .and_then(|()| write_message(&stream, &ToKeeper::Ack))
+            {
                 return Some(Err(err));
             }
             lock(jobs()).links.insert(pid, link);
@@ -1190,6 +1222,50 @@ mod tests {
             started.elapsed() < Duration::from_millis(200),
             "a reused pid is not the program"
         );
+    }
+
+    /// Security review H3: a program whose pane the server gave up on, even
+    /// one that ignores a hangup, ends with its keeper.
+    #[test]
+    fn a_keeper_ends_a_program_no_server_took() {
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let tty = pair.master.tty_name().unwrap();
+        drop(pair.slave);
+        let (keeper_end, server_end) = UnixStream::pair().unwrap();
+        let (done_tx, done) = mpsc::channel();
+        std::thread::spawn(move || {
+            let code = keep(
+                keeper_end,
+                Path::new("/nonexistent/pane-jobs"),
+                "dev.herdr.pane.test",
+                "secret",
+            );
+            let _ = done_tx.send(code);
+        });
+        let mut pending = Vec::new();
+        let hello = read_message::<FromKeeper>(&server_end, &mut pending, None).unwrap();
+        assert!(matches!(hello, Some(FromKeeper::Hello { .. })), "{hello:?}");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap '' HUP; exec sleep 30"]);
+        let slave = open_slave(&tty).unwrap();
+        let line = encode(&ToKeeper::Spawn { command }).unwrap();
+        send_with_fd(&server_end, &line, slave.as_raw_fd()).unwrap();
+        drop(slave);
+        let pid = match read_message::<FromKeeper>(&server_end, &mut pending, None).unwrap() {
+            Some(FromKeeper::Spawned { pid }) => pid,
+            other => panic!("no pid: {other:?}"),
+        };
+        // The server timed out: it hangs up without taking the pane.
+        drop(server_end);
+        let code = done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the keeper did not wait for the program");
+        assert_eq!(code, 1);
+        // SAFETY: probes the pid the keeper reported, which it reaped.
+        let gone = unsafe { libc::kill(pid as libc::pid_t, 0) } == -1;
+        assert!(gone, "the program ended with its keeper");
     }
 
     /// Security review H2: signal forwarding is turned off while the exited
