@@ -796,6 +796,25 @@ pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     (result == 0 && cred.pid > 0).then_some(cred.pid as u32)
 }
 
+/// Fills `buf` from the OS random source.
+pub(super) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let rest = &mut buf[filled..];
+        // SAFETY: writes at most `rest.len()` bytes into `rest`.
+        let read = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+        if read >= 0 {
+            filled += read as usize;
+            continue;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
 /// The effective uid of the process on the other end of a Unix socket.
 pub(super) fn socket_peer_uid(fd: RawFd) -> Option<u32> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };

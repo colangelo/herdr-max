@@ -1031,6 +1031,13 @@ pub(super) fn socket_peer_uid(fd: RawFd) -> Option<u32> {
     (result == 0).then_some(uid)
 }
 
+/// Fills `buf` from the OS random source.
+pub(super) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+    // SAFETY: fills the buffer with random bytes; never fails.
+    unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) };
+    Ok(())
+}
+
 pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     let info = process_bsdinfo(pid)?;
     Some((comm_from_bsdinfo(&info)?, info.pbi_ppid))

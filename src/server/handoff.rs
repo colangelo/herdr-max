@@ -479,7 +479,37 @@ pub(crate) fn accept_and_validate_on(
     manifest: &HandoffManifest,
     importer_batches: bool,
 ) -> io::Result<(UnixStream, FdTransport)> {
+    // SAFETY: getuid has no preconditions.
+    let our_uid = unsafe { libc::getuid() };
+    accept_and_validate_as(
+        listener,
+        socket_path,
+        token,
+        manifest,
+        importer_batches,
+        our_uid,
+    )
+}
+
+/// Takes the one importer connection, which must come from `our_uid` and show
+/// the token. Both checks stand on their own: the token does not stand in for
+/// the owner check.
+#[cfg(unix)]
+fn accept_and_validate_as(
+    listener: UnixListener,
+    socket_path: &Path,
+    token: &str,
+    manifest: &HandoffManifest,
+    importer_batches: bool,
+    our_uid: u32,
+) -> io::Result<(UnixStream, FdTransport)> {
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
+    if !crate::platform::unix_stream_peer_is(&stream, our_uid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "handoff import connection belongs to another user",
+        ));
+    }
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     stream.set_write_timeout(Some(READY_TIMEOUT))?;
@@ -1351,6 +1381,30 @@ mod tests {
         assert_eq!(validated_line(&older), "validated\n");
 
         assert!(fd_transport_for("ready\n", 1, true).is_err());
+    }
+
+    #[test]
+    fn a_connection_from_another_user_is_refused_before_the_token_is_read() {
+        let dir = std::env::temp_dir().join(format!("herdr-handoff-291-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("handoff.sock");
+        let listener = bind_listener(&socket).unwrap();
+        let manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None, None, None);
+        let importer_socket = socket.clone();
+        let importer = std::thread::spawn(move || receive(&importer_socket, "token"));
+
+        // SAFETY: getuid has no preconditions.
+        let not_us = unsafe { libc::getuid() }.wrapping_add(1);
+        let err = accept_and_validate_as(listener, &socket, "token", &manifest, true, not_us)
+            .expect_err("the importer's uid is not the one the server serves");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(
+            err.to_string().contains("another user"),
+            "not the token check: {err}"
+        );
+        assert!(importer.join().unwrap().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

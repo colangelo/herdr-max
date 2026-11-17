@@ -146,15 +146,9 @@ fn write_message<T: Serialize>(stream: &UnixStream, message: &T) -> io::Result<(
 }
 
 /// Only a process of this user may talk to a keeper or the server.
-fn peer_is_us(peer_uid: Option<u32>, our_uid: u32) -> bool {
-    peer_uid == Some(our_uid)
-}
-
 fn stream_peer_is_us(stream: &UnixStream) -> bool {
     // SAFETY: getuid has no preconditions.
-    peer_is_us(crate::platform::unix_stream_peer_uid(stream), unsafe {
-        libc::getuid()
-    })
+    crate::platform::unix_stream_peer_is(stream, unsafe { libc::getuid() })
 }
 
 // ----- the keeper process -----
@@ -572,13 +566,6 @@ fn new_label() -> String {
     )
 }
 
-fn new_token() -> String {
-    let mut bytes = [0u8; 16];
-    // SAFETY: fills the buffer with random bytes; never fails.
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 /// Removes finished pane jobs off the spawn path, at most once a minute.
 fn sweep_stale_jobs() {
     {
@@ -634,7 +621,10 @@ pub(crate) fn spawn(
         Err(err) => return fall_back(format!("no keeper executable: {err}")),
     };
     let label = new_label();
-    let token = new_token();
+    let token = match crate::platform::random_token() {
+        Ok(token) => token,
+        Err(err) => return fall_back(format!("no random token: {err}")),
+    };
     let (connected_tx, connected) = mpsc::channel();
     lock(jobs()).waiting.insert(
         label.clone(),
@@ -1168,13 +1158,6 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode & 0o077, 0, "mode {mode:o}");
-    }
-
-    #[test]
-    fn only_this_user_reaches_the_socket() {
-        assert!(peer_is_us(Some(501), 501));
-        assert!(!peer_is_us(Some(0), 501));
-        assert!(!peer_is_us(None, 501));
     }
 
     #[test]

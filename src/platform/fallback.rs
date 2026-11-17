@@ -24,6 +24,12 @@ pub(super) fn socket_peer_uid(_fd: std::os::fd::RawFd) -> Option<u32> {
 }
 
 #[cfg(unix)]
+pub(super) fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")?.read_exact(buf)
+}
+
+#[cfg(unix)]
 pub(super) fn process_name_and_parent(_pid: u32) -> Option<(String, u32)> {
     None
 }

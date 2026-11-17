@@ -427,6 +427,24 @@ pub(crate) fn unix_stream_peer_uid(stream: &std::os::unix::net::UnixStream) -> O
     super::socket_peer_uid(stream.as_raw_fd())
 }
 
+/// Whether the process on the other end of a socket runs as `our_uid`. A peer
+/// the OS cannot name is not trusted.
+fn peer_is_us(peer_uid: Option<u32>, our_uid: u32) -> bool {
+    peer_uid == Some(our_uid)
+}
+
+/// Whether the Unix socket `stream` is held by a process running as `uid`.
+pub(crate) fn unix_stream_peer_is(stream: &std::os::unix::net::UnixStream, uid: u32) -> bool {
+    peer_is_us(unix_stream_peer_uid(stream), uid)
+}
+
+/// A token of 128 bits from the OS random source, as 32 lowercase hex digits.
+pub(crate) fn random_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 16];
+    super::fill_random(&mut bytes)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// The session `pid` belongs to, when it exists.
 pub(crate) fn process_session(pid: u32) -> Option<u32> {
     if pid == 0 || pid > i32::MAX as u32 {
@@ -711,6 +729,25 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_user_reaches_the_socket() {
+        assert!(peer_is_us(Some(501), 501));
+        assert!(!peer_is_us(Some(0), 501));
+        assert!(!peer_is_us(None, 501));
+    }
+
+    #[test]
+    fn random_tokens_are_128_bits_and_never_repeat() {
+        let first = random_token().unwrap();
+        let second = random_token().unwrap();
+        assert_eq!(first.len(), 32, "{first}");
+        assert!(
+            first.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{first}"
+        );
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn server_hangup_evidence_expires() {

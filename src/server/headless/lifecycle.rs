@@ -48,14 +48,13 @@ impl HeadlessServer {
             crate::server::handoff::check_single_message_fits(panes)?;
         }
         let socket_path = crate::server::handoff::handoff_socket_path();
-        let token = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let token = match crate::platform::random_token() {
+            Ok(token) => token,
+            Err(err) => {
+                self.handoff_in_progress = false;
+                return Err(err);
+            }
+        };
         let listener = match crate::server::handoff::bind_listener(&socket_path) {
             Ok(listener) => listener,
             Err(err) => {
