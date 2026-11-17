@@ -401,6 +401,11 @@ pub(crate) fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Release);
 }
 
+/// Whether `[experimental] pane_jobs` is on in this server.
+pub(crate) fn enabled() -> bool {
+    ENABLED.load(Ordering::Acquire)
+}
+
 /// Why new panes do not start as jobs, if they do not.
 fn unavailable(enabled: bool, over_ssh: bool) -> Option<&'static str> {
     if !enabled {

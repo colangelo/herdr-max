@@ -518,11 +518,15 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
 pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::io::Result<u32> {
     #[cfg(target_os = "macos")]
     {
-        macos::keep_server_context_through_launchd(command);
-        match macos::spawn_launchd_job(command) {
-            Ok(_label) => return Ok(0),
-            Err(err) => {
-                tracing::info!(%err, "starting the handoff server directly instead of through launchd");
+        // Behind `[experimental] pane_jobs` with the pane jobs it belongs to
+        // (fork issue 288): alone it moves the server, not the panes.
+        if macos::pane_job::enabled() {
+            macos::keep_server_context_through_launchd(command);
+            match macos::spawn_launchd_job(command) {
+                Ok(_label) => return Ok(0),
+                Err(err) => {
+                    tracing::info!(%err, "starting the handoff server directly instead of through launchd");
+                }
             }
         }
         macos::configure_server_daemon_context(command);

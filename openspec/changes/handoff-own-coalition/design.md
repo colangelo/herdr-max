@@ -39,3 +39,9 @@ unchanged. The token stays out of logs (the plist lives in a private 0700 folder
 | V4 | the replacement's pid comes from the socket peer when launchd started it | unit: pid 0 from spawn + peer pid N gives N to the manifest/rollback path | N used |
 | V5 | rollback never signals a pid that is not the replacement | unit: not our child, peer pid whose session leader differs -> no signal; pid 0 -> no signal, one warn | no signal |
 | V6 | SSH or launchd failure falls back to today's spawn | unit/integration: SSH_CONNECTION set -> disclaimed spawn path | old path |
+
+## Revised (2026-11-17, herdr-core): gated
+
+Alone this moves the server but not the panes (V2 failed live, see tasks.md), and the panes' own launchd jobs come
+with `openspec/changes/pane-launchd-jobs`. So the launchd handoff path runs only when `[experimental] pane_jobs` is
+on in the handing-off server; with it off, handoffs spawn exactly as before (disclaimed spawn, then detached spawn).
