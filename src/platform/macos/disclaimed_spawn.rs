@@ -423,6 +423,52 @@ mod tests {
         assert_eq!(status, 0);
     }
 
+    /// A pane program that opens a terminal of its own, as `script`, tmux or
+    /// atuin's PTY proxy do in place of the shell, keeps its pane's terminal
+    /// as its controlling one (fork issue 288).
+    #[test]
+    fn a_program_on_a_tty_keeps_it_when_it_opens_another_terminal() {
+        use std::io::Read;
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .expect("pty");
+        let tty = pair.master.tty_name().expect("tty name");
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        drop(pair.slave);
+        let mut command = portable_pty::CommandBuilder::new("/usr/bin/script");
+        command.args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            r#"echo "leader $(ps -o tty= -p $PPID) done""#,
+        ]);
+        let parts = command.unix_spawn_parts().expect("parts");
+        let pid = spawn_disclaimed_on_tty(&parts, &tty).expect("spawn") as libc::pid_t;
+
+        let mut output = String::new();
+        let mut buf = [0u8; 512];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output.contains(" done") {
+            assert!(Instant::now() < deadline, "no output: {output:?}");
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => output.push_str(&String::from_utf8_lossy(&buf[..read])),
+            }
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+
+        let tty_name = tty.file_name().expect("tty file").to_string_lossy();
+        let leader = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("leader "))
+            .and_then(|rest| rest.strip_suffix(" done"))
+            .map(str::trim);
+        assert_eq!(leader, Some(&*tty_name), "{output:?}");
+    }
+
     #[test]
     fn a_working_directory_falls_back_to_a_normal_spawn() {
         let mut command = Command::new("/usr/bin/true");
