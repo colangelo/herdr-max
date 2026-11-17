@@ -20,7 +20,7 @@ use std::io::{self, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -30,7 +30,9 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use super::launchd_spawn::PANE_LABEL_PREFIX;
-use super::pane_anchor::{encode, lock, open_slave, recv_with_fds, send_with_fds, MAX_LINE};
+use super::pane_anchor::{
+    bind_owner_only, encode, lock, open_slave, recv_with_fds, send_with_fds, MAX_LINE,
+};
 use crate::platform::{PaneJobLink, ProcessIdentity};
 // Exit statuses that are not the program's own: the pane is suspended
 // (design D3), not closed.
@@ -501,11 +503,7 @@ fn ensure_listening(path: &Path) -> io::Result<()> {
         return Ok(());
     }
     let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(
-        path,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-    )?;
+    let listener = bind_owner_only(path)?;
     jobs.bound = std::fs::metadata(path).map(|meta| meta.ino()).ok();
     std::thread::Builder::new()
         .name("pane-job-listener".into())
@@ -1111,6 +1109,25 @@ mod tests {
             "still waits for the real keeper"
         );
         lock(jobs()).waiting.remove(&label);
+    }
+
+    /// Security review H7: the socket is owner-only from the moment it
+    /// exists, whatever the server's umask.
+    #[test]
+    fn the_pane_job_socket_is_owner_only_when_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-pane-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s");
+        // SAFETY: swaps this test process's mask; restored below.
+        let umask = unsafe { libc::umask(0) };
+        let bound = bind_owner_only(&path);
+        unsafe { libc::umask(umask) };
+        let _listener = bound.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode & 0o077, 0, "mode {mode:o}");
     }
 
     #[test]

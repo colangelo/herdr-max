@@ -174,6 +174,18 @@ pub(super) fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[RawFd]) ->
     Ok(())
 }
 
+/// Binds a socket at `path` that only this user can reach from the moment
+/// it exists, rather than after a chmod (security review H7). The mask is the
+/// process's: a file another thread creates meanwhile is owner-only too,
+/// never more open.
+pub(super) fn bind_owner_only(path: &Path) -> io::Result<UnixListener> {
+    // SAFETY: umask only swaps the process mask; it is restored right after.
+    let umask = unsafe { libc::umask(0o077) };
+    let bound = UnixListener::bind(path);
+    unsafe { libc::umask(umask) };
+    bound
+}
+
 /// Reads into `buf`, queuing any received descriptors, each close-on-exec.
 /// A transfer with more descriptors than fit is refused, and what did arrive
 /// of it is closed (security review H6).
@@ -263,16 +275,8 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
     }
     let _ = std::fs::remove_file(&socket);
-    // SAFETY: no other thread runs yet, so the umask change is not observed.
-    let umask = unsafe { libc::umask(0o077) };
-    let bound = UnixListener::bind(&socket);
-    unsafe { libc::umask(umask) };
-    let listener = bound?;
+    let listener = bind_owner_only(&socket)?;
     let socket_inode = std::fs::metadata(&socket).map(|meta| meta.ino()).ok();
-    std::fs::set_permissions(
-        &socket,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
-    )?;
     let pid_marker = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
             .map(|dir| dir.join("pids").join(std::process::id().to_string()))
