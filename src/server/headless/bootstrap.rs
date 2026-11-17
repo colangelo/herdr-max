@@ -7,9 +7,12 @@ pub fn run_server() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     // Taken before any thread starts, so it leaves the environment unobserved.
+    #[cfg(unix)]
     let handoff_token = handoff_import
         .then(|| crate::server::handoff::take_import_token(&args))
         .flatten();
+    #[cfg(not(unix))]
+    let handoff_token = handoff_import.then(|| args.get(4).cloned()).flatten();
     #[cfg(unix)]
     let handoff_user_context = handoff_import
         && args.get(3).is_some_and(|socket| {
