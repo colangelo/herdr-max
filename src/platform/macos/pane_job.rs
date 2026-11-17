@@ -261,8 +261,7 @@ fn keep(stream: UnixStream, socket: &Path, label: &str, token: &str) -> i32 {
         unsafe { libc::kill(raw_pid, libc::SIGHUP) };
     }
     let _ = write_message(&stream, &FromKeeper::Spawned { pid });
-    let status = wait_for(raw_pid);
-    PROGRAM.store(0, Ordering::SeqCst);
+    let status = wait_for(raw_pid, || PROGRAM.store(0, Ordering::SeqCst));
     let report = ExitReport {
         code: status.exit_code(),
         signal: status.signal().map(str::to_owned),
@@ -293,11 +292,37 @@ fn tty_path(fd: &OwnedFd) -> io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes())))
 }
 
-fn wait_for(pid: libc::pid_t) -> ExitStatus {
+/// Waits for the program to exit and reaps it. `disarm` runs once the exit
+/// is seen but before the reap, while the pid still names the exited program
+/// and no other process can have it (security review H2).
+fn wait_for(pid: libc::pid_t, disarm: impl FnOnce()) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt;
+    let exited = loop {
+        // SAFETY: waits for the keeper's own child into a zeroed siginfo,
+        // leaving it waitable.
+        let waited = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if waited == 0 {
+            break true;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            break false;
+        }
+    };
+    disarm();
+    if !exited {
+        return ExitStatus::with_signal("unknown");
+    }
     let mut status = 0;
     loop {
-        // SAFETY: waits for the keeper's own child.
+        // SAFETY: reaps the keeper's own child, which has exited.
         let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
         if waited == pid {
             return std::process::ExitStatus::from_raw(status).into();
@@ -1165,6 +1190,39 @@ mod tests {
             started.elapsed() < Duration::from_millis(200),
             "a reused pid is not the program"
         );
+    }
+
+    /// Security review H2: signal forwarding is turned off while the exited
+    /// program still holds its pid, so a SIGTERM never reaches a stranger.
+    #[test]
+    // `wait_for` reaps the child itself, which is what this test checks.
+    #[allow(clippy::zombie_processes)]
+    fn forwarding_is_disarmed_before_the_program_is_reaped() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        let mut held = None;
+        let status = wait_for(pid, || {
+            // SAFETY: asks about the test's own child without reaping it.
+            let waitable = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ) == 0
+                    && info.si_pid == pid
+            };
+            held = Some(waitable);
+        });
+        assert_eq!(held, Some(true), "the exited program still held its pid");
+        assert_eq!(status.exit_code(), 7);
+        // SAFETY: probes the reaped child's pid.
+        let reaped = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) } == -1;
+        assert!(reaped, "reaped after the disarm");
     }
 
     #[test]
