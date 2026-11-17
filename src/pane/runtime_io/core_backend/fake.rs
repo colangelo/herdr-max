@@ -47,6 +47,8 @@ struct Shared {
     requests: Vec<Value>,
     /// Terminal records by address: run here, or left by an earlier server.
     terminals: std::collections::HashMap<String, Value>,
+    /// The client closed its connection.
+    client_gone: bool,
 }
 
 pub(crate) struct FakeCore {
@@ -111,6 +113,11 @@ impl FakeCore {
             assert!(std::time::Instant::now() < deadline, "no client connected");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// Whether the client closed its connection.
+    pub(crate) fn client_hung_up(&self) -> bool {
+        lock(&self.shared).client_gone
     }
 
     /// Closes the connection, as a core restart does.
@@ -212,7 +219,10 @@ fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
             }
         }
         match socket.read(&mut buf) {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => {
+                lock(&shared).client_gone = true;
+                return;
+            }
             Ok(n) => decoder.push(&buf[..n]),
         }
     }

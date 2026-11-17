@@ -931,20 +931,16 @@ mod tests {
         drop(client);
         assert!(!other.is_closed(), "a clone keeps the connection");
         drop(other);
-        // The fake core serves one client; once it hung up, the next connect
-        // is refused at once instead of waiting out a hello timeout.
-        let started = std::time::Instant::now();
-        let deadline = started + Duration::from_secs(2);
-        loop {
-            match CoreClient::connect(&core.socket, None) {
-                Err(_) => break,
-                Ok(_) if std::time::Instant::now() > deadline => {
-                    panic!("the dropped client's connection stayed open")
-                }
-                Ok(_) => std::thread::sleep(Duration::from_millis(20)),
-            }
+        // Behaviour, not timing: the core sees the hang-up (a leaked
+        // connection would keep it open for good). Generous under load.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !core.client_hung_up() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the dropped client's connection stayed open"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
