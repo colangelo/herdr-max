@@ -1163,6 +1163,7 @@ mod tests {
             cwd: None,
             foreground_cwd: None,
             restore_error: None,
+            suspended: false,
             label: None,
             agent: Some("pi".into()),
             title: None,

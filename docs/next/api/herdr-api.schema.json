@@ -1066,6 +1066,10 @@
               },
               "type": "object"
             },
+            "suspended": {
+              "description": "The session ended the pane's program (a logout, or its macOS pane job\nwas stopped). The pane keeps its place and starts again, resuming its\nagent, once launchd accepts pane jobs. Absent means false.",
+              "type": "boolean"
+            },
             "synced": {
               "description": "The pane's tab syncs input and this pane is in the synced set.",
               "type": "boolean"
@@ -11177,6 +11181,10 @@
                 "type": "string"
               },
               "type": "object"
+            },
+            "suspended": {
+              "description": "The session ended the pane's program (a logout, or its macOS pane job\nwas stopped). The pane keeps its place and starts again, resuming its\nagent, once launchd accepts pane jobs. Absent means false.",
+              "type": "boolean"
             },
             "synced": {
               "description": "The pane's tab syncs input and this pane is in the synced set.",

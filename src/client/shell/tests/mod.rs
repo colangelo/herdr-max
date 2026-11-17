@@ -192,6 +192,7 @@ fn pane_scroll_result(
             cwd: None,
             foreground_cwd: None,
             restore_error: None,
+            suspended: false,
             label: None,
             agent: None,
             title: None,

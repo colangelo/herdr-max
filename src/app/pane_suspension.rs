@@ -389,6 +389,7 @@ mod tests {
             "cut-off work is not shown as done"
         );
         assert!(app.pane_agent_resume_plan(pane_id).is_some());
+        assert!(app.pane_metadata(0, pane_id).unwrap().suspended);
         app.state.assert_invariants_for_test();
 
         app.save_session_on_shutdown();
