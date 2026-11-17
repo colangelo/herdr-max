@@ -37,6 +37,12 @@ const STALE_JOB_AGE: Duration = Duration::from_secs(60);
 /// the caller can spawn directly, when there is no GUI domain or the command
 /// cannot be represented exactly in a launchd job. Returns the job label.
 pub(crate) fn spawn_launchd_job(command: &Command) -> io::Result<String> {
+    if clears_environment(command) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the command cleared its environment, which a launchd job cannot carry",
+        ));
+    }
     let domain = gui_domain()?;
     let now = since_epoch()?;
     let label = format!(
@@ -331,6 +337,15 @@ fn resolved_environment(command: &Command) -> Vec<(std::ffi::OsString, std::ffi:
     env
 }
 
+/// Whether `command` called `env_clear`. `Command` has no getter for it, but
+/// its `Debug` form spells the clear as an `env -i` prefix. A job inherits the
+/// domain's environment, and `UNSET_ENV` lists only what `env_remove` named,
+/// so such a command must be spawned directly.
+fn clears_environment(command: &Command) -> bool {
+    let text = format!("{command:?}");
+    text.starts_with("env -i ") || text.contains("\" && env -i ")
+}
+
 /// The variable listing what `command` removes, for `leave_launchd_job`.
 fn removed_environment(command: &Command) -> Option<(std::ffi::OsString, std::ffi::OsString)> {
     let mut names = std::ffi::OsString::new();
@@ -475,6 +490,31 @@ mod tests {
             None,
             "nothing to unset"
         );
+    }
+
+    /// `HERDR_LAUNCHD_UNSET` covers `env_remove` only, so a cleared command
+    /// is refused and the caller spawns it directly.
+    #[test]
+    fn a_command_that_cleared_its_environment_is_not_submitted() {
+        let mut cleared = Command::new("/bin/true");
+        cleared.env_clear().env("HERDR_TEST_KEPT", "yes");
+        let err = spawn_launchd_job(&cleared).expect_err("a cleared environment is refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains("cleared its environment"), "{err}");
+
+        let mut with_dir = Command::new("/bin/true");
+        with_dir.current_dir("/tmp").env_clear();
+        assert!(
+            clears_environment(&with_dir),
+            "a working directory leads the text"
+        );
+
+        let mut kept = Command::new("/bin/true");
+        kept.current_dir("/tmp")
+            .env("HERDR_TEST_KEPT", "yes")
+            .env_remove("HOME");
+        assert!(!clears_environment(&kept));
+        assert!(!clears_environment(&Command::new("env -i")));
     }
 
     #[test]
