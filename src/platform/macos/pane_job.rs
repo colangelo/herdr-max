@@ -32,6 +32,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use super::launchd_spawn::PANE_LABEL_PREFIX;
 use super::pane_anchor::{encode, lock, open_slave, recv_with_fds, send_with_fd, MAX_LINE};
 use crate::platform::PaneJobLink;
+// Exit statuses that are not the program's own: the pane is suspended
+// (design D3), not closed.
+use crate::platform::{PANE_JOB_STOPPED as KEEPER_STOPPED, PANE_KEEPER_LOST as KEEPER_LOST};
 
 const PROTOCOL: u32 = 1;
 pub(crate) const SUBCOMMAND: &str = "__pane-job";
@@ -54,11 +57,6 @@ const REPORT_WINDOW: Duration = Duration::from_secs(10);
 const STALE_SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// How often a pane whose keeper is gone checks that its program still runs.
 const LOST_KEEPER_POLL: Duration = Duration::from_millis(250);
-/// Exit statuses that are not the program's own: both read as interrupted, so
-/// the session is checkpointed, and a suspended pane state (design D3) keys on
-/// them.
-const KEEPER_STOPPED: &str = "pane job stopped";
-const KEEPER_LOST: &str = "pane keeper lost";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -87,10 +85,12 @@ struct ExitReport {
 }
 
 impl ExitReport {
+    /// A stopped job wins over the program's own status: the keeper hung up
+    /// on the program, so its `Hangup` is the session's doing, not its own.
     fn status(&self) -> ExitStatus {
         match (&self.signal, self.stopped) {
-            (Some(signal), _) => ExitStatus::with_signal(signal),
-            (None, true) => ExitStatus::with_signal(KEEPER_STOPPED),
+            (_, true) => ExitStatus::with_signal(KEEPER_STOPPED),
+            (Some(signal), false) => ExitStatus::with_signal(signal),
             (None, false) => ExitStatus::with_exit_code(self.code),
         }
     }
@@ -1100,8 +1100,8 @@ mod tests {
         )
         .unwrap();
         let report = ExitReport {
-            code: 129,
-            signal: None,
+            code: 0,
+            signal: Some("Hangup: 1".into()),
             stopped: true,
         };
         let answer = send_report(&keeper_end, &mut Vec::new(), &report);
@@ -1111,8 +1111,8 @@ mod tests {
         assert_eq!(received.status().signal(), Some(KEEPER_STOPPED));
         assert_eq!(
             crate::platform::classify_child_exit(&received.status()),
-            crate::platform::ChildExitReason::Interrupted,
-            "a stopped job checkpoints the session"
+            crate::platform::ChildExitReason::Suspended,
+            "a program the stopped keeper hung up on suspends its pane"
         );
     }
 

@@ -212,6 +212,10 @@ pub enum ChildExitReason {
     /// Imported runtimes have no child wait handle in the replacement server.
     #[cfg(unix)]
     Handoff,
+    /// The program ended without its own exit: the session ended its pane
+    /// job (fork issue 288). The pane is kept and started again later.
+    #[cfg(unix)]
+    Suspended,
     WaitFailed,
 }
 
@@ -220,7 +224,7 @@ impl ChildExitReason {
         match self {
             Self::Interrupted => true,
             #[cfg(unix)]
-            Self::Handoff => true,
+            Self::Handoff | Self::Suspended => true,
             _ => false,
         }
     }
@@ -230,6 +234,8 @@ impl ChildExitReason {
 pub(crate) use unix_common::{
     classify_child_exit, poll_fd_readable, read_fd, shared_ssh_control_path,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use unix_common::{PANE_JOB_STOPPED, PANE_KEEPER_LOST};
 
 // Tests inject their own probe because the recorded hangup is process-global.
 #[cfg_attr(test, allow(dead_code))]
@@ -1100,6 +1106,12 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     #[cfg(unix)]
     assert!(ChildExitReason::Handoff.requires_session_checkpoint());
     assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
+    #[cfg(unix)]
+    for keeper_status in [unix_common::PANE_JOB_STOPPED, unix_common::PANE_KEEPER_LOST] {
+        let reason = classify_child_exit(&portable_pty::ExitStatus::with_signal(keeper_status));
+        assert_eq!(reason, ChildExitReason::Suspended, "{keeper_status}");
+        assert!(reason.requires_session_checkpoint());
+    }
 }
 
 #[cfg(all(test, unix))]

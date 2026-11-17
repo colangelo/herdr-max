@@ -51,11 +51,17 @@ impl std::io::Write for ChildPipe {
     }
 }
 
+/// Exit statuses a macOS pane keeper gives for a program whose own exit it
+/// did not report: its job was stopped (a logout, `launchctl remove`), or the
+/// keeper itself is gone (fork issue 288). The pane is suspended, not closed.
+pub(crate) const PANE_JOB_STOPPED: &str = "pane job stopped";
+pub(crate) const PANE_KEEPER_LOST: &str = "pane keeper lost";
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
-    if status.signal().is_some() {
-        super::ChildExitReason::Interrupted
-    } else {
-        super::ChildExitReason::Exited
+    match status.signal() {
+        Some(PANE_JOB_STOPPED | PANE_KEEPER_LOST) => super::ChildExitReason::Suspended,
+        Some(_) => super::ChildExitReason::Interrupted,
+        None => super::ChildExitReason::Exited,
     }
 }
 
