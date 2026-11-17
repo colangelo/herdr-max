@@ -6,6 +6,10 @@ pub fn run_server() -> io::Result<()> {
     crate::platform::ignore_server_hangup();
     let args: Vec<String> = std::env::args().collect();
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
+    // Taken before any thread starts, so it leaves the environment unobserved.
+    let handoff_token = handoff_import
+        .then(|| crate::server::handoff::take_import_token(&args))
+        .flatten();
     #[cfg(unix)]
     let handoff_user_context = handoff_import
         && args.get(3).is_some_and(|socket| {
@@ -36,10 +40,9 @@ pub fn run_server() -> io::Result<()> {
             .get(3)
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing handoff socket"))?;
-        let token = args
-            .get(4)
+        let token = handoff_token
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing handoff token"))?;
-        return run_handoff_import_server(&socket_path, token);
+        return run_handoff_import_server(&socket_path, &token);
     }
 
     let loaded_config = config::Config::load();

@@ -47,6 +47,18 @@ const SINGLE_MESSAGE_FD_LIMIT: usize = 253;
 pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
 #[cfg(unix)]
 pub(crate) const COMMIT_TIMEOUT: Duration = READY_TIMEOUT;
+/// Carries the import token to the replacement server; the environment,
+/// unlike the arguments, is not visible to other users (security review H5).
+const IMPORT_TOKEN_ENV: &str = "HERDR_HANDOFF_TOKEN";
+
+/// The import token of `herdr server --handoff-import <socket>`, taken out of
+/// the environment so panes never inherit it. An exporter from before the
+/// variable passes it as the next argument instead.
+pub(crate) fn take_import_token(args: &[String]) -> Option<String> {
+    let from_env = std::env::var(IMPORT_TOKEN_ENV).ok();
+    std::env::remove_var(IMPORT_TOKEN_ENV);
+    from_env.or_else(|| args.get(4).cloned())
+}
 
 #[cfg(unix)]
 #[derive(Serialize, Deserialize)]
@@ -312,22 +324,7 @@ pub(crate) fn spawn_handoff_import(
         })?;
         &fallback_exe
     };
-    let mut command = Command::new(exe);
-    command
-        .arg("server")
-        .arg("--handoff-import")
-        .arg(socket_path)
-        .arg(token)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if crate::session::explicit_session_requested() {
-        // The import child no longer has the original `--session` argument, so
-        // stale socket overrides must not mask the inherited HERDR_SESSION.
-        command
-            .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
-            .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
-    }
+    let mut command = handoff_import_command(exe, socket_path, token);
     crate::platform::spawn_handoff_server(&mut command)
         .map(ImportServer::from_spawn)
         .map_err(|err| {
@@ -339,6 +336,27 @@ pub(crate) fn spawn_handoff_import(
                 ),
             )
         })
+}
+
+#[cfg(unix)]
+fn handoff_import_command(exe: &Path, socket_path: &Path, token: &str) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .arg("server")
+        .arg("--handoff-import")
+        .arg(socket_path)
+        .env(IMPORT_TOKEN_ENV, token)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if crate::session::explicit_session_requested() {
+        // The import child no longer has the original `--session` argument, so
+        // stale socket overrides must not mask the inherited HERDR_SESSION.
+        command
+            .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
+            .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
+    }
+    command
 }
 
 #[cfg(unix)]
@@ -963,6 +981,41 @@ mod tests {
             "its session and start time are recorded"
         );
         assert!(peer.identity.is_some());
+    }
+
+    /// Security review H5: the token is in the replacement's environment,
+    /// never its arguments, and the replacement takes it out again.
+    #[test]
+    fn the_import_token_travels_in_the_environment() {
+        let command =
+            handoff_import_command(Path::new("/bin/herdr"), Path::new("/tmp/h.sock"), "secret");
+        assert!(
+            command.get_args().all(|arg| arg != "secret"),
+            "{:?}",
+            command.get_args().collect::<Vec<_>>()
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == IMPORT_TOKEN_ENV && value == Some("secret".as_ref())));
+
+        let args: Vec<String> = ["herdr", "server", "--handoff-import", "/tmp/h.sock"]
+            .map(String::from)
+            .into();
+        std::env::set_var(IMPORT_TOKEN_ENV, "secret");
+        assert_eq!(take_import_token(&args).as_deref(), Some("secret"));
+        assert_eq!(
+            std::env::var_os(IMPORT_TOKEN_ENV),
+            None,
+            "panes never see it"
+        );
+
+        let mut from_older_exporter = args;
+        from_older_exporter.push("argv-token".into());
+        assert_eq!(
+            take_import_token(&from_older_exporter).as_deref(),
+            Some("argv-token")
+        );
+        assert_eq!(take_import_token(&from_older_exporter[..4]), None);
     }
 
     fn request_dir(name: &str) -> PathBuf {
