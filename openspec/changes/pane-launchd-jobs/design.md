@@ -91,6 +91,31 @@ is added as an optional field or a new enum value with an `Unknown` fallback tha
 changing a frozen generation-1 codec or fixture. A client that does not know the state shows the pane as it shows
 any pane without one.
 
+**Revised (task 2.1 build, 2026-11-17).**
+
+- The keeper's report counts a stopped job first: `Exited{stopped}` reads as `pane job stopped` even when the program
+  died of the hangup the keeper sent it (it usually does: live, bash ended with `Hangup: 1`). Before, that status
+  read as the program's own signal and closed the pane.
+- Both keeper statuses classify as `ChildExitReason::Suspended` (Unix only, like `Handoff`). Only job panes report
+  them, so with `pane_jobs` off nothing changes; a job pane started before `pane_jobs` was turned off still suspends.
+- On a suspended exit the server saves the session first (the checkpoint an interrupted exit takes, with the pane's
+  history), keeps the pane's last directory, drops its runtime and marks its terminal `suspended`. The agent is not
+  released, by the app or by the server's own exit forwarding (which releases every exited pane's agent first, and
+  so dropped the plan in the first live run), so its session and resume plan stay on record. A detected agent reads
+  as idle, with no "done" mark for the cut-off work; a hook-reported state stays as reported until the pane resumes.
+  Popup panes, overlay panes and panes a worktree removal is stopping close as before.
+- The pane shows a notice in place, drawn by the server, so every client shows it. `pane get`/`pane list` carry
+  `suspended: true`, and endpoint clients get the optional `pane_process` resource fact (`suspended`, else `Unknown`).
+- Resume: 5 s after the last keeper ended (30 s after a burst, so panes do not restart into a logout), or at once
+  on a client attach, the server starts every suspended pane again if launchd accepts pane jobs: pane jobs off or
+  unavailable, or not in the 60 s fallback window, and `launchctl print gui/<uid>` answers. Else it looks again
+  every 10 s. A pane with a resume plan runs it (as `pane respawn --resume`), any other re-runs its launch command
+  or a shell. A pane that cannot start shows why and stops waiting.
+- The burst warning is logged when the third keeper ends within 2 s of the previous one, with that count; the
+  resume logs how many panes started again.
+- Not kept across a restart: `suspended` is not saved. A restore or live handoff starts every pane anyway, the
+  suspended ones by their saved plans. A suspended pane has no history in later saves, only in the checkpoint.
+
 ## D4. TCC responsibility
 
 A launchd-started keeper is its own responsible process, and so is the program it starts, because the keeper
