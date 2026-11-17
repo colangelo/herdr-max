@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -174,18 +174,6 @@ pub(super) fn send_with_fds(stream: &UnixStream, bytes: &[u8], fds: &[RawFd]) ->
     Ok(())
 }
 
-/// Binds a socket at `path` that only this user can reach from the moment
-/// it exists, rather than after a chmod (security review H7). The mask is the
-/// process's: a file another thread creates meanwhile is owner-only too,
-/// never more open.
-pub(super) fn bind_owner_only(path: &Path) -> io::Result<UnixListener> {
-    // SAFETY: umask only swaps the process mask; it is restored right after.
-    let umask = unsafe { libc::umask(0o077) };
-    let bound = UnixListener::bind(path);
-    unsafe { libc::umask(umask) };
-    bound
-}
-
 /// Reads into `buf`, queuing any received descriptors, each close-on-exec.
 /// A transfer with more descriptors than fit is refused, and what did arrive
 /// of it is closed (security review H6).
@@ -275,7 +263,7 @@ pub(crate) fn run(args: &[String]) -> io::Result<()> {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
     }
     let _ = std::fs::remove_file(&socket);
-    let listener = bind_owner_only(&socket)?;
+    let listener = crate::platform::bind_owner_only(&socket)?;
     let socket_inode = std::fs::metadata(&socket).map(|meta| meta.ino()).ok();
     let pid_marker = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()
@@ -1017,6 +1005,7 @@ pub(super) fn open_slave(tty: &Path) -> io::Result<OwnedFd> {
 mod tests {
     use super::*;
     use std::io::Read;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn requests_and_replies_round_trip() {

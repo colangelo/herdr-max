@@ -465,9 +465,8 @@ fn kill_and_reap_import_child(pid: u32) {
 #[cfg(unix)]
 pub(crate) fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = crate::platform::bind_owner_only(socket_path)?;
     listener.set_nonblocking(true)?;
-    restrict_socket_permissions(socket_path)?;
     Ok(listener)
 }
 
@@ -684,13 +683,6 @@ pub(crate) fn manifest_for(
         announce_capabilities: true,
         host_shutdown_intent,
     }
-}
-
-#[cfg(unix)]
-fn restrict_socket_permissions(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 #[cfg(unix)]
@@ -1381,6 +1373,26 @@ mod tests {
         assert_eq!(validated_line(&older), "validated\n");
 
         assert!(fd_transport_for("ready\n", 1, true).is_err());
+    }
+
+    /// The handoff socket is owner-only from the moment it exists, whatever
+    /// the server's umask, as the pane-job socket is.
+    #[test]
+    fn the_handoff_socket_is_owner_only_when_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("herdr-handoff-291-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("handoff.sock");
+        // SAFETY: swaps this test process's mask; restored below.
+        let umask = unsafe { libc::umask(0) };
+        let bound = bind_listener(&socket);
+        unsafe { libc::umask(umask) };
+        let _listener = bound.unwrap();
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode & 0o077, 0, "mode {mode:o}");
     }
 
     #[test]

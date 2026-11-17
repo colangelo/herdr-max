@@ -445,6 +445,18 @@ pub(crate) fn random_token() -> std::io::Result<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Binds a socket at `path` that only this user can reach from the moment
+/// it exists, rather than after a chmod (security review H7). The mask is the
+/// process's: a file another thread creates meanwhile is owner-only too,
+/// never more open.
+pub(crate) fn bind_owner_only(path: &Path) -> std::io::Result<std::os::unix::net::UnixListener> {
+    // SAFETY: umask only swaps the process mask; it is restored right after.
+    let umask = unsafe { libc::umask(0o077) };
+    let bound = std::os::unix::net::UnixListener::bind(path);
+    unsafe { libc::umask(umask) };
+    bound
+}
+
 /// The session `pid` belongs to, when it exists.
 pub(crate) fn process_session(pid: u32) -> Option<u32> {
     if pid == 0 || pid > i32::MAX as u32 {
@@ -747,6 +759,25 @@ mod tests {
             "{first}"
         );
         assert_ne!(first, second);
+    }
+
+    /// Security review H7: the socket is owner-only from the moment it
+    /// exists, whatever the server's umask.
+    #[test]
+    fn an_owner_only_socket_is_owner_only_when_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-owner-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s");
+        // SAFETY: swaps this test process's mask; restored below.
+        let umask = unsafe { libc::umask(0) };
+        let bound = bind_owner_only(&path);
+        unsafe { libc::umask(umask) };
+        let _listener = bound.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode & 0o077, 0, "mode {mode:o}");
     }
 
     #[test]
