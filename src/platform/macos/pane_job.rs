@@ -31,7 +31,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use super::launchd_spawn::PANE_LABEL_PREFIX;
 use super::pane_anchor::{encode, lock, open_slave, recv_with_fds, send_with_fd, MAX_LINE};
-use crate::platform::PaneJobLink;
+use crate::platform::{PaneJobLink, ProcessIdentity};
 // Exit statuses that are not the program's own: the pane is suspended
 // (design D3), not closed.
 use crate::platform::{PANE_JOB_STOPPED as KEEPER_STOPPED, PANE_KEEPER_LOST as KEEPER_LOST};
@@ -746,27 +746,6 @@ pub(crate) fn adopt(
         jobs.links.remove(&pid);
         report.map(|report| report.status())
     })
-}
-
-/// A process as it was when its job reported it, so a reused pid is never
-/// taken for it (security review M2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProcessIdentity {
-    session: u32,
-    started: u64,
-}
-
-impl ProcessIdentity {
-    fn of(pid: u32) -> Option<Self> {
-        Some(Self {
-            session: crate::platform::process_session(pid)?,
-            started: super::process_start_token(pid)?,
-        })
-    }
-
-    fn is(identity: Option<Self>, pid: u32) -> bool {
-        identity.is_some_and(|identity| Self::of(pid) == Some(identity))
-    }
 }
 
 /// A pane program started by its keeper.

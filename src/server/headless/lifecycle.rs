@@ -189,7 +189,7 @@ impl HeadlessServer {
         ) {
             Ok(validated) => {
                 import_server =
-                    import_server.with_peer(crate::platform::unix_stream_peer_pid(&validated.0));
+                    import_server.with_peer(crate::server::handoff::HandoffPeer::of(&validated.0));
                 info!(pid = ?import_server.pid(), "handoff import server connected");
                 validated
             }

@@ -209,9 +209,30 @@ pub(crate) fn handoff_socket_path() -> PathBuf {
 pub(crate) enum ImportServer {
     /// Our own child, which rollback kills and reaps.
     Child(u32),
-    /// Started through launchd, so not our child. Its pid is the handoff
-    /// socket's peer, known once it has connected and shown the token.
-    Detached(Option<u32>),
+    /// Started through launchd, so not our child: the handoff socket's peer,
+    /// known once it has connected and shown the token.
+    Detached(Option<HandoffPeer>),
+}
+
+/// The process on the other end of the handoff socket, as it was when it
+/// showed the token. Its identity tells it apart from a later process that
+/// reuses the pid (security review H1).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandoffPeer {
+    pid: u32,
+    identity: Option<crate::platform::ProcessIdentity>,
+}
+
+#[cfg(unix)]
+impl HandoffPeer {
+    pub(crate) fn of(stream: &UnixStream) -> Option<Self> {
+        let pid = crate::platform::unix_stream_peer_pid(stream)?;
+        Some(Self {
+            pid,
+            identity: crate::platform::ProcessIdentity::of(pid),
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -226,7 +247,7 @@ impl ImportServer {
     }
 
     /// Records the peer of the handoff connection that presented the token.
-    pub(crate) fn with_peer(self, peer: Option<u32>) -> Self {
+    pub(crate) fn with_peer(self, peer: Option<HandoffPeer>) -> Self {
         match self {
             Self::Child(pid) => Self::Child(pid),
             Self::Detached(known) => Self::Detached(known.or(peer)),
@@ -236,7 +257,7 @@ impl ImportServer {
     pub(crate) fn pid(self) -> Option<u32> {
         match self {
             Self::Child(pid) => Some(pid),
-            Self::Detached(pid) => pid,
+            Self::Detached(peer) => peer.map(|peer| peer.pid),
         }
     }
 }
@@ -251,20 +272,25 @@ enum Rollback {
     Leave(Option<u32>),
 }
 
-/// A detached replacement is signalled only when it leads its own session,
-/// as the server does once it has left its launchd job, and is not us.
+/// A detached replacement is signalled only while its pid is still the
+/// process that showed the token, leading its own session as the server does
+/// once it has left its launchd job, and is not us. Without a recorded
+/// identity nothing is signalled.
 #[cfg(unix)]
 fn rollback_for(
     server: ImportServer,
     own_pid: u32,
-    session_of: impl Fn(u32) -> Option<u32>,
+    identity_of: impl Fn(u32) -> Option<crate::platform::ProcessIdentity>,
 ) -> Rollback {
     match server {
         ImportServer::Child(pid) => Rollback::KillAndReap(pid),
-        ImportServer::Detached(Some(pid)) if pid != own_pid && session_of(pid) == Some(pid) => {
+        ImportServer::Detached(Some(HandoffPeer {
+            pid,
+            identity: Some(identity),
+        })) if pid != own_pid && identity.session == pid && identity_of(pid) == Some(identity) => {
             Rollback::Kill(pid)
         }
-        ImportServer::Detached(pid) => Rollback::Leave(pid),
+        ImportServer::Detached(peer) => Rollback::Leave(peer.map(|peer| peer.pid)),
     }
 }
 
@@ -317,11 +343,15 @@ pub(crate) fn spawn_handoff_import(
 
 #[cfg(unix)]
 pub(crate) fn cleanup_failed_import_server(server: ImportServer) {
-    match rollback_for(server, std::process::id(), crate::platform::process_session) {
+    match rollback_for(
+        server,
+        std::process::id(),
+        crate::platform::ProcessIdentity::of,
+    ) {
         Rollback::KillAndReap(pid) => kill_and_reap_import_child(pid),
         Rollback::Kill(pid) => {
-            // SAFETY: plain syscall; the pid is the handoff peer that showed
-            // the token and leads its own session.
+            // SAFETY: plain syscall; the pid is still the handoff peer that
+            // showed the token, matched by its session and start time.
             if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0 {
                 info!(pid, "killed handoff import server during rollback");
             } else {
@@ -332,7 +362,7 @@ pub(crate) fn cleanup_failed_import_server(server: ImportServer) {
         Rollback::Leave(pid) => {
             warn!(
                 ?pid,
-                "handoff import server started through launchd cannot be identified; not signalling it during rollback"
+                "handoff import server started through launchd is no longer the process that connected, or cannot be identified; not signalling it during rollback"
             );
         }
     }
@@ -826,51 +856,113 @@ mod tests {
 
     const OWN_PID: u32 = 100;
 
-    fn leads_own_session(pid: u32) -> Option<u32> {
-        Some(pid)
+    use crate::platform::ProcessIdentity;
+
+    const PEER: u32 = 4242;
+    const STARTED: u64 = 7;
+
+    fn peer(pid: u32, identity: Option<ProcessIdentity>) -> Option<HandoffPeer> {
+        Some(HandoffPeer { pid, identity })
+    }
+
+    /// A session leader as it was when it showed the token.
+    fn leader(pid: u32) -> Option<ProcessIdentity> {
+        Some(ProcessIdentity {
+            session: pid,
+            started: STARTED,
+        })
     }
 
     #[test]
     fn a_launchd_replacement_is_rolled_back_by_its_socket_peer() {
-        let server = ImportServer::from_spawn(0).with_peer(Some(4242));
-        assert_eq!(server.pid(), Some(4242));
-        assert_eq!(
-            rollback_for(server, OWN_PID, leads_own_session),
-            Rollback::Kill(4242)
-        );
+        let server = ImportServer::from_spawn(0).with_peer(peer(PEER, leader(PEER)));
+        assert_eq!(server.pid(), Some(PEER));
+        assert_eq!(rollback_for(server, OWN_PID, leader), Rollback::Kill(PEER));
     }
 
     #[test]
     fn a_child_replacement_keeps_its_spawn_pid() {
-        let server = ImportServer::from_spawn(77).with_peer(Some(4242));
+        let server = ImportServer::from_spawn(77).with_peer(peer(PEER, leader(PEER)));
         assert_eq!(
-            rollback_for(server, OWN_PID, leads_own_session),
+            rollback_for(server, OWN_PID, leader),
             Rollback::KillAndReap(77)
         );
     }
 
+    /// Security review H1: a pid reused by another session leader, or one
+    /// whose identity is not known, is never signalled.
     #[test]
     fn rollback_signals_no_process_it_cannot_identify_as_the_replacement() {
         let unknown = ImportServer::from_spawn(0);
         assert_eq!(
-            rollback_for(unknown, OWN_PID, leads_own_session),
+            rollback_for(unknown, OWN_PID, leader),
             Rollback::Leave(None)
         );
-        let in_another_session = ImportServer::from_spawn(0).with_peer(Some(4242));
+        let connected = ImportServer::from_spawn(0).with_peer(peer(PEER, leader(PEER)));
+        let reused = |pid| {
+            Some(ProcessIdentity {
+                session: pid,
+                started: STARTED + 1,
+            })
+        };
         assert_eq!(
-            rollback_for(in_another_session, OWN_PID, |_| Some(1)),
-            Rollback::Leave(Some(4242))
+            rollback_for(connected, OWN_PID, reused),
+            Rollback::Leave(Some(PEER)),
+            "the same pid and session with a later start is another process"
         );
-        let gone = ImportServer::from_spawn(0).with_peer(Some(4242));
+        let in_another_session = |_| {
+            Some(ProcessIdentity {
+                session: 1,
+                started: STARTED,
+            })
+        };
         assert_eq!(
-            rollback_for(gone, OWN_PID, |_| None),
-            Rollback::Leave(Some(4242))
+            rollback_for(connected, OWN_PID, in_another_session),
+            Rollback::Leave(Some(PEER))
         );
-        let ourselves = ImportServer::from_spawn(0).with_peer(Some(OWN_PID));
         assert_eq!(
-            rollback_for(ourselves, OWN_PID, leads_own_session),
+            rollback_for(connected, OWN_PID, |_| None),
+            Rollback::Leave(Some(PEER)),
+            "gone, or unreadable now"
+        );
+        let never_identified = ImportServer::from_spawn(0).with_peer(peer(PEER, None));
+        assert_eq!(
+            rollback_for(never_identified, OWN_PID, leader),
+            Rollback::Leave(Some(PEER)),
+            "unreadable when it connected"
+        );
+        let not_a_leader = ImportServer::from_spawn(0).with_peer(peer(
+            PEER,
+            Some(ProcessIdentity {
+                session: 1,
+                started: STARTED,
+            }),
+        ));
+        assert_eq!(
+            rollback_for(not_a_leader, OWN_PID, |_| Some(ProcessIdentity {
+                session: 1,
+                started: STARTED,
+            })),
+            Rollback::Leave(Some(PEER))
+        );
+        let ourselves = ImportServer::from_spawn(0).with_peer(peer(OWN_PID, leader(OWN_PID)));
+        assert_eq!(
+            rollback_for(ourselves, OWN_PID, leader),
             Rollback::Leave(Some(OWN_PID))
         );
+    }
+
+    #[test]
+    fn a_handoff_peer_is_identified_when_it_connects() {
+        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
+        let peer = HandoffPeer::of(&ours).expect("the peer pid is readable");
+        assert_eq!(peer.pid, std::process::id());
+        assert_eq!(
+            peer.identity,
+            ProcessIdentity::of(std::process::id()),
+            "its session and start time are recorded"
+        );
+        assert!(peer.identity.is_some());
     }
 
     fn request_dir(name: &str) -> PathBuf {

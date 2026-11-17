@@ -436,6 +436,31 @@ pub(crate) fn process_session(pid: u32) -> Option<u32> {
     (session > 0).then_some(session as u32)
 }
 
+/// A process as it was when first seen: its session and start time. A later
+/// process that reuses its pid is never taken for it (security review M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    pub(crate) session: u32,
+    pub(crate) started: u64,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn of(pid: u32) -> Option<Self> {
+        Some(Self {
+            session: process_session(pid)?,
+            started: super::process_start_token(pid)?,
+        })
+    }
+
+    /// Whether `pid` is still the process `identity` describes; never when
+    /// the identity was not known.
+    // Only the macOS pane keeper asks this; the handoff compares identities.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn is(identity: Option<Self>, pid: u32) -> bool {
+        identity.is_some_and(|identity| Self::of(pid) == Some(identity))
+    }
+}
+
 /// The parent of process `pid`, when it can be read.
 pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     super::process_name_and_parent(pid).map(|(_, parent)| parent)
