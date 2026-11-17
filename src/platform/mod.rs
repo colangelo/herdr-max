@@ -504,13 +504,27 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
 }
 
 /// Starts a live handoff's replacement server, detached like any server
-/// daemon, and returns its pid. On macOS the replacement is responsible for
-/// itself, so privacy prompts from its panes name its own binary rather than
-/// the server it replaces (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/240).
+/// daemon, and returns its pid, or 0 when launchd started it.
+///
+/// On macOS the replacement goes through the same one-shot launchd job as a
+/// client-started server, so it gets a resource coalition of its own instead
+/// of the one every earlier server in its handoff chain was born into, which
+/// on macOS can be shared with the user's launch agents
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/288).
+/// The fallback replacement is still responsible for itself, so privacy
+/// prompts from its panes name its own binary rather than the server it
+/// replaces (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/240).
 #[cfg(unix)]
 pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::io::Result<u32> {
     #[cfg(target_os = "macos")]
     {
+        macos::keep_server_context_through_launchd(command);
+        match macos::spawn_launchd_job(command) {
+            Ok(_label) => return Ok(0),
+            Err(err) => {
+                tracing::info!(%err, "starting the handoff server directly instead of through launchd");
+            }
+        }
         macos::configure_server_daemon_context(command);
         match macos::spawn_disclaimed_daemon(command) {
             Ok(pid) => return Ok(pid),
@@ -1050,6 +1064,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         assert!(reaped, "the exited daemon {pid} was left as a zombie");
+    }
+
+    /// Over SSH a handoff replacement stays our own detached child, so the
+    /// handoff knows its pid and rollback can reap it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_ssh_handoff_spawns_its_replacement_directly() {
+        std::env::set_var("SSH_CONNECTION", "192.0.2.1 22 192.0.2.2 22");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0", "sh", "--handoff-import"]);
+        let pid = spawn_handoff_server(&mut command).expect("spawn the stand-in replacement");
+        std::env::remove_var("SSH_CONNECTION");
+
+        assert_ne!(pid, 0, "not started through launchd");
+        let mut status = 0;
+        // SAFETY: waits on the child this test just spawned.
+        let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+        assert_eq!(reaped, pid as libc::pid_t, "the replacement is our child");
     }
 
     #[cfg(target_os = "linux")]

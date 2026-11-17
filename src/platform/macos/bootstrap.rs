@@ -35,6 +35,19 @@ pub(crate) fn configure_server_daemon_context(command: &mut Command) {
     }
 }
 
+/// A handoff replacement started through launchd gets the GUI domain's
+/// bootstrap instead of inheriting ours, so it is asked to take the per-user
+/// one whenever this server holds it (fork issues 226 and 228).
+pub(crate) fn keep_server_context_through_launchd(command: &mut Command) {
+    let holds_user_context = macos_services()
+        .is_some_and(|services| services.context == crate::platform::MacosServiceContext::User);
+    if holds_user_context {
+        command.env(SERVER_CONTEXT_ENV, USER_CONTEXT);
+    } else {
+        command.env_remove(SERVER_CONTEXT_ENV);
+    }
+}
+
 /// Called after exec, before logging, worker threads, or pane creation.
 /// `handoff_user_context` is a live handoff whose caller asked the new server
 /// to move to the per-user context (fork issue 226).
@@ -63,8 +76,10 @@ fn needs_user_context(
     // Fork: a source started before that fix, or from a GUI terminal, keeps the
     // logout-scoped context forever unless the handoff's caller explicitly asks
     // to move it (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/226).
+    // A source that starts its replacement through launchd cannot pass its
+    // context by fork, so it sends the marker instead (fork issue 288).
     if handoff_import {
-        handoff_user_context
+        handoff_user_context || requested == Some(OsStr::new(USER_CONTEXT))
     } else {
         requested == Some(OsStr::new(USER_CONTEXT))
     }
@@ -452,8 +467,17 @@ mod tests {
             false
         ));
         assert!(!needs_user_context(None, true, false));
-        assert!(!needs_user_context(
+    }
+
+    #[test]
+    fn a_handoff_through_launchd_keeps_its_sources_user_context() {
+        assert!(needs_user_context(
             Some(OsStr::new(USER_CONTEXT)),
+            true,
+            false
+        ));
+        assert!(!needs_user_context(
+            Some(OsStr::new("unknown")),
             true,
             false
         ));
