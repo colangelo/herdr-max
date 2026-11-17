@@ -39,9 +39,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a started anchor may take to listen: macOS checks an executable it
 /// has not run before, which can take seconds on a busy machine.
 const ANCHOR_START_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_LINE: usize = 4 * 1024 * 1024;
+pub(super) const MAX_LINE: usize = 4 * 1024 * 1024;
 /// `sun_path` holds 104 bytes on macOS, the terminating NUL included.
-const MAX_SOCKET_PATH: usize = 103;
+pub(super) const MAX_SOCKET_PATH: usize = 103;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -58,12 +58,12 @@ enum Request {
 
 /// The command's environment is keyed by `OsString`, which JSON cannot key a
 /// map by, so the command travels as base64 of its bincode encoding.
-mod command_codec {
+pub(super) mod command_codec {
     use base64::Engine;
     use portable_pty::CommandBuilder;
     use serde::{de, ser, Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(
+    pub(in crate::platform::macos) fn serialize<S: Serializer>(
         command: &CommandBuilder,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -72,7 +72,7 @@ mod command_codec {
         serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(in crate::platform::macos) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<CommandBuilder, D::Error> {
         let text = String::deserialize(deserializer)?;
@@ -112,7 +112,7 @@ enum Reply {
     },
 }
 
-fn encode<T: Serialize>(message: &T) -> io::Result<Vec<u8>> {
+pub(super) fn encode<T: Serialize>(message: &T) -> io::Result<Vec<u8>> {
     let mut line = serde_json::to_vec(message).map_err(io::Error::other)?;
     line.push(b'\n');
     Ok(line)
@@ -127,7 +127,7 @@ fn write_reply(writer: &Mutex<UnixStream>, reply: &Reply) -> io::Result<()> {
 }
 
 /// Sends `bytes` with `fd` attached to the first segment.
-fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<()> {
+pub(super) fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<()> {
     let mut iov = libc::iovec {
         iov_base: bytes.as_ptr() as *mut libc::c_void,
         iov_len: bytes.len(),
@@ -170,7 +170,7 @@ fn send_with_fd(stream: &UnixStream, bytes: &[u8], fd: RawFd) -> io::Result<()> 
 }
 
 /// Reads into `buf`, queuing any received descriptors.
-fn recv_with_fds(
+pub(super) fn recv_with_fds(
     stream: &UnixStream,
     buf: &mut [u8],
     fds: &mut VecDeque<OwnedFd>,
@@ -576,7 +576,7 @@ impl Client {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -675,7 +675,7 @@ impl ChildKiller for PidKiller {
     }
 }
 
-fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
+pub(super) fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
     let pid = libc::pid_t::try_from(pid).map_err(io::Error::other)?;
     if unsafe { libc::kill(pid, signal) } != 0 {
         return Err(io::Error::last_os_error());
@@ -729,6 +729,11 @@ pub(crate) fn serving() {
     SERVING.store(true, Ordering::Release);
 }
 
+/// Whether the server serves clients yet (`serving`).
+pub(super) fn is_serving() -> bool {
+    SERVING.load(Ordering::Acquire)
+}
+
 /// The anchor client for a pane spawn. Panes restored as the server starts,
 /// before it serves anyone, wait for the anchor the early start began, so they
 /// are anchored after a reboot. Once the server serves, a spawn never waits:
@@ -736,7 +741,7 @@ pub(crate) fn serving() {
 /// later panes use it when it listens (fork issue 249: even 2 s on the app
 /// loop held a waiting client past its deadline).
 fn client() -> Option<Arc<Client>> {
-    let wait = if SERVING.load(Ordering::Acquire) {
+    let wait = if is_serving() {
         Duration::ZERO
     } else {
         ANCHOR_START_TIMEOUT
@@ -830,7 +835,7 @@ fn remember(client: Arc<Client>) -> Arc<Client> {
 }
 
 fn start_anchor(path: &Path) -> io::Result<()> {
-    let exe = anchor_executable()?;
+    let exe = helper_executable()?;
     let mut command = std::process::Command::new(&exe);
     command.arg(SUBCOMMAND).arg("--socket").arg(path);
     let pid = super::spawn_disclaimed_daemon(&command)?;
@@ -839,13 +844,14 @@ fn start_anchor(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A clone of this executable that outlives the package manager removing it.
+/// A clone of this executable that outlives the package manager removing it,
+/// which the anchor and the pane keepers (`pane_job`) run from.
 ///
 /// Homebrew deletes the old version's files on upgrade, while the anchor keeps
 /// running for months; a deleted executable may fail tccd's code-signing check.
 /// The directory is named after the executable's inode, so another build never
 /// reuses it, and the file keeps the executable's name, which the prompt shows.
-fn anchor_executable() -> io::Result<PathBuf> {
+pub(super) fn helper_executable() -> io::Result<PathBuf> {
     clone_executable(
         &std::env::current_exe()?,
         &crate::config::config_dir().join("pane-anchor"),
@@ -972,7 +978,7 @@ pub(crate) fn spawn(
     }
 }
 
-fn open_slave(tty: &Path) -> io::Result<OwnedFd> {
+pub(super) fn open_slave(tty: &Path) -> io::Result<OwnedFd> {
     let path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(tty.as_os_str()))
         .map_err(io::Error::other)?;
     let fd = unsafe {

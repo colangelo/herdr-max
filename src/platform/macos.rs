@@ -40,6 +40,7 @@ pub(crate) use launchd_spawn::{leave_launchd_job, spawn_launchd_job};
 mod disclaimed_spawn;
 pub(crate) use disclaimed_spawn::spawn_disclaimed_daemon;
 pub(crate) mod pane_anchor;
+pub(crate) mod pane_job;
 
 #[cfg(test)]
 mod config_file_tests;

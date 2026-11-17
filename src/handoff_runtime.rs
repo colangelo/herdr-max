@@ -44,6 +44,11 @@ pub(crate) struct HandoffRuntimeState {
     /// issue 128).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unseen: bool,
+    /// The pane program's keeper job on macOS (fork issue 288), so the
+    /// receiving server hears its exit. Older servers ignore it and see the
+    /// pane end by PTY EOF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_job: Option<crate::platform::PaneJobLink>,
 }
 
 #[cfg(unix)]
@@ -117,6 +122,7 @@ mod tests {
             agent_state: None,
             hook_agent_state: None,
             unseen: false,
+            pane_job: None,
         }
     }
 

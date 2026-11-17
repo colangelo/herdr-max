@@ -244,6 +244,7 @@ async fn v2_adopted_handoff_pane_reports_handoff_once_when_its_reader_ends() {
         agent_state: None,
         hook_agent_state: None,
         unseen: false,
+        pane_job: None,
     };
     let (events, mut event_rx) = mpsc::channel(64);
     let runtime = PaneRuntime::from_handoff_fd(

@@ -2594,6 +2594,7 @@ impl PaneRuntime {
             agent: None,
             hook_agent_state: None,
             unseen: false,
+            pane_job: crate::platform::pane_job_link(child_pid),
         }
     }
 
@@ -2916,6 +2917,7 @@ impl PaneRuntime {
             agent: _,
             hook_agent_state: _,
             unseen: _,
+            pane_job,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2968,6 +2970,9 @@ impl PaneRuntime {
         let content_seq = Arc::new(AtomicU64::new(0));
         let content_write_lock = Arc::new(Mutex::new(()));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let job_exit = pane_job.and_then(|link| {
+            crate::platform::adopt_pane_job(link, child_pid.load(Ordering::Acquire))
+        });
 
         let io = {
             let terminal = terminal.clone();
@@ -3050,6 +3055,7 @@ impl PaneRuntime {
                 pane_id,
                 master_fd,
                 runtime_io::PaneIoSink { on_read, on_exit },
+                job_exit,
             )?
         };
 
@@ -8113,6 +8119,7 @@ mod tests {
                 agent_state: None,
                 hook_agent_state: None,
                 unseen: false,
+                pane_job: None,
             };
             let render_dirty = Arc::new(RenderSignal::new());
             let (events, _event_rx) = mpsc::channel(8);

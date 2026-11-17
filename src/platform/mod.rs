@@ -537,23 +537,81 @@ pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::
     command.spawn().map(|child| child.id())
 }
 
-/// Starts a pane program through the macOS pane anchor, so its privacy answers
-/// outlive server upgrades (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/246).
+/// A pane program's keeper job on macOS (fork issue 288), carried across a
+/// live handoff so the replacement server hears the program's exit.
+#[cfg(unix)]
+// Only macOS builds one; other Unix servers only carry it in handoff state.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PaneJobLink {
+    pub label: String,
+    pub token: String,
+}
+
+/// Starts a pane program outside the server, on the PTY whose slave is `tty`:
+/// on macOS under its own launchd job when `[experimental] pane_jobs` is on
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/288), else
+/// through the pane anchor, so its privacy answers outlive server upgrades
+/// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/246).
 /// `None` means the caller spawns it itself.
 #[cfg(target_os = "macos")]
-pub(crate) fn pane_anchor_spawn(
+pub(crate) fn spawn_pane_program(
     command: &portable_pty::CommandBuilder,
     tty: &std::path::Path,
 ) -> Option<std::io::Result<Box<dyn portable_pty::Child + Send + Sync>>> {
-    macos::pane_anchor::spawn(command, tty)
+    macos::pane_job::spawn(command, tty).or_else(|| macos::pane_anchor::spawn(command, tty))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn pane_anchor_spawn(
+pub(crate) fn spawn_pane_program(
     _command: &portable_pty::CommandBuilder,
     _tty: &std::path::Path,
 ) -> Option<std::io::Result<Box<dyn portable_pty::Child + Send + Sync>>> {
     None
+}
+
+/// `[experimental] pane_jobs`: start new macOS panes under launchd jobs.
+pub(crate) fn set_pane_jobs(enabled: bool) {
+    #[cfg(target_os = "macos")]
+    macos::pane_job::set_enabled(enabled);
+    #[cfg(not(target_os = "macos"))]
+    if enabled {
+        tracing::warn!("[experimental] pane_jobs is macOS only; panes start as before");
+    }
+}
+
+/// The keeper job of the running pane program `pid`, if it has one.
+#[cfg(unix)]
+pub(crate) fn pane_job_link(pid: u32) -> Option<PaneJobLink> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::pane_job::link(pid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// How a handed-off job pane learns its program's exit: called once its
+/// terminal closed, it waits up to the given time for the keeper's report.
+#[cfg(unix)]
+pub(crate) type AdoptedPaneExit =
+    Box<dyn FnOnce(std::time::Duration) -> Option<portable_pty::ExitStatus> + Send>;
+
+/// Takes over a job pane from the server this one replaces.
+#[cfg(unix)]
+pub(crate) fn adopt_pane_job(link: PaneJobLink, pid: u32) -> Option<AdoptedPaneExit> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::pane_job::adopt(link, pid).map(|wait| Box::new(wait) as AdoptedPaneExit)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (link, pid);
+        None
+    }
 }
 
 /// Connects to or starts the pane anchor off the app loop as the server starts.
@@ -574,15 +632,18 @@ pub(crate) fn pane_anchor_serving() {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn pane_anchor_serving() {}
 
-/// Runs the pane anchor when this process was started as one.
+/// Runs the pane anchor or a pane keeper when this process was started as one.
 #[cfg(target_os = "macos")]
-pub(crate) fn maybe_run_pane_anchor(args: &[String]) -> Option<std::io::Result<()>> {
-    (args.get(1).map(String::as_str) == Some(macos::pane_anchor::SUBCOMMAND))
-        .then(|| macos::pane_anchor::run(&args[2..]))
+pub(crate) fn maybe_run_pane_helper(args: &[String]) -> Option<std::io::Result<()>> {
+    match args.get(1).map(String::as_str) {
+        Some(macos::pane_anchor::SUBCOMMAND) => Some(macos::pane_anchor::run(&args[2..])),
+        Some(macos::pane_job::SUBCOMMAND) => Some(macos::pane_job::run(&args[2..])),
+        _ => None,
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn maybe_run_pane_anchor(_args: &[String]) -> Option<std::io::Result<()>> {
+pub(crate) fn maybe_run_pane_helper(_args: &[String]) -> Option<std::io::Result<()>> {
     None
 }
 

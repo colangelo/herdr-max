@@ -10,6 +10,11 @@ use super::{PaneIo, PaneIoSink, SpawnSpec};
 use crate::layout::PaneId;
 use crate::pty::actor::{PtyIoActor, PtyIoActorConfig};
 
+/// How long a handed-off job pane whose terminal closed waits for its
+/// keeper's exit report; the keeper reports as soon as its program ends.
+#[cfg(unix)]
+const ADOPTED_JOB_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl PaneIo {
     /// Starts `spec.command` on a new PTY. The order is load-bearing
     /// (runtime-seam roundtable F1, F2): the shell pid is published before the
@@ -70,12 +75,14 @@ impl PaneIo {
 
     /// Takes over a PTY whose master fd came from a live handoff. The reader
     /// starts quiesced, as the handoff protocol expects. There is no child
-    /// handle, so the exit is reported as `Handoff` when the reader ends.
+    /// handle, so the exit is reported when the reader ends: as the status the
+    /// pane's keeper job reports (`job_exit`), or else as `Handoff`.
     #[cfg(unix)]
     pub(in crate::pane) fn adopt_handoff_fd(
         pane_id: PaneId,
         master_fd: std::os::fd::OwnedFd,
         sink: PaneIoSink,
+        job_exit: Option<crate::platform::AdoptedPaneExit>,
     ) -> std::io::Result<Self> {
         let PaneIoSink {
             on_read, on_exit, ..
@@ -86,7 +93,15 @@ impl PaneIo {
             initially_quiesced: true,
             on_read,
             on_reader_exit: Some(Box::new(move || {
-                on_exit(crate::platform::ChildExitReason::Handoff)
+                let reported = job_exit.and_then(|wait| wait(ADOPTED_JOB_EXIT_GRACE));
+                let exit_reason = match reported {
+                    Some(status) => {
+                        crate::logging::pane_exited(pane_id.raw(), &format!("{status:?}"));
+                        crate::platform::classify_child_exit(&status)
+                    }
+                    None => crate::platform::ChildExitReason::Handoff,
+                };
+                on_exit(exit_reason)
             })),
         })?))
     }

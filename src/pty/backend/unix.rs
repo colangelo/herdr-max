@@ -32,7 +32,7 @@ pub(crate) fn spawn_with_portable_pty(
     let anchored = pair
         .master
         .tty_name()
-        .and_then(|tty| crate::platform::pane_anchor_spawn(&cmd, &tty));
+        .and_then(|tty| crate::platform::spawn_pane_program(&cmd, &tty));
     let child = match anchored {
         Some(spawned) => spawned?,
         None => pair

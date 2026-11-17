@@ -557,6 +557,7 @@ impl App {
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
         apply_pane_runtime_choice(config.experimental.runtime);
+        crate::platform::set_pane_jobs(config.experimental.pane_jobs);
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
@@ -1207,6 +1208,7 @@ impl App {
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
             apply_pane_runtime_choice(config.experimental.runtime);
+            crate::platform::set_pane_jobs(config.experimental.pane_jobs);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();

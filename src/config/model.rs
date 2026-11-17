@@ -1902,6 +1902,10 @@ pub struct ExperimentalConfig {
     /// herdr-core terminal (Unix only; falls back to the PTY when core is not
     /// usable). Existing and restored panes keep their backend.
     pub runtime: PaneRuntimeChoice,
+    /// Start each new macOS PTY pane under its own launchd job, so stopping an
+    /// app launched from one pane can end at most that pane (fork issue 288).
+    /// Existing panes keep how they started. macOS only. Default: false.
+    pub pane_jobs: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -3370,6 +3374,19 @@ pane_history = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.pane_history);
+    }
+
+    #[test]
+    fn pane_jobs_are_opt_in() {
+        assert!(!Config::default().experimental.pane_jobs);
+
+        let toml = r#"
+[experimental]
+pane_jobs = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert!(config.experimental.pane_jobs);
     }
 
     #[test]
