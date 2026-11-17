@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_void, CString, OsStr, OsString};
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::Command;
 
@@ -23,6 +24,14 @@ type SetDisclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, c_int) -> 
 
 /// From <sys/spawn.h>; the libc crate does not define it.
 const POSIX_SPAWN_SETSID: c_int = 0x0400;
+
+extern "C" {
+    /// From <spawn.h>; the libc crate does not declare it.
+    fn posix_spawn_file_actions_addinherit_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        fd: c_int,
+    ) -> c_int;
+}
 
 /// Starts `command` (program, arguments, environment changes) in a new
 /// session with its standard streams on /dev/null and with responsibility
@@ -105,9 +114,12 @@ pub(crate) fn spawn_disclaimed_daemon(command: &Command) -> io::Result<u32> {
 /// Starts `parts` on the terminal `tty` as a session leader with that terminal
 /// as fds 0, 1 and 2 (and as its controlling terminal unless `parts` says
 /// otherwise), default signal dispositions, no other descriptors, and with
-/// responsibility disclaimed. This is the PTY library's own child setup, done
-/// by spawn attributes: macOS opens the file actions after the new session
-/// exists, so opening the terminal makes it the controlling one.
+/// responsibility disclaimed. This is the PTY library's own child setup: a
+/// forked child takes the terminal with `TIOCSCTTY`, then replaces itself by
+/// a disclaimed spawn. A terminal that a `POSIX_SPAWN_SETSID` spawn's file
+/// action opens does become the controlling one, but the session loses it as
+/// soon as the program opens a terminal of its own, and atuin's PTY proxy,
+/// which an interactive zsh can exec first thing, then exits 1 (fork issue 288).
 pub(crate) fn spawn_disclaimed_on_tty(
     parts: &portable_pty::UnixSpawnParts,
     tty: &std::path::Path,
@@ -133,17 +145,11 @@ pub(crate) fn spawn_disclaimed_on_tty(
     let tty = c_string(tty.as_os_str().as_bytes())?;
     let argv = null_terminated(&args);
     let envp = null_terminated(&env);
-    let open_flags = if parts.controlling_tty {
-        libc::O_RDWR
-    } else {
-        libc::O_RDWR | libc::O_NOCTTY
-    };
-
     let mut attrs = SpawnAttrs::new()?;
     let mut actions = FileActions::new()?;
     let mut empty: libc::sigset_t = 0;
     let mut defaults: libc::sigset_t = 0;
-    let flags = POSIX_SPAWN_SETSID
+    let flags = libc::POSIX_SPAWN_SETEXEC
         | libc::POSIX_SPAWN_SETSIGMASK
         | libc::POSIX_SPAWN_SETSIGDEF
         | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
@@ -184,30 +190,111 @@ pub(crate) fn spawn_disclaimed_on_tty(
             "posix_spawn_file_actions_addchdir_np",
             libc::posix_spawn_file_actions_addchdir_np(&mut actions.0, cwd.as_ptr()),
         )?;
-        check(
-            "posix_spawn_file_actions_addopen",
-            libc::posix_spawn_file_actions_addopen(&mut actions.0, 0, tty.as_ptr(), open_flags, 0),
-        )?;
-        for fd in 1..=2 {
+        for fd in 0..=2 {
             check(
-                "posix_spawn_file_actions_adddup2",
-                libc::posix_spawn_file_actions_adddup2(&mut actions.0, 0, fd),
+                "posix_spawn_file_actions_addinherit_np",
+                posix_spawn_file_actions_addinherit_np(&mut actions.0, fd),
             )?;
         }
-        let mut pid: libc::pid_t = 0;
-        check(
-            "posix_spawn",
-            libc::posix_spawn(
-                &mut pid,
+    }
+    let (failure_read, failure_write) = cloexec_pipe()?;
+    // SAFETY: the child calls only async-signal-safe functions and the
+    // posix_spawn wrapper, which allocates nothing, on values made above.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        let report = failure_write.as_raw_fd();
+        // SAFETY: as above; every path ends in a successful exec or `_exit`.
+        unsafe {
+            if libc::setsid() < 0 {
+                child_failed(report, 0);
+            }
+            let fd = libc::open(tty.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            if fd < 0 {
+                child_failed(report, 1);
+            }
+            for target in 0..=2 {
+                if libc::dup2(fd, target) < 0 {
+                    child_failed(report, 2);
+                }
+            }
+            if fd > 2 {
+                libc::close(fd);
+            }
+            if parts.controlling_tty && libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
+                child_failed(report, 3);
+            }
+            let mut replaced: libc::pid_t = 0;
+            *libc::__error() = libc::posix_spawn(
+                &mut replaced,
                 program.as_ptr(),
                 &actions.0,
                 &attrs.0,
                 argv.as_ptr(),
                 envp.as_ptr(),
-            ),
-        )?;
-        u32::try_from(pid).map_err(io::Error::other)
+            );
+            child_failed(report, 4)
+        }
     }
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(failure_write);
+    let mut report = [0 as c_int; 2];
+    let read = loop {
+        // SAFETY: reads into a local buffer of the given size.
+        let read = unsafe {
+            libc::read(
+                failure_read.as_raw_fd(),
+                report.as_mut_ptr().cast(),
+                std::mem::size_of_val(&report),
+            )
+        };
+        if read >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            break read;
+        }
+    };
+    if read == 0 {
+        // The exec closed the pipe: the program runs.
+        return u32::try_from(pid).map_err(io::Error::other);
+    }
+    // SAFETY: reaps the child that failed before its exec.
+    unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    let step = usize::try_from(report[0])
+        .ok()
+        .and_then(|step| CHILD_STEPS.get(step))
+        .unwrap_or(&"the child");
+    let err = io::Error::from_raw_os_error(report[1]);
+    Err(io::Error::new(err.kind(), format!("{step} failed: {err}")))
+}
+
+const CHILD_STEPS: [&str; 5] = ["setsid", "open", "dup2", "TIOCSCTTY", "posix_spawn"];
+
+/// Reports which step of `CHILD_STEPS` failed, with errno, and ends the child.
+unsafe fn child_failed(report: c_int, step: c_int) -> ! {
+    let failure = [step, *libc::__error()];
+    libc::write(
+        report,
+        failure.as_ptr().cast(),
+        std::mem::size_of_val(&failure),
+    );
+    libc::_exit(127)
+}
+
+fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as c_int; 2];
+    // SAFETY: pipe fills two descriptors this function then owns.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just opened by pipe.
+    let fds = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&fds.0, &fds.1] {
+        // SAFETY: sets a flag on a descriptor this function owns.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(fds)
 }
 
 fn set_disclaim() -> io::Result<SetDisclaim> {

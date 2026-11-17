@@ -1031,6 +1031,12 @@ mod tests {
         assert_eq!(super::link(pid), Some(link), "kept for a handoff");
         let mut writer = pair.master.take_writer().unwrap();
         writer.write_all(b"done\r").unwrap();
+        // As a pane's reader does: a session leader's exit waits for the
+        // terminal's output, here the echo, to drain.
+        std::thread::spawn(move || {
+            let mut sink = [0u8; 512];
+            while matches!(reader.read(&mut sink), Ok(read) if read > 0) {}
+        });
         let status = child.wait().unwrap();
 
         assert!(
