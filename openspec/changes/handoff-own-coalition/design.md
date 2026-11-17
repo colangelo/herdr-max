@@ -45,3 +45,23 @@ unchanged. The token stays out of logs (the plist lives in a private 0700 folder
 Alone this moves the server but not the panes (V2 failed live, see tasks.md), and the panes' own launchd jobs come
 with `openspec/changes/pane-launchd-jobs`. So the launchd handoff path runs only when `[experimental] pane_jobs` is
 on in the handing-off server; with it off, handoffs spawn exactly as before (disclaimed spawn, then detached spawn).
+
+## Security review (2026-11-17)
+
+Security's two-vendor review (`security/docs/reviews/2026-11-17-herdr-pane-launchd-jobs.md`) found no P0 or P1.
+What changed here:
+
+- **H1 (P2), rollback identity.** D3 signalled any session leader with the peer pid. The peer's session and start
+  time (`platform::ProcessIdentity`, shared with the pane keeper) are now recorded when it shows the token, and
+  rollback sends SIGKILL only while both still match. With no recorded identity it signals nothing and warns once.
+  Unit: `rollback_signals_no_process_it_cannot_identify_as_the_replacement` (same pid and session with a later
+  start: no signal).
+- **H4, environment removals.** launchd adds the gui domain's environment (`launchctl setenv`) to the job's, so a
+  variable D4 removed, such as a socket override, came back. The job carries the removed names in
+  `HERDR_LAUNCHD_UNSET`, and `leave_launchd_job` unsets them first. Unit:
+  `a_launchd_server_unsets_what_its_command_removed`.
+- **H5, the token.** D4's `--handoff-import <socket> <token>` becomes `--handoff-import <socket>` with the token in
+  `HERDR_HANDOFF_TOKEN`, which the replacement removes before any thread starts. A target that does not list
+  `handoff-features: token-env` when `--version` runs with `HERDR_HANDOFF_FEATURES` set (every older build) also
+  gets the token as an argument, so a handoff to an older beta still works. Unit:
+  `the_import_token_travels_in_the_environment`, `the_target_version_is_read_from_its_binary`.

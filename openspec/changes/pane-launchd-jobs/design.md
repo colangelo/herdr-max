@@ -143,3 +143,25 @@ V1-V3 hold for panes started with the backend on; panes that existed before stay
 | V12 | a handoff to an older beta keeps job panes | live, once: `live-handoff --import-exe` an older beta; the pane keeps output, then exits | kept; the pane ends by PTY EOF |
 | V13 | only our uid reaches the pane-job socket | unit: the peer-uid gate | another uid is dropped |
 | V14 | a suspended pane reaches old clients safely | unit: frozen generation-1 fixtures unchanged; an old client decodes a snapshot with the new state | decodes, shows the pane |
+
+## Security review (2026-11-17)
+
+Security's two-vendor review (`security/docs/reviews/2026-11-17-herdr-pane-launchd-jobs.md`) found no P0 or P1;
+H1 is the handoff rollback (see `handoff-own-coalition`). What changed here:
+
+- **H2, signal forwarding after the reap.** The keeper sees its program's exit with `waitid(WNOWAIT)`, clears the
+  pid its SIGTERM handler forwards to, and only then reaps. The keeper is single-threaded, so the handler runs on
+  the thread that clears the pid and needs no signal mask. Unit: `forwarding_is_disarmed_before_the_program_is_reaped`.
+- **H3, a failed handshake.** D1 gains a step: the server answers `Spawned` with `Ack`. A keeper with no `Ack`
+  (the server timed out and hung up) kills its program's session group and exits, and the server removes the job
+  on every failure after the keeper connected. Unit: `a_keeper_ends_a_program_no_server_took` (a program that
+  ignores SIGHUP, no `Ack`).
+- **H4, environment removals.** Does not apply to keepers: a pane program's environment is the complete one the
+  server sends over the socket, not the job's. The server's own launchd start is fixed in `handoff-own-coalition`.
+- **H6, descriptors.** Received descriptors are marked `FD_CLOEXEC` at once, a transfer with `MSG_CTRUNC` is refused
+  with what arrived of it closed, and a keeper given anything but one descriptor reports `Failed`. The pane anchor
+  shares `recv_with_fds`. Unit: `a_keeper_refuses_anything_but_one_descriptor` (0, 2 and 9),
+  `received_descriptors_close_on_exec_and_a_cut_transfer_is_refused`.
+- **H7, the socket's mode.** The pane-job socket is bound under umask 077 (`bind_owner_only`, which the anchor now
+  shares), so it is owner-only from the moment it exists; it is 0700, not chmodded to 0600. The plist folder is
+  unchanged (mkdtemp 0700 under the user's private `TMPDIR`). Unit: `the_pane_job_socket_is_owner_only_when_bound`.
