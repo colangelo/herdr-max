@@ -23,6 +23,22 @@ gui/<uid>, label `dev.herdr.pane.<server-pid>.<id>.<nanos>`), but unlike the ser
 The keeper is a few hundred lines in `src/platform/macos/pane_job.rs`; it runs before logging and threads start,
 like the anchor.
 
+**Revised (phase 1 build, 2026-11-17).**
+
+- The command line is `herdr __pane-job --socket <path> --label <label>`. The token travels in the job's environment
+  (`HERDR_PANE_JOB_TOKEN`), because other users can read a process's arguments but not its environment. The label is
+  the key the keeper presents: a per-server `--id` would collide across a live handoff.
+- Step 5 forwards SIGHUP, not SIGTERM. Interactive shells ignore SIGTERM (bash(1): "in the absence of any traps, it
+  ignores SIGTERM"), so a forwarded SIGTERM would leave the pane's shell running. SIGHUP is what a closed terminal
+  sends. Live: `launchctl remove` of a pane's job ended its bash with `Hangup: 1`.
+- The PTY setup in step 3 is done by spawn attributes: `POSIX_SPAWN_SETSID`, then opening the slave's path as fd 0
+  (macOS runs the file actions after the new session exists, so the open makes it the controlling terminal), dup to
+  1 and 2, `POSIX_SPAWN_CLOEXEC_DEFAULT`, default dispositions for the signals the PTY library resets. The resolved
+  program, argv, environment and working directory come from the vendored `CommandBuilder::unix_spawn_parts`
+  (portable-pty patch 0006), from which `as_command` is now built too.
+- The exit report carries `stopped` (the keeper was told to stop). A stopped job and a lost keeper end the pane as
+  interrupted, so the session is checkpointed; D3 keys its suspended state on them.
+
 ## D2. The server side
 
 Off by default: `[experimental] pane_jobs = true` turns the job backend on for new panes (applied on config load
@@ -46,6 +62,17 @@ peer's uid equals its own (`platform::unix_stream_peer_uid`, PR 50) and drops an
 holds the PTY master fd as for any pane and ignores the job fields of the handoff state. The keeper loses its
 server, keeps waiting for its program, and after the exit retries the socket for 10 s and exits. The older server
 sees the pane end by PTY EOF, as every imported pane does.
+
+**Revised (phase 1 build, 2026-11-17).**
+
+- Start timeout: 10 s before the server serves (restored panes, as the anchor waits), 3 s after, because a spawn
+  holds the app loop (fork issue 249). After a timeout the job is removed and new panes skip the backend for 60 s.
+  Measured on m4m: a keeper connects and its program starts 42-74 ms after the submit.
+- The dead-keeper check compares the program's session and its process start time with the values recorded at
+  spawn. A session check alone passes a reused pid that leads a session of its own.
+- Handoff: the job travels in the handoff state as `pane_job {label, token}`. The importer re-binds the socket when
+  it adopts a job pane, and when the pane's PTY closes it waits up to 3 s for the keeper's report. Without one the
+  pane ends as `Handoff`, as before.
 
 ## D3. Suspended panes
 
