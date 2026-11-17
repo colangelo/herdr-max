@@ -58,12 +58,14 @@ pub(crate) const HANDOFF_FEATURES_ENV: &str = "HERDR_HANDOFF_FEATURES";
 pub(crate) const HANDOFF_FEATURES: &str = "handoff-features: token-env";
 
 /// The import token of `herdr server --handoff-import <socket>`, taken out of
-/// the environment so panes never inherit it. An exporter from before the
-/// variable passes it as the next argument instead.
+/// the environment so panes never inherit it. An exporter that passes it as the
+/// next argument (an older build, or a newer one handing off to an older
+/// target) wins over the environment, which may hold a stale token an older
+/// server kept for life.
 pub(crate) fn take_import_token(args: &[String]) -> Option<String> {
     let from_env = std::env::var(IMPORT_TOKEN_ENV).ok();
     std::env::remove_var(IMPORT_TOKEN_ENV);
-    from_env.or_else(|| args.get(4).cloned())
+    args.get(4).cloned().or(from_env)
 }
 
 #[cfg(unix)]
@@ -377,13 +379,16 @@ fn handoff_import_command(
         .arg("server")
         .arg("--handoff-import")
         .arg(socket_path)
-        .env(IMPORT_TOKEN_ENV, token)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if !token_in_env {
-        // An older build reads it only here (security review H5).
-        command.arg(token);
+    if token_in_env {
+        command.env(IMPORT_TOKEN_ENV, token);
+    } else {
+        // An older build reads it only here and never removes the variable,
+        // so it must not get one: its panes and later handoffs would carry it
+        // (security review H5).
+        command.env_remove(IMPORT_TOKEN_ENV).arg(token);
     }
     if crate::session::explicit_session_requested() {
         // The import child no longer has the original `--session` argument, so
@@ -1019,6 +1024,27 @@ mod tests {
         assert!(peer.identity.is_some());
     }
 
+    /// A rollback to an older build leaves it holding a token variable for
+    /// life; its next handoff passes a fresh token as the argument.
+    #[test]
+    fn a_fresh_argument_token_wins_over_a_stale_environment_one() {
+        let args: Vec<String> = [
+            "herdr",
+            "server",
+            "--handoff-import",
+            "/tmp/h.sock",
+            "fresh",
+        ]
+        .map(String::from)
+        .into();
+        std::env::set_var(IMPORT_TOKEN_ENV, "stale");
+        assert_eq!(take_import_token(&args).as_deref(), Some("fresh"));
+        assert!(
+            std::env::var_os(IMPORT_TOKEN_ENV).is_none(),
+            "taken out of the environment"
+        );
+    }
+
     /// Security review H5: the token is in the replacement's environment,
     /// never its arguments, and the replacement takes it out again.
     #[test]
@@ -1033,6 +1059,12 @@ mod tests {
             older.get_args().last(),
             Some("secret".as_ref()),
             "a build that reads only the argument still gets it"
+        );
+        assert!(
+            older
+                .get_envs()
+                .all(|(key, value)| key != IMPORT_TOKEN_ENV || value.is_none()),
+            "an older target never gets the variable it would keep for life"
         );
         let command = handoff_import_command(
             Path::new("/bin/herdr"),
