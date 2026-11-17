@@ -288,6 +288,7 @@ mod tests {
         assert!(!state.suspend_pane(PaneId::from_raw(u32::MAX), Instant::now()));
     }
 
+    #[cfg(unix)]
     fn app_with_one_pane(agent: bool) -> (App, PaneId, crate::terminal::TerminalId) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -331,6 +332,7 @@ mod tests {
         (app, pane_id, terminal_id)
     }
 
+    #[cfg(unix)]
     fn wait_for_screen(app: &App, terminal_id: &crate::terminal::TerminalId, needle: &str) {
         let runtime = app.terminal_runtimes.get(terminal_id).expect("a runtime");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -345,6 +347,7 @@ mod tests {
         panic!("the pane never showed {needle:?}: {screen}");
     }
 
+    #[cfg(unix)]
     fn shutdown_runtimes(app: &mut App) {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
