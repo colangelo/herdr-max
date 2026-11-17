@@ -24,9 +24,16 @@ pane; a Dock stop can end at most that pane; panes end at logout and come back b
   client attach once a GUI session exists again, respawns it and resumes its agent.
 - The live handoff replacement starts through launchd too (handoff-own-coalition, already implemented on the branch).
 - Fallbacks: over SSH or with no GUI domain, panes start through the pane anchor or directly, as today.
+- The job backend is off by default behind `[experimental] pane_jobs = true`. It is tried in a throwaway session
+  first, then turned on by ac's opt-in.
+- Panes that exist when the backend turns on stay on the pane anchor until they are respawned. There is no
+  migration. The isolation (V1-V3) holds for panes started after it is on.
 
 ## Not in scope
 
-- herdr-core terminals (Herdr Core.app spawns them): same model requested from herdr-core upstream,
+- This change fixes PTY panes only. herdr-core terminals are started by Herdr Core.app, not by this server. On
+  m4m most of ac's panes are core terminals now (37 on 2026-11-17), and each of them stays one Dock stop away
+  from ending with the rest until herdr-core does the same. Plan: request the same per-terminal launchd-job
+  model from herdr-core upstream; owner herdr-core (the herdr-core agent),
   https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/287.
 - Linux and Windows: unchanged.

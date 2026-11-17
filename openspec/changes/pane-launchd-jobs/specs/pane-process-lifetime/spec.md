@@ -19,3 +19,15 @@ resume plan and SHALL be respawned and resumed on the next herdr start or client
 #### Scenario: Logout and login
 - **WHEN** ac logs out and back in and starts herdr
 - **THEN** every pane that ran an agent is back in its place, resumed from its saved plan
+
+### Requirement: Job panes are opt-in and own their privacy answers
+The job backend SHALL start panes only when `[experimental] pane_jobs = true`, and the program a keeper starts SHALL
+be its own responsible process.
+
+#### Scenario: Setting unset
+- **WHEN** `[experimental] pane_jobs` is not set
+- **THEN** new panes start through the pane anchor or directly, as before
+
+#### Scenario: Privacy prompt from a job pane
+- **WHEN** a program in a job pane triggers a privacy (TCC) check
+- **THEN** macOS attributes it to that program, not to the keeper or the server
