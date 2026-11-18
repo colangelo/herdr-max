@@ -104,6 +104,9 @@ if [ -n "$DRY_RUN" ]; then
   exit 0
 fi
 
+# The commit the beta pointed at before this one, for the ask-to-live telemetry below.
+PREV_SHA=$(git ls-remote "https://github.com/${REPO}.git" refs/tags/beta 2>/dev/null | cut -f1)
+
 step "4/6 publish the beta prerelease"
 BETA_NOTES="Rolling \`-ac-beta\` build (\`${VERSION}\`) from \`${REF}\`, built on $(hostname -s) (Apple silicon only)."$'\n\n'"Install: \`brew install colangelo/tap/herdr-beta\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-beta\`"
 GH_TOKEN=$(gh auth token) GITHUB_REPOSITORY=$REPO GITHUB_RUN_ID="local-$(date +%s)" \
@@ -127,5 +130,13 @@ else
 fi
 
 step "6/6 published ${VERSION}"
+# Ask-to-live telemetry (ac/team-of-agents#16): the commits in this beta count as live
+# once it is published; both Macs install it right after. Optional and never fatal.
+TELEMETRY="$HOME/_sync/dev/monitoring/tools/turn-telemetry"
+if [ -n "$PREV_SHA" ] && [ "$PREV_SHA" != "$SHA" ] && [ -d "$TELEMETRY" ]; then
+  uv run --no-project --directory "$TELEMETRY" python -B -m turn_telemetry proof-from-range \
+    --repo AC-forks/herdr-max --from "$PREV_SHA" --to "$SHA" --stage live --path "$SRC" \
+    || echo "telemetry: proof-from-range failed (the beta is published)" >&2
+fi
 echo "install: brew update && just brew-upgrade herdr-beta (m4m and mbm5 together)"
 echo "Linux binaries for herdr machines: just beta-linux"
