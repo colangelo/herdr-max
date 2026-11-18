@@ -68,12 +68,18 @@ jobs:
           - os: ubuntu-latest
             kind: unix
             nextest_filter: all()
+          # macOS is advisory: GitHub often never hands the job a hosted
+          # arm64 runner and drops it after ~15 min in the queue. The macOS
+          # gate is the local `just check` before every push, and betas build
+          # on m4m. https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/285
           - os: macos-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
+            advisory: true
           - os: windows-latest
             kind: windows
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.advisory == true }}
     timeout-minutes: 30
     steps:
       - name: Checkout
