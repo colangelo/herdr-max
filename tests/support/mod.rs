@@ -92,7 +92,33 @@ pub const TEST_PARENT_PID_ENV: &str = "HERDR_TEST_PARENT_PID";
 pub fn test_tmp_dir(name: &str) -> PathBuf {
     let root = Path::new("/tmp/ht");
     let _ = fs::create_dir_all(root);
+    sweep_stale_test_dirs(root);
     root.join(name)
+}
+
+/// Removes test folders under `root` untouched for six hours, once per test
+/// process. A test that panics or is killed never cleans up, and a live-handoff
+/// folder holds a ~94 MB clone of the build for the pane anchor: 546 of them
+/// filled 4 GB by 2026-11-19. No test runs that long, so nothing live is hit.
+fn sweep_stale_test_dirs(root: &Path) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        let stale = std::time::Duration::from_secs(6 * 60 * 60);
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > stale);
+            if old {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    });
 }
 
 /// The macOS pane anchor switch, which the spawn helpers below set to `off`; a
