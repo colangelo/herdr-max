@@ -76,7 +76,11 @@ jobs:
             kind: unix
             nextest_filter: not binary(live_handoff)
             advisory: true
-          - os: windows-latest
+          # Pinned to windows-2022 like the ConPTY package job: windows-latest
+          # moved to VS 18 / MSVC 14.52 on 2026-11-19, whose STL headers zig's
+          # clang rejects when it builds vendored libghostty-vt.
+          # https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/292
+          - os: windows-2022
             kind: windows
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.advisory == true }}
