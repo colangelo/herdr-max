@@ -224,6 +224,24 @@ fn a_restart_stop_tells_clients_to_follow_and_a_plain_stop_does_not() {
     }
 }
 
+// Security review M3 (Sol H8): while the resume worker may be starting a
+// pane's program, a live handoff is refused before anything is paused.
+#[cfg(unix)]
+#[test]
+fn a_live_handoff_waits_for_resumes_in_flight() {
+    let mut server = test_headless_server();
+    server
+        .app
+        .resume_queue
+        .reserve_for_test(crate::layout::PaneId::alloc());
+    let err = server
+        .perform_live_handoff(Default::default())
+        .expect_err("refused while a resume is in flight");
+    assert!(err.to_string().contains("starting their programs"), "{err}");
+    assert!(!server.handoff_in_progress);
+    shutdown_test_runtimes(&mut server);
+}
+
 #[test]
 fn completed_handoff_disables_only_old_server_session_persistence() {
     let mut server = test_headless_server();

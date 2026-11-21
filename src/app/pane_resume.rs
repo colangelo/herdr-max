@@ -9,7 +9,7 @@
 //! Cardinality: per loss burst times suspended panes, never per render or
 //! per byte. The loop's work per pane is one spec build and one install.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -132,7 +132,10 @@ pub(crate) struct ResumeQueue {
     queued: VecDeque<ResumeJob>,
     /// Every queued or in-flight pane's finish, by pane.
     finishes: HashMap<PaneId, (TerminalId, ResumeFinish)>,
-    in_flight: usize,
+    /// Panes whose program the worker is starting: each is reserved from
+    /// launch to install, so nothing else starts one for it meanwhile
+    /// (security review M3, Sol H8).
+    in_flight: HashSet<PaneId>,
     /// Some pane of this round must be looked at again later.
     retry: bool,
     /// The most panes one batch sent at once, for tests.
@@ -142,7 +145,25 @@ pub(crate) struct ResumeQueue {
 
 impl ResumeQueue {
     pub(crate) fn busy(&self) -> bool {
-        self.in_flight > 0 || !self.queued.is_empty()
+        !self.in_flight.is_empty() || !self.queued.is_empty()
+    }
+
+    /// Whether the worker may be starting `pane_id`'s program now.
+    pub(crate) fn launching(&self, pane_id: PaneId) -> bool {
+        self.in_flight.contains(&pane_id)
+    }
+
+    /// Marks `pane_id` as being started, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn reserve_for_test(&mut self, pane_id: PaneId) {
+        self.in_flight.insert(pane_id);
+    }
+
+    /// How many panes the worker may be starting now.
+    // Only the Unix live handoff asks.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn launches(&self) -> usize {
+        self.in_flight.len()
     }
 
     pub(super) fn ask_retry(&mut self) {
@@ -333,7 +354,7 @@ impl App {
 
     /// Sends the next batch to the resume worker when none is in flight.
     pub(super) fn dispatch_resume_batch(&mut self) {
-        if self.resume_queue.in_flight > 0 {
+        if !self.resume_queue.in_flight.is_empty() {
             return;
         }
         let mut batch = Vec::new();
@@ -358,7 +379,7 @@ impl App {
             .iter()
             .map(|job| (job.pane_id, job.terminal_id.clone()))
             .collect();
-        self.resume_queue.in_flight = batch.len();
+        self.resume_queue.in_flight = panes.iter().map(|(pane_id, _)| *pane_id).collect();
         let events = self.event_tx.clone();
         let worker = tokio::runtime::Handle::try_current()
             .map_err(std::io::Error::other)
@@ -369,7 +390,7 @@ impl App {
             });
         if let Err(err) = worker {
             warn!(err = %err, "could not start the resume worker; suspended panes retry later");
-            self.resume_queue.in_flight = 0;
+            self.resume_queue.in_flight.clear();
             for (pane_id, terminal_id) in panes {
                 self.resume_not_ready(pane_id, &terminal_id);
             }
@@ -396,7 +417,7 @@ impl App {
         outcome: ResumeOutcome,
         now: Instant,
     ) {
-        self.resume_queue.in_flight = self.resume_queue.in_flight.saturating_sub(1);
+        self.resume_queue.in_flight.remove(&pane_id);
         let current = self.awaits_resume(pane_id, &terminal_id);
         let finish = self
             .resume_queue
@@ -811,6 +832,50 @@ mod tests {
         {
             assert!(Instant::now() < deadline, "{:?}", core.methods());
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // Security review M3 (Sol H8): from the worker's launch to the install,
+    // a respawn of the pane starts nothing, so the pane runs one program;
+    // once the resume lands, a respawn works again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resuming_pane_is_reserved_from_launch_to_install() {
+        let core = crate::pane::FakeCore::start_with(|config| {
+            config.run_delay = Duration::from_millis(400);
+        });
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, panes) = app_with_suspended_panes(1, true);
+        app.request_suspended_pane_resume(Instant::now());
+        assert!(app.resume_suspended_panes_if_due(Instant::now()));
+        assert!(app.resume_queue.launching(panes[0]));
+        let runs = |core: &crate::pane::FakeCore| {
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.run")
+                .count()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runs(&core) == 0 {
+            assert!(Instant::now() < deadline, "the worker never launched");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!app.respawn_pane_runtime(panes[0], RespawnTarget::LaunchArgv));
+        assert_eq!(app.respawn_pane_agent(panes[0]), None);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "the resume never landed");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(app.state.suspended_panes().is_empty(), "resumed");
+        assert!(
+            on_core(&app, panes[0]),
+            "the worker's program is the pane's"
+        );
+        assert_eq!(runs(&core), 1, "one program: {:?}", core.methods());
+        assert!(app.respawn_pane_runtime(panes[0], RespawnTarget::LaunchArgv));
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
         }
     }
 

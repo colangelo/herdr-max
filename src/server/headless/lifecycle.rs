@@ -31,6 +31,16 @@ impl HeadlessServer {
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
         info!("starting live handoff");
+        // A program the resume worker is starting would land after the
+        // snapshot, beside the next server's own start (security review M3,
+        // Sol H8).
+        let launches = self.app.resume_queue.launches();
+        if launches > 0 {
+            self.handoff_in_progress = false;
+            return Err(io::Error::other(format!(
+                "{launches} pane(s) are starting their programs again; try the handoff once they land"
+            )));
+        }
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         // A target from before batched descriptors takes them in one message.
         // Refuse a session too big for that now, before anything is paused.

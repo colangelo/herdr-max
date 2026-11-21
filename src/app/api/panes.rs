@@ -2327,6 +2327,16 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if self.pane_resume_launching(pane_id) {
+            return encode_error(
+                id,
+                "pane_resuming",
+                format!(
+                    "pane {} is starting its program again; respawn it once that lands",
+                    params.pane_id
+                ),
+            );
+        }
         if resume_agent && self.pane_agent_resume_plan(pane_id).is_none() {
             return encode_error(
                 id,

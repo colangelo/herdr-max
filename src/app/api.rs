@@ -684,6 +684,9 @@ impl App {
         target: RespawnTarget,
         focus_pane: bool,
     ) -> bool {
+        if self.pane_resume_launching(pane_id) {
+            return false;
+        }
         let Some((ws_idx, prepared)) = self.prepare_respawn(pane_id, target) else {
             return false;
         };
@@ -704,6 +707,20 @@ impl App {
             self.state.focus_pane_in_workspace(ws_idx, pane_id);
         }
         true
+    }
+
+    /// Whether the resume worker may be starting `pane_id`'s program: a
+    /// respawn then waits, so the pane never runs two (security review M3,
+    /// Sol H8).
+    pub(crate) fn pane_resume_launching(&self, pane_id: crate::layout::PaneId) -> bool {
+        let launching = self.resume_queue.launching(pane_id);
+        if launching {
+            tracing::warn!(
+                pane = pane_id.raw(),
+                "pane not respawned: its program is starting again off the server loop"
+            );
+        }
+        launching
     }
 
     /// What a respawn of `pane_id` starts, without starting it: the spawn,
@@ -841,6 +858,9 @@ impl App {
     /// no agent session herdr can resume
     /// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
     pub(crate) fn respawn_pane_agent(&mut self, pane_id: crate::layout::PaneId) -> Option<String> {
+        if self.pane_resume_launching(pane_id) {
+            return None;
+        }
         let plan = self.pane_agent_resume_plan(pane_id)?;
         let (ws_idx, pane_state) = self.find_pane(pane_id)?;
         let terminal_id = pane_state.attached_terminal_id.clone();
