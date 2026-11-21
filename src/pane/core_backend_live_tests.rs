@@ -68,6 +68,36 @@ impl ScratchCore {
 }
 
 impl ScratchCore {
+    /// The terminal's `status` as core keeps it (`Null` when it has none).
+    fn status(&self, address: &str) -> serde_json::Value {
+        let out = std::process::Command::new("hc")
+            .args(["get", address, "--json"])
+            .env("HC_SESSION", &self.session)
+            .env("XDG_STATE_HOME", &self.state)
+            .output()
+            .expect("hc get");
+        let record: serde_json::Value = serde_json::from_slice(&out.stdout).expect("get json");
+        record["status"].clone()
+    }
+
+    async fn wait_for_status(
+        &self,
+        address: &str,
+        done: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let status = self.status(address);
+                if done(&status) {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("core status: last {}", self.status(address)))
+    }
+
     fn restart(&self) {
         let status = std::process::Command::new("hc")
             .args(["server", "restart"])
@@ -436,6 +466,75 @@ async fn core_v8_printed_status_is_not_an_agent_report() {
                 AppEvent::HookStateReported { .. } | AppEvent::AgentHintReported { .. }
             ),
             "printed bytes became an agent report"
+        );
+    }
+}
+
+// core-status-mirror verifier 12-13: the status herdr mirrors reaches core's
+// record through the program's terminal and `clear` removes it, while the
+// echo in the pane's stream changes nothing herdr shows or reports.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_status_mirror_reaches_cores_record_and_clears() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-mirror");
+    let (runtime, mut events) = spawn_sh(
+        &scratch.0,
+        "printf 'MIRROR-READY\\n'; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    assert!(wait_for_text(&runtime, "MIRROR-READY").await);
+    let address = runtime
+        .core_terminal()
+        .expect("a core pane has a link")
+        .address;
+    assert!(
+        core.status(&address).is_null(),
+        "no status before the mirror"
+    );
+    let screen = runtime.visible_text();
+
+    runtime.mirror_core_status(CoreStatusRecord::Report {
+        word: CoreStatusWord::Working,
+        app: CoreStatusApp::parse("claude"),
+    });
+    let status = core
+        .wait_for_status(&address, |status| status["state"] == "working")
+        .await;
+    assert_eq!(status["app"], "claude", "{status}");
+
+    runtime.mirror_core_status(CoreStatusRecord::Report {
+        word: CoreStatusWord::Blocked,
+        app: CoreStatusApp::parse("claude"),
+    });
+    let status = core
+        .wait_for_status(&address, |status| status["state"] == "blocked")
+        .await;
+    assert_eq!(status["kind"], "permission", "{status}");
+
+    runtime.mirror_core_status(CoreStatusRecord::Clear);
+    core.wait_for_status(&address, serde_json::Value::is_null)
+        .await;
+
+    // Give the echo, and any event it could raise, time to arrive.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = runtime.visible_text();
+    runtime.shutdown();
+    assert_eq!(after, screen, "the echoed records change no screen text");
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::HookStateReported { .. } | AppEvent::AgentHintReported { .. }
+            ),
+            "a mirrored record became an agent report"
         );
     }
 }

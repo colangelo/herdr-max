@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Server-level herdr-core checks (openspec/changes/core-backend): a throwaway
 # herdr with one PTY pane and one herdr-core pane. V15: the core it starts is
-# not tied to it; V11: a hook in the core pane reports through our API; V10:
-# a live handoff, then `herdr server restart`, then `herdr server stop`.
+# not tied to it; V11: a hook in the core pane reports through our API, and
+# with `core_status_mirror` on, the status reaches core's record
+# (openspec/changes/core-status-mirror); V10: a live handoff, then `herdr
+# server restart`, then `herdr server stop`.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -117,7 +119,8 @@ core_terminals() {
 }
 
 set_runtime() {
-  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\n' "$1" > "$CONFIG_HOME/herdr-dev/config.toml"
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\n' "$1" \
+    > "$CONFIG_HOME/herdr-dev/config.toml"
 }
 
 echo "herdr: $HERDR_BIN"
@@ -172,12 +175,21 @@ echo "ok: core $CORE runs outside our server's session, without pane or agent va
 pane_get() {
   api "{\"id\":\"v10\",\"method\":\"pane.get\",\"params\":{\"pane_id\":\"$1\"}}"
 }
-send_line "$B" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state working > $BASE/report.out 2>&1; echo \$? > $BASE/report.rc"
+# The sleep keeps B's shell out of the foreground: core clears a status when
+# the root shell comes back (herdr-core `foreground.rs`).
+send_line "$B" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state working > $BASE/report.out 2>&1; echo \$? > $BASE/report.rc; sleep 3"
 wait_until "the hook report from inside B" file_has_line "$BASE/report.rc"
 [[ "$(cat "$BASE/report.rc")" == 0 ]] || fail "report-agent failed in B: $(cat "$BASE/report.out")"
 B_AGENT="$(pane_get "$B" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); p=r.get("pane", r); print(p.get("agent"), p.get("agent_status"))')"
 [[ "$B_AGENT" == "pi working" ]] || fail "B's hook report did not land on B: $B_AGENT ($(pane_get "$B"))"
 echo "ok: a hook in core pane B reported to B through our API"
+core_status() {
+  hc_scratch get "$ADDR" --json \
+    | python3 -I -c 'import json,sys; s=json.load(sys.stdin).get("status") or {}; print(s.get("state","-"), s.get("app","-"))'
+}
+mirrored() { [[ "$(core_status)" == "working pi" ]]; }
+wait_until "B's status mirrored into core" mirrored
+echo "ok: core_status_mirror put B's status in core: $(core_status)"
 
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
