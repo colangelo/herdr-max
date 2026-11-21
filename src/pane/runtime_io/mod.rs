@@ -57,15 +57,16 @@ pub(crate) fn unclaimed_core_terminals(claimed: &[String]) -> Vec<(String, Optio
     }
 }
 
-/// Hands the `herdr-app` document (`Null` clears it) to the background writer
-/// (openspec/changes/core-spaces-doc, D5). Without a core backend, nothing.
-/// Test builds reach it only from the Unix live tests (D7).
+/// Hands herdr-max's spaces for the `herdr-app` document (an empty list
+/// removes them) to the background writer (openspec/changes/core-spaces-doc,
+/// D5). Without a core backend, nothing. Test builds reach it only from the
+/// Unix live tests (D7).
 #[cfg(any(unix, not(test)))]
-pub(crate) fn publish_core_spaces(value: serde_json::Value) {
+pub(crate) fn publish_core_spaces(spaces: Vec<serde_json::Value>) {
     #[cfg(unix)]
-    core_backend::spaces_doc::publish(value);
+    core_backend::spaces_doc::publish(spaces);
     #[cfg(not(unix))]
-    let _ = value;
+    let _ = spaces;
 }
 
 /// A raw call on the server's core connection, for live tests of documents.

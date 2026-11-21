@@ -213,8 +213,8 @@ pub struct App {
     core_spaces_doc: bool,
     /// When the `herdr-app` document is built next (core-spaces-doc D4).
     core_spaces_deadline: Option<Instant>,
-    /// Where the document goes: the core writer, a recorder in tests (D7).
-    core_spaces_publish: fn(serde_json::Value),
+    /// Where herdr-max's spaces go: the core writer, a recorder in tests (D7).
+    core_spaces_publish: fn(Vec<serde_json::Value>),
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.

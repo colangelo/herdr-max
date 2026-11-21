@@ -1,18 +1,22 @@
-//! Writes herdr's layout into herdr-core as the `herdr-app` document the
+//! Writes herdr's layout into herdr-core's `herdr-app` document, the one the
 //! Herdr apps read their spaces from (openspec/changes/core-spaces-doc, D5).
+//! Other clients write the same document, so herdr-max owns only the spaces it
+//! marks with `"herdr_max": 1` and merges them into what core holds (D6).
 //! One thread, one write in flight, latest value wins, compare-and-set on the
-//! document's version. herdr never reads the value back (D6).
+//! document's version.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::client::CoreError;
 
 const DOC_NAME: &str = "herdr-app";
+/// The space field that marks a space as herdr-max's own.
+const MARK: &str = "herdr_max";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an unwritten document waits before the next try.
 const RETRY: Duration = Duration::from_secs(10);
@@ -21,72 +25,138 @@ const CONFLICT_RETRIES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StoreError {
-    /// Someone wrote the document after the version we hold.
+    /// Someone wrote the document after the version we read.
     Conflict,
     Unavailable(String),
 }
 
+/// The document as core holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Doc {
+    value: Value,
+    version: u64,
+}
+
 /// The document in core, as the publisher needs it.
 pub(super) trait DocStore {
-    /// The document's current version.
-    fn get(&mut self) -> Result<u64, StoreError>;
+    fn get(&mut self) -> Result<Doc, StoreError>;
     /// Writes `value` if the document is still at `version`; the new version.
     fn set(&mut self, value: &Value, version: u64) -> Result<u64, StoreError>;
+}
+
+/// A document herdr cannot read as the apps' `{"spaces": [{…}]}`, which it
+/// leaves alone rather than replace someone else's data.
+#[derive(Debug, PartialEq)]
+struct Undecodable;
+
+fn is_ours(space: &Value) -> bool {
+    space.get(MARK).is_some()
+}
+
+/// `current` with its marked spaces replaced by `ours`, or `None` when that
+/// changes nothing. Foreign spaces and other top-level fields stay as they
+/// are. Ours go where the first marked space was, else after the rest. A
+/// document left with no spaces and no other field becomes `null`.
+fn merge(current: &Value, ours: &[Value]) -> Result<Option<Value>, Undecodable> {
+    let empty = Map::new();
+    let fields = match current {
+        Value::Null => &empty,
+        Value::Object(fields) => fields,
+        _ => return Err(Undecodable),
+    };
+    let spaces = match fields.get("spaces") {
+        None => &[][..],
+        Some(Value::Array(spaces)) if spaces.iter().all(Value::is_object) => spaces.as_slice(),
+        Some(_) => return Err(Undecodable),
+    };
+    let at = spaces.iter().position(is_ours).unwrap_or(spaces.len());
+    let before = spaces[..at].iter();
+    let after = spaces[at..].iter().filter(|space| !is_ours(space));
+    let merged: Vec<Value> = before
+        .cloned()
+        .chain(ours.iter().cloned())
+        .chain(after.cloned())
+        .collect();
+    if merged.as_slice() == spaces {
+        return Ok(None);
+    }
+    if merged.is_empty() && fields.keys().all(|key| key == "spaces") {
+        return Ok(Some(Value::Null));
+    }
+    let mut fields = fields.clone();
+    fields.insert("spaces".into(), Value::Array(merged));
+    Ok(Some(Value::Object(fields)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Flush {
     /// Nothing is left to write.
     Idle,
-    /// A value is still pending; try again later.
+    /// Our spaces are still pending; try again later.
     Retry,
 }
 
 pub(super) struct DocPublisher<S> {
     store: S,
-    version: Option<u64>,
-    written: Option<Value>,
-    pending: Option<Value>,
+    written: Option<Vec<Value>>,
+    pending: Option<Vec<Value>>,
 }
 
 impl<S: DocStore> DocPublisher<S> {
     pub(super) fn new(store: S) -> Self {
         Self {
             store,
-            version: None,
             written: None,
             pending: None,
         }
     }
 
-    pub(super) fn offer(&mut self, value: Value) {
-        self.pending = (self.written.as_ref() != Some(&value)).then_some(value);
+    /// herdr-max's spaces, marked here; an empty list removes ours.
+    pub(super) fn offer(&mut self, mut spaces: Vec<Value>) {
+        for space in &mut spaces {
+            if let Value::Object(fields) = space {
+                fields.insert(MARK.into(), json!(1));
+            }
+        }
+        self.pending = (self.written.as_ref() != Some(&spaces)).then_some(spaces);
     }
 
     pub(super) fn flush(&mut self) -> Flush {
-        let Some(value) = self.pending.take() else {
+        let Some(ours) = self.pending.take() else {
             return Flush::Idle;
         };
         for _ in 0..CONFLICT_RETRIES {
-            let version = match self.version {
-                Some(version) => Ok(version),
-                None => self.store.get(),
+            let doc = match self.store.get() {
+                Ok(doc) => doc,
+                Err(err) => {
+                    note_unavailable(&format!("{err:?}"));
+                    break;
+                }
             };
-            match version.and_then(|version| self.store.set(&value, version)) {
-                Ok(version) => {
-                    self.version = Some(version);
-                    self.written = Some(value);
+            let merged = match merge(&doc.value, &ours) {
+                Ok(Some(merged)) => merged,
+                Ok(None) => {
+                    self.written = Some(ours);
                     return Flush::Idle;
                 }
-                Err(StoreError::Conflict) => self.version = None,
+                Err(Undecodable) => {
+                    note_undecodable(&doc.value);
+                    break;
+                }
+            };
+            match self.store.set(&merged, doc.version) {
+                Ok(_) => {
+                    self.written = Some(ours);
+                    return Flush::Idle;
+                }
+                Err(StoreError::Conflict) => {}
                 Err(StoreError::Unavailable(reason)) => {
                     note_unavailable(&reason);
-                    self.version = None;
                     break;
                 }
             }
         }
-        self.pending = Some(value);
+        self.pending = Some(ours);
         Flush::Retry
     }
 
@@ -96,16 +166,33 @@ impl<S: DocStore> DocPublisher<S> {
     }
 }
 
-static WARNED: AtomicBool = AtomicBool::new(false);
+static WARNED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+static WARNED_UNDECODABLE: AtomicBool = AtomicBool::new(false);
 
 fn note_unavailable(reason: &str) {
-    if !WARNED.swap(true, Ordering::AcqRel) {
+    if !WARNED_UNAVAILABLE.swap(true, Ordering::AcqRel) {
         tracing::warn!(
             reason,
             "cannot write the herdr-app document to herdr-core yet"
         );
     } else {
         tracing::debug!(reason, "herdr-app document not written");
+    }
+}
+
+fn note_undecodable(value: &Value) {
+    let kind = match value {
+        Value::Object(_) => "an object whose spaces is not a list of objects",
+        Value::Array(_) => "an array",
+        _ => "a scalar",
+    };
+    if !WARNED_UNDECODABLE.swap(true, Ordering::AcqRel) {
+        tracing::warn!(
+            kind,
+            "herdr-core's herdr-app document is not a spaces document; left as is, retrying later"
+        );
+    } else {
+        tracing::debug!(kind, "herdr-app document still undecodable");
     }
 }
 
@@ -120,14 +207,18 @@ fn store_error(err: CoreError) -> StoreError {
 }
 
 impl DocStore for CoreDocStore {
-    fn get(&mut self) -> Result<u64, StoreError> {
+    fn get(&mut self) -> Result<Doc, StoreError> {
         let client = super::existing_core_connector()().map_err(store_error)?;
         let reply = client
             .call("doc.get", json!({"name": DOC_NAME}), CALL_TIMEOUT)
             .map_err(store_error)?;
-        reply["version"]
+        let version = reply["version"]
             .as_u64()
-            .ok_or_else(|| StoreError::Unavailable(format!("doc.get gave no version: {reply}")))
+            .ok_or_else(|| StoreError::Unavailable(format!("doc.get gave no version: {reply}")))?;
+        Ok(Doc {
+            value: reply["value"].clone(),
+            version,
+        })
     }
 
     fn set(&mut self, value: &Value, version: u64) -> Result<u64, StoreError> {
@@ -145,7 +236,7 @@ impl DocStore for CoreDocStore {
     }
 }
 
-fn run(store: impl DocStore, offers: mpsc::Receiver<Value>) {
+fn run(store: impl DocStore, offers: mpsc::Receiver<Vec<Value>>) {
     let mut publisher = DocPublisher::new(store);
     let mut state = Flush::Idle;
     loop {
@@ -154,22 +245,22 @@ fn run(store: impl DocStore, offers: mpsc::Receiver<Value>) {
             Flush::Retry => offers.recv_timeout(RETRY),
         };
         match offer {
-            Ok(value) => publisher.offer(value),
+            Ok(spaces) => publisher.offer(spaces),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        while let Ok(value) = offers.try_recv() {
-            publisher.offer(value);
+        while let Ok(spaces) = offers.try_recv() {
+            publisher.offer(spaces);
         }
         state = publisher.flush();
     }
 }
 
-static OFFERS: OnceLock<Mutex<Option<mpsc::Sender<Value>>>> = OnceLock::new();
+static OFFERS: OnceLock<Mutex<Option<mpsc::Sender<Vec<Value>>>>> = OnceLock::new();
 
-/// Hands the publisher thread the latest document (`Null` clears it),
+/// Hands the publisher thread herdr-max's latest spaces (empty removes them),
 /// starting the thread on first use. Never blocks on core.
-pub(crate) fn publish(value: Value) {
+pub(crate) fn publish(spaces: Vec<Value>) {
     let slot = OFFERS.get_or_init(|| Mutex::new(None));
     let mut sender = super::lock(slot);
     if sender.is_none() {
@@ -186,7 +277,7 @@ pub(crate) fn publish(value: Value) {
         }
     }
     if let Some(tx) = sender.as_ref() {
-        if tx.send(value).is_err() {
+        if tx.send(spaces).is_err() {
             *sender = None;
         }
     }
@@ -202,144 +293,230 @@ pub(crate) fn call_for_test(method: &str, params: Value) -> Result<Value, CoreEr
 mod tests {
     use super::*;
 
-    /// A store that answers from a script and records its calls.
+    /// A store that keeps one document and records its calls.
     #[derive(Default)]
     struct FakeStore {
-        version: u64,
-        value: Value,
+        doc: Option<Doc>,
+        /// Foreign values that land between our next reads and writes, in order.
+        races: Vec<Value>,
         /// Errors the next calls return, in order, before normal answers.
         fail: Vec<StoreError>,
         calls: Vec<String>,
     }
 
     impl FakeStore {
-        fn scripted_failure(&mut self) -> Option<StoreError> {
-            (!self.fail.is_empty()).then(|| self.fail.remove(0))
+        fn holding(value: Value) -> Self {
+            Self {
+                doc: Some(Doc { value, version: 4 }),
+                ..Self::default()
+            }
+        }
+
+        fn doc(&self) -> Doc {
+            self.doc.clone().unwrap_or(Doc {
+                value: Value::Null,
+                version: 0,
+            })
+        }
+
+        fn sets(&self) -> usize {
+            self.calls
+                .iter()
+                .filter(|call| call.starts_with("set"))
+                .count()
         }
     }
 
     impl DocStore for FakeStore {
-        fn get(&mut self) -> Result<u64, StoreError> {
-            self.calls.push(format!("get -> {}", self.version));
-            Ok(self.version)
+        fn get(&mut self) -> Result<Doc, StoreError> {
+            self.calls.push("get".into());
+            Ok(self.doc())
         }
 
         fn set(&mut self, value: &Value, version: u64) -> Result<u64, StoreError> {
-            self.calls.push(format!("set {value} @{version}"));
-            if let Some(err) = self.scripted_failure() {
-                if err == StoreError::Conflict {
-                    self.version += 1;
-                }
-                return Err(err);
-            }
-            if version != self.version {
+            self.calls.push(format!("set @{version}"));
+            let current = self.doc();
+            if !self.races.is_empty() {
+                let foreign = self.races.remove(0);
+                self.doc = Some(Doc {
+                    value: foreign,
+                    version: current.version + 1,
+                });
                 return Err(StoreError::Conflict);
             }
-            self.version += 1;
-            self.value = value.clone();
-            Ok(self.version)
+            if !self.fail.is_empty() {
+                return Err(self.fail.remove(0));
+            }
+            if version != current.version {
+                return Err(StoreError::Conflict);
+            }
+            self.doc = Some(Doc {
+                value: value.clone(),
+                version: version + 1,
+            });
+            Ok(version + 1)
         }
     }
 
-    fn publisher(version: u64) -> DocPublisher<FakeStore> {
-        DocPublisher::new(FakeStore {
-            version,
+    fn space(id: &str) -> Value {
+        json!({"id": id, "name": id, "folder": "/w", "tabs": []})
+    }
+
+    fn marked(id: &str) -> Value {
+        let mut space = space(id);
+        space[MARK] = json!(1);
+        space
+    }
+
+    fn foreign(id: &str) -> Value {
+        json!({"id": id, "name": "phone", "folder": "/p", "color": "teal", "tabs": [{"id": "x"}]})
+    }
+
+    fn ids(value: &Value) -> Vec<String> {
+        value["spaces"]
+            .as_array()
+            .map(|spaces| {
+                spaces
+                    .iter()
+                    .map(|space| {
+                        let mark = if is_ours(space) { "+" } else { "" };
+                        format!("{mark}{}", space["id"].as_str().unwrap_or("?"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn publish_to(store: FakeStore, ours: &[&str]) -> DocPublisher<FakeStore> {
+        let mut p = DocPublisher::new(store);
+        p.offer(ours.iter().copied().map(space).collect());
+        assert_eq!(p.flush(), Flush::Idle);
+        p
+    }
+
+    #[test]
+    fn an_empty_document_gets_our_marked_spaces() {
+        let p = publish_to(FakeStore::default(), &["w1", "w2"]);
+        let doc = p.store().doc();
+        assert_eq!(ids(&doc.value), ["+w1", "+w2"]);
+        assert_eq!(doc.value["spaces"][0], marked("w1"));
+        assert_eq!(p.store().calls, ["get", "set @0"]);
+    }
+
+    #[test]
+    fn foreign_spaces_stay_untouched_and_ours_replace_ours_in_place() {
+        let current =
+            json!({"spaces": [foreign("f1"), marked("old"), foreign("f2"), marked("old2")]});
+        let p = publish_to(FakeStore::holding(current.clone()), &["w1", "w2"]);
+        let value = p.store().doc().value;
+        assert_eq!(ids(&value), ["f1", "+w1", "+w2", "f2"]);
+        assert_eq!(value["spaces"][0], current["spaces"][0], "every field kept");
+        assert_eq!(value["spaces"][3], current["spaces"][2]);
+    }
+
+    #[test]
+    fn with_none_of_ours_yet_ours_go_after_the_foreign_ones() {
+        let current = json!({"spaces": [foreign("f1")], "other": true});
+        let p = publish_to(FakeStore::holding(current), &["w1"]);
+        let value = p.store().doc().value;
+        assert_eq!(ids(&value), ["f1", "+w1"]);
+        assert_eq!(value["other"], true, "top-level fields kept");
+    }
+
+    #[test]
+    fn removing_ours_keeps_the_foreign_ones() {
+        let current = json!({"spaces": [marked("w1"), foreign("f1"), marked("w2")]});
+        let p = publish_to(FakeStore::holding(current.clone()), &[]);
+        let value = p.store().doc().value;
+        assert_eq!(value, json!({"spaces": [current["spaces"][1]]}));
+    }
+
+    #[test]
+    fn removing_ours_from_our_own_document_clears_it() {
+        let p = publish_to(FakeStore::holding(json!({"spaces": [marked("w1")]})), &[]);
+        assert_eq!(p.store().doc().value, Value::Null);
+    }
+
+    #[test]
+    fn a_foreign_only_document_is_left_alone_when_we_have_nothing() {
+        for current in [
+            json!({"spaces": []}),
+            json!({"spaces": [foreign("f1")]}),
+            Value::Null,
+        ] {
+            let p = publish_to(FakeStore::holding(current.clone()), &[]);
+            assert_eq!(p.store().sets(), 0, "{current}");
+            assert_eq!(p.store().doc().value, current);
+        }
+    }
+
+    #[test]
+    fn an_undecodable_document_is_never_overwritten_and_is_retried() {
+        for current in [
+            json!("text"),
+            json!([1]),
+            json!({"spaces": {"id": "f1"}}),
+            json!({"spaces": [foreign("f1"), 7]}),
+        ] {
+            let mut p = DocPublisher::new(FakeStore::holding(current.clone()));
+            p.offer(vec![space("w1")]);
+            assert_eq!(p.flush(), Flush::Retry, "{current}");
+            assert_eq!(p.store().sets(), 0);
+            p.store.doc = Some(Doc {
+                value: json!({"spaces": [foreign("f1")]}),
+                version: 9,
+            });
+            assert_eq!(p.flush(), Flush::Idle, "a later try lands once it decodes");
+            assert_eq!(ids(&p.store().doc().value), ["f1", "+w1"]);
+        }
+    }
+
+    #[test]
+    fn a_conflict_merges_again_into_the_foreign_write() {
+        let mut store = FakeStore::holding(json!({"spaces": [foreign("f1"), marked("w1")]}));
+        store.races = vec![json!({"spaces": [marked("w1"), foreign("f1"), foreign("f2")]})];
+        let p = publish_to(store, &["w1", "w2"]);
+        assert_eq!(p.store().calls, ["get", "set @4", "get", "set @5"]);
+        assert_eq!(ids(&p.store().doc().value), ["+w1", "+w2", "f1", "f2"]);
+    }
+
+    #[test]
+    fn conflicts_in_a_row_keep_our_spaces_for_later() {
+        let mut p = DocPublisher::new(FakeStore {
+            races: vec![json!({"spaces": [foreign("f1")]}); CONFLICT_RETRIES],
             ..FakeStore::default()
-        })
-    }
-
-    #[test]
-    fn writes_with_the_known_version_and_skips_what_it_wrote() {
-        let mut p = publisher(4);
-        p.offer(json!({"spaces": []}));
-        assert_eq!(p.flush(), Flush::Idle);
-        p.offer(json!({"spaces": []}));
-        assert_eq!(
-            p.flush(),
-            Flush::Idle,
-            "an equal document is not written again"
-        );
-        p.offer(json!({"spaces": [{"id": "w1"}]}));
-        assert_eq!(p.flush(), Flush::Idle);
-        assert_eq!(
-            p.store().calls,
-            [
-                "get -> 4",
-                r#"set {"spaces":[]} @4"#,
-                r#"set {"spaces":[{"id":"w1"}]} @5"#,
-            ]
-        );
-        assert_eq!(p.store().value, json!({"spaces": [{"id": "w1"}]}));
-    }
-
-    #[test]
-    fn a_conflict_rereads_the_version_and_overwrites() {
-        let mut p = publisher(1);
-        p.offer(json!(1));
-        p.flush();
-        p.store.version = 7;
-        p.offer(json!(2));
-        assert_eq!(p.flush(), Flush::Idle);
-        assert_eq!(
-            p.store().calls[2..],
-            ["set 2 @2", "get -> 7", "set 2 @7"],
-            "the foreign write at 7 is overwritten"
-        );
-        assert_eq!(p.store().value, json!(2));
-    }
-
-    #[test]
-    fn conflicts_in_a_row_keep_the_document_for_later() {
-        let mut p = publisher(0);
-        p.store.fail = vec![StoreError::Conflict; CONFLICT_RETRIES];
-        p.offer(json!(1));
+        });
+        p.offer(vec![space("w1")]);
         assert_eq!(p.flush(), Flush::Retry);
         assert_eq!(p.store().calls.len(), 2 * CONFLICT_RETRIES);
         assert_eq!(p.flush(), Flush::Idle, "the next try lands");
-        assert_eq!(p.store().value, json!(1));
+        assert_eq!(ids(&p.store().doc().value), ["f1", "+w1"]);
     }
 
     #[test]
-    fn an_unavailable_core_keeps_the_document_and_forgets_the_version() {
-        let mut p = publisher(2);
-        p.offer(json!(1));
-        p.flush();
-        p.store.fail = vec![StoreError::Unavailable("core restarting".into())];
-        p.offer(json!(2));
+    fn an_unavailable_core_keeps_our_spaces_for_later() {
+        let mut p = DocPublisher::new(FakeStore {
+            fail: vec![StoreError::Unavailable("core restarting".into())],
+            ..FakeStore::default()
+        });
+        p.offer(vec![space("w1")]);
         assert_eq!(p.flush(), Flush::Retry);
         assert_eq!(p.flush(), Flush::Idle);
-        assert_eq!(
-            p.store().calls[2..],
-            ["set 2 @3", "get -> 3", "set 2 @3"],
-            "after the failure the version is read again"
-        );
+        assert_eq!(ids(&p.store().doc().value), ["+w1"]);
         assert_eq!(p.flush(), Flush::Idle, "nothing left");
     }
 
     #[test]
-    fn only_the_latest_offer_is_written() {
-        let mut p = publisher(0);
-        for n in 1..=3 {
-            p.offer(json!(n));
+    fn only_the_latest_offer_is_written_and_a_repeat_is_not() {
+        let mut p = DocPublisher::new(FakeStore::default());
+        for id in ["w1", "w2", "w3"] {
+            p.offer(vec![space(id)]);
         }
         p.flush();
-        assert_eq!(p.store().calls, ["get -> 0", "set 3 @0"]);
-    }
-
-    #[test]
-    fn clearing_writes_null_once() {
-        let mut p = publisher(0);
-        p.offer(json!({"spaces": []}));
-        p.flush();
-        p.offer(Value::Null);
-        p.flush();
-        p.offer(Value::Null);
-        p.flush();
-        assert_eq!(
-            p.store().calls.last().map(String::as_str),
-            Some("set null @1")
-        );
-        assert_eq!(p.store().calls.len(), 3);
+        p.offer(vec![space("w3")]);
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(p.store().calls, ["get", "set @0"]);
+        assert_eq!(ids(&p.store().doc().value), ["+w3"]);
     }
 
     #[test]

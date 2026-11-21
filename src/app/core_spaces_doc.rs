@@ -1,6 +1,7 @@
-//! herdr's workspaces, tabs and splits as the `herdr-app` document the Herdr
-//! apps read their spaces from (openspec/changes/core-spaces-doc). One way:
-//! herdr's layout is the source, and herdr never reads the document back.
+//! herdr's workspaces, tabs and splits as spaces of the `herdr-app` document
+//! the Herdr apps read (openspec/changes/core-spaces-doc). One way: herdr's
+//! layout is the source of its own spaces, which the writer merges into the
+//! document beside other clients' spaces (D6).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -204,7 +205,7 @@ impl<F: Fn(&TerminalId) -> Option<String>> Leaves<'_, F> {
 
 impl App {
     /// `[experimental] core_spaces_doc`, on reload. Turning it on publishes
-    /// at once; turning it off removes the document.
+    /// at once; turning it off removes herdr-max's spaces.
     pub(super) fn set_core_spaces_doc(&mut self, enabled: bool) {
         if self.core_spaces_doc == enabled {
             return;
@@ -214,7 +215,7 @@ impl App {
             self.core_spaces_deadline = Some(Instant::now());
         } else {
             self.core_spaces_deadline = None;
-            (self.core_spaces_publish)(serde_json::Value::Null);
+            (self.core_spaces_publish)(Vec::new());
         }
     }
 
@@ -240,9 +241,10 @@ impl App {
         let document = spaces_document(&self.state.workspaces, &self.state.terminals, |id| {
             runtimes.get(id)?.core_terminal().map(|link| link.address)
         });
-        match serde_json::to_value(document) {
-            Ok(value) => (self.core_spaces_publish)(value),
-            Err(err) => tracing::warn!(err = %err, "cannot encode the herdr-app document"),
+        let spaces: Result<Vec<_>, _> = document.spaces.iter().map(serde_json::to_value).collect();
+        match spaces {
+            Ok(spaces) => (self.core_spaces_publish)(spaces),
+            Err(err) => tracing::warn!(err = %err, "cannot encode the herdr-app spaces"),
         }
     }
 }
@@ -544,15 +546,15 @@ mod tests {
     }
 
     thread_local! {
-        static PUBLISHED: std::cell::RefCell<Vec<serde_json::Value>> =
+        static PUBLISHED: std::cell::RefCell<Vec<Vec<serde_json::Value>>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    fn record(value: serde_json::Value) {
-        PUBLISHED.with(|published| published.borrow_mut().push(value));
+    fn record(spaces: Vec<serde_json::Value>) {
+        PUBLISHED.with(|published| published.borrow_mut().push(spaces));
     }
 
-    fn published() -> Vec<serde_json::Value> {
+    fn published() -> Vec<Vec<serde_json::Value>> {
         PUBLISHED.with(|published| std::mem::take(&mut *published.borrow_mut()))
     }
 
@@ -583,7 +585,7 @@ mod tests {
         app.publish_core_spaces_if_due(Instant::now());
         let first = published();
         assert_eq!(first.len(), 1, "turning it on publishes at once");
-        assert_eq!(first[0]["spaces"][0]["name"], "api");
+        assert_eq!(first[0][0]["name"], "api");
 
         app.state.workspaces[0].custom_name = Some("renamed".into());
         app.state.mark_session_dirty();
@@ -603,10 +605,14 @@ mod tests {
         app.publish_core_spaces_if_due(due);
         let renamed = published();
         assert_eq!(renamed.len(), 1);
-        assert_eq!(renamed[0]["spaces"][0]["name"], "renamed");
+        assert_eq!(renamed[0][0]["name"], "renamed");
 
         app.set_core_spaces_doc(false);
-        assert_eq!(published(), [serde_json::Value::Null], "off clears");
+        assert_eq!(
+            published(),
+            [Vec::<serde_json::Value>::new()],
+            "off withdraws our spaces"
+        );
         app.state.mark_session_dirty();
         app.sync_core_spaces_schedule();
         app.publish_core_spaces_if_due(Instant::now() + Duration::from_secs(1));
