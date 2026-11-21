@@ -30,9 +30,15 @@ Record: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/295. Related
   ended it (`holder_lost`, `host_shutdown`, `server_stop`, `stopped_by_restart`, or gone after a reconnect) keeps
   its place as Suspended and starts again by its saved plan, the way a lost pane keeper does (#288 D3). Agents
   resume with `--resume`.
-- **herdr-max starts its core again after a loss.** When the core's socket stays missing past a restart's
-  window, the server starts the core again with the clean environment of core-backend D2. A crash-loop guard
-  stops after three losses in ten minutes and resumes panes on the PTY with one notice.
+- **No second copy of a running program.** A core that does not answer is never read as "gone": the pane waits in
+  place. The saved link records the program's pid and start time, so a restart or live handoff while the core is
+  down starts nothing, and every resume first checks that the old program ended.
+- **herdr-max starts its core again after a loss.** When the core's socket stays missing or refusing past a
+  restart's window, the server starts the core again with the clean environment of core-backend D2, never a core
+  a person stopped. A crash-loop guard counts loss bursts, stops after three in ten minutes, resumes panes on the
+  PTY with one notice, and says so in `herdr server status`.
+- **Some panes stay on the PTY by server config.** `[experimental] core_pty_panes` (ac's Macs: `["*-hlp"]`) keeps
+  the computer-use host panes on the PTY through restore, resume, respawn and the idle move.
 - **What only upstream can do is separated.** Per-terminal responsibility or a holder per terminal is herdr-core's
   code. It is pursued only as a verified, reproducible bug report that ac submits, per AGENTS.md § External
   contributor guardrail.
@@ -41,8 +47,8 @@ Record: https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/295. Related
   The `herdr.session` label keeps its current value, so ownership no longer depends on which core a terminal is
   in. Panes in the old `herdr` core are re-adopted from there until they end or move.
 - **Core is the runtime of restored and respawned panes**, and a new server verb moves an idle pane onto the
-  primary core (from the PTY or from the old `herdr` core). A driver script moves one canary first, verifies it,
-  then the rest, and never the computer-use host panes.
+  primary core (from the PTY or from the old `herdr` core). The move kills the old program and starts the
+  replacement only after the kill is confirmed. A driver script moves one canary first, verifies it, then the rest.
 - **The CPU gate is a verifier row** with a conditional PR (a reader that hands whole batches to the parsers) if
   the re-measure is over 1.3x.
 - **The default stays per machine.** `[experimental] runtime` keeps its code default `"pty"`. Both Macs set
@@ -66,16 +72,21 @@ opt-in per new pane"), and the core session named `herdr` for the default herdr 
 
 ## Impact
 
-- Code: `src/pane/runtime_io/core_backend/` (exit mapping, session registry, connector start rule),
+- Code: `src/pane/runtime_io/core_backend/` (exit mapping, reattach outcomes, session registry, connector start
+  rule), `src/persist/restore.rs` and `snapshot.rs` (restore outcomes, the link's pid), `src/config/` (the
+  `core_pty_panes` key),
   `src/pane/runtime_io/mod.rs` (`CoreTerminalLink` from the pane), `src/app/pane_suspension.rs` (backend-aware
   resume), `src/app/core_terminals.rs` (orphans per session), `src/pane.rs` (restored panes), `src/app/api.rs`
   and the API schema (a new `pane.respawn_if_idle` method), `scripts/` (the move driver).
-- Persisted state: none new. `core_terminal {session, address}` already carries the session; its value for new
-  panes changes from `herdr` to `default`.
-- Client endpoint: no new wire field. Suspended core panes reuse the optional `suspended` fact.
+- Persisted state: `core_terminal` gains two optional fields, `pid` and `pid_started`, which older builds ignore;
+  its `session` value for new panes changes from `herdr` to `default`.
+- Client endpoint: no change to a frozen codec. Suspended core panes reuse the optional `suspended` fact; the new
+  pane facts `suspend_cause` and `core_unreachable_since` and the `core` field of `herdr server status` are optional
+  JSON, and the new `pane.respawn_if_idle` is an advertised method.
 - Docs: `docs/next` config reference (core loss, the default session, the rollback rule), the herdr skill line
   about quitting Herdr Core.
 - Outside this repo: the chezmoi `~/.zshenv` bridge on both Macs is removed at the end (relayed to the dotfiles
   owner); the old `herdr` core is stopped by ac once it is empty.
-- Rollback: an older build ignores panes in core session `default` and restores them fresh, leaving their
-  programs running unseen. The rollback rule from core-backend D10 extends to both sessions.
+- Rollback: the build that reads sessions `default` and `herdr` (PR B) ships as its own beta on both Macs before
+  the placement move, and is the rollback target. Builds older than that ignore panes in `default` and restore them
+  fresh; the rollback rule from core-backend D10 extends to both sessions for them.
