@@ -49,6 +49,7 @@ pub(crate) struct RuntimeSpawn {
     appearance: Option<crate::terminal_theme::HostAppearance>,
     launch_env: crate::pane::PaneLaunchEnv,
     program: SpawnProgram,
+    runtime: crate::pane::RuntimeChoice,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<tokio::sync::Notify>,
     render_dirty: Arc<crate::render_signal::RenderSignal>,
@@ -69,6 +70,7 @@ impl RuntimeSpawn {
                 self.appearance,
                 crate::pane::PaneShellConfig::new(shell, *mode),
                 &self.launch_env,
+                self.runtime,
                 self.events,
                 self.render_notify,
                 self.render_dirty,
@@ -81,6 +83,7 @@ impl RuntimeSpawn {
                 argv,
                 &self.launch_env,
                 crate::pane::AgentDetection::Enabled,
+                self.runtime,
                 self.scrollback_limit_bytes,
                 self.theme,
                 self.appearance,
@@ -175,6 +178,11 @@ impl App {
         launch_env: crate::pane::PaneLaunchEnv,
         program: SpawnProgram,
     ) -> RuntimeSpawn {
+        let argv = match &program {
+            SpawnProgram::Argv(argv) => Some(argv.as_slice()),
+            SpawnProgram::Shell { .. } => None,
+        };
+        let runtime = self.pane_runtime_choice(pane_id, argv);
         RuntimeSpawn {
             pane_id,
             rows,
@@ -185,9 +193,29 @@ impl App {
             appearance: self.pane_host_terminal_appearance(),
             launch_env,
             program,
+            runtime,
             events: self.event_tx.clone(),
             render_notify: self.render_notify.clone(),
             render_dirty: self.render_dirty.clone(),
+        }
+    }
+
+    /// Which backend a respawn or resume of `pane_id` starts its program
+    /// on, `argv` when it runs one: the PTY when the pane's stable name, or
+    /// else the name `argv` gives its agent, matches `core_pty_panes`
+    /// (core-phase3 D13).
+    pub(super) fn pane_runtime_choice(
+        &self,
+        pane_id: PaneId,
+        argv: Option<&[String]>,
+    ) -> crate::pane::RuntimeChoice {
+        let pane_name = self
+            .state
+            .pane_terminal(pane_id)
+            .and_then(crate::terminal::TerminalState::stable_name);
+        match (pane_name, argv) {
+            (None, Some(argv)) => crate::pane::RuntimeChoice::for_argv(argv),
+            (name, _) => crate::pane::RuntimeChoice::for_pane(name),
         }
     }
 
@@ -485,6 +513,18 @@ mod tests {
     };
 
     fn app_with_suspended_panes(count: usize, on_core: bool) -> (App, Vec<PaneId>) {
+        let (mut app, panes) = app_with_panes(count, on_core);
+        let now = Instant::now();
+        for pane in &panes {
+            let mut suspension = Suspension::new(SuspendCause::HolderLost);
+            suspension.program = Some(GONE);
+            assert!(app.state.suspend_pane(*pane, now, suspension));
+        }
+        (app, panes)
+    }
+
+    /// One workspace per pane, each pane with a terminal and no program.
+    fn app_with_panes(count: usize, on_core: bool) -> (App, Vec<PaneId>) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -508,13 +548,146 @@ mod tests {
             .iter()
             .map(|ws| ws.tabs[0].root_pane)
             .collect();
-        let now = Instant::now();
-        for pane in &panes {
-            let mut suspension = Suspension::new(SuspendCause::HolderLost);
-            suspension.program = Some(GONE);
-            assert!(app.state.suspend_pane(*pane, now, suspension));
-        }
         (app, panes)
+    }
+
+    /// V32's panes: the first named by `herdr agent rename`, the second by
+    /// the `--name` its agent was launched with, the third only by a title
+    /// and a name the agent reported about itself.
+    fn name_the_host_panes(app: &mut App, panes: &[PaneId]) {
+        crate::pane::set_core_pty_panes(vec!["*-hlp".into()]);
+        let terminal = app.state.pane_terminal_mut(panes[0]).expect("terminal");
+        terminal.set_agent_name("manager-lab-hlp".into());
+        let terminal = app.state.pane_terminal_mut(panes[1]).expect("terminal");
+        terminal.restore_agent_launch(crate::agent_resume::AgentLaunchFlags {
+            agent: "claude".into(),
+            flags: vec!["--name".into(), "manager-aruba-hlp".into()],
+            started_at_ms: None,
+            env: Vec::new(),
+        });
+        let terminal = app.state.pane_terminal_mut(panes[2]).expect("terminal");
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+            source: "custom:claude".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: Some("manager-lab-hlp".into()),
+            display_agent: Some("manager-lab-hlp".into()),
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: None,
+        });
+    }
+
+    fn on_core(app: &App, pane: PaneId) -> bool {
+        let terminal_id = app
+            .state
+            .workspaces
+            .iter()
+            .find_map(|ws| ws.terminal_id(pane).cloned())
+            .expect("terminal");
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .expect("a runtime")
+            .core_terminal()
+            .is_some()
+    }
+
+    // V32 (core-phase3 D13): with core on, both computer-use host panes
+    // resume on the PTY; a pane with the name only as a title resumes on core.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn excluded_panes_resume_on_the_pty() {
+        let core = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, panes) = app_with_suspended_panes(3, true);
+        name_the_host_panes(&mut app, &panes);
+        assert_eq!(
+            app.pane_runtime_choice(panes[0], None),
+            crate::pane::RuntimeChoice::Pty(crate::pane::PtyReason::Excluded)
+        );
+        longest_turn_while_resuming(&mut app).await;
+        assert!(app.state.suspended_panes().is_empty(), "all resumed");
+        assert!(!on_core(&app, panes[0]), "manager-lab-hlp resumed on core");
+        assert!(
+            !on_core(&app, panes[1]),
+            "manager-aruba-hlp resumed on core"
+        );
+        assert!(on_core(&app, panes[2]), "a title is not a name");
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    // V32: a respawn honours the list, and a reload that drops the pattern
+    // changes the answer for the next respawn.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn excluded_panes_respawn_on_the_pty_until_the_list_changes() {
+        let core = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, panes) = app_with_panes(3, true);
+        name_the_host_panes(&mut app, &panes);
+        for pane in &panes {
+            assert!(app.respawn_pane_runtime(*pane, RespawnTarget::Shell));
+        }
+        assert!(
+            !on_core(&app, panes[0]),
+            "manager-lab-hlp respawned on core"
+        );
+        assert!(
+            !on_core(&app, panes[1]),
+            "manager-aruba-hlp respawned on core"
+        );
+        assert!(on_core(&app, panes[2]), "a title is not a name");
+        crate::pane::set_core_pty_panes(Vec::new());
+        assert!(app.respawn_pane_runtime(panes[1], RespawnTarget::Shell));
+        assert!(
+            on_core(&app, panes[1]),
+            "with no pattern the pane goes to core"
+        );
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    // V32: a new pane whose command names its agent `manager-lab-hlp` starts
+    // on the PTY; the same command without the name starts on core.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_pane_named_by_its_command_starts_on_the_pty() {
+        let core = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _panes) = app_with_panes(1, true);
+        crate::pane::set_core_pty_panes(vec!["*-hlp".into()]);
+        let folder = std::env::temp_dir().join(format!("hcs-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        let claude = folder.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nexec sleep 30\n").expect("stand-in");
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("mode");
+        let claude = claude.display().to_string();
+        let named = [claude.clone(), "--name".into(), "manager-lab-hlp".into()];
+        let (_, pane) = app
+            .spawn_overlay_argv_command(&named, None, Vec::new(), Vec::new())
+            .expect("named pane");
+        assert!(
+            pane.runtime.core_terminal().is_none(),
+            "the named pane is on core"
+        );
+        pane.runtime.shutdown();
+        let (_, pane) = app
+            .spawn_overlay_argv_command(&[claude], None, Vec::new(), Vec::new())
+            .expect("unnamed pane");
+        assert!(
+            pane.runtime.core_terminal().is_some(),
+            "the unnamed pane is not on core"
+        );
+        pane.runtime.shutdown();
+        let _ = std::fs::remove_dir_all(folder);
     }
 
     /// Drives the loop's two resume entry points until the round is over;

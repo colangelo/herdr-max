@@ -669,7 +669,7 @@ async fn core_v1_a_restored_pane_stays_on_the_pty() {
     };
     let scratch = Scratch::new("core-v1r");
     let (events, _event_rx) = mpsc::channel(64);
-    let restored = PaneRuntime::spawn_restored(
+    let restored = PaneRuntime::spawn_with_initial_history(
         PaneId::alloc(),
         24,
         80,
@@ -680,6 +680,7 @@ async fn core_v1_a_restored_pane_stays_on_the_pty() {
         PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::default()),
         &PaneLaunchEnv::default(),
         Some("saved history\r\n"),
+        crate::pane::RuntimeChoice::for_pane(None).restored(),
         events,
         Arc::new(Notify::new()),
         Arc::new(RenderSignal::new()),

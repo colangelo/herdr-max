@@ -779,6 +779,11 @@ fn restore_tab(
         let restored_agent_launch = saved_pane
             .and_then(saved_agent_launch)
             .filter(|_| !startup.duplicate_agent_session);
+        let restored_runtime = crate::pane::RuntimeChoice::for_pane(crate::pane::stable_name(
+            saved_pane.and_then(saved_agent_launch).as_ref(),
+            saved_agent_name.as_deref(),
+        ))
+        .restored();
         let initial_restore_agent = startup
             .restore_plan
             .as_ref()
@@ -967,6 +972,7 @@ fn restore_tab(
                     runtime_context.shell_config,
                     &launch_env,
                     startup.initial_history_ansi,
+                    restored_runtime,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
@@ -986,6 +992,7 @@ fn restore_tab(
                     runtime_context.shell_config,
                     &launch_env,
                     startup.initial_history_ansi,
+                    restored_runtime,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),

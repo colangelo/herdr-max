@@ -1918,6 +1918,14 @@ pub struct ExperimentalConfig {
     /// spaces with the core panes as terminals. herdr's layout is the source:
     /// an edit made in an app is overwritten. Unix only. Default: false.
     pub core_spaces_doc: bool,
+    /// Panes that always start on the PTY, even with `runtime = "core"`: glob
+    /// patterns (`*` any run, `?` one character, case-sensitive) matched
+    /// against a pane's stable name, the `--name` its agent was launched with,
+    /// else the herdr agent name set with `herdr agent rename` or the API.
+    /// Never a terminal title. Honoured for new panes, restores, resumes and
+    /// respawns. A pane already on core stays there until respawned.
+    /// Applies on reload. Default: empty.
+    pub core_pty_panes: Vec<String>,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -3399,6 +3407,18 @@ pane_jobs = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.pane_jobs);
+    }
+
+    #[test]
+    fn core_pty_panes_default_to_none_and_read_a_list() {
+        assert!(Config::default().experimental.core_pty_panes.is_empty());
+        let config: Config =
+            toml::from_str("[experimental]\ncore_pty_panes = [\"manager-lab-hlp\", \"*-hlp\"]\n")
+                .unwrap();
+        assert_eq!(
+            config.experimental.core_pty_panes,
+            ["manager-lab-hlp", "*-hlp"]
+        );
     }
 
     #[test]

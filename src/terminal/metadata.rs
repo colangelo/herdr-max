@@ -555,6 +555,36 @@ mod tests {
         );
     }
 
+    // core-phase3 D13: a title or a name the agent reports about itself is
+    // never the pane's stable name; a name set with `herdr agent rename` is.
+    #[test]
+    fn a_reported_title_is_not_a_stable_name() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert!(terminal
+            .set_agent_metadata(AgentMetadataReport {
+                source: "custom:claude".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: Some("manager-lab-hlp".into()),
+                display_agent: Some("manager-lab-hlp".into()),
+                state_labels: HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: None,
+            })
+            .is_some());
+        assert_eq!(
+            terminal.effective_title().as_deref(),
+            Some("manager-lab-hlp")
+        );
+        assert_eq!(terminal.stable_name(), None);
+        terminal.set_agent_name("manager-lab-hlp".into());
+        assert_eq!(terminal.stable_name(), Some("manager-lab-hlp"));
+    }
+
     #[test]
     fn custom_metadata_reanchors_sequence_after_process_restart() {
         let mut terminal = test_terminal();

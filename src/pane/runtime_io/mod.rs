@@ -13,10 +13,15 @@ pub(in crate::pane) use crate::pty::actor::PtyReadResult;
 /// The read callback a backend calls for every chunk.
 pub(in crate::pane) use crate::pty::actor::ReadCallback;
 
+mod choice;
 #[cfg(unix)]
 mod core_backend;
 mod core_status;
 mod pty;
+
+#[cfg(all(test, unix))]
+pub(crate) use choice::PtyReason;
+pub(crate) use choice::{set_core_pty_panes, stable_name, RuntimeChoice};
 
 #[cfg(all(test, unix))]
 pub(crate) use core_backend::fake::FakeCore;
@@ -186,15 +191,16 @@ pub(crate) fn set_core_events(events: mpsc::Sender<crate::events::AppEvent>) {
     let _ = events;
 }
 
-/// Whether a resumed program starts on core: `runtime = "core"` and the
-/// guard has not given up.
-pub(crate) fn resumes_on_core() -> bool {
+/// Whether a program spawned with `runtime` tries core first: `Preferred`
+/// (no exclusion, the guard has not given up) and `runtime = "core"`.
+pub(crate) fn starts_on_core(runtime: RuntimeChoice) -> bool {
     #[cfg(unix)]
     {
-        core_backend::uses_core()
+        runtime == RuntimeChoice::Preferred && core_backend::preferred()
     }
     #[cfg(not(unix))]
     {
+        let _ = runtime;
         false
     }
 }
@@ -254,20 +260,24 @@ pub(crate) fn set_preferred_runtime(core: bool) {
 }
 
 impl PaneIo {
-    /// Starts `spec.command` on the preferred backend: a herdr-core terminal
-    /// when `runtime = "core"` and core is usable, else a PTY (D1). The first
-    /// time core cannot be used, `on_unavailable` gets the reason, for the
-    /// server's one notice.
+    /// Starts `spec.command` as `runtime` says: on `Preferred`, a herdr-core
+    /// terminal when `runtime = "core"` and core is usable, else a PTY (D1);
+    /// on `Pty`, a PTY. The first time core cannot be used, `on_unavailable`
+    /// gets the reason, for the server's one notice.
     pub(in crate::pane) fn spawn_preferred(
         pane_id: crate::layout::PaneId,
+        runtime: RuntimeChoice,
         spec: SpawnSpec,
         sink: PaneIoSink,
         child_pid: &std::sync::atomic::AtomicU32,
         child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         on_unavailable: impl FnOnce(String),
     ) -> std::io::Result<Self> {
+        if let RuntimeChoice::Pty(reason) = runtime {
+            tracing::debug!(pane = pane_id.raw(), ?reason, "pane starts on the PTY");
+        }
         #[cfg(unix)]
-        if core_backend::uses_core() {
+        if starts_on_core(runtime) {
             let started =
                 core_backend::core_spawn_from(pane_id, &spec.command, spec.rows, spec.cols)
                     .ok_or_else(|| {

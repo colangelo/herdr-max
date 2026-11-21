@@ -47,6 +47,12 @@ impl AgentLaunchFlags {
         }
     }
 
+    /// The session name the agent was launched with (`-n`/`--name`), the
+    /// first part of a pane's stable name (core-phase3 D13).
+    pub fn name(&self) -> Option<&str> {
+        launch_name(&self.agent, &self.flags)
+    }
+
     /// The Claude config directory the agent ran with, when it was not the
     /// server's.
     pub fn claude_config_dir(&self) -> Option<&str> {
@@ -311,6 +317,32 @@ pub fn carried_launch_flags(agent: &str, argv: &[String], cwd: Option<&Path>) ->
     carried
 }
 
+/// The value of the `name` flag in `agent`'s carried launch flags.
+fn launch_name<'a>(agent: &str, flags: &'a [String]) -> Option<&'a str> {
+    let list = carry_list(agent);
+    let mut words = flags.iter();
+    while let Some(word) = words.next() {
+        let Some(flag) = find_flag(list, word) else {
+            continue;
+        };
+        if flag.group == "name" {
+            return words.next().map(String::as_str);
+        }
+        if flag.arity == Arity::One {
+            words.next();
+        }
+    }
+    None
+}
+
+/// The session name a command line gives its agent (`claude --name x`), for
+/// a pane that has not run it yet (core-phase3 D13).
+pub fn argv_launch_name(argv: &[String]) -> Option<String> {
+    let program = Path::new(argv.first()?).file_name()?.to_str()?;
+    let agent = crate::detect::agent_label(crate::detect::identify_agent(program)?);
+    launch_name(agent, &carried_launch_flags(agent, argv, None)).map(str::to_string)
+}
+
 /// The recorded launch flags without a `--settings` file that is not there.
 ///
 /// Claude refuses to start on a settings path it cannot read, so a restore
@@ -405,6 +437,31 @@ mod tests {
 
     fn words(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    // core-phase3 D13: the launch name, in either spelling, never a value of
+    // another flag; a command line gives it only for a known agent.
+    #[test]
+    fn the_launch_name_is_the_name_flag_value() {
+        assert_eq!(
+            launch_name(
+                "claude",
+                &words(&["--agent", "-n", "--name", "manager-lab-hlp"])
+            ),
+            Some("manager-lab-hlp")
+        );
+        assert_eq!(
+            launch_name("claude", &words(&["-n", "manager-aruba-hlp"])),
+            Some("manager-aruba-hlp")
+        );
+        assert_eq!(launch_name("claude", &words(&["--model", "opus"])), None);
+        assert_eq!(launch_name("codex", &words(&["--name", "x-hlp"])), None);
+        assert_eq!(
+            argv_launch_name(&words(&["/opt/bin/claude", "--name=manager-lab-hlp"])),
+            Some("manager-lab-hlp".into())
+        );
+        assert_eq!(argv_launch_name(&words(&["vim", "--name", "x-hlp"])), None);
+        assert_eq!(argv_launch_name(&[]), None);
     }
 
     /// Fork issue 143: a `--settings` file that is gone must never reach the

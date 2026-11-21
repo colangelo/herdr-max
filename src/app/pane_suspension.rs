@@ -345,13 +345,24 @@ impl App {
             self.pane_suspensions.done();
             return noticed;
         }
-        let on_core = crate::pane::resumes_on_core();
-        if !on_core && !(self.pane_jobs_ready_probe)() {
+        // A pane excluded from core resumes on the PTY even with core on
+        // (core-phase3 D13), so it waits for pane jobs like any PTY pane.
+        let on_core: Vec<bool> = panes
+            .iter()
+            .map(|pane_id| {
+                let launch_argv = self
+                    .state
+                    .pane_terminal(*pane_id)
+                    .and_then(|terminal| terminal.launch_argv.as_deref());
+                crate::pane::starts_on_core(self.pane_runtime_choice(*pane_id, launch_argv))
+            })
+            .collect();
+        if on_core.contains(&false) && !(self.pane_jobs_ready_probe)() {
             self.pane_suspensions.retry_later(now);
             return noticed;
         }
         let (mut queued, mut failed, mut still_running, mut unconfirmed) = (0, 0, 0, 0);
-        for pane_id in &panes {
+        for (pane_id, on_core) in panes.iter().zip(on_core) {
             match self.check_old_program_gone(*pane_id) {
                 Some(ResumeBlock::StillRuns(_)) => still_running += 1,
                 Some(ResumeBlock::CannotConfirm) => unconfirmed += 1,

@@ -57,6 +57,7 @@ pub(super) fn spawn_sh(
         &argv,
         env,
         AgentDetection::Disabled,
+        crate::pane::RuntimeChoice::Preferred,
         scrollback_limit_bytes,
         crate::terminal_theme::TerminalTheme::default(),
         None,

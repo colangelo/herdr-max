@@ -257,12 +257,6 @@ pub(crate) fn set_events(events: tokio::sync::mpsc::Sender<crate::events::AppEve
     *lock(&EVENTS) = Some(events);
 }
 
-/// New programs start on core: `runtime = "core"` and the guard has not
-/// given up (core-phase3 D3a).
-pub(crate) fn uses_core() -> bool {
-    preferred() && !gave_up()
-}
-
 /// Whether the primary core answers, through the server's connector, which
 /// starts it again by D3's rule.
 pub(crate) fn primary_answers() -> bool {

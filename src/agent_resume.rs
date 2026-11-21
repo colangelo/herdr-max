@@ -9,8 +9,8 @@ mod launch_flags;
 pub use claude_transcript::claude_transcript_resume;
 pub use footer::argv_with_live_footer;
 pub use launch_flags::{
-    carried_env_names, compose_resume_argv, with_launch_env, without_missing_settings,
-    AgentLaunchArgv, AgentLaunchFlags,
+    argv_launch_name, carried_env_names, compose_resume_argv, with_launch_env,
+    without_missing_settings, AgentLaunchArgv, AgentLaunchFlags,
 };
 
 const MAX_SESSION_ID_LEN: usize = 512;

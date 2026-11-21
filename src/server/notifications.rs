@@ -125,6 +125,7 @@ mod tests {
             None,
             crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
             &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::RuntimeChoice::Preferred,
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(crate::render_signal::RenderSignal::new()),

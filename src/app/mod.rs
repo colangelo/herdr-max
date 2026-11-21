@@ -583,6 +583,7 @@ impl App {
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
         apply_pane_runtime_choice(config.experimental.runtime);
+        crate::pane::set_core_pty_panes(config.experimental.core_pty_panes.clone());
         crate::platform::set_pane_jobs(config.experimental.pane_jobs);
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
@@ -1287,6 +1288,7 @@ impl App {
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
             apply_pane_runtime_choice(config.experimental.runtime);
+            crate::pane::set_core_pty_panes(config.experimental.core_pty_panes.clone());
             // A reload is a person's act: the core loss guard starts afresh
             // (core-phase3 D3a).
             crate::pane::reset_core_loss_guard();

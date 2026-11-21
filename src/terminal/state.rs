@@ -2587,6 +2587,11 @@ impl TerminalState {
             .filter(|record| self.session_agent_matches_detected(&record.agent))
     }
 
+    /// The name `[experimental] core_pty_panes` matches (core-phase3 D13).
+    pub fn stable_name(&self) -> Option<&str> {
+        crate::pane::stable_name(self.agent_launch.as_ref(), self.agent_name.as_deref())
+    }
+
     pub fn restore_agent_launch(&mut self, record: crate::agent_resume::AgentLaunchFlags) {
         self.set_agent_launch(Some(record));
     }

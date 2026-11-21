@@ -173,6 +173,7 @@ impl TerminalRuntime {
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &crate::pane::PaneLaunchEnv,
+        runtime: crate::pane::RuntimeChoice,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
@@ -187,6 +188,7 @@ impl TerminalRuntime {
             host_terminal_appearance,
             shell_config,
             launch_env,
+            runtime,
             events,
             render_notify,
             render_dirty,
@@ -194,8 +196,9 @@ impl TerminalRuntime {
         .map(Self)
     }
 
-    /// A restored pane's shell with its saved history, always on the PTY
-    /// (core-backend D1; a restored core pane uses `reattach_core`).
+    /// A restored pane's shell with its saved history, on the backend
+    /// `runtime` names (core-backend D1; a restored core pane uses
+    /// `reattach_core`).
     // Wrapper mirrors pane runtime construction arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_initial_history(
@@ -209,11 +212,12 @@ impl TerminalRuntime {
         shell_config: crate::pane::PaneShellConfig<'_>,
         launch_env: &crate::pane::PaneLaunchEnv,
         initial_history_ansi: Option<&str>,
+        runtime: crate::pane::RuntimeChoice,
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<Self> {
-        crate::pane::PaneRuntime::spawn_restored(
+        crate::pane::PaneRuntime::spawn_with_initial_history(
             pane_id,
             rows,
             cols,
@@ -224,6 +228,7 @@ impl TerminalRuntime {
             shell_config,
             launch_env,
             initial_history_ansi,
+            runtime,
             events,
             render_notify,
             render_dirty,
@@ -241,6 +246,7 @@ impl TerminalRuntime {
         command: &str,
         launch_env: &crate::pane::PaneLaunchEnv,
         agent_detection: crate::pane::AgentDetection,
+        runtime: crate::pane::RuntimeChoice,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -256,6 +262,7 @@ impl TerminalRuntime {
             command,
             launch_env,
             agent_detection,
+            runtime,
             scrollback_limit_bytes,
             host_terminal_theme,
             host_terminal_appearance,
@@ -276,6 +283,7 @@ impl TerminalRuntime {
         argv: &[String],
         launch_env: &crate::pane::PaneLaunchEnv,
         agent_detection: crate::pane::AgentDetection,
+        runtime: crate::pane::RuntimeChoice,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -291,6 +299,7 @@ impl TerminalRuntime {
             argv,
             launch_env,
             agent_detection,
+            runtime,
             scrollback_limit_bytes,
             host_terminal_theme,
             host_terminal_appearance,
