@@ -25,6 +25,11 @@ pub(crate) struct FakeConfig {
     /// How long `terminal.run` takes to answer, as a slow core; other calls
     /// on the connection are answered meanwhile.
     pub run_delay: std::time::Duration,
+    /// `terminal.run` starts the terminal, then the connection drops before
+    /// the answer, as a core that restarts mid-call (security review M3).
+    pub lose_run_reply: bool,
+    /// These calls answer with an `internal` error.
+    pub failing: Vec<&'static str>,
 }
 
 impl Default for FakeConfig {
@@ -38,6 +43,8 @@ impl Default for FakeConfig {
             hello_line: None,
             reads_after_hello: true,
             run_delay: std::time::Duration::ZERO,
+            lose_run_reply: false,
+            failing: Vec::new(),
         }
     }
 }
@@ -282,6 +289,13 @@ fn answer(
     let method = request["method"].as_str().unwrap_or_default();
     let params = &request["params"];
     let (result, then): (Result<Value, Value>, Option<Frame>) = match method {
+        _ if config.failing.contains(&method) => (
+            Err(
+                json!({"code": -32000, "message": format!("{method} failed"),
+                        "data": {"kind": "internal", "hint": ""}}),
+            ),
+            None,
+        ),
         "server.status" => (
             Ok(json!({"version": config.version, "pid": 1, "holders": []})),
             None,
@@ -370,6 +384,10 @@ fn answer(
     let _ = Frame::new(0, kind::DATA, payload).encode_into(&mut bytes);
     if let Some(frame) = then {
         let _ = frame.encode_into(&mut bytes);
+    }
+    if method == "terminal.run" && config.lose_run_reply {
+        let _ = out.shutdown(std::net::Shutdown::Both);
+        return;
     }
     if method == "terminal.run" && !config.run_delay.is_zero() {
         let Ok(mut out) = out.try_clone() else {

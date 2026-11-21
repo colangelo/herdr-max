@@ -220,6 +220,40 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
     })
 }
 
+/// The label that names one `terminal.run`, so a launch whose answer was
+/// lost can be found again (security review M3, Sol H7).
+const LAUNCH_LABEL: &str = "herdr.launch";
+
+/// Why a core start failed, and whether core may run the program anyway
+/// (security review M3, Sol H7).
+#[derive(Debug)]
+pub(crate) enum StartFailure {
+    /// Core never ran the program, or ended it and said so: the pane may
+    /// start it on the PTY.
+    NotStarted(CoreError),
+    /// Core may run the program: starting it anywhere else could make a
+    /// second copy.
+    Unknown(CoreError),
+}
+
+impl StartFailure {
+    fn into_error(self) -> CoreError {
+        match self {
+            Self::NotStarted(err) | Self::Unknown(err) => err,
+        }
+    }
+}
+
+/// Whether core confirms the terminal at `address` ended: it killed it, or
+/// it no longer runs.
+fn kill_confirmed(client: &CoreClient, address: &str) -> bool {
+    match client.call("terminal.kill", json!({"terminal": address}), CALL_TIMEOUT) {
+        Ok(_) => true,
+        Err(CoreError::Rpc { kind, .. }) => kind == "not_found" || kind == "finished",
+        Err(_) => false,
+    }
+}
+
 /// A core terminal that is running and attached, before the pane hands over
 /// its callbacks. Splitting the spawn this way keeps the callbacks with the
 /// caller until core has said yes, so a refusal can fall back to the PTY.
@@ -237,54 +271,94 @@ impl StartedCore {
         spawn: CoreSpawn,
         child_pid: &AtomicU32,
         connector: Connector,
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self, StartFailure> {
         Self::start_with(spawn, child_pid, connector, ReattachPolicy::default())
     }
 
+    /// A start falls back to the PTY only when core certainly runs nothing
+    /// for it: core was not reached, refused the run, or confirmed it ended
+    /// the program. A run whose answer was lost is found again by its launch
+    /// label and attached (security review M3, Sol H7).
     pub(crate) fn start_with(
         spawn: CoreSpawn,
         child_pid: &AtomicU32,
         connector: Connector,
         policy: ReattachPolicy,
-    ) -> Result<Self, CoreError> {
-        let client = connector()?;
-        let record = client.call(
+    ) -> Result<Self, StartFailure> {
+        let client = connector().map_err(StartFailure::NotStarted)?;
+        let launch = crate::platform::random_token().map_err(|err| {
+            StartFailure::NotStarted(CoreError::Unavailable(format!("no launch id: {err}")))
+        })?;
+        let mut labels = spawn.labels.clone();
+        labels.insert(LAUNCH_LABEL.into(), Value::String(launch.clone()));
+        let reply = client.call(
             "terminal.run",
             json!({
                 "argv": spawn.argv,
                 "cwd": spawn.cwd,
                 "env": spawn.env,
-                "labels": spawn.labels,
+                "labels": labels,
                 "size": {"cols": spawn.cols, "rows": spawn.rows},
                 "no_parent": true,
                 "no_notify": true,
                 "keep": false,
             }),
             CALL_TIMEOUT,
-        )?;
-        let address = record["address"]
-            .as_str()
-            .ok_or_else(|| CoreError::Rpc {
-                kind: "protocol".into(),
-                message: format!("terminal.run returned no address: {record}"),
-            })?
-            .to_string();
-        let pid = core_pid(&record["pid"]);
-        Self::attach(
-            client,
-            Attach {
-                pane_id: spawn.pane_id,
-                session: spawn.session,
-                address,
-                pid,
-                rows: spawn.rows,
-                cols: spawn.cols,
-                ours_to_kill: true,
-            },
-            child_pid,
-            connector,
-            policy,
-        )
+        );
+        let started = match reply {
+            Ok(record) => record["address"]
+                .as_str()
+                .map(|address| (address.to_string(), core_pid(&record["pid"])))
+                .ok_or_else(|| CoreError::Rpc {
+                    kind: "protocol".into(),
+                    message: format!("terminal.run returned no address: {record}"),
+                }),
+            Err(err @ CoreError::Rpc { .. }) => return Err(StartFailure::NotStarted(err)),
+            Err(err) => Err(err),
+        };
+        let attach = |address: String, pid: u32| Attach {
+            pane_id: spawn.pane_id,
+            session: spawn.session.clone(),
+            address,
+            pid,
+            rows: spawn.rows,
+            cols: spawn.cols,
+            ours_to_kill: true,
+        };
+        match started {
+            Ok((address, pid)) => {
+                Self::attach(client, attach(address, pid), child_pid, connector, policy)
+            }
+            Err(err) => {
+                warn!(
+                    pane = spawn.pane_id.raw(),
+                    err = %err,
+                    "terminal.run gave no answer; looking for the launch in herdr-core"
+                );
+                let found = connector().and_then(|client| {
+                    let listed = client.call(
+                        "terminal.list",
+                        json!({"labels": {LAUNCH_LABEL: launch}}),
+                        CALL_TIMEOUT,
+                    )?;
+                    Ok((client, listed))
+                });
+                let (client, listed) = found.map_err(|_| StartFailure::Unknown(err.clone()))?;
+                match listed["terminals"].as_array().map(Vec::as_slice) {
+                    Some([one]) => {
+                        let address = one["address"]
+                            .as_str()
+                            .ok_or_else(|| StartFailure::Unknown(err.clone()))?
+                            .to_string();
+                        let pid = core_pid(&one["pid"]);
+                        Self::attach(client, attach(address, pid), child_pid, connector, policy)
+                    }
+                    // None listed proves nothing: a slow run may land after
+                    // the list.
+                    _ => Err(StartFailure::Unknown(err)),
+                }
+            }
+        }
     }
 
     /// Attaches to a terminal an earlier server left running (D10 "Arriving").
@@ -333,7 +407,7 @@ impl StartedCore {
             connector,
             ReattachPolicy::default(),
         )
-        .map_err(ReattachError::Unreachable)
+        .map_err(|failure| ReattachError::Unreachable(failure.into_error()))
     }
 
     fn attach(
@@ -342,7 +416,7 @@ impl StartedCore {
         child_pid: &AtomicU32,
         connector: Connector,
         policy: ReattachPolicy,
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self, StartFailure> {
         let Attach {
             pane_id,
             session,
@@ -375,12 +449,12 @@ impl StartedCore {
                 (0, false)
             }
             Err(err) => {
-                // Do not leave a program running that no pane shows.
-                if ours_to_kill {
-                    let _ =
-                        client.call("terminal.kill", json!({"terminal": address}), CALL_TIMEOUT);
+                // Do not leave a program running that no pane shows; one
+                // core does not confirm ended may still run.
+                if ours_to_kill && !kill_confirmed(&client, &address) {
+                    return Err(StartFailure::Unknown(err));
                 }
-                return Err(err);
+                return Err(StartFailure::NotStarted(err));
             }
         };
         if pid > 0 {
@@ -1256,6 +1330,93 @@ mod tests {
             )
             .expect("pane");
         (pane, exit_rx, unreachable_rx)
+    }
+
+    fn spawn_for(pane: &str) -> CoreSpawn {
+        CoreSpawn {
+            pane_id: PaneId::from_raw(6),
+            session: "herdr-test".into(),
+            argv: vec!["sh".into()],
+            cwd: None,
+            env: serde_json::Map::new(),
+            labels: labels(pane),
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    /// A connector that connects anew each time, as the server's does after
+    /// a connection drops.
+    fn reconnecting(core: &FakeCore) -> Connector {
+        let socket = core.socket.clone();
+        Arc::new(move || CoreClient::connect(&socket, None))
+    }
+
+    fn runs(core: &FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "terminal.run")
+            .count()
+    }
+
+    // Security review M3 (Sol H7): a run whose answer was lost is found by
+    // its launch label and attached; it is never run again.
+    #[test]
+    fn a_lost_run_answer_is_found_by_its_launch_label() {
+        let core = FakeCore::start_with(|config| config.lose_run_reply = true);
+        let pid = AtomicU32::new(0);
+        let started = StartedCore::start(spawn_for("w1-p6"), &pid, reconnecting(&core))
+            .expect("the launch reconciled");
+        assert_eq!(started.shared.address, "t1");
+        assert_eq!(pid.load(Ordering::Acquire), 4242);
+        assert_eq!(runs(&core), 1, "{:?}", core.methods());
+        let run = &core.requests()[0]["params"]["labels"];
+        let list = core
+            .requests()
+            .into_iter()
+            .find(|request| request["method"] == "terminal.list")
+            .expect("a list by launch");
+        assert_eq!(list["params"]["labels"][LAUNCH_LABEL], run[LAUNCH_LABEL]);
+        assert_eq!(run[LAUNCH_LABEL].as_str().map(str::len), Some(32));
+    }
+
+    // Security review M3 (Sol H7): only a definite failure lets the pane use
+    // the PTY.
+    #[test]
+    fn only_a_definite_failure_allows_the_pty() {
+        let not_started = |failure: Result<StartedCore, StartFailure>| {
+            matches!(failure, Err(StartFailure::NotStarted(_)))
+        };
+        let unknown = |failure: Result<StartedCore, StartFailure>| {
+            matches!(failure, Err(StartFailure::Unknown(_)))
+        };
+        let pid = AtomicU32::new(0);
+        let start =
+            |core: &FakeCore| StartedCore::start(spawn_for("w1-p6"), &pid, reconnecting(core));
+
+        let refused = FakeCore::start_with(|config| config.failing = vec!["terminal.run"]);
+        assert!(not_started(start(&refused)), "core refused the run");
+
+        let no_core: Connector = Arc::new(|| Err(CoreError::Unavailable("no core".into())));
+        assert!(not_started(StartedCore::start(
+            spawn_for("w1-p6"),
+            &pid,
+            no_core
+        )));
+
+        let killed = FakeCore::start_with(|config| config.failing = vec!["terminal.attach"]);
+        assert!(not_started(start(&killed)), "core confirmed the kill");
+
+        let lost = FakeCore::start_with(|config| {
+            config.lose_run_reply = true;
+            config.failing = vec!["terminal.list"];
+        });
+        assert!(unknown(start(&lost)), "the run's outcome is unknown");
+
+        let unkilled = FakeCore::start_with(|config| {
+            config.failing = vec!["terminal.attach", "terminal.kill"];
+        });
+        assert!(unknown(start(&unkilled)), "the kill was not confirmed");
     }
 
     fn short_policy(start_token: StartTokenLookup) -> ReattachPolicy {

@@ -333,8 +333,10 @@ impl PaneIo {
             let started =
                 core_backend::core_spawn_from(pane_id, &spec.command, spec.rows, spec.cols)
                     .ok_or_else(|| {
-                        core_backend::client::CoreError::Unavailable(
-                            "the command has a non-UTF-8 argument, folder or variable".into(),
+                        core_backend::StartFailure::NotStarted(
+                            core_backend::client::CoreError::Unavailable(
+                                "the command has a non-UTF-8 argument, folder or variable".into(),
+                            ),
                         )
                     })
                     .and_then(|spawn| {
@@ -355,10 +357,22 @@ impl PaneIo {
                         .into_pane(on_read, on_exit, on_core_unreachable, child_wait_completed)
                         .map(PaneIo::Core);
                 }
-                Err(err) => {
+                Err(core_backend::StartFailure::NotStarted(err)) => {
                     if core_backend::note_unavailable(&err) {
                         on_unavailable(err.to_string());
                     }
+                }
+                // Core may run the program: the PTY would be a second copy
+                // (security review M3, Sol H7).
+                Err(core_backend::StartFailure::Unknown(err)) => {
+                    tracing::warn!(
+                        pane = pane_id.raw(),
+                        err = %err,
+                        "herdr-core may run this pane's program; not starting it on the PTY"
+                    );
+                    return Err(std::io::Error::other(format!(
+                        "herdr-core may already run this program ({err}), so it was not started again; see `hc ls --label herdr.launch`"
+                    )));
                 }
             }
         }

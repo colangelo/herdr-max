@@ -20,7 +20,7 @@ use tracing::warn;
 
 use client::CoreError;
 pub(crate) use pane_io::{
-    Connector, CorePaneIo, CoreReattach, CoreSpawn, ReattachError, StartedCore,
+    Connector, CorePaneIo, CoreReattach, CoreSpawn, ReattachError, StartFailure, StartedCore,
 };
 pub(crate) use sessions::{
     core_session_name, existing_core_connector, existing_session_connector, herdr_session_label,
@@ -556,6 +556,54 @@ mod tests {
         }
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("older than"), "{notices:?}");
+    }
+
+    // Security review M3 (Sol H7): when core may have started the program,
+    // the pane is not started on the PTY; when the launch is found again,
+    // the pane shows it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_launch_core_may_run_never_falls_back_to_the_pty() {
+        use crate::pane::runtime_characterization_tests::Scratch;
+        let core = fake::FakeCore::start_with(|config| {
+            config.lose_run_reply = true;
+            config.failing = vec!["terminal.list"];
+        });
+        std::env::set_var("HC_SOCKET", &core.socket);
+        set_preferred(true);
+        let scratch = Scratch::new("core-h7");
+        let marker = scratch.0.join("pty-ran");
+        let (events, _rx) = tokio::sync::mpsc::channel(64);
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("echo ran > {}; exec sleep 30", marker.display()),
+        ];
+        let started = crate::pane::PaneRuntime::spawn_argv_command(
+            PaneId::alloc(),
+            24,
+            80,
+            scratch.0.clone(),
+            &argv,
+            &crate::pane::PaneLaunchEnv::default(),
+            crate::pane::AgentDetection::Disabled,
+            crate::pane::RuntimeChoice::Preferred,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        assert!(started.is_err(), "the pane did not start anywhere");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!marker.exists(), "no PTY copy ran");
+        assert_eq!(
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.run")
+                .count(),
+            1
+        );
     }
 
     #[test]
