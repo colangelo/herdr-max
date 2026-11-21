@@ -50,18 +50,39 @@ A1 as built (47219db8, 6dd307f6):
 
 ## PR A2. Core start, loss guard, resume off the loop
 
-- [ ] A2.1 Resume worker: specs built on the loop, batches of 8 on `resume-worker`, `AppEvent::PaneResumed`; V43
-  with the 1 and 16 pane numbers in the PR body
-- [ ] A2.2 `connect_session`: refused counts as missing, primary only, exit 5 polled again, the 3 s rule replacing
-  `EVER_CONNECTED`; V38; V15 live
-- [ ] A2.3 `CoreLossGuard` over loss bursts, `core: gave_up` in `herdr server status`, reset on a new server; V4,
+- [x] A2.1 Resume worker: specs built on the loop, batches of 8 on `resume-worker`, `AppEvent::PaneResumed`; V43
+  with the 1 and 16 pane numbers in the PR body (fake core answering `terminal.run` after 2 s: the loop's longest
+  turn 0.11 ms with 1 pane, 0.55 ms with 16; at most 8 runs at once)
+- [x] A2.2 `connect_session`: refused counts as missing, primary only, exit 5 polled again, the 3 s rule replacing
+  `EVER_CONNECTED`; V38; V15 live (herdr started the killed core after 3.2-3.3 s, every pid kept)
+- [x] A2.3 `CoreLossGuard` over loss bursts, `core: gave_up` in `herdr server status`, reset on a new server; V4,
   V36; V16 live
-- [ ] A2.4 `server_stop` as `CoreStopped` with the stop record (D3b); V37 live
-- [ ] A2.5 Notices per cause (D2 table) and the optional `suspend_cause` fact; V12 fixtures unchanged
-- [ ] A2.6 `docs/next`: core loss behaviour, the waiting state, the guard reset on handoff, the "Running in
+- [x] A2.4 `server_stop` as `CoreStopped` with the stop record (D3b); V37 live
+- [x] A2.5 Notices per cause (D2 table) and the optional `suspend_cause` fact; V12 fixtures unchanged
+- [x] A2.6 `docs/next`: core loss behaviour, the waiting state, the guard reset on handoff, the "Running in
   Background" rule; the same line relayed to the owner of CONTEXT `SKILLS/herdr` (this repo's
   `skills/herdr/SKILL.md` changes only at a stable release)
-- [ ] A2.7 Check: `just check` 0, `just core-live-test` 0, CI green
+- [ ] A2.7 Check: `just check` 0, `just core-live-test` 0, CI green (both checks 0 on m4m, 2026-11-21; CI waits for
+  the push)
+
+A2 as built:
+
+- The worker runs each pane of a batch on a thread of its own, so a batch takes as long as its slowest pane, and
+  the next batch leaves when every answer of the last one has landed. Respawn and agent resume are split into
+  prepare (on the loop), spawn and install (on the loop), so `pane respawn` and the restore path share the code.
+- The 3 s rule applies to every primary connection after the first, the never-start connector included: a pane a
+  restore reattached, a waiting pane's probe and the spaces-doc publisher can each start the primary after 3 s
+  down. Only the server connector starts a core at once before the first connection. V29a now waits for herdr's
+  own start instead of a start by hand.
+- While the guard has given up, new panes start on the PTY too, not only resumed ones (`uses_core` gates
+  `spawn_preferred`); PR S's `RuntimeChoice::Pty(GaveUp)` replaces the gate.
+- A `server_stop` suspension is a person's act and not a loss event for the guard.
+- The guard's notice reaches the app through an event sender the app registers with the core backend: a start
+  that trips the guard happens on a pane's thread.
+- Restored panes still start on the PTY until PR F, so in V37's second run (a herdr restart) the panes come back on
+  the PTY and the core starts with the next new core pane.
+- A waiting pane whose core answered and whose program is gone still starts fresh on the loop
+  (`attach_waiting_pane`): one pane per probe answer, not a mass resume.
 
 ## PR S. `core_pty_panes`
 
