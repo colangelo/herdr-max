@@ -83,15 +83,42 @@ A2 as built:
   the PTY and the core starts with the next new core pane.
 - A waiting pane whose core answered and whose program is gone still starts fresh on the loop
   (`attach_waiting_pane`): one pane per probe answer, not a mass resume.
+- The "stopped by a person" record (D3b) lives in the server's memory only. A herdr restart, or a live
+  handoff, after `hc server stop` forgets it, so the new server's first connection starts the core again.
 
 ## PR S. `core_pty_panes`
 
-- [ ] S.1 `[experimental] core_pty_panes` parse and reload; `excluded_from_core` over the stable name (D13)
-- [ ] S.2 `RuntimeChoice` replacing `pty_only`; every caller of `spawn_preferred` passes it (new pane, restore,
+- [x] S.1 `[experimental] core_pty_panes` parse and reload; `excluded_from_core` over the stable name (D13)
+- [x] S.2 `RuntimeChoice` replacing `pty_only`; every caller of `spawn_preferred` passes it (new pane, restore,
   resume, respawn); V32 naming `manager-lab-hlp` and `manager-aruba-hlp`
-- [ ] S.3 V33 live in `scripts/core_live_test.sh` (restore and resume parts; the move part lands with G)
-- [ ] S.4 `docs/next` config reference for the key
+- [x] S.3 V33 live in `scripts/core_live_test.sh` (restore and resume parts; the move part lands with G)
+- [x] S.4 `docs/next` config reference for the key
 - [ ] S.5 Check: `just check` 0, `just core-live-test` 0, CI green
+
+S as built:
+
+- `RuntimeChoice` and `PtyReason` live in `src/pane/runtime_io/choice.rs`. The reasons are `Excluded`, `GaveUp`
+  and `Restored`. `FdAdopted` is not a variant: an fd adopted in a live handoff never reaches
+  `spawn_preferred`. `Restored` marks a restored pane's fresh program until PR F starts it on core (D8); F
+  removes it. The guard's give-up moved from inside `spawn_preferred` into `RuntimeChoice::for_pane`, so a
+  pane's choice is made once, when its spawn is built.
+- The pattern list is process state set at startup and on reload, beside `[experimental] runtime`.
+  `excluded_from_core` is the only matcher (`*`, `?`, case-sensitive).
+- A new pane matches only when it is started with a command that names its agent (`claude --name x`, read
+  with the agent's carry list). A new pane that starts as a shell has no name yet, so it follows `runtime`.
+  This is how the computer-use host panes are made today (`pane split`, then `claude --name` typed into the
+  shell), so once `runtime = "core"` is on, a new host pane must be named and respawned (the docs say so).
+- A resume with core on asks the pane-jobs probe when any suspended pane will resume on the PTY, an excluded
+  one included.
+- An explicit agent name is cleared by a plain respawn (`clear_agent_runtime_identity_after_respawn`), so a
+  pane matched only by that name and respawned to a shell no longer matches. A launch name survives it.
+- V32 is unit tests in `choice.rs`, `launch_flags.rs`, `terminal/metadata.rs` (a title is not a name) and
+  `app/pane_resume.rs` (resume, respawn and new pane against a fake core). The restore call site is covered by
+  `RuntimeChoice::restored` and V33: until PR F every restored program runs on the PTY anyway.
+- V33 is section 5 of `scripts/core_live_test.sh`, macOS only (pane jobs): a compiled `claude` stand-in started
+  as `claude --name test-hlp` in a PTY pane, then `runtime = "core"`: `pane respawn --resume`, a stopped pane
+  job, and a herdr restart each leave it on the PTY while a new unnamed pane goes to core; with the pattern
+  removed, the same respawn puts it on core.
 
 ## PR B. One connection per core session (placement unchanged)
 
