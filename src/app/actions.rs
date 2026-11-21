@@ -1475,6 +1475,8 @@ impl AppState {
             // The app attaches the waiting panes; the state has nothing to do.
             #[cfg(unix)]
             AppEvent::CoreSessionsAnswered { .. } => Vec::new(),
+            // The app installs resumed panes and raises the guard's notice.
+            AppEvent::PaneResumed { .. } | AppEvent::CoreGaveUp => Vec::new(),
             AppEvent::CoreUnreachable { pane_id, since } => {
                 if let Some(terminal) = self.pane_terminal_mut(pane_id) {
                     if terminal.core_unreachable_since != since {

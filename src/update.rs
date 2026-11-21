@@ -3355,6 +3355,7 @@ mod tests {
             }),
             exe: None,
             macos_services: None,
+            core: None,
         };
         let missing_baseline = crate::api::RuntimeStatus {
             capabilities: None,
@@ -3432,6 +3433,7 @@ mod tests {
                 }),
                 exe: None,
                 macos_services: None,
+                core: None,
             },
         };
 
@@ -3618,6 +3620,7 @@ mod tests {
             capabilities: None,
             exe: None,
             macos_services: None,
+            core: None,
         };
         let release = ReleaseInfo {
             version: Version::parse("0.5.6").unwrap(),
@@ -3695,6 +3698,7 @@ mod tests {
                 }),
                 exe: None,
                 macos_services: None,
+                core: None,
             },
         };
         let decisions = confirm_running_server_update_action(

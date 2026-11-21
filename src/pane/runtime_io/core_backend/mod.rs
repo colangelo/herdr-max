@@ -6,6 +6,7 @@ pub(crate) mod client;
 pub(crate) mod fake;
 pub(crate) mod frame;
 mod pane_io;
+mod primary;
 pub(crate) mod spaces_doc;
 mod status_mirror;
 
@@ -26,11 +27,23 @@ use crate::layout::PaneId;
 static PREFER_CORE: AtomicBool = AtomicBool::new(false);
 /// One unavailability warning per server lifetime (D1).
 static WARNED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
-/// Set after the first connection: from then on a missing socket is retried,
-/// never answered by starting a core.
-static EVER_CONNECTED: AtomicBool = AtomicBool::new(false);
-/// The server's one connection (D3), replaced when it closes.
-static CLIENT: Mutex<Option<CoreClient>> = Mutex::new(None);
+/// The server's one connection to its primary core (D3), replaced when it
+/// closes, and when the primary may be started again (core-phase3 D3).
+static PRIMARY: Mutex<Primary> = Mutex::new(Primary {
+    client: None,
+    rule: primary::StartRule::new(),
+});
+/// Loss bursts (core-phase3 D3a). Its own lock: the server loop records
+/// losses and must never wait behind a connect.
+static LOSS_GUARD: Mutex<primary::CoreLossGuard> = Mutex::new(primary::CoreLossGuard::new());
+static GAVE_UP: AtomicBool = AtomicBool::new(false);
+/// Where the guard's "gave up" goes, for the server's one notice.
+static EVENTS: Mutex<Option<tokio::sync::mpsc::Sender<crate::events::AppEvent>>> = Mutex::new(None);
+
+struct Primary {
+    client: Option<CoreClient>,
+    rule: primary::StartRule,
+}
 
 pub(crate) fn set_preferred(core: bool) {
     PREFER_CORE.store(core, Ordering::Release);
@@ -68,14 +81,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-/// The server's connector: the live connection, or a new one (starting the
-/// core session when its socket is missing).
+/// The server's connector: the live connection, or a new one. It starts the
+/// primary core before the server's first connection, and later when its
+/// socket has been missing or refusing for 3 s (core-phase3 D3).
 pub(crate) fn server_connector() -> Connector {
     connector(true)
 }
 
-/// Like `server_connector`, but never starts a core: one that is not running
-/// holds no terminal to reattach to (D10).
+/// Like `server_connector`, but never starts a core before the server's
+/// first connection: one that is not running then holds no terminal to
+/// reattach to (D10). A primary that went down is started by the same 3 s
+/// rule, so a pane reattached by a restore also comes back (core-phase3 D3).
 pub(crate) fn existing_core_connector() -> Connector {
     connector(false)
 }
@@ -159,27 +175,98 @@ pub(crate) fn find_labelled_terminals(
     found
 }
 
-fn connector(may_start: bool) -> Connector {
+fn connector(first_start: bool) -> Connector {
     Arc::new(move || {
-        let mut slot = lock(&CLIENT);
-        if let Some(client) = slot.as_ref() {
+        let mut primary = lock(&PRIMARY);
+        if let Some(client) = primary.client.as_ref() {
             if !client.is_closed() {
                 return Ok(client.clone());
             }
         }
-        // Start the core only before the first connection. Later, a missing
-        // socket means a core restart in progress: starting one then would race
-        // the restart and could leave a second core behind.
-        let first = may_start && !EVER_CONNECTED.load(Ordering::Acquire);
         let session = core_session_name();
-        let client = client::connect_session(&session, None, first)?;
+        let socket = client::socket_path(&session);
         // No events subscription: core's status comes only from bytes a
         // program prints, which any printed file can forge, so herdr does not
         // use it (security review M3; design D9). Detection and hooks decide.
-        EVER_CONNECTED.store(true, Ordering::Release);
-        *slot = Some(client.clone());
-        Ok(client)
+        let err = match client::connect_at(&socket) {
+            Ok((client, _)) => return Ok(primary.connected(client)),
+            Err(err) => err,
+        };
+        let now = std::time::Instant::now();
+        let down = client::socket_down(&socket);
+        if !primary.rule.should_start(now, down, first_start, gave_up()) {
+            return Err(err);
+        }
+        if primary.rule.after_loss() {
+            if note_core_loss(now) {
+                return Err(err);
+            }
+            warn!(
+                %session,
+                ?down,
+                "herdr-core has been down for 3 s or more; starting it again"
+            );
+        }
+        client::start_and_connect(&session, &socket).map(|client| primary.connected(client))
     })
+}
+
+impl Primary {
+    fn connected(&mut self, client: CoreClient) -> CoreClient {
+        self.rule.connected();
+        self.client = Some(client.clone());
+        client
+    }
+}
+
+/// Terminals of `session` finished with `server_stop`: a person stopped
+/// that core, so herdr does not start it until it answers again (core-phase3
+/// D3b). Only the primary is ever started, so only its stop is recorded.
+pub(crate) fn note_stopped_by_person(session: &str) {
+    if session == core_session_name() {
+        lock(&PRIMARY).rule.stopped_by_person();
+    }
+}
+
+/// A loss event for the guard (core-phase3 D3a): core panes suspended, or
+/// the primary started after it went down. True when this one made the
+/// guard give up; the server is then told once, through `set_events`.
+pub(crate) fn note_core_loss(now: std::time::Instant) -> bool {
+    if !lock(&LOSS_GUARD).record(now) {
+        return false;
+    }
+    GAVE_UP.store(true, Ordering::Release);
+    warn!("herdr-core keeps ending panes; no more core starts, panes resume on the PTY");
+    if let Some(events) = lock(&EVENTS).as_ref() {
+        let _ = events.try_send(crate::events::AppEvent::CoreGaveUp);
+    }
+    true
+}
+
+pub(crate) fn gave_up() -> bool {
+    GAVE_UP.load(Ordering::Acquire)
+}
+
+/// A config reload: the guard starts afresh.
+pub(crate) fn reset_loss_guard() {
+    *lock(&LOSS_GUARD) = primary::CoreLossGuard::new();
+    GAVE_UP.store(false, Ordering::Release);
+}
+
+pub(crate) fn set_events(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
+    *lock(&EVENTS) = Some(events);
+}
+
+/// New programs start on core: `runtime = "core"` and the guard has not
+/// given up (core-phase3 D3a).
+pub(crate) fn uses_core() -> bool {
+    preferred() && !gave_up()
+}
+
+/// Whether the primary core answers, through the server's connector, which
+/// starts it again by D3's rule.
+pub(crate) fn primary_answers() -> bool {
+    server_connector()().is_ok()
 }
 
 /// Logs the first reason core could not be used; later ones are debug only.
@@ -591,6 +678,118 @@ mod tests {
             ]
         );
         assert!(unclaimed_in(&serde_json::json!({}), &[]).is_empty());
+    }
+
+    static STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static STARTED: Mutex<Option<fake::FakeCore>> = Mutex::new(None);
+    static STARTED_AT: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+    /// A start that returns before the core listens, as one that landed in a
+    /// core restart and exited 5: the core comes up 300 ms later.
+    fn start_late(_session: &str) -> Result<(), CoreError> {
+        STARTS.fetch_add(1, Ordering::AcqRel);
+        let socket = lock(&STARTED_AT).clone().expect("socket");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = std::fs::remove_file(&socket);
+            let dir = socket.parent().expect("dir").to_path_buf();
+            *lock(&STARTED) = Some(fake::FakeCore::start_in(dir, "p.sock", |_| {}));
+        });
+        Ok(())
+    }
+
+    // V38, V15 in a unit (core-phase3 D3): after the first connection, a
+    // primary whose socket stays and refuses (a SIGKILLed core) is started
+    // after 3 s down, not before; a start whose core listens only later is
+    // polled; a secondary session is never started.
+    #[test]
+    fn a_refusing_primary_is_started_after_three_seconds_and_a_secondary_never() {
+        let first = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &first.socket);
+        let connect = server_connector();
+        connect().expect("first connection");
+
+        let dir = std::env::temp_dir().join(format!("hcr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .expect("mode");
+        let socket = dir.join("p.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind"));
+        assert_eq!(
+            client::socket_down(&socket),
+            Some(primary::SocketDown::Refused),
+            "the file stays and refuses"
+        );
+        *lock(&STARTED_AT) = Some(socket.clone());
+        *lock(&client::TEST_CORE_START) = Some(start_late);
+        std::env::set_var("HC_SOCKET", &socket);
+        first.hang_up();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lock(&PRIMARY)
+            .client
+            .as_ref()
+            .is_some_and(|c| !c.is_closed())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection not closed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let down_at = std::time::Instant::now();
+        while down_at.elapsed() < primary::DOWN_BEFORE_START - std::time::Duration::from_millis(200)
+        {
+            assert!(connect().is_err());
+            assert_eq!(STARTS.load(Ordering::Acquire), 0, "no start before 3 s");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        connect().expect("started and polled until it answered");
+        assert_eq!(STARTS.load(Ordering::Acquire), 1);
+
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        assert!(existing_session_connector("herdrdev-other")().is_err());
+        assert_eq!(
+            STARTS.load(Ordering::Acquire),
+            1,
+            "a secondary is never started"
+        );
+        *lock(&STARTED) = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // D3b: a core whose terminals finished with `server_stop` is not
+    // started while the stop stands.
+    #[test]
+    fn a_primary_a_person_stopped_is_not_started() {
+        let first = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &first.socket);
+        server_connector()().expect("first connection");
+        *lock(&client::TEST_CORE_START) = Some(start_late);
+        note_stopped_by_person(&core_session_name());
+        let missing = std::env::temp_dir().join(format!("hcs-{}.sock", std::process::id()));
+        std::env::set_var("HC_SOCKET", &missing);
+        first.hang_up();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while lock(&PRIMARY)
+            .client
+            .as_ref()
+            .is_some_and(|c| !c.is_closed())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection not closed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let down_at = std::time::Instant::now();
+        while down_at.elapsed() < primary::DOWN_BEFORE_START + std::time::Duration::from_millis(500)
+        {
+            assert!(server_connector()().is_err());
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(STARTS.load(Ordering::Acquire), 0, "stopped by a person");
     }
 
     #[test]

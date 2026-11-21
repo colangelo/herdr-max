@@ -13,6 +13,8 @@ pub struct RuntimeStatus {
     pub exe: Option<String>,
     /// What the server reaches of macOS services, when it reports it.
     pub macos_services: Option<crate::api::schema::MacosServicesInfo>,
+    /// `gave_up` when the server stopped using Herdr Core (core-phase3 D3a).
+    pub core: Option<String>,
 }
 
 pub fn read_runtime_status_at(
@@ -54,6 +56,7 @@ pub fn read_runtime_status_at(
             capabilities,
             exe,
             macos_services,
+            core,
             ..
         } => Ok(Some(RuntimeStatus {
             version: Some(version),
@@ -61,6 +64,7 @@ pub fn read_runtime_status_at(
             capabilities,
             exe,
             macos_services,
+            core,
         })),
         result => Err(io::Error::other(format!(
             "server status request returned unexpected result: {result:?}"

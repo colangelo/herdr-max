@@ -1079,6 +1079,13 @@
               },
               "type": "object"
             },
+            "suspend_cause": {
+              "description": "Why the pane is suspended: `holder_lost`, `host_shutdown`,\n`core_stopped`, `stopped_by_restart`, `terminal_gone` or\n`pane_job_ended`; a newer server may add others. Absent while the pane\nis not suspended and on an older server.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "suspended": {
               "description": "The session ended the pane's program (a logout, or its macOS pane job\nwas stopped). The pane keeps its place and starts again, resuming its\nagent, once launchd accepts pane jobs. Absent means false.",
               "type": "boolean"
@@ -11208,6 +11215,13 @@
               },
               "type": "object"
             },
+            "suspend_cause": {
+              "description": "Why the pane is suspended: `holder_lost`, `host_shutdown`,\n`core_stopped`, `stopped_by_restart`, `terminal_gone` or\n`pane_job_ended`; a newer server may add others. Absent while the pane\nis not suspended and on an older server.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "suspended": {
               "description": "The session ended the pane's program (a logout, or its macOS pane job\nwas stopped). The pane keeps its place and starts again, resuming its\nagent, once launchd accepts pane jobs. Absent means false.",
               "type": "boolean"
@@ -12477,6 +12491,13 @@
                     }
                   ],
                   "default": null
+                },
+                "core": {
+                  "description": "`gave_up` once Herdr Core kept ending panes and the server stopped\nusing it until a config reload. Absent otherwise and on an older\nserver.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "exe": {
                   "description": "Path of the binary the server runs, so an attached client left on\nan older build can re-exec onto it after a live update. Absent when\nthe OS lookup fails or on an older server.",

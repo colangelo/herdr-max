@@ -571,6 +571,7 @@ fn handle_request(
                     .ok()
                     .map(|path| path.display().to_string()),
                 macos_services: crate::platform::macos_services().map(Into::into),
+                core: crate::pane::core_gave_up().then(|| "gave_up".to_string()),
             },
         })
         .unwrap_or_else(|_| {
@@ -1166,6 +1167,7 @@ mod tests {
             suspended: false,
             core_waiting: false,
             core_unreachable_since: None,
+            suspend_cause: None,
             label: None,
             agent: Some("pi".into()),
             title: None,
@@ -1459,6 +1461,42 @@ mod tests {
         let services = macos_services.expect("macOS servers report their services");
         assert!(services.reachable, "a test process reaches libinfo");
         assert!(["user", "session"].contains(&services.context.as_str()));
+    }
+
+    fn ping_core_field() -> Option<String> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let response = handle_request(
+            Request {
+                id: "req_core".into(),
+                method: Method::Ping(crate::api::schema::PingParams::default()),
+            },
+            &tx,
+            None,
+            None,
+            None,
+            None,
+        );
+        let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::Pong { core, .. } = parsed.result else {
+            panic!("expected pong");
+        };
+        core
+    }
+
+    // V36 (core-phase3 D3a): a server whose core loss guard gave up says
+    // `core: gave_up`; a reload clears it, and a server that never gave up
+    // (a new one, after a handoff) leaves the field out.
+    #[cfg(unix)]
+    #[test]
+    fn ping_says_when_the_server_gave_up_on_core() {
+        assert_eq!(ping_core_field(), None, "a new server has not given up");
+        let start = std::time::Instant::now();
+        for burst in 0..3 {
+            crate::pane::note_core_loss(start + std::time::Duration::from_secs(10 * burst));
+        }
+        assert_eq!(ping_core_field().as_deref(), Some("gave_up"));
+        crate::pane::reset_core_loss_guard();
+        assert_eq!(ping_core_field(), None, "a reload starts afresh");
     }
 
     #[test]

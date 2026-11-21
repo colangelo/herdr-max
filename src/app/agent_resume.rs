@@ -242,60 +242,21 @@ impl App {
         cols: u16,
         allow_empty_theme: bool,
     ) -> bool {
-        let host_terminal_theme = self.state.host_terminal_theme;
-        if host_terminal_theme.is_empty() && !allow_empty_theme {
-            return false;
-        }
-
-        let session_name = self
-            .state
-            .terminals
-            .get(&terminal_id)
-            .and_then(|terminal| terminal.agent_name.clone());
-        let argv = typed_resume_argv(&plan, &self.codex_app_server, &cwd, session_name.as_deref());
-        let codex_thread = (plan.agent == "codex")
-            .then(|| codex_resume_thread_id(&plan.argv))
-            .flatten();
-        let Some(resume_command) = shell_command_from_argv(&argv) else {
-            tracing::warn!(
-                pane = pane_id.raw(),
-                terminal = %terminal_id,
-                agent = %plan.agent,
-                "failed to start deferred agent resume with empty argv"
-            );
-            return false;
-        };
-        let Some(launch_env) = self
-            .find_pane(pane_id)
-            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, Vec::new()))
-        else {
-            return false;
-        };
-
-        if !cwd.is_dir() {
-            if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-                terminal.pending_agent_resume_plan = None;
-                terminal.restore_error = Some("Saved directory is unavailable. Restore the directory and restart this session.".into());
-                terminal.revision = terminal.revision.saturating_add(1);
-            }
-            return true;
-        }
-
-        let runtime = match crate::terminal::TerminalRuntime::spawn(
+        let (spawn, finish) = match self.agent_resume_launch(
             pane_id,
+            &terminal_id,
+            cwd,
+            &plan,
             rows,
             cols,
-            cwd,
-            self.state.pane_scrollback_limit_bytes,
-            host_terminal_theme,
-            self.pane_host_terminal_appearance(),
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            &launch_env,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
+            allow_empty_theme,
         ) {
-            Ok(runtime) => runtime,
+            AgentResumeLaunch::NotNow => return false,
+            AgentResumeLaunch::Settled => return true,
+            AgentResumeLaunch::Spawn(spawn, finish) => (spawn, finish),
+        };
+        match spawn.run() {
+            Ok(runtime) => self.finish_agent_resume(pane_id, terminal_id, finish, runtime),
             Err(err) => {
                 tracing::warn!(
                     pane = pane_id.raw(),
@@ -309,19 +270,98 @@ impl App {
                     terminal.restore_error = Some(format!("Could not start the saved shell: {err}. Fix the shell configuration and restart this session."));
                     terminal.revision = terminal.revision.saturating_add(1);
                 }
-                return true;
+                true
             }
+        }
+    }
+
+    /// The shell that types `plan`'s resume command, without starting it.
+    /// `Settled` when the pane cannot resume and now says why.
+    // The launch threads the pane's geometry and plan, as the start does.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn agent_resume_launch(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        cwd: std::path::PathBuf,
+        plan: &crate::agent_resume::AgentResumePlan,
+        rows: u16,
+        cols: u16,
+        allow_empty_theme: bool,
+    ) -> AgentResumeLaunch {
+        if self.state.host_terminal_theme.is_empty() && !allow_empty_theme {
+            return AgentResumeLaunch::NotNow;
+        }
+
+        let session_name = self
+            .state
+            .terminals
+            .get(terminal_id)
+            .and_then(|terminal| terminal.agent_name.clone());
+        let argv = typed_resume_argv(plan, &self.codex_app_server, &cwd, session_name.as_deref());
+        let codex_thread = (plan.agent == "codex")
+            .then(|| codex_resume_thread_id(&plan.argv))
+            .flatten();
+        let Some(resume_command) = shell_command_from_argv(&argv) else {
+            tracing::warn!(
+                pane = pane_id.raw(),
+                terminal = %terminal_id,
+                agent = %plan.agent,
+                "failed to start deferred agent resume with empty argv"
+            );
+            return AgentResumeLaunch::NotNow;
+        };
+        let Some(launch_env) = self
+            .find_pane(pane_id)
+            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, Vec::new()))
+        else {
+            return AgentResumeLaunch::NotNow;
         };
 
-        let retry_command = resume_command.clone();
-        let mut input = resume_command;
+        if !cwd.is_dir() {
+            if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+                terminal.pending_agent_resume_plan = None;
+                terminal.restore_error = Some("Saved directory is unavailable. Restore the directory and restart this session.".into());
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+            return AgentResumeLaunch::Settled;
+        }
+
+        let program = self.shell_program();
+        let spawn = self.runtime_spawn(pane_id, rows, cols, cwd, launch_env, program);
+        AgentResumeLaunch::Spawn(
+            Box::new(spawn),
+            AgentResumeFinish {
+                command: resume_command,
+                agent: plan.agent.clone(),
+                codex_thread,
+            },
+        )
+    }
+
+    /// Types the resume command into the shell `runtime` runs and installs
+    /// it for `terminal_id`. False when the command could not be sent.
+    pub(super) fn finish_agent_resume(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        terminal_id: crate::terminal::TerminalId,
+        finish: AgentResumeFinish,
+        runtime: crate::terminal::TerminalRuntime,
+    ) -> bool {
+        let AgentResumeFinish {
+            command,
+            agent,
+            codex_thread,
+        } = finish;
+        let retry_command = command.clone();
+        let mut input = command;
         input.push('\r');
         // Restore relaunches the agent; that is not activity in the pane.
         if let Err(err) = runtime.try_send_bytes_untracked(Bytes::from(input)) {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
-                agent = %plan.agent,
+                agent = %agent,
                 err = %err,
                 "failed to send deferred agent resume command to shell"
             );
@@ -335,7 +375,7 @@ impl App {
             super::agent_resume_retry::ResumeRetry::new(
                 pane_id,
                 retry_command,
-                plan.agent.clone(),
+                agent,
                 Instant::now(),
             )
             .resuming(
@@ -369,6 +409,23 @@ impl App {
         }
         true
     }
+}
+
+/// What starting an agent's resume found (core-phase3 D2 splits the start
+/// so the spawn can run off the server loop).
+pub(super) enum AgentResumeLaunch {
+    /// Not now; the pending-resume loop tries again.
+    NotNow,
+    /// The pane cannot resume and says why.
+    Settled,
+    Spawn(Box<super::pane_resume::RuntimeSpawn>, AgentResumeFinish),
+}
+
+/// What to type into the shell once it runs.
+pub(super) struct AgentResumeFinish {
+    command: String,
+    agent: String,
+    codex_thread: Option<String>,
 }
 
 fn derived_pending_agent_resume_pane_infos(

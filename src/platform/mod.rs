@@ -241,6 +241,20 @@ pub enum SuspendCause {
     PaneJobEnded,
 }
 
+impl SuspendCause {
+    /// The cause as the API's `suspend_cause` names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HolderLost => "holder_lost",
+            Self::HostShutdown => "host_shutdown",
+            Self::CoreStopped => "core_stopped",
+            Self::StoppedByRestart => "stopped_by_restart",
+            Self::TerminalGone => "terminal_gone",
+            Self::PaneJobEnded => "pane_job_ended",
+        }
+    }
+}
+
 /// A process as herdr saw it: its pid and its start token, which tells it
 /// apart from a later process that reuses the pid (core-phase3 D1a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

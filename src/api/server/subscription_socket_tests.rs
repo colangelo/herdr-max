@@ -228,6 +228,7 @@ fn reply_to_probe(request: ApiRequestMessage) {
                 suspended: false,
                 core_waiting: false,
                 core_unreachable_since: None,
+                suspend_cause: None,
                 label: None,
                 agent: Some("pi".into()),
                 title: None,

@@ -346,6 +346,9 @@ impl App {
             suspended: terminal.is_suspended(),
             core_waiting: terminal.core_waiting().is_some(),
             core_unreachable_since: terminal.core_unreachable_since,
+            suspend_cause: terminal
+                .suspension()
+                .map(|suspension| suspension.cause.as_str().to_string()),
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,

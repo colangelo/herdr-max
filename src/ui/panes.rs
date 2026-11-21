@@ -487,6 +487,9 @@ pub(crate) const SUSPENDED_PANE_NOTICE: &str = "Suspended: macOS ended this pane
 /// What a suspended core pane shows until it starts again (core-phase3 D1).
 const CORE_SUSPENDED_PANE_NOTICE: &str =
     "Suspended: Herdr Core ended this pane's program. It starts again here, and its agent resumes.";
+/// What a core pane shows after a person stopped Herdr Core (core-phase3 D3b).
+const CORE_STOPPED_PANE_NOTICE: &str =
+    "Suspended: Herdr Core was stopped. This pane starts again here, and its agent resumes, once Herdr Core runs again (`hc server start`, or a herdr restart).";
 /// Drawn over a core pane's last row while core does not answer (core-phase3 D1a).
 const CORE_UNREACHABLE_LINE: &str = " Herdr Core is not answering; the program keeps running ";
 
@@ -494,6 +497,9 @@ const CORE_UNREACHABLE_LINE: &str = " Herdr Core is not answering; the program k
 fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow<'static, str> {
     use crate::terminal::state::{PaneHold, ResumeBlock};
     match hold {
+        PaneHold::Suspended(suspension) if suspension.resuming => {
+            "Resuming: this pane's program is starting again.".into()
+        }
         PaneHold::Suspended(suspension) => match suspension.blocked {
             Some(ResumeBlock::StillRuns(pid)) => format!(
                 "Suspended: the old program (pid {pid}) still runs. This pane starts again once it ends."
@@ -504,6 +510,9 @@ fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow
             }
             None if suspension.cause == crate::platform::SuspendCause::PaneJobEnded => {
                 SUSPENDED_PANE_NOTICE.into()
+            }
+            None if suspension.cause == crate::platform::SuspendCause::CoreStopped => {
+                CORE_STOPPED_PANE_NOTICE.into()
             }
             None => CORE_SUSPENDED_PANE_NOTICE.into(),
         },
