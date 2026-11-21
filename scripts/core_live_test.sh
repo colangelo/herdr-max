@@ -8,7 +8,11 @@
 # (openspec/changes/core-spaces-doc); V10: a live handoff, then `herdr server
 # restart`, then `herdr server stop`. Core-phase3: V14, a holder loss suspends
 # the core panes and they resume; V29, with the core server killed, a restart
-# and a live handoff start nothing and the panes wait for core.
+# and a live handoff start nothing and the panes wait for core, which herdr
+# starts again; V15, a killed core server is started again after 3 s and
+# every program keeps its pid; V37, `hc server stop` suspends the panes and
+# herdr waits for core; V16, a holder that keeps dying makes herdr give up on
+# core until a config reload.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -336,8 +340,8 @@ echo "ok: B, C and D started again on holder $NEW_HOLDER; the agent resumed with
 # 3c. V29a (core-phase3 D1a, D1b): with the core server killed (its socket
 #     stays and refuses; the holder and the programs run on), a restart and a
 #     live handoff start nothing for the core panes: they wait for core, and
-#     attach to the same programs once a core runs again. No hc call here
-#     before the deliberate start: any hc call would start a core.
+#     attach to the same programs once herdr has started the core again (D3,
+#     3 s down). No hc call here before that: any hc call would start a core.
 core_terminals > "$BASE/before"
 before_of() { awk -v pane="$1" '$3 == pane { print $1, $2 }' "$BASE/before"; }
 before_pid() { awk -v pane="$1" '$3 == pane { print $2 }' "$BASE/before"; }
@@ -355,11 +359,12 @@ run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
   || fail "live handoff with panes waiting for core did not complete"
 wait_until "server after the handoff" socket_up
 for pane in "$B" "$C" "$D"; do
-  is_waiting "$pane" || fail "pane $pane does not wait for core after the handoff"
+  # Waiting, or already attached to its own program if herdr started the
+  # core in the meantime: never a fresh program.
+  is_waiting "$pane" || is_running "$pane" || fail "pane $pane neither waits nor runs after the handoff"
   alive "$(before_pid "$pane")" || fail "pane $pane's program ended in the handoff"
 done
 echo "ok: with the core server down, a restart and a handoff started nothing for B, C and D"
-hc_scratch server start >/dev/null
 for pane in "$B" "$C" "$D"; do
   wait_long "pane $pane attached once core runs" is_running "$pane"
   [[ "$(address_of "$pane") $(pid_of "$pane")" == "$(before_of "$pane")" ]] \
@@ -368,23 +373,147 @@ done
 [[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "a program was started: $(core_terminals)"
 send_line "$B" "echo after-wait > $BASE/b.wait"
 wait_until "input to B after it attached" file_has_line "$BASE/b.wait"
-echo "ok: B, C and D attached to the same programs; nothing was started twice"
-ADDR="$(address_of "$B")"
-B_PID="$(pid_of "$B")"
-C_PID="$(pid_of "$C")"
-D_PID="$(pid_of "$D")"
+echo "ok: B, C and D attached to the same programs once herdr started the core; nothing was started twice"
+
+# 3d. V15 (core-phase3 D3): the core server killed while herdr runs. Its
+#     socket stays and refuses; after 3 s herdr starts the core, which finds
+#     the live holder: every program keeps its pid and nothing is suspended.
+#     No hc call until the core is back: any hc call would start one.
+CORE_SOCKET="$RUNTIME_DIR/herdr-core/$CORE_SESSION.sock"
+core_socket_state() {
+  python3 -I - "$CORE_SOCKET" <<'PY2'
+import os, socket, sys
+if not os.path.exists(sys.argv[1]):
+    print("missing")
+    raise SystemExit
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    client.connect(sys.argv[1])
+    print("up")
+except ConnectionRefusedError:
+    print("refused")
+PY2
+}
+core_up() { [[ "$(core_socket_state)" == up ]]; }
+core_terminals > "$BASE/before15"
+CORE="$(core_pid)"
+kill -KILL "$CORE"
+wait_until "core server gone" gone "$CORE"
+KILLED_AT="$(python3 -I -c 'import time; print(time.monotonic())')"
+[[ "$(core_socket_state)" == refused ]] || fail "the killed core's socket is $(core_socket_state), not refused"
+wait_long "herdr started the core again" core_up
+GAP="$(python3 -I -c 'import sys,time; print(f"{time.monotonic()-float(sys.argv[1]):.1f}")' "$KILLED_AT")"
+python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= 3.0 else 1)' "$GAP" \
+  || fail "herdr started the core after only $GAP s"
+for pane in "$B" "$C" "$D"; do
+  wait_long "pane $pane reattached after the core came back" is_running "$pane"
+done
+[[ "$(core_terminals | sort)" == "$(sort "$BASE/before15")" ]] \
+  || fail "programs changed across the core server loss: $(core_terminals) vs $(cat "$BASE/before15")"
+[[ "$(core_pid)" != "$CORE" ]] || fail "the core pid did not change"
+send_line "$B" "echo after-v15 > $BASE/b.v15"
+wait_until "input to B after the core came back" file_has_line "$BASE/b.v15"
+echo "ok: herdr started the killed core again after $GAP s; B, C and D kept their programs"
+
+# 3e. V37 (core-phase3 D3b): `hc server stop` is a person's stop. The panes
+#     are suspended, `core_stopped`, and herdr does not start the core; once
+#     someone starts it, each pane resumes after the dead-program check.
+OLD_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
+hc_scratch server stop >/dev/null
+for pane in "$B" "$C" "$D"; do
+  wait_until "pane $pane suspended by the stop" is_suspended "$pane"
+  [[ "$(pane_field "$pane" suspend_cause)" == core_stopped ]] \
+    || fail "pane $pane suspended as $(pane_field "$pane" suspend_cause)"
+done
+for _ in $(seq 1 60); do
+  [[ "$(core_socket_state)" == missing ]] || fail "herdr started the core a person stopped"
+  for pane in "$B" "$C" "$D"; do
+    is_suspended "$pane" || fail "pane $pane resumed while the core was stopped"
+  done
+  sleep 1
+done
+echo "ok: after hc server stop, B, C and D stayed suspended and no core was started for 60 s"
+hc_scratch server start >/dev/null
+for pane in "$B" "$C" "$D"; do
+  wait_long "pane $pane resumed once the core runs" is_running "$pane"
+done
+NEW_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "expected three core panes: $(core_terminals)"
+[[ "$NEW_PIDS" != "$OLD_PIDS" ]] || fail "the panes did not start new programs"
+echo "ok: once the core was started by hand, B, C and D resumed on it"
+
+#     V37, second run: stopped again, then a herdr restart, whose first
+#     connection may start the core; the panes come back.
+hc_scratch server stop >/dev/null
+for pane in "$B" "$C" "$D"; do
+  wait_until "pane $pane suspended by the second stop" is_suspended "$pane"
+done
+run_herdr server restart --yes >"$BASE/restart3.out" 2>&1 &
+wait_until "server after the third restart" socket_up
+for pane in "$B" "$C" "$D"; do
+  wait_long "pane $pane running after the restart" is_running "$pane"
+done
+# Restored panes start on the PTY until PR F (core-phase3 D8).
+echo "ok: after a second stop, a herdr restart brought B, C and D back"
+
+# 3f. V16 (core-phase3 D3a): a holder that keeps dying. Each loss suspends
+#     the core panes and they resume on a new holder; the third burst in ten
+#     minutes makes herdr give up: the panes resume on the PTY and `herdr
+#     server status` says `core: gave_up` until a config reload.
+E="$(split_down "$A")"
+send_line "$E" "echo \$\$ > $BASE/e.pid"
+wait_until "pane E pid" file_has_line "$BASE/e.pid"
+F="$(split_down "$E")"
+send_line "$F" "echo \$\$ > $BASE/f.pid"
+wait_until "pane F pid" file_has_line "$BASE/f.pid"
+on_core() { [[ -n "$(pid_of "$1")" ]]; }
+on_core "$E" || fail "pane E is not on core: $(core_terminals)"
+on_core "$F" || fail "pane F is not on core: $(core_terminals)"
+server_core_field() {
+  run_herdr status server --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin).get("core") or "-")'
+}
+[[ "$(server_core_field)" == - ]] || fail "a new server reports core $(server_core_field)"
+for round in 1 2 3; do
+  HOLDER="$(hc_scratch server status --json | python3 -I -c 'import json,sys; h=json.load(sys.stdin)["holders"]; print(h[0]["pid"] if h else 0)')"
+  [[ "$HOLDER" != 0 ]] || fail "round $round: no holder to quit"
+  kill -TERM "$HOLDER"
+  for pane in "$E" "$F"; do
+    wait_until "round $round: pane $pane suspended" is_suspended "$pane"
+  done
+  for pane in "$E" "$F"; do
+    wait_long "round $round: pane $pane resumed" is_running "$pane"
+  done
+  if (( round < 3 )); then
+    on_core "$E" || fail "round $round: E resumed off core"
+    [[ "$(server_core_field)" == - ]] || fail "round $round: gave up too early"
+  fi
+done
+[[ "$(server_core_field)" == gave_up ]] || fail "server status says core $(server_core_field), not gave_up"
+on_core "$E" && fail "the third resume of E ran on core"
+on_core "$F" && fail "the third resume of F ran on core"
+grep -q "keeps ending panes" "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.log \
+  || fail "no keeps-ending line in the server log"
+echo "ok: the third holder loss made herdr give up; E and F resumed on the PTY; status says core: gave_up"
+run_herdr server reload-config >/dev/null
+[[ "$(server_core_field)" == - ]] || fail "a reload did not reset the guard: $(server_core_field)"
+echo "ok: a config reload reset the guard"
+
+G="$(split_down "$F")"
+send_line "$G" "echo \$\$ > $BASE/g.pid"
+wait_until "pane G pid" file_has_line "$BASE/g.pid"
+on_core "$G" || fail "after the reload, a new pane G is not on core: $(core_terminals)"
+ADDR="$(address_of "$G")"
+G_PID="$(pid_of "$G")"
 CORE="$(core_pid)"
 
 # 4. herdr server stop ends the core pane's program.
 run_herdr server stop >/dev/null
-wait_until "core pane's program ended by the stop" gone "$B_PID"
-wait_until "core pane C's program ended by the stop" gone "$C_PID"
-wait_until "core pane D's program ended by the stop" gone "$D_PID"
+wait_until "core pane G's program ended by the stop" gone "$G_PID"
 if core_terminals | grep -q "^$ADDR "; then
   fail "$ADDR still live after server stop"
 fi
-# B was the pane whose spawn started the core; ending it (the D8 close path)
-# and stopping our server leave the core running.
+# Ending our server's panes (the D8 close path) and stopping our server
+# leave the core running.
 alive "$CORE" || fail "core ended with our server"
-echo "ok: server stop ended B's program and left the core $CORE running"
-echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V29a)"
+echo "ok: server stop ended G's program and left the core $CORE running"
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V29a, V37)"
