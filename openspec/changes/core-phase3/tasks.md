@@ -19,14 +19,34 @@ rollout R.
 
 ## PR A1. Loss outcomes, identity in the link, no fresh start on a guess (#287, herdr-max side)
 
-- [ ] A1.1 `exit_reason` per D1 with `SuspendCause`; `ReattachOutcome` in `pane_io.rs` with the limit on `Shared`,
+- [x] A1.1 `exit_reason` per D1 with `SuspendCause`; `ReattachOutcome` in `pane_io.rs` with the limit on `Shared`,
   `core_unreachable_since` fact; V1, V3, V34
-- [ ] A1.2 `PaneCoreTerminalSnapshot.pid` and `pid_started` (optional), written from the attach identity; V31
-- [ ] A1.3 `RestoreReattach` table in `reattach_core_pane`, the `CoreWaiting` pane state and its 10 s retry; V30
-- [ ] A1.4 Known-session search before any fresh start; V45; live V29 in `scripts/core_live_test.sh`
-- [ ] A1.5 Dead-program check before every resume (all causes, pid 0 may run, agent pid); V35
-- [ ] A1.6 V13 invariants with suspended and waiting core panes; V2, V14 in `just core-live-test`
-- [ ] A1.7 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows
+- [x] A1.2 `PaneCoreTerminalSnapshot.pid` and `pid_started` (optional), written from the attach identity; V31
+- [x] A1.3 `RestoreReattach` table in `reattach_core_pane`, the `CoreWaiting` pane state and its 10 s retry; V30
+- [x] A1.4 Known-session search before any fresh start; V45; live V29 in `scripts/core_live_test.sh`
+- [x] A1.5 Dead-program check before every resume (all causes, pid 0 may run, agent pid); V35
+- [x] A1.6 V13 invariants with suspended and waiting core panes; V2, V14 in `just core-live-test`
+- [ ] A1.7 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows (both checks 0 on
+  m4m, 2026-11-21; CI waits for the push)
+
+A1 as built (47219db8, 6dd307f6):
+
+- `ReattachOutcome::Gone` carries the `ChildExitReason` of D1, not a bare `SuspendCause`: a finished record whose
+  program exited by itself (`exited`, a code) still closes the pane once the program is gone.
+- `RestoreReattach` is `after_failed_attach` in `src/persist/restore.rs` (`Wait` or `Search`) plus `CoreRestore`.
+  A live address labelled for another pane is treated as gone for this pane, except that a recorded program that
+  still runs makes the pane wait (D1a: never a fresh start while it runs).
+- The pane state is `TerminalState::hold: Option<PaneHold>` (`Suspended(Suspension)` or `CoreWaiting`), replacing
+  the `suspended` flag. Waiting and suspended panes keep their link in the saved session, so the next restore checks
+  it again. The API pane fact gains the optional `core_waiting` and `core_unreachable_since`.
+- Secondary sessions are reached at their own socket, never started and never through `HC_SOCKET`
+  (`connect_secondary`); the full `CoreSessions` registry stays PR B.
+- V29 (b), a secondary session down, is covered in unit tests (`core_restore_tests`), not live: a live secondary
+  needs the PR C placement.
+- A `server_stop` pane resumes like the other causes until A2 adds D3b's stop record; with the core still down it
+  resumes on the PTY.
+- Two terminals labelled for one pane show the conflict on the pane; their separate notice comes with A2's notices
+  (the orphan notice already names them).
 
 ## PR A2. Core start, loss guard, resume off the loop
 
