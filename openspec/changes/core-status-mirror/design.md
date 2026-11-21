@@ -73,13 +73,18 @@ to core events (M3) and never reads core's `status`. Tests assert both.
   that is core's rule and matches herdr's release-to-clear.
 - A record a previous server wrote stays when the agent ended during a handoff and the
   new server never sees it, until the program exits or a new status arrives.
+- herdr turns `done` into `idle` when the pane is viewed, without a state update; the
+  mirror keeps `done` until the next status change.
+- A program whose output never pauses for 100 ms (a fast animated spinner) delays its
+  record until it does. Whether a working agent's screen pauses that long is not
+  measured yet; the beta check (verifier 16) shows it.
 
 ## Verifier table (required tests)
 
 The answer key for 2, 12 and 13 is herdr-core itself: its OSC 7501 encoder
 (`status.rs` `encode`) and its stored `status` as `hc get --json` reports it. Rows 1-11
-are unit tests next to the code; 12-14 run with `just core-live-test` against a
-throwaway `hc` 0.1.21; 15 is ac's own check on the phone.
+are unit tests next to the code; 12-15 run with `just core-live-test` against a
+throwaway `hc` 0.1.21; 16 is ac's own check on the phone.
 
 | # | Proves | Where | Pass when |
 |---|---|---|---|
@@ -93,8 +98,9 @@ throwaway `hc` 0.1.21; 15 is ac's own check on the phone.
 | 8 | checked write | unit (Unix), `src/platform/unix_common.rs` | a regular file is refused; a fresh pty slave gets exactly the record bytes on its master |
 | 9 | config key | unit, `src/config/model.rs` | default false; `core_status_mirror = true` parses true |
 | 10 | server hand-off | unit, `src/app/core_status_mirror.rs` | flag on: a state update gives the pane's runtime the mapped record; flag off: none |
-| 11 | no feedback into herdr | unit, `src/pane.rs` tests | after the record bytes, visible and detection text are byte-identical and no event is sent |
+| 11 | no feedback into herdr | unit, `src/pane.rs` tests | after the record bytes, visible and detection text are byte-identical and no reply goes to the program |
 | 12 | live: core stores the mirror | live, `src/pane/core_backend_live_tests.rs` | `hc get --json` shows `status.state=working`, `app=claude`; after `clear`, no `status` |
 | 13 | live: echo is inert | live, same test | no `HookStateReported`/`AgentHintReported`, screen text unchanged |
 | 14 | M3 unchanged | live, `core_v8_printed_status_is_not_an_agent_report` | passes unchanged |
-| 15 | the phone's Inbox | ac, Herdr Mobile on m4m with a beta that has the flag on | a working agent pane appears in the Inbox (not run by the builder) |
+| 15 | server path: config, hook report, mirror | live, `scripts/core_live_test.sh` (V11 step) | with `core_status_mirror = true`, a `report-agent --state working --agent pi` in a core pane gives `hc get` status `working pi` |
+| 16 | the phone's Inbox | ac, Herdr Mobile on m4m with a beta that has the flag on | a working agent pane appears in the Inbox (not run by the builder) |
