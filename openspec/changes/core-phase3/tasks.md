@@ -197,8 +197,22 @@ C as built:
 
 ## PR D. The `herdr-app` leaf filter (after PR 59)
 
-- [ ] D.1 `spaces_document` leaf filter by the primary session; publisher on the primary only; V11
-- [ ] D.2 Check: `just check` 0, `just core-live-test` 0 (core-spaces-doc rows 10, 11, 13 unchanged), CI green
+- [x] D.1 `spaces_document` leaf filter by the primary session; publisher on the primary only; V11
+- [x] D.2 Check: `just check` 0, `just core-live-test` 0 (core-spaces-doc rows 10, 11, 13 unchanged), CI green (both 0 on m4m,
+  2026-11-21; CI waits for the push)
+
+D as built:
+
+- The leaf filter is the `core_address` closure `spaces_document` already took: `primary_address` keeps a link's
+  address only when its session is `core_session_name()`. `spaces_document` itself did not change. V11 is the unit
+  test `only_primary_session_panes_are_leaves` in `core_spaces_doc.rs`, with a `herdr` link beside `default` links.
+- The publisher already wrote through `existing_core_connector()`, the primary's connection, so D.1's "primary
+  only" needed no change there.
+- `core_session_name()` in `runtime_io/mod.rs` was test-only; it is now Unix-wide, with an empty-string twin for
+  non-Unix (no pane has a link there). Rows 10, 11 and 13 are the live `core_spaces_doc` tests in the core live
+  test, unchanged and passing.
+- Limit: a primary pane's leaf is only checked against the link's session; the live test does not put a legacy
+  pane beside a primary one in a published document.
 
 ## M. CPU re-measure (no code; after PR C, on its release build)
 
