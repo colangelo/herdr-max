@@ -161,13 +161,39 @@ B as built:
 
 ## PR C. The default herdr session moves to core session `default` (#293 1b)
 
-- [ ] C.1 `herdr_session_label()` and the new `core_session_name()` (D5); V5
-- [ ] C.2 SSH-start notice on positive evidence (D7); unit over a fake process table with an `sshd-session`
+- [x] C.1 `herdr_session_label()` and the new `core_session_name()` (D5); V5
+- [x] C.2 SSH-start notice on positive evidence (D7); unit over a fake process table with an `sshd-session`
   session leader and a ppid-1 desktop start
-- [ ] C.3 V17 live; V19 with `herdr`, `default` and a PTY pane; V21 rollback to the R0 beta and to beta 202
-- [ ] C.4 `docs/next`: the default session, the rollback rule (D10)
+- [x] C.3 V17 live; V19 with `herdr`, `default` and a PTY pane; V21 rollback to the R0 beta and to beta 202
+- [x] C.4 `docs/next`: the default session, the rollback rule (D10)
 - [ ] C.5 Check: `just check` 0, `just core-live-test` 0, CI green; two-vendor security review of A1, A2 and C
   together (core restart after loss, the shared default core, forged labels: open question 3)
+
+C as built:
+
+- `core_session_name()` is `core_session_for` in `core_backend/sessions.rs`: the release default herdr session gives
+  `default`, every other session its label's name. The primary connector, the orphan scan and the known-session
+  search needed no change: B's registry already read `herdr` and `default` for that session.
+- The SSH check is `core_backend/ssh_start.rs`: `started_over_ssh` over a `ProcessTable` (`getsid`, then the
+  session leader and its parents, looking for `sshd` or `sshd-session`). It runs once per core pid on each new
+  primary connection, a core herdr started included, and raises `AppEvent::CoreStartedOverSsh`, one warning and
+  one notice. Limit, measured on m4m with hc 0.1.21: the core server is its own session leader with parent
+  launchd, both after a start from a herdr pane with `SSH_CONNECTION` set and in each core running there, so for an
+  hc-started core the test finds no SSH login and the notice does not fire. It fires only for a core that stays in
+  its starter's session. The core's environment was not used instead: any core started by a process that
+  inherited the SSH variables carries them (inferred: the variables are inherited, as the probe's core showed). The
+  replacement D7 names, core's `installed_by` and launch facts in `server.status`, is the real fix.
+- V5 is a unit test in `sessions.rs`; V17, V19 and V21 are `scripts/core_default_session_live_test.sh`, which needs
+  a release build (only a release build uses `default`) and which `just core-live-test` runs after
+  `cargo build --release`. It asserts its XDG directories are under its own temp folder before any hc call.
+  V17 runs twice: a saved link pointed at a labelled program in scratch `herdr` (as B's V19), and a pane that
+  beta 202 itself started in `herdr` before the handoff back.
+- V21 runs only with `HERDR_R0_BIN` and `HERDR_202_BIN`. Run on 2026-11-21 with beta 204
+  (`0.9.5-ac-beta.204-lichtsteiner`, the published beta asset, built at 785e60a0, PR B's head) as the R0 beta,
+  and a local release build of 1a590805 (beta 202's commit, #293) as beta 202: not the published 202 binary, and
+  without its beta version string.
+- Until PR D, the spaces publisher writes to the primary, now `default`, with panes still in `herdr` as leaves
+  whose addresses mean nothing there (D7): C and D ship in the same beta (R.1).
 
 ## PR D. The `herdr-app` leaf filter (after PR 59)
 
