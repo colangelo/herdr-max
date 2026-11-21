@@ -1479,6 +1479,20 @@ impl AppState {
             AppEvent::PaneResumed { .. } => Vec::new(),
             #[cfg(unix)]
             AppEvent::CoreGaveUp => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::CoreStartedOverSsh { session } => {
+                self.post_notification(ToastNotification {
+                    kind: ToastKind::NeedsAttention,
+                    title: "Herdr Core started over SSH".into(),
+                    context: format!(
+                        "Herdr Core in session {session} was started over SSH; restart it from a desktop terminal."
+                    ),
+                    position: None,
+                    target: None,
+                    anchor_pane: None,
+                });
+                Vec::new()
+            }
             AppEvent::CoreUnreachable { pane_id, since } => {
                 if let Some(terminal) = self.pane_terminal_mut(pane_id) {
                     if terminal.core_unreachable_since != since {
@@ -2427,6 +2441,23 @@ mod tests {
         assert_eq!(
             toast.context,
             "herdr-core 0.1.17 is older than 0.1.21. New panes use the PTY."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_core_started_over_ssh_raises_a_notice_naming_its_session() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        state.handle_app_event(AppEvent::CoreStartedOverSsh {
+            session: "default".into(),
+        });
+
+        let toast = state.toast.as_ref().expect("a notice");
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(
+            toast.context,
+            "Herdr Core in session default was started over SSH; restart it from a desktop terminal."
         );
     }
 

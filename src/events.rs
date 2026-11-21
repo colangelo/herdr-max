@@ -240,6 +240,10 @@ pub enum AppEvent {
     /// core starts, panes resume on the PTY (core-phase3 D3a).
     #[cfg(unix)]
     CoreGaveUp,
+    /// The core of `session` herdr connected to was started over SSH
+    /// (core-phase3 D7). Sent once per core process.
+    #[cfg(unix)]
+    CoreStartedOverSsh { session: String },
     /// The resume worker's answer for one suspended pane (core-phase3 D2).
     PaneResumed {
         pane_id: PaneId,

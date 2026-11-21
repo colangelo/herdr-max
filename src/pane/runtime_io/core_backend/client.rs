@@ -679,8 +679,12 @@ fn run_core_start(session: &str) -> Result<(), CoreError> {
 /// landed during a restart returns before the restarted core listens.
 const START_POLL_LIMIT: Duration = Duration::from_secs(2);
 
-/// Starts `session` and connects to it once it answers at `socket`.
-pub(crate) fn start_and_connect(session: &str, socket: &Path) -> Result<CoreClient, CoreError> {
+/// Starts `session` and connects to it once it answers at `socket`. Returns
+/// core's `server.status` too.
+pub(crate) fn start_and_connect(
+    session: &str,
+    socket: &Path,
+) -> Result<(CoreClient, Value), CoreError> {
     start_core(session)?;
     let deadline = std::time::Instant::now() + START_POLL_LIMIT;
     let (client, status) = loop {
@@ -701,7 +705,7 @@ pub(crate) fn start_and_connect(session: &str, socket: &Path) -> Result<CoreClie
             "herdr-core runs in this server's session; it may end when this server does, and core panes with it"
         );
     }
-    Ok(client)
+    Ok((client, status))
 }
 
 /// Connects to a core session other than the server's own, at that

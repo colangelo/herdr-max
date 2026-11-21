@@ -498,6 +498,11 @@ pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     super::process_name_and_parent(pid).map(|(_, parent)| parent)
 }
 
+/// The short name of process `pid` (its executable's), when it can be read.
+pub(crate) fn process_name(pid: u32) -> Option<String> {
+    super::process_name_and_parent(pid).map(|(name, _)| name)
+}
+
 /// A program's own terminal, pinned when herdr attached to the program: its
 /// pid, that process's identity and its terminal's device id
 /// (openspec/changes/core-status-mirror, D4; security review 2026-11-21 M1).

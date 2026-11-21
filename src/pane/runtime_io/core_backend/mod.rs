@@ -9,6 +9,7 @@ mod pane_io;
 mod primary;
 mod sessions;
 pub(crate) mod spaces_doc;
+mod ssh_start;
 mod status_mirror;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,10 +106,30 @@ pub(crate) fn note_core_loss(now: std::time::Instant) -> bool {
     }
     GAVE_UP.store(true, Ordering::Release);
     warn!("herdr-core keeps ending panes; no more core starts, panes resume on the PTY");
-    if let Some(events) = lock(&EVENTS).as_ref() {
-        let _ = events.try_send(crate::events::AppEvent::CoreGaveUp);
-    }
+    tell_server(crate::events::AppEvent::CoreGaveUp);
     true
+}
+
+fn tell_server(event: crate::events::AppEvent) {
+    if let Some(events) = lock(&EVENTS).as_ref() {
+        let _ = events.try_send(event);
+    }
+}
+
+/// Raises the one warning and notice when the core at `core_pid`, which
+/// `session` was just connected to, was started over SSH (core-phase3 D7).
+/// The server never restarts that core: other clients share it.
+fn check_ssh_start(session: &str, core_pid: u32) {
+    if core_pid == 0 || !ssh_start::started_over_ssh(core_pid, &ssh_start::LiveProcesses) {
+        return;
+    }
+    warn!(
+        session,
+        core_pid, "herdr-core was started over SSH; restart it from a desktop terminal"
+    );
+    tell_server(crate::events::AppEvent::CoreStartedOverSsh {
+        session: session.to_string(),
+    });
 }
 
 pub(crate) fn gave_up() -> bool {

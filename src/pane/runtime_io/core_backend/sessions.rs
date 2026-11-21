@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use super::client::{self, CoreClient};
-use super::{gave_up, lock, note_core_loss, primary, Connector};
+use super::{check_ssh_start, gave_up, lock, note_core_loss, primary, Connector};
 
 /// One connection per core session (D6). The primary, where new panes go,
 /// is the only session herdr ever starts (D3). A secondary is a session a
@@ -25,6 +25,7 @@ static SESSIONS: CoreSessions = CoreSessions {
     primary: Mutex::new(Primary {
         client: None,
         rule: primary::StartRule::new(),
+        checked_core_pid: 0,
     }),
     secondaries: Mutex::new(BTreeMap::new()),
 };
@@ -34,6 +35,9 @@ static SESSIONS: CoreSessions = CoreSessions {
 struct Primary {
     client: Option<CoreClient>,
     rule: primary::StartRule,
+    /// The core process last checked for an SSH start (D7), so each core
+    /// gets one notice at most.
+    checked_core_pid: u32,
 }
 
 /// The `herdr.session` label that marks a core terminal as this herdr
@@ -167,7 +171,7 @@ fn connector(first_start: bool) -> Connector {
         // program prints, which any printed file can forge, so herdr does not
         // use it (security review M3; design D9). Detection and hooks decide.
         let err = match client::connect_at(&socket) {
-            Ok((client, _)) => return Ok(primary.connected(client)),
+            Ok((client, status)) => return Ok(primary.connected(&session, client, &status)),
             Err(err) => err,
         };
         let now = std::time::Instant::now();
@@ -185,14 +189,27 @@ fn connector(first_start: bool) -> Connector {
                 "herdr-core has been down for 3 s or more; starting it again"
             );
         }
-        client::start_and_connect(&session, &socket).map(|client| primary.connected(client))
+        client::start_and_connect(&session, &socket)
+            .map(|(client, status)| primary.connected(&session, client, &status))
     })
 }
 
 impl Primary {
-    fn connected(&mut self, client: CoreClient) -> CoreClient {
+    fn connected(
+        &mut self,
+        session: &str,
+        client: CoreClient,
+        status: &serde_json::Value,
+    ) -> CoreClient {
         self.rule.connected();
         self.client = Some(client.clone());
+        let core_pid = status["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok());
+        if let Some(core_pid) = core_pid.filter(|pid| *pid != self.checked_core_pid) {
+            self.checked_core_pid = core_pid;
+            check_ssh_start(session, core_pid);
+        }
         client
     }
 }
