@@ -6,6 +6,7 @@ pub(crate) mod client;
 pub(crate) mod fake;
 pub(crate) mod frame;
 mod pane_io;
+pub(crate) mod spaces_doc;
 mod status_mirror;
 
 use std::sync::atomic::{AtomicBool, Ordering};
