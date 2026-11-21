@@ -10,6 +10,7 @@ use ratatui::layout::Direction;
 use serde::Serialize;
 
 use crate::layout::Node;
+use crate::pane::CoreTerminalLink;
 use crate::terminal::{TerminalId, TerminalState};
 use crate::workspace::{public_pane_id_for_number, public_tab_id_for_number, Tab, Workspace};
 
@@ -69,6 +70,13 @@ struct TerminalBlock {
 #[derive(Debug, Clone, Copy, Serialize)]
 struct Weight {
     weight: f32,
+}
+
+/// A pane's leaf address: only a terminal in the primary session, the one the
+/// document is written to, has an address that means something there. A pane
+/// in another core session is left out like a PTY pane (core-phase3 D7).
+fn primary_address(link: CoreTerminalLink, primary: &str) -> Option<String> {
+    (link.session == primary).then_some(link.address)
 }
 
 /// Builds the document. `core_address` gives a terminal's core address, or
@@ -238,8 +246,9 @@ impl App {
             return;
         }
         let runtimes = &self.terminal_runtimes;
+        let primary = crate::pane::core_session_name();
         let document = spaces_document(&self.state.workspaces, &self.state.terminals, |id| {
-            runtimes.get(id)?.core_terminal().map(|link| link.address)
+            primary_address(runtimes.get(id)?.core_terminal()?, &primary)
         });
         let spaces: Result<Vec<_>, _> = document.spaces.iter().map(serde_json::to_value).collect();
         match spaces {
@@ -628,5 +637,59 @@ mod tests {
         app.schedule_session_save();
         app.sync_core_spaces_schedule();
         assert!(app.core_spaces_deadline.is_some());
+    }
+
+    fn link(session: &str, address: &str) -> CoreTerminalLink {
+        CoreTerminalLink {
+            session: session.into(),
+            address: address.into(),
+            program: None,
+        }
+    }
+
+    #[test]
+    fn only_primary_session_panes_are_leaves() {
+        let mut ws = Workspace::test_new("api");
+        let left = ws.tabs[0].root_pane;
+        let right = ws.test_split(Direction::Horizontal);
+        let below = ws.test_split(Direction::Vertical);
+        let legacy = ws.tabs[0].terminal_id(right).unwrap().clone();
+        let links: HashMap<TerminalId, CoreTerminalLink> = ws.tabs[0]
+            .layout
+            .pane_ids()
+            .into_iter()
+            .map(|pane| {
+                let id = ws.tabs[0].terminal_id(pane).unwrap().clone();
+                let session = if id == legacy { "herdr" } else { "default" };
+                (id, link(session, &format!("t{}", pane.raw())))
+            })
+            .collect();
+
+        let (_, doc) = decode(spaces_document(
+            std::slice::from_ref(&ws),
+            &HashMap::new(),
+            |id| primary_address(links.get(id)?.clone(), "default"),
+        ));
+
+        let root = &doc.spaces[0].tabs[0].root;
+        let [a, b] = children(root) else {
+            panic!("two sides")
+        };
+        assert_eq!(terminal_of(a), format!("t{}", left.raw()));
+        assert_eq!(terminal_of(b), format!("t{}", below.raw()));
+        assert_eq!(
+            weight(b),
+            0.5,
+            "the legacy side is left out, its split collapsed"
+        );
+    }
+
+    #[test]
+    fn a_link_names_the_primary_or_is_not_a_leaf() {
+        assert_eq!(
+            primary_address(link("default", "t8"), "default").as_deref(),
+            Some("t8")
+        );
+        assert_eq!(primary_address(link("herdr", "t8"), "default"), None);
     }
 }

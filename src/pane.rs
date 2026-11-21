@@ -22,7 +22,6 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
-#[cfg(all(test, unix))]
 pub(crate) use runtime_io::core_session_name;
 #[cfg(not(test))]
 pub(crate) use runtime_io::publish_core_spaces;

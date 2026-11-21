@@ -115,9 +115,15 @@ pub(crate) fn herdr_session_label() -> String {
 
 /// The herdr-core session this herdr session's new panes run in
 /// (core-phase3 D5).
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) fn core_session_name() -> String {
     core_backend::core_session_name()
+}
+
+/// Without a core backend there is no session, and no pane has a link.
+#[cfg(not(unix))]
+pub(crate) fn core_session_name() -> String {
+    String::new()
 }
 
 /// What restoring a pane's saved core terminal found, when it did not attach
