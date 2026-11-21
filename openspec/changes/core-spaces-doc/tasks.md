@@ -19,4 +19,5 @@
 
 - [x] 5.1 Live core test: publish, read back, conflict, clear (verifier 10-11); server path in `scripts/core_live_test.sh` (verifier 13)
 - [x] 5.2 `just check` and `just core-live-test` green
+- [x] 5.4 herdr-max owns only its marked spaces: `merge` in `spaces_doc.rs`, writer reads the value, re-merges on conflict, leaves an undecodable value; live tests seed a foreign space (verifier 5-8, 10-11, 13-18); `just check` and `just core-live-test` green
 - [ ] 5.3 Beta with the flag on in ac's m4m config; ac checks the phone's spaces (verifier 12)

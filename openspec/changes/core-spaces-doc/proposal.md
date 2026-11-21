@@ -16,19 +16,24 @@ phone has terminals but no workspaces, tabs or splits to put them in.
   becomes a space (`id`, `name`, `folder`), each tab becomes a tab, and each tab's split
   tree becomes the app's layout `Node`. Each pane that runs in herdr-core becomes a
   `terminal` block that holds the pane's core address.
-- A background thread writes the document into this herdr session's core session with
-  `doc.set`, using compare-and-set on the version. It keeps only the latest document.
-  It skips a document equal to the last one it wrote. On `conflict` it reads the
-  current version and writes again.
+- Other clients (the phone app, a Herdr Mac app) write the same document, so herdr-max
+  owns only the spaces it marks with `"herdr_max": 1`. A background thread reads the
+  document, keeps every unmarked space as it is, puts herdr-max's current spaces in
+  place of its marked ones, and writes with `doc.set` using compare-and-set on the
+  version it read. It keeps only the latest spaces and skips spaces equal to the last
+  ones it wrote. On `conflict` it reads and merges again. A value it cannot decode is
+  left alone.
 - The server builds the document on its main loop, 500 ms after a change that would
   also be saved to the session, and once at startup and after a handoff.
 - Behind `[experimental] core_spaces_doc` (default false). Config reload applies it.
-  Turning it on publishes the layout. Turning it off writes `null` to the document.
+  Turning it on publishes the layout. Turning it off removes herdr-max's spaces and
+  writes `null` only when nothing else remains.
 
 ## What does not change
 
-- herdr's layout stays the only source. herdr never reads the document back. A space
-  that a phone or Mac app edits is overwritten by herdr's next publish.
+- herdr's layout stays the only source of herdr's spaces. herdr never applies the
+  document to its layout. A phone or Mac app's edit to one of herdr's spaces is replaced
+  by herdr's next publish. Other clients' spaces are never changed.
 - PTY panes: they are not in core, so the phone cannot show them. They are left out.
 - Windows: the core backend is Unix only.
 

@@ -8,7 +8,7 @@ The source is `github.com/herdrdev/herdr-app`: `src/mirror.rs` (`Document`,
 `schema/README.md` § Documents defines the calls. The shape herdr writes:
 
 ```json
-{"spaces": [{"id": "w1", "name": "herdr", "folder": "/Users/ac/dev/herdr",
+{"spaces": [{"id": "w1", "name": "herdr", "folder": "/Users/ac/dev/herdr", "herdr_max": 1,
   "tabs": [{"id": "w1:t1", "name": "1", "root":
     {"id": "w1:t1", "type": "row", "children": [
       {"id": "w1:p1", "type": "block", "content": {"terminal": "t7"}, "size": {"weight": 0.5}},
@@ -19,7 +19,10 @@ The source is `github.com/herdrdev/herdr-app`: `src/mirror.rs` (`Document`,
 
 - Space: `id` is the public workspace id (`w1`). `name` is the name herdr shows (the
   custom name, else the automatic label). `folder` is the cwd of the first tab's root
-  pane, else the workspace's identity cwd.
+  pane, else the workspace's identity cwd. `herdr_max: 1` marks the space as herdr-max's
+  own (D6). The writer adds it. The apps keep unknown space fields across their own
+  writes (`SharedSpace.rest`, `#[serde(flatten)]` in `mirror.rs`), so the mark survives
+  a phone or Mac app write.
 - Tab: `id` is the public tab id (`w1:t1`). `name` is the custom name, else the tab's
   number, as herdr shows it.
 - `root`: a container whose `id` is the tab id, as the Mac app writes it
@@ -71,27 +74,32 @@ second and only on human-speed changes. It runs in no render, view or PTY loop.
 ## D5. The publisher
 
 `src/pane/runtime_io/core_backend/spaces_doc.rs`. `crate::pane::publish_core_spaces`
-sends a `serde_json::Value` (`Null` clears) over an `mpsc` channel. The first call
+sends herdr-max's spaces, a `Vec<serde_json::Value>`, over an `mpsc` channel. An empty
+list withdraws them. The first call
 starts one thread, `herdr-core-spaces`, which lives as long as the process. The server
 main loop never waits on core.
 
 The thread owns a `DocPublisher<S: DocStore>`:
 
 ```rust
+struct Doc { value: Value, version: u64 }
 trait DocStore {
-    fn get(&mut self) -> Result<u64, StoreError>;               // current version
+    fn get(&mut self) -> Result<Doc, StoreError>;               // current value and version
     fn set(&mut self, value: &Value, version: u64) -> Result<u64, StoreError>;
 }
 enum StoreError { Conflict, Unavailable(String) }
-struct DocPublisher<S> { store: S, version: Option<u64>, written: Option<Value>, pending: Option<Value> }
+struct DocPublisher<S> { store: S, written: Option<Vec<Value>>, pending: Option<Vec<Value>> }
+fn merge(current: &Value, ours: &[Value]) -> Result<Option<Value>, Undecodable>;
 ```
 
-- `offer(value)`: the latest value wins. A value equal to `written` clears `pending`.
-- `flush()`: with nothing pending it does nothing. Otherwise it gets the version when it
-  does not know one, then calls `set`. Success records `written` and the new version. On
-  `Conflict` it reads the version again and retries, at most 3 times. On `Unavailable`,
-  or when the retries run out, it keeps `pending` and forgets the version. The thread
-  then waits 10 s or for the next offer, whichever comes first, and flushes again.
+- `offer(spaces)`: marks each space with `herdr_max: 1`. The latest offer wins. An offer
+  equal to `written` (our spaces as last merged) clears `pending`.
+- `flush()`: with nothing pending it does nothing. Otherwise it reads the document's
+  value and version, merges our spaces into the value (D6), and calls `set` with that
+  version. A merge that changes nothing writes nothing. Success records `written`. On
+  `Conflict` it reads and merges again, at most 3 times. On `Unavailable`, on an
+  undecodable value, or when the retries run out, it keeps `pending`. The thread then
+  waits 10 s or for the next offer, whichever comes first, and flushes again.
 - The thread blocks on `recv` when nothing is pending. After each message it drains the
   channel, so one write covers a burst. Only one write is ever in flight.
 
@@ -101,12 +109,35 @@ core connection, which never starts a core, and calls `doc.get` and `doc.set` on
 every other error maps to `Unavailable`. It logs the first unavailability as a warning
 and later ones at debug level.
 
-## D6. One way
+## D6. herdr-max owns only its marked spaces
 
-herdr does not subscribe to doc events and never decodes the stored value. A foreign
-write (a phone edit, a Mac app on the same machine) stays until herdr's next publish.
-That publish then gets `conflict`, re-reads the version and overwrites the edit. ac
-approved this in #293 (b): herdr-max's layout is the source.
+Other clients write `herdr-app` too. The phone app writes it (`{"spaces":[]}` at version 4
+was seen in the default core session), and a Herdr Mac app on the same machine would. So
+herdr-max owns only the spaces it marked, and `merge(current, ours)` is the whole rule:
+
+- A space with a `herdr_max` field is ours. Every other space is foreign. herdr never
+  changes, moves relative to each other, or removes a foreign space, and keeps the
+  document's other top-level fields.
+- Ours replace the marked spaces as one block, at the place of the first marked space.
+  With no marked space yet, ours go after the foreign ones. This follows the Herdr app's
+  own `Document::replace`, which puts a machine's spaces where that machine's first space
+  was. A user who moved herdr-max's spaces in an app keeps that place.
+- An empty `ours` (the flag turned off) removes the marked spaces. The document becomes
+  `null` only when no foreign space and no other top-level field remains. A document
+  with no marked space and an empty `ours` is left alone, so a foreign-only document is
+  never written.
+- A merge that would not change the spaces writes nothing.
+- The value must be `null` or an object whose `spaces` is absent or a list of objects.
+  Anything else is undecodable. herdr does not overwrite it, logs a warning once, and
+  tries again after 10 s.
+
+The merge runs on the value just read, and `doc.set` is a compare-and-set on that
+version. A foreign write between the read and the write makes core answer `conflict`, and
+the writer reads and merges again. A foreign write can therefore never be lost.
+
+One way still holds for ours: herdr does not subscribe to doc events, and its layout is
+the source of its own spaces (#293 (b)). An app's edit to one of herdr's spaces stays
+until herdr's next publish, which replaces it.
 
 ## D7. Server tests use no core
 
@@ -116,7 +147,10 @@ no unit test can reach a user's core (`server_hangup_probe` uses the same patter
 
 ## Limits
 
-- An app edit is overwritten only at herdr's next layout change, not at once (D6).
+- An app's edit to one of herdr's spaces is replaced only at herdr's next layout change,
+  not at once (D6). An app that removes herdr's spaces sees them return then too.
+- The mark is the field's presence. A foreign client that copies a marked space keeps
+  the mark, so herdr takes that copy for its own and replaces it.
 - A pane's cwd change alone does not republish the space's `folder`. The next layout
   change carries it.
 - The document holds only core panes (D2). On m4m every pane is a core pane since
@@ -131,9 +165,9 @@ The answer key for 1 to 4 is the Herdr app's own serde shapes. A test-only copy 
 `Document`, `SharedSpace`, `SharedTab`, `Node`, `Kind`, `Content` and `Size` from
 `herdr-app` `src/mirror.rs` and `src/layout.rs` decodes what herdr writes, and that
 copy also decodes the app's own fixture from
-`unknown_space_and_tab_fields_survive_a_read_and_write`. Rows 1 to 9 are unit tests.
-Rows 10, 11 and 13 run with `just core-live-test` against a throwaway `hc` 0.1.21.
-Row 12 is ac's own check on the phone.
+`unknown_space_and_tab_fields_survive_a_read_and_write`. Rows 1 to 9 and 14 to 18 are
+unit tests. Rows 10, 11 and 13 run with `just core-live-test` against a throwaway `hc`
+0.1.21. Row 12 is ac's own check on the phone.
 
 | # | Proves | Where | Pass when |
 |---|---|---|---|
@@ -141,12 +175,17 @@ Row 12 is ac's own check on the phone.
 | 2 | spaces, tabs and names | unit, `core_spaces_doc.rs` | two workspaces with custom and automatic names, two tabs: ids `w…`/`w…:t…`, names and folder as D1; decodes with the copy |
 | 3 | split tree | unit, `core_spaces_doc.rs` | horizontal → `row`, vertical → `column`, weights `ratio`/`1-ratio`, root id is the tab id, leaves carry the core address |
 | 4 | non-core panes left out | unit, `core_spaces_doc.rs` | a split with one PTY side collapses to the core side, which keeps the slot's size; an all-PTY tab has an empty `row` root; it still decodes |
-| 5 | CAS write and dedupe | unit, `core_backend/spaces_doc.rs` | first flush gets then sets; an equal offer writes nothing; a new offer sets with the last version |
-| 6 | conflict | unit, `spaces_doc.rs` | a `Conflict` re-reads the version and the retry succeeds; three conflicts in a row keep the value pending |
-| 7 | unavailable | unit, `spaces_doc.rs` | `Unavailable` keeps the value pending and forgets the version; the next flush gets and sets |
-| 8 | latest wins | unit, `spaces_doc.rs` | three offers before a flush write only the last |
+| 5 | CAS write and mark | unit, `core_backend/spaces_doc.rs` | into an empty document, one get then one set at version 0; each space carries `herdr_max: 1` |
+| 6 | conflict re-merge | unit, `spaces_doc.rs` | a foreign write between get and set gives `Conflict`; the retry merges into the foreign value and keeps its new space; three conflicts in a row keep ours pending |
+| 7 | unavailable | unit, `spaces_doc.rs` | `Unavailable` keeps ours pending; the next flush gets and sets |
+| 8 | latest wins, no repeat | unit, `spaces_doc.rs` | three offers before a flush write only the last; offering it again writes nothing |
 | 9 | config and server schedule | unit, `src/config/model.rs` and `core_spaces_doc.rs` | default false, `core_spaces_doc = true` parses; flag off: a dirty flag sets no deadline and nothing is published; on: dirty sets a deadline 500 ms out, due publishes the document; turning off publishes `null` |
-| 10 | live: core stores the document | live, `src/pane/core_backend_live_tests.rs` | after `publish_core_spaces` with a document whose leaf is a real core pane's address, `doc.get herdr-app` returns that value and a version > 0 |
-| 11 | live: conflict and clear | live, same test | after a foreign `doc.set` bumps the version, the next publish still lands; publishing `null` leaves `value: null` |
+| 10 | live: merge beside a foreign space | live, `src/pane/core_backend_live_tests.rs` | core holds a foreign space; after `publish_core_spaces` with a space whose leaf is a real core pane's address, `doc.get herdr-app` returns the foreign space unchanged, then ours with `herdr_max: 1` |
+| 11 | live: foreign write and withdraw | live, same test | after a foreign `doc.set` moves ours first and adds a second foreign space, the next publish replaces ours in place and keeps both foreign spaces; publishing no spaces leaves only the two foreign ones |
 | 12 | the phone shows spaces | ac, Herdr Mobile on m4m, beta with the flag on | ac's workspaces appear as spaces with their tabs and terminals (not run by the builder) |
-| 13 | live: the server path | `scripts/core_live_test.sh` | with the flag on, split core pane B is `B=<address>` in the document and PTY pane A is not; a restarted server overwrites a foreign write; reload with the flag off leaves `null` |
+| 13 | live: the server path | `scripts/core_live_test.sh` | with the flag on, the document is one marked space whose only leaf is split core pane B (`B=<address>`), not PTY pane A; after a foreign write of space `s9` alone, a restarted server's document is `s9` then ours; reload with the flag off leaves `s9` alone |
+| 14 | foreign kept in place, ours replaced | unit, `spaces_doc.rs` | `[f1, ours, f2, ours]` with ours `[w1, w2]` gives `[f1, w1, w2, f2]`; `f1` and `f2` keep every field |
+| 15 | ours after foreign when new | unit, `spaces_doc.rs` | `{spaces: [f1], other}` gives `[f1, w1]` and keeps `other` |
+| 16 | off removes only ours | unit, `spaces_doc.rs` | `[ours, f1, ours]` with no spaces gives `[f1]`; `[ours]` alone gives `null` |
+| 17 | foreign-only left alone | unit, `spaces_doc.rs` | `null`, `{spaces: []}` and `{spaces: [f1]}` with no spaces of ours make no `set` |
+| 18 | undecodable untouched | unit, `spaces_doc.rs` | a string, an array, `spaces` as an object, and a non-object space: no `set`, `Retry`; once the value decodes, the next flush lands |
