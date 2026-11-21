@@ -12,8 +12,10 @@
 # starts again; V15, a killed core server is started again after 3 s and
 # every program keeps its pid; V37, `hc server stop` suspends the panes and
 # herdr waits for core; V16, a holder that keeps dying makes herdr give up on
-# core until a config reload; V33, a pane named by `core_pty_panes` stays on
-# the PTY when respawned, resumed and restored (macOS: it uses pane jobs).
+# core until a config reload; V19, a pane in a second core session is kept
+# through a handoff and a restart, and a stop ends both sessions' panes; V33,
+# a pane named by `core_pty_panes` stays on the PTY when respawned, resumed
+# and restored (macOS: it uses pane jobs).
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -29,6 +31,8 @@ RUNTIME_DIR="$BASE/r"
 STATE_DIR="$BASE/s"
 SESSION="v10"
 CORE_SESSION="herdrdev-$SESSION"
+# A second scratch core session, which herdr reaches but never starts (V19).
+OTHER="$CORE_SESSION-b"
 SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
 
 case "$BASE" in
@@ -50,10 +54,17 @@ hc_scratch() {
     HC_SESSION="$CORE_SESSION" hc "$@"
 }
 
+hc_other() {
+  env -u HC_SOCKET XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
+    HC_SESSION="$OTHER" hc "$@"
+}
+
 cleanup() {
   set +e
   run_herdr server stop >/dev/null 2>&1
   hc_scratch server stop >/dev/null 2>&1
+  # Only a running one: any hc call would start the session.
+  [[ -S "$RUNTIME_DIR/herdr-core/$OTHER.sock" ]] && hc_other server stop >/dev/null 2>&1
   for pid in $(jobs -p); do kill "$pid" 2>/dev/null; done
   rm -rf "$BASE"
 }
@@ -504,19 +515,125 @@ send_line "$G" "echo \$\$ > $BASE/g.pid"
 wait_until "pane G pid" file_has_line "$BASE/g.pid"
 on_core "$G" || fail "after the reload, a new pane G is not on core: $(core_terminals)"
 ADDR="$(address_of "$G")"
-G_PID="$(pid_of "$G")"
+
+# 3g. V19 (core-phase3 D6): a pane in a second core session. With our server
+#     killed (core programs live on), pane G's saved link is pointed at a
+#     program labelled for G in the scratch session $OTHER. The next server
+#     attaches G there without starting anything, keeps it through a live
+#     handoff and a restart, and names a stray terminal there with that
+#     session's look-up; `herdr server stop` ends the panes in both sessions.
+other_run() {
+  hc_other run --bg --json --no-parent --label "herdr.session=$CORE_SESSION" \
+    --label "herdr.pane_id=$1" -- /bin/sh -c 'echo $$ > "$0"; exec /bin/sh' "$2" \
+    | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["address"])'
+}
+server_pid() {
+  python3 -I - "$SOCKET" <<'PY2'
+import socket, struct, sys
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(sys.argv[1])
+if sys.platform == "darwin":
+    print(struct.unpack("i", client.getsockopt(0, 2, 4))[0])  # SOL_LOCAL, LOCAL_PEERPID
+else:
+    print(struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0])
+PY2
+}
+# Points the saved link of the pane on $1 in our session's saved files at
+# $2 in $OTHER, as a link from before the pid fields; prints the count.
+relink() {
+  python3 -I - "$CONFIG_HOME/herdr-dev/sessions/$SESSION" "$CORE_SESSION" "$1" "$OTHER" "$2" <<'PY2'
+import json, pathlib, sys
+folder, session, address, other, other_address = sys.argv[1:]
+def walk(node):
+    count = 0
+    if isinstance(node, dict):
+        link = node.get("core_terminal")
+        if isinstance(link, dict) and link.get("session") == session and link.get("address") == address:
+            node["core_terminal"] = {"session": other, "address": other_address}
+            count += 1
+        for value in node.values():
+            count += walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            count += walk(value)
+    return count
+total = 0
+for path in pathlib.Path(folder).glob("*.json"):
+    try:
+        data = json.loads(path.read_text())
+    except ValueError:
+        continue
+    count = walk(data)
+    if count:
+        path.write_text(json.dumps(data))
+        total += count
+print(total)
+PY2
+}
+saved_with_g() { grep -q "\"$ADDR\"" "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.json 2>/dev/null; }
+wait_until "G's link saved" saved_with_g
+G_OTHER="$(other_run "$G" "$BASE/g.other.pid")"
+STRAY="$(other_run w9-stray "$BASE/stray.pid")"
+wait_until "G's program in $OTHER" file_has_line "$BASE/g.other.pid"
+G_OTHER_PID="$(cat "$BASE/g.other.pid")"
+OTHER_CORE="$(hc_other server status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["pid"])')"
+HERDR_PID="$(server_pid)"
+kill -KILL "$HERDR_PID"
+wait_until "our server gone" gone "$HERDR_PID"
+hc_scratch kill "$ADDR" >/dev/null
+[[ "$(relink "$ADDR" "$G_OTHER")" -ge 1 ]] || fail "no saved link of G on $ADDR to point at $OTHER"
+run_herdr server >/dev/null 2>&1 &
+wait_until "server after the kill" socket_up
+wait_long "pane G attached in $OTHER" is_running "$G"
+send_line "$G" "echo \$\$ > $BASE/g.after"
+wait_until "input to G in $OTHER" file_has_line "$BASE/g.after"
+[[ "$(cat "$BASE/g.after")" == "$G_OTHER_PID" ]] || fail "G runs $(cat "$BASE/g.after"), not $OTHER's $G_OTHER_PID"
+[[ -z "$(pid_of "$G")" ]] || fail "a program was started for G in $CORE_SESSION: $(core_terminals)"
+stray_reported() {
+  grep -h "has no pane" "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.log 2>/dev/null \
+    | grep "session=$OTHER" | grep -q "address=$STRAY"
+}
+wait_until "the stray terminal in $OTHER reported with its session" stray_reported
+echo "ok: G attached to its program in $OTHER (pid $G_OTHER_PID); the stray $STRAY there was reported as $OTHER's"
+hc_other kill "$STRAY" >/dev/null
+
+run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
+  || fail "live handoff with a pane in $OTHER did not complete"
+wait_until "server after the V19 handoff" socket_up
+alive "$G_OTHER_PID" || fail "G's program in $OTHER ended in the handoff"
+send_line "$G" "echo after-handoff > $BASE/g.handoff"
+wait_until "input to G after the handoff" file_has_line "$BASE/g.handoff"
+HERDR_PID="$(server_pid)"
+run_herdr server restart --yes >"$BASE/restart-v19.out" 2>&1 &
+wait_long "the old server gone in the V19 restart" gone "$HERDR_PID"
+wait_until "server after the V19 restart" socket_up
+wait_long "pane G back after the restart" is_running "$G"
+alive "$G_OTHER_PID" || fail "G's program in $OTHER ended in the restart"
+send_line "$G" "echo \$\$ > $BASE/g.restart"
+wait_until "input to G after the restart" file_has_line "$BASE/g.restart"
+[[ "$(cat "$BASE/g.restart")" == "$G_OTHER_PID" ]] || fail "after the restart G runs $(cat "$BASE/g.restart")"
+[[ "$(hc_other server status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["pid"])')" == "$OTHER_CORE" ]] \
+  || fail "the core of $OTHER changed"
+echo "ok: G kept its program in $OTHER through a live handoff and a restart"
+
+H="$(split_down "$G")"
+send_line "$H" "echo \$\$ > $BASE/h.pid"
+wait_until "pane H pid" file_has_line "$BASE/h.pid"
+on_core "$H" || fail "new pane H is not in $CORE_SESSION: $(core_terminals)"
+H_PID="$(pid_of "$H")"
 CORE="$(core_pid)"
 
-# 4. herdr server stop ends the core pane's program.
+# 4. herdr server stop ends the core panes' programs, in both sessions.
 run_herdr server stop >/dev/null
-wait_until "core pane G's program ended by the stop" gone "$G_PID"
-if core_terminals | grep -q "^$ADDR "; then
-  fail "$ADDR still live after server stop"
-fi
+wait_until "core pane H's program ended by the stop" gone "$H_PID"
+wait_until "pane G's program in $OTHER ended by the stop" gone "$G_OTHER_PID"
+[[ -z "$(core_terminals)" ]] || fail "core terminals still live after server stop: $(core_terminals)"
 # Ending our server's panes (the D8 close path) and stopping our server
-# leave the core running.
+# leave the cores running.
 alive "$CORE" || fail "core ended with our server"
-echo "ok: server stop ended G's program and left the core $CORE running"
+alive "$OTHER_CORE" || fail "the core of $OTHER ended with our server"
+echo "ok: server stop ended H's program and G's in $OTHER, and left both cores running"
+hc_other server stop >/dev/null 2>&1 || true
 # 5. V33 (core-phase3 D13): a pane named `test-hlp` by its agent's `--name`
 #    stays on the PTY with runtime = "core" and core_pty_panes = ["*-hlp"]:
 #    respawned, resumed after its pane job ended, and restored after a
@@ -618,4 +735,4 @@ wait_until "H on core without the pattern" on_core "$H"
 echo "ok: V33: with no core_pty_panes, the same respawn put H on core"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
-echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V29a, V33, V37)"
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37)"
