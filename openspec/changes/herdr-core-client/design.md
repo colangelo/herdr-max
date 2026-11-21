@@ -758,6 +758,14 @@ ac answered on the desk (`6 A, 7 A`, relayed by manager-lab at about 22:1xZ):
    The `herdr.space` / `herdr.tab` labels are not written in phase 4 (herdr-app will not show our
    spaces; revisit only if ac starts using herdr-app).
 
+   **Amendment, 2026-11-21.** The revisit happened: ac uses Herdr Mobile with herdr-max on m4m
+   and asked to see his workspaces there as spaces (#293,
+   https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/293). The layout home is
+   unchanged: herdr-max's layout stays herdr-max's own state, and nothing reads it back from
+   core. The `herdr-app` document is a one-way display projection of herdr-max's layout
+   (openspec/changes/core-spaces-doc). herdr-max writes there only the spaces it owns, each marked
+   `"herdr_max": 1`, and merges them beside every other client's spaces, which it never changes.
+
 ### 6.7 Required tests by phase (verifier table, filled in per phase change)
 
 | Phase | Gate | Test |
