@@ -120,10 +120,48 @@ enum ResumeFinish {
 struct ResumeJob {
     pane_id: PaneId,
     terminal_id: TerminalId,
-    /// The primary core must answer first: the pane resumes on core, or a
-    /// person stopped core and the pane waits for it (D3b).
-    needs_core: bool,
+    ready: ResumeReady,
     spawn: RuntimeSpawn,
+}
+
+/// What must answer before a pane resumes: the primary core when the pane
+/// resumes on core, and the session a person stopped (D3b), which is never
+/// started. A stopped secondary holds the pane even with the primary up
+/// (security review M7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ResumeReady {
+    pub primary: bool,
+    pub stopped: Option<String>,
+}
+
+impl ResumeReady {
+    pub(super) fn for_pane(
+        on_core: bool,
+        suspension: Option<&crate::terminal::state::Suspension>,
+    ) -> Self {
+        let stopped = suspension
+            .filter(|suspension| suspension.cause == crate::platform::SuspendCause::CoreStopped)
+            .map(|suspension| {
+                suspension
+                    .core_link
+                    .as_ref()
+                    .map(|link| link.session.clone())
+            });
+        match stopped {
+            None => Self {
+                primary: on_core,
+                stopped: None,
+            },
+            Some(Some(session)) if session != crate::pane::core_session_name() => Self {
+                primary: on_core,
+                stopped: Some(session),
+            },
+            Some(_) => Self {
+                primary: true,
+                stopped: None,
+            },
+        }
+    }
 }
 
 /// Suspended panes on their way back.
@@ -243,8 +281,8 @@ impl App {
     /// Queues `pane_id` to start again: its agent by its resume plan, else
     /// its launch command or a shell. False when it cannot start; the pane
     /// then says so.
-    pub(super) fn queue_resume(&mut self, pane_id: PaneId, needs_core: bool) -> bool {
-        match self.prepare_resume(pane_id, needs_core) {
+    pub(super) fn queue_resume(&mut self, pane_id: PaneId, ready: ResumeReady) -> bool {
+        match self.prepare_resume(pane_id, ready) {
             Prepare::Job(job, finish) => {
                 let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
                     return false;
@@ -272,7 +310,7 @@ impl App {
         }
     }
 
-    fn prepare_resume(&mut self, pane_id: PaneId, needs_core: bool) -> Prepare {
+    fn prepare_resume(&mut self, pane_id: PaneId, ready: ResumeReady) -> Prepare {
         let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
             return Prepare::Failed;
         };
@@ -300,7 +338,7 @@ impl App {
                     let job = ResumeJob {
                         pane_id,
                         terminal_id,
-                        needs_core,
+                        ready,
                         spawn: *spawn,
                     };
                     let finish = ResumeFinish::Agent {
@@ -320,7 +358,7 @@ impl App {
         let job = ResumeJob {
             pane_id,
             terminal_id: prepared.terminal_id,
-            needs_core,
+            ready,
             spawn: prepared.spawn,
         };
         Prepare::Job(Box::new(job), ResumeFinish::Respawn(prepared.finish))
@@ -489,20 +527,33 @@ fn run_resume_batch(
     events: &mpsc::Sender<AppEvent>,
     handle: &tokio::runtime::Handle,
 ) {
-    let core_answers = batch
+    let primary_answers = batch
         .iter()
-        .any(|job| job.needs_core)
+        .any(|job| job.ready.primary)
         .then(crate::pane::primary_core_answers);
+    let mut stopped_answers: HashMap<String, bool> = HashMap::new();
+    for session in batch.iter().filter_map(|job| job.ready.stopped.as_ref()) {
+        if !stopped_answers.contains_key(session) {
+            let answers = crate::pane::core_session_answers(session);
+            stopped_answers.insert(session.clone(), answers);
+        }
+    }
+    let stopped_answers = &stopped_answers;
     std::thread::scope(|scope| {
         for job in batch {
             scope.spawn(move || {
                 let ResumeJob {
                     pane_id,
                     terminal_id,
-                    needs_core,
+                    ready,
                     spawn,
                 } = job;
-                let outcome = if needs_core && core_answers == Some(false) {
+                let waits_for_primary = ready.primary && primary_answers == Some(false);
+                let waits_for_stopped = ready
+                    .stopped
+                    .as_ref()
+                    .is_some_and(|session| stopped_answers.get(session) != Some(&true));
+                let outcome = if waits_for_primary || waits_for_stopped {
                     ResumeOutcome::CoreNotReady
                 } else {
                     let _runtime = handle.enter();
@@ -877,6 +928,69 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+    }
+
+    // Security review M7 (Sol H11): a pane whose secondary session a person
+    // stopped waits for that session with the primary up, and resumes once
+    // it answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopped_secondary_holds_its_panes_with_the_primary_up() {
+        let runtime_dir = std::path::PathBuf::from(format!("/tmp/hcs7-{}", std::process::id()));
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+        let primary = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &primary.socket);
+        let (mut app, panes) = app_with_suspended_panes(1, true);
+        let terminal = app.state.pane_terminal_mut(panes[0]).expect("terminal");
+        let Some(PaneHold::Suspended(suspension)) = terminal.hold.as_mut() else {
+            panic!("suspended");
+        };
+        suspension.cause = SuspendCause::CoreStopped;
+        suspension.core_link = Some(crate::pane::CoreTerminalLink {
+            session: "herdrdev-m7".into(),
+            address: "t7".into(),
+            program: Some(GONE),
+            agent: None,
+        });
+        let ask = |app: &mut App| {
+            let now = Instant::now();
+            app.request_suspended_pane_resume(now);
+            assert!(app.resume_suspended_panes_if_due(now));
+        };
+        ask(&mut app);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "no answer");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(app.state.suspended_panes(), panes, "still suspended");
+        assert!(
+            !primary
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.run"),
+            "nothing started on the primary: {:?}",
+            primary.methods()
+        );
+
+        let _secondary = crate::pane::FakeCore::start_in(
+            runtime_dir.join("herdr-core"),
+            "herdrdev-m7.sock",
+            |_| {},
+        );
+        ask(&mut app);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "no answer");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(app.state.suspended_panes().is_empty(), "resumed");
+        assert!(on_core(&app, panes[0]), "on the primary");
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(runtime_dir);
     }
 
     // D3b: a pane a person's core stop suspended waits for the core even

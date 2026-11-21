@@ -367,12 +367,13 @@ impl App {
                 Some(ResumeBlock::StillRuns(_)) => still_running += 1,
                 Some(ResumeBlock::CannotConfirm) => unconfirmed += 1,
                 None => {
-                    // A core a person stopped is waited for in every case (D3b).
-                    let needs_core = on_core
-                        || self
-                            .pane_suspension(*pane_id)
-                            .is_some_and(|s| s.cause == SuspendCause::CoreStopped);
-                    if self.queue_resume(*pane_id, needs_core) {
+                    // A core a person stopped is waited for in every case
+                    // (D3b), a secondary one included (security review M7).
+                    let ready = super::pane_resume::ResumeReady::for_pane(
+                        on_core,
+                        self.pane_suspension(*pane_id),
+                    );
+                    if self.queue_resume(*pane_id, ready) {
                         queued += 1;
                     } else {
                         failed += 1;

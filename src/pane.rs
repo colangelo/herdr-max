@@ -35,13 +35,12 @@ use runtime_io::PtyReadResult;
 pub(crate) use runtime_io::PtyReason;
 #[cfg(unix)]
 pub(crate) use runtime_io::{
-    core_attach_failure, core_session_answers, find_pane_core_terminals, CoreAttachFailure,
-    PaneCoreSearch,
+    core_attach_failure, find_pane_core_terminals, CoreAttachFailure, PaneCoreSearch,
 };
 pub(crate) use runtime_io::{
-    core_gave_up, herdr_session_label, note_core_loss, primary_core_answers, reset_core_loss_guard,
-    set_core_events, set_core_pty_panes, stable_name, starts_on_core, unclaimed_core_terminals,
-    RuntimeChoice, UnclaimedCoreTerminal,
+    core_gave_up, core_session_answers, herdr_session_label, note_core_loss, primary_core_answers,
+    reset_core_loss_guard, set_core_events, set_core_pty_panes, stable_name, starts_on_core,
+    unclaimed_core_terminals, RuntimeChoice, UnclaimedCoreTerminal,
 };
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 

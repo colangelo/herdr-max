@@ -272,9 +272,16 @@ pub(crate) fn primary_core_answers() -> bool {
 }
 
 /// Whether the core session `session` answers now, never starting it.
-#[cfg(unix)]
 pub(crate) fn core_session_answers(session: &str) -> bool {
-    core_backend::existing_session_connector(session)().is_ok()
+    #[cfg(unix)]
+    {
+        core_backend::existing_session_connector(session)().is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session;
+        false
+    }
 }
 
 pub(in crate::pane) struct PaneIoSink {
