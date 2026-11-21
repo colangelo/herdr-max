@@ -23,7 +23,9 @@ use super::client::{
     stream_channel, CoreClient, CoreError, StreamEvent, StreamEvents, StreamSink, CREDIT_WINDOW,
 };
 use super::frame::{kind, Frame};
+use super::status_mirror::StatusMirror;
 use crate::layout::PaneId;
+use crate::pane::runtime_io::CoreStatusRecord;
 use crate::platform::ChildExitReason;
 use crate::pty::actor::{PtyReadResult, ReadCallback};
 
@@ -127,6 +129,12 @@ struct Shared {
     /// Set when the next server takes the program over (`herdr server
     /// restart`, D10): dropping the pane then detaches without a kill.
     keep_on_drop: AtomicBool,
+    /// The program's pid from core, 0 when unknown: its terminal device is
+    /// where mirrored status goes (core-status-mirror D4).
+    pid: u32,
+    /// The latest status record to mirror, until the parser takes it: one
+    /// slot, so a burst of changes never queues (core-status-mirror D3).
+    mirror_slot: Mutex<Option<CoreStatusRecord>>,
 }
 
 impl Shared {
@@ -322,6 +330,8 @@ impl StartedCore {
                 size: Mutex::new((rows, cols)),
                 closing: AtomicBool::new(false),
                 keep_on_drop: AtomicBool::new(false),
+                pid,
+                mirror_slot: Mutex::new(None),
             }),
             events_rx,
             automatic_input,
@@ -461,6 +471,16 @@ impl CorePaneIo {
 
     pub(crate) fn kept_on_drop(&self) -> bool {
         self.shared.keep_on_drop.load(Ordering::Acquire)
+    }
+
+    /// Mirrors `record` into core through the program's terminal once the
+    /// pane's output allows it (core-status-mirror D3). Replaces a record not
+    /// yet written; wakes the parser only when the slot was empty.
+    pub(crate) fn mirror_status(&self, record: CoreStatusRecord) {
+        let was_empty = lock(&self.shared.mirror_slot).replace(record).is_none();
+        if was_empty {
+            let _ = self.shared.sink.send(StreamEvent::Wake);
+        }
     }
 
     /// Ends the program in core (D8's first half; the local sweep follows in
@@ -625,13 +645,31 @@ fn spawn_parser(
                 }
             };
             let mut credit = CreditBatch::default();
+            let mut mirror = StatusMirror::default();
             loop {
-                let event = match events.recv() {
-                    Ok(event) => event,
-                    Err(_) => return,
+                let event = match mirror.wake_in(Instant::now()) {
+                    None => match events.recv() {
+                        Ok(event) => event,
+                        Err(_) => return,
+                    },
+                    Some(wait) => match events.recv_timeout(wait) {
+                        Ok(event) => event,
+                        Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                            write_mirrored_status(&shared, &mut mirror);
+                            continue;
+                        }
+                        Err(std_mpsc::RecvTimeoutError::Disconnected) => return,
+                    },
                 };
                 match event {
+                    StreamEvent::Wake => {
+                        if let Some(record) = lock(&shared.mirror_slot).take() {
+                            mirror.offer(record);
+                        }
+                        write_mirrored_status(&shared, &mut mirror);
+                    }
                     StreamEvent::Data(bytes) => {
+                        mirror.observe(&bytes, Instant::now());
                         let consumed = bytes.len() as u32;
                         let PtyReadResult { terminal_responses } = on_read(&bytes);
                         for reply in terminal_responses {
@@ -675,6 +713,27 @@ fn spawn_parser(
         })
         .map(|_| ())
         .map_err(|err| CoreError::Unavailable(format!("parser thread: {err}")))
+}
+
+/// Writes the waiting status record when the gate is open (core-status-mirror
+/// D3, D4). A full terminal buffer keeps it for a retry; any other failure
+/// drops it, since the next status change sends a fresh one.
+fn write_mirrored_status(shared: &Shared, mirror: &mut StatusMirror) {
+    let Some(record) = mirror.take_due(Instant::now()) else {
+        return;
+    };
+    match crate::platform::write_to_process_terminal(shared.pid, &record.encode()) {
+        Ok(()) => mirror.written(record),
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            mirror.busy(record, Instant::now());
+        }
+        Err(err) => debug!(
+            pane = shared.pane_id.raw(),
+            terminal = %shared.address,
+            err = %err,
+            "could not mirror agent status into herdr-core"
+        ),
+    }
 }
 
 /// Reaches the terminal again after its stream ended without an exit (D5).

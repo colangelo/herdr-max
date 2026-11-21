@@ -123,6 +123,11 @@ impl TerminalRuntime {
         self.0.set_keep_core_terminal(keep);
     }
 
+    /// Mirrors herdr's agent status into a core pane (core-status-mirror).
+    pub fn mirror_core_status(&self, record: crate::pane::CoreStatusRecord) {
+        self.0.mirror_core_status(record);
+    }
+
     #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,

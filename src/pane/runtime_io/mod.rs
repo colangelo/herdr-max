@@ -15,7 +15,10 @@ pub(in crate::pane) use crate::pty::actor::ReadCallback;
 
 #[cfg(unix)]
 mod core_backend;
+mod core_status;
 mod pty;
+
+pub(crate) use core_status::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 /// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
 /// for now (runtime-seam design D5).
@@ -209,6 +212,17 @@ impl PaneIo {
         }
         #[cfg(not(unix))]
         let _ = keep;
+    }
+
+    /// Mirrors herdr's agent status into the pane's core terminal
+    /// (openspec/changes/core-status-mirror). Other backends ignore it.
+    pub(super) fn mirror_core_status(&self, record: CoreStatusRecord) {
+        #[cfg(unix)]
+        if let PaneIo::Core(core) = self {
+            core.mirror_status(record);
+        }
+        #[cfg(not(unix))]
+        let _ = record;
     }
 
     pub(super) fn shutdown(&self) {

@@ -27,6 +27,7 @@ pub(crate) use runtime_io::CoreTerminalLink;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
 pub(crate) use runtime_io::{core_session_name, unclaimed_core_terminals};
+pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 mod agent_detection;
 mod background_agent;
@@ -2889,6 +2890,12 @@ impl PaneRuntime {
         self.io.set_keep_core_terminal(keep);
     }
 
+    /// Mirrors herdr's agent status into a core pane's terminal as OSC 7501
+    /// (openspec/changes/core-status-mirror). No effect on a PTY pane.
+    pub fn mirror_core_status(&self, record: CoreStatusRecord) {
+        self.io.mirror_core_status(record);
+    }
+
     #[cfg(unix)]
     pub fn from_handoff_fd(
         import: crate::handoff_runtime::ImportedHandoffRuntime,
@@ -4728,6 +4735,35 @@ impl PaneRuntime {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    // core-status-mirror D5: the record herdr mirrors comes back in the pane's
+    // own output. It must not change what herdr shows or detects.
+    #[tokio::test]
+    async fn a_mirrored_status_record_in_the_output_changes_nothing_herdr_reads() {
+        let runtime = PaneRuntime::test_with_screen_bytes(
+            40,
+            4,
+            b"\xe2\x9c\xbb Thinking\x1b[0m\r\n> waiting for input",
+        );
+        let (visible, detection) = (runtime.visible_text(), runtime.detection_text());
+        for word in [
+            CoreStatusWord::Working,
+            CoreStatusWord::Blocked,
+            CoreStatusWord::Done,
+            CoreStatusWord::Idle,
+        ] {
+            let record = CoreStatusRecord::Report {
+                word,
+                app: CoreStatusApp::parse("claude"),
+            };
+            let replies = runtime.test_process_pty_bytes(&record.encode());
+            assert!(replies.is_empty(), "{word:?}: no reply to the program");
+        }
+        let replies = runtime.test_process_pty_bytes(&CoreStatusRecord::Clear.encode());
+        assert!(replies.is_empty());
+        assert_eq!(runtime.visible_text(), visible);
+        assert_eq!(runtime.detection_text(), detection);
+    }
 
     #[tokio::test]
     async fn clear_scrollback_invalidates_the_unidentified_text_cache() {

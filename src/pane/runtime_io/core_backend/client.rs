@@ -67,6 +67,9 @@ pub(crate) enum StreamEvent {
     Close(Value),
     /// The connection ended under the stream.
     ConnectionLost,
+    /// Not from core: the pane has a status record to mirror
+    /// (openspec/changes/core-status-mirror, D3).
+    Wake,
 }
 
 /// Where the reader queues a stream's events, counting the queued bytes so a
@@ -117,7 +120,6 @@ impl StreamEvents {
         self.rx.recv().inspect(|event| self.taken(event))
     }
 
-    #[cfg(test)]
     pub(crate) fn recv_timeout(
         &self,
         timeout: Duration,
