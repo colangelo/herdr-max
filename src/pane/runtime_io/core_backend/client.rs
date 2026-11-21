@@ -550,31 +550,74 @@ fn core_start_keeps(key: &str) -> bool {
             .any(|prefix| key.starts_with(prefix))
 }
 
-/// The `hc` binary: found on `PATH` once, then used by that absolute path,
-/// so a later `PATH` cannot swap it. Its path and version are logged then.
+/// The `hc` binary: the installed one (`~/.local/bin/hc`, where core's
+/// installer puts it), else the first on `PATH` with a warning, so an `hc`
+/// planted earlier on `PATH` is not run while the installed one exists
+/// (security review M5). Chosen once, then run by that absolute path; its
+/// path, target and version are logged then.
 fn hc_binary() -> Result<&'static Path, CoreError> {
     static HC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     if let Some(path) = HC.get() {
         return Ok(path);
     }
-    let path = find_on_path("hc", std::env::var_os("PATH").as_deref())
-        .ok_or_else(|| CoreError::Unavailable("no hc on PATH".into()))?;
+    let installed = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(INSTALLED_HC));
+    let (path, from_path) = choose_hc(installed.as_deref(), std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| CoreError::Unavailable("no hc installed or on PATH".into()))?;
     let version = binary_version(&path).unwrap_or_else(|| "unknown".into());
-    info!(path = %path.display(), version, "herdr-core is started with this hc");
+    let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if from_path {
+        warn!(path = %path.display(), target = %target.display(), version, "no hc at ~/{INSTALLED_HC}; herdr-core is started with the first hc on PATH");
+    } else {
+        info!(path = %path.display(), target = %target.display(), version, "herdr-core is started with this hc");
+    }
     Ok(HC.get_or_init(|| path))
+}
+
+/// Where core's installer puts `hc`, under `HOME`.
+const INSTALLED_HC: &str = ".local/bin/hc";
+
+/// The installed `hc` when it is an executable file, else the first on
+/// `path`; true when it came from `path`.
+fn choose_hc(installed: Option<&Path>, path: Option<&std::ffi::OsStr>) -> Option<(PathBuf, bool)> {
+    installed
+        .filter(|candidate| is_executable_file(candidate))
+        .map(|candidate| (candidate.to_path_buf(), false))
+        .or_else(|| find_on_path("hc", path).map(|found| (found, true)))
+}
+
+fn is_executable_file(candidate: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(candidate)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// The first executable file `name` in an absolute `PATH` folder.
 fn find_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     std::env::split_paths(path?)
         .filter(|folder| folder.is_absolute())
         .map(|folder| folder.join(name))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Waits for `child` at most `limit`, then kills it; `None` when it had to.
+fn wait_at_most(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// What `<binary> --version` prints, waiting at most two seconds.
@@ -587,15 +630,7 @@ fn binary_version(binary: &Path) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while child.try_wait().ok()?.is_none() {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_at_most(&mut child, Duration::from_secs(2))?;
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
     Some(out.trim().to_string())
@@ -689,14 +724,32 @@ pub(crate) fn start_core(session: &str) -> Result<(), CoreError> {
     }
 }
 
+/// How long `hc server start` may run: a start that hangs holds the
+/// primary's connector lock, so every core pane waits behind it (security
+/// review M5). A start takes well under a second (design.md § Context).
+const START_LIMIT: Duration = Duration::from_secs(10);
+
 #[cfg_attr(test, allow(dead_code))] // tests use TEST_CORE_START instead
 fn run_core_start(session: &str) -> Result<(), CoreError> {
-    let status = core_start_command(hc_binary()?, session, std::env::vars())
+    run_start(
+        core_start_command(hc_binary()?, session, std::env::vars()),
+        START_LIMIT,
+    )
+}
+
+fn run_start(mut command: std::process::Command, limit: Duration) -> Result<(), CoreError> {
+    let mut child = command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
         .map_err(|err| CoreError::Unavailable(format!("cannot run hc: {err}")))?;
+    let status = wait_at_most(&mut child, limit).ok_or_else(|| {
+        CoreError::Unavailable(format!(
+            "hc server start did not finish in {} s; it was stopped",
+            limit.as_secs_f32()
+        ))
+    })?;
     if !start_left_a_core(status.code()) {
         return Err(CoreError::Unavailable(format!(
             "hc server start exited with {status}"
@@ -1027,6 +1080,57 @@ mod tests {
         assert!(env.contains(&("HC_SESSION".into(), Some("herdr".into()))));
         assert_eq!(command.get_program(), "/opt/hc/bin/hc");
         assert_eq!(command.get_args().collect::<Vec<_>>(), ["server", "start"]);
+    }
+
+    // Security review M5: the installed hc wins over one earlier on PATH;
+    // PATH is used only without it.
+    #[test]
+    fn the_installed_hc_wins_over_one_earlier_on_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("hcpick-{}", std::process::id()));
+        let (planted, home_bin) = (root.join("planted"), root.join("home/.local/bin"));
+        for folder in [&planted, &home_bin] {
+            std::fs::create_dir_all(folder).expect("folder");
+            let hc = folder.join("hc");
+            std::fs::write(&hc, "#!/bin/sh\n").expect("hc");
+            std::fs::set_permissions(&hc, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        }
+        let path = std::env::join_paths([&planted]).unwrap();
+        let installed = root.join("home").join(INSTALLED_HC);
+        assert_eq!(
+            choose_hc(Some(&installed), Some(&path)),
+            Some((installed.clone(), false))
+        );
+        std::fs::remove_file(&installed).expect("uninstall");
+        assert_eq!(
+            choose_hc(Some(&installed), Some(&path)),
+            Some((planted.join("hc"), true))
+        );
+        assert_eq!(choose_hc(None, None), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // Security review M5: a start that hangs is stopped at its limit; exit
+    // codes 0 and 5 leave a core, others do not.
+    #[test]
+    fn a_hanging_start_is_stopped_at_its_limit() {
+        let sh = |script: &str| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        };
+        let started = std::time::Instant::now();
+        let err = run_start(sh("exec sleep 30"), Duration::from_millis(200))
+            .expect_err("a hanging start fails");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("did not finish"), "{err}");
+        assert_eq!(run_start(sh("exit 0"), START_LIMIT), Ok(()));
+        assert_eq!(run_start(sh("exit 5"), START_LIMIT), Ok(()));
+        assert!(run_start(sh("exit 1"), START_LIMIT).is_err());
     }
 
     #[test]
