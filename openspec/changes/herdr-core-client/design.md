@@ -744,6 +744,14 @@ Status (2026-11-21, herdr-core; issue numbers are AC-forks/herdr-max on Gitea):
   Pane ids stay ours; the core address is an extra field.
 - The client endpoint contract (AGENTS.md § Stable client endpoint contract): generation 1 stays.
 - Each phase is reversible by config until phase 6.
+- **macOS privacy grants follow the responsible app (found 2026-11-21, #295).** A core pane's programs are
+  attributed to Herdr Core.app, not to the PTY lineage that held ac's grants. Tested on m4m's
+  `manager-lab-hlp`: the computer-use MCP loads, but Accessibility and Screen Recording are missing. So a
+  **computer-use host session must never run on core**. Keep it on the PTY with
+  `[experimental] core_pty_panes = ["<exact session name>"]` (phase 3 PR S), never with a `*-hlp` glob.
+  Do not grant Accessibility or Screen Recording to Herdr Core.app: that would give every core pane screen
+  control (manager-lab, 2026-11-21). The same holds for other per-app grants (AppData, automation). App
+  checks run through Codex computer-use agents instead (CONTEXT RULES/codex-computer-use-direct-steering).
 
 ### 6.6 Decisions (decided by ac, 2026-11-14)
 
