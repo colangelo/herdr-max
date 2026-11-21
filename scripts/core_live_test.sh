@@ -12,7 +12,8 @@
 # starts again; V15, a killed core server is started again after 3 s and
 # every program keeps its pid; V37, `hc server stop` suspends the panes and
 # herdr waits for core; V16, a holder that keeps dying makes herdr give up on
-# core until a config reload.
+# core until a config reload; V33, a pane named by `core_pty_panes` stays on
+# the PTY when respawned, resumed and restored (macOS: it uses pane jobs).
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -516,4 +517,105 @@ fi
 # leave the core running.
 alive "$CORE" || fail "core ended with our server"
 echo "ok: server stop ended G's program and left the core $CORE running"
-echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V29a, V37)"
+# 5. V33 (core-phase3 D13): a pane named `test-hlp` by its agent's `--name`
+#    stays on the PTY with runtime = "core" and core_pty_panes = ["*-hlp"]:
+#    respawned, resumed after its pane job ended, and restored after a
+#    restart. Its own herdr session, so its own core session.
+hc_scratch server stop >/dev/null 2>&1 || true
+SESSION="v33"
+CORE_SESSION="herdrdev-$SESSION"
+SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
+set_v33_config() {
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\npane_jobs = true\ncore_pty_panes = [%s]\n' \
+    "$1" "$2" > "$CONFIG_HOME/herdr-dev/config.toml"
+}
+# A compiled stand-in, so detection sees a process named claude.
+cat > "$BASE/claude.c" <<STUB
+#include <stdio.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  FILE *out = fopen("$BASE/h.args", "w");
+  if (!out) return 1;
+  fprintf(out, "%d", (int)getpid());
+  for (int i = 1; i < argc; i++) fprintf(out, " %s", argv[i]);
+  fprintf(out, "\n");
+  fclose(out);
+  for (;;) pause();
+}
+STUB
+cc -o "$BASE/bin/claude" "$BASE/claude.c" || fail "could not compile the claude stand-in"
+stub_pid() { cut -d' ' -f1 "$BASE/h.args"; }
+stub_args() { cut -d' ' -f2- "$BASE/h.args"; }
+stub_restarted() { file_has_line "$BASE/h.args" && [[ "$(stub_pid)" != "$1" ]] && alive "$(stub_pid)"; }
+on_pty() { [[ -z "$(pid_of "$1")" ]] && is_running "$1"; }
+not_a_core_program() {
+  if core_terminals | awk '{print $2}' | grep -qx "$1"; then
+    fail "pid $1 runs in a core terminal"
+  fi
+}
+set_v33_config pty '"*-hlp"'
+run_herdr server >/dev/null 2>&1 &
+wait_until "v33 server socket" socket_up
+W="$(api "{\"id\":\"v33\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')"
+H="$(split_down "$W")"
+send_line "$H" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v33:test --agent claude --state idle --agent-session-id sess-h -- claude --resume sess-h; exec claude --name test-hlp"
+wait_until "the stand-in started in H" file_has_line "$BASE/h.args"
+[[ "$(stub_args)" == "--name test-hlp" ]] || fail "the stand-in ran with $(stub_args)"
+session_has_launch_name() { grep -q '"test-hlp"' "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/session.json 2>/dev/null; }
+wait_long "H's launch name saved" session_has_launch_name
+
+set_v33_config core '"*-hlp"'
+run_herdr server reload-config >/dev/null
+X="$(split_down "$W")"
+wait_until "an unnamed new pane on core" on_core "$X"
+
+STUB_PID="$(stub_pid)"
+run_herdr pane respawn "$H" --resume --force >/dev/null || fail "pane respawn --resume of H failed"
+wait_long "H's agent respawned" stub_restarted "$STUB_PID"
+[[ "$(stub_args)" == "--resume sess-h --name test-hlp" ]] || fail "H respawned with $(stub_args)"
+on_pty "$H" || fail "H respawned on core: $(core_terminals)"
+not_a_core_program "$(stub_pid)"
+echo "ok: V33: H, named test-hlp by --name, respawned on the PTY while a new pane went to core"
+
+STUB_PID="$(stub_pid)"
+SHELL_PID="$(ps -o ppid= -p "$STUB_PID" | tr -d ' ')"
+KEEPER="$(ps -o ppid= -p "$SHELL_PID" | tr -d ' ')"
+# Stopping the keeper's launchd job, as a logout does: only this pane's job.
+JOB="$(launchctl list | awk -v pid="$KEEPER" '$1 == pid { print $3 }')"
+[[ "$JOB" == dev.herdr.pane.* ]] || fail "H's shell parent $KEEPER is not a pane job ($JOB)"
+launchctl bootout "gui/$(id -u)/$JOB" || fail "could not stop H's pane job $JOB"
+wait_until "H suspended by its pane job ending" is_suspended "$H"
+wait_long "H's agent resumed" stub_restarted "$STUB_PID"
+wait_long "H running after the resume" is_running "$H"
+on_pty "$H" || fail "H resumed on core: $(core_terminals)"
+not_a_core_program "$(stub_pid)"
+echo "ok: V33: after its pane job ended, H resumed on the PTY"
+
+# A resumed Claude reports its session again through its hook; so does the
+# stand-in's test here, so the restart has a session to restore.
+run_herdr pane report-agent "$H" --source v33:test --agent claude --state idle \
+  --agent-session-id sess-h -- claude --resume sess-h >/dev/null
+session_has_session() { grep -q '"sess-h"' "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/session.json 2>/dev/null; }
+wait_long "H's session saved" session_has_session
+STUB_PID="$(stub_pid)"
+run_herdr server restart --yes >"$BASE/restart4.out" 2>&1 &
+wait_until "H's program ended by the restart" gone "$STUB_PID"
+wait_until "v33 server after the restart" socket_up
+wait_long "H's agent restored" stub_restarted "$STUB_PID"
+wait_long "H running after the restore" is_running "$H"
+on_pty "$H" || fail "H restored on core: $(core_terminals)"
+not_a_core_program "$(stub_pid)"
+on_core "$X" || fail "X is not on core after the restart: $(core_terminals)"
+echo "ok: V33: after a restart, H was restored on the PTY and X reattached on core"
+
+set_v33_config core ''
+run_herdr server reload-config >/dev/null
+STUB_PID="$(stub_pid)"
+run_herdr pane respawn "$H" --resume --force >/dev/null || fail "pane respawn --resume of H failed"
+wait_long "H's agent respawned without the pattern" stub_restarted "$STUB_PID"
+wait_until "H on core without the pattern" on_core "$H"
+echo "ok: V33: with no core_pty_panes, the same respawn put H on core"
+run_herdr server stop >/dev/null
+hc_scratch server stop >/dev/null 2>&1 || true
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V29a, V33, V37)"
