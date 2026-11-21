@@ -153,6 +153,20 @@ If Herdr Core ends panes three times within ten minutes, Herdr stops using it. P
 
 Quitting Herdr Core in Activity Monitor ends every core pane's program, so those panes start again. A macOS app started from a pane can appear in the Dock as "Running in Background". Do not stop such an entry: on macOS, stopping it can end every program in the same core.
 
+### Keeping a pane on the PTY
+
+Some programs must not move to Herdr Core. On macOS, a privacy grant such as Screen Recording or Accessibility belongs to the process that asked for it, and a program in Herdr Core asks as Herdr Core. To keep such panes on the PTY, list their names in `[experimental] core_pty_panes`:
+
+```toml
+[experimental]
+runtime = "core"
+core_pty_panes = ["*-hlp"]
+```
+
+Each entry is a pattern: `*` matches any run of characters, and `?` matches one character. Matching is case-sensitive. A pattern matches a pane's stable name. The stable name is the `--name` that the pane's agent was started with, for example `claude --name manager-lab-hlp`. When the agent was started without one, it is the agent name set with `herdr agent rename`. A terminal title, or a name that the agent reports about itself, is never a stable name. A pane without a stable name always uses `runtime`.
+
+A matching pane starts on the PTY when it is created with a command that names its agent, when it is restored, when it starts again after a suspension, and when it is respawned. A new pane that starts as a shell has no name yet, so it uses `runtime`. Name it, then run `herdr pane respawn` on it. A pane that already runs in Herdr Core stays there after you add a pattern. Run `herdr pane respawn` on it to move it to the PTY. `herdr server reload-config` applies changes to the list to the next pane that starts.
+
 ## macOS: after a logout
 
 On macOS, a server that Herdr starts in the background (the usual `herdr` launch) runs in your account's per-user context, which survives logging out. A server started another way, or carried forward by live handoffs from such a server, can run in a login session's context instead. When that login ends, for example after a crash logs you out, every pane the server starts can no longer resolve host names, read the keychain, or use `launchctl`.

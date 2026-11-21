@@ -1957,6 +1957,12 @@
           "description": "Publish herdr's workspaces, tabs and splits into herdr-core as the `herdr-app` document, so the Herdr apps such as Herdr Mobile show them as spaces, with each herdr-core pane as a terminal. PTY panes are left out. herdr's layout is the source: a change made to the spaces in an app is replaced at herdr's next layout change. Applies on reload: turning it on publishes the layout, turning it off removes the document. Unix only. Default: false."
         },
         {
+          "key": "experimental.core_pty_panes",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Panes that always start on the PTY, even with runtime = \"core\", for example [\"*-hlp\"]. Each entry is a pattern (* matches any run of characters, ? one character; case-sensitive) matched against a pane's stable name: the --name its agent was started with, else the agent name set with herdr agent rename. A terminal title is never a stable name. Applies to new panes started with a command that names their agent, restores, resumes after a suspension, and respawns. A pane already in herdr-core stays there until respawned. Applies on reload. See Session state. Default: []."
+        },
+        {
           "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
           "type": "boolean",
           "default": "false",
