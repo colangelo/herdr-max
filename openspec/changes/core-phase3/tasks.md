@@ -122,14 +122,37 @@ S as built:
 
 ## PR B. One connection per core session (placement unchanged)
 
-- [ ] B.1 Characterization first: today's reattach, orphan and handoff tests named as the protected behaviour
-- [ ] B.2 `CoreSessions` registry (D6): primary, and secondaries including `herdr` and `default`; never started;
+- [x] B.1 Characterization first: today's reattach, orphan and handoff tests named as the protected behaviour
+- [x] B.2 `CoreSessions` registry (D6): primary, and secondaries including `herdr` and `default`; never started;
   `HC_SOCKET` primary only; V42
-- [ ] B.3 Every call site of D5's table moved to label or session; `CorePaneIo` stores its session;
+- [x] B.3 Every call site of D5's table moved to label or session; `CorePaneIo` stores its session;
   `CoreTerminalLink` reads it; claims as `(session, address)`; V7
-- [ ] B.4 Orphan scan per session with the label/session notice; V6 against a two-session fake core
+- [x] B.4 Orphan scan per session with the label/session notice; V6 against a two-session fake core
 - [ ] B.5 Check: `just check` 0, `just core-live-test` 0 (core-backend V10 unchanged), V19 with sessions `herdr` and
-  `herdr-<name>`, CI green
+  `herdr-<name>`, CI green (both checks 0 on m4m, 2026-11-21; CI waits for the push)
+
+B as built:
+
+- Protected behaviour (B.1): `core_restore_tests` in `src/persist/restore.rs` (V30, V45), the reattach tests in
+  `core_backend/pane_io.rs`, the reattach and orphan half of `core_backend_live_tests`, and the handoff and restart
+  sections of `scripts/core_live_test.sh`; two new pins, the orphan scan against a fake core and V7.
+- The registry is `CoreSessions` in `core_backend/sessions.rs`, with the session names and connectors moved there
+  from `core_backend/mod.rs`. Each secondary has its own slot lock, so a core that hangs on hello holds up only its
+  own session. A secondary is released at the end of an orphan scan that found no claim and no orphan in it.
+- `core_session_name()` still returns `herdr_session_label()`; PR C changes only the former.
+- The known-session search and the orphan scan look in the same list: the primary, the sessions panes' links name,
+  every connected secondary, then `herdr` and `default` for the release default herdr session.
+- The orphan scan counts a waiting pane's link as a claim, so a core that answers again between the restore and the
+  scan does not show a waiting pane's program as an orphan.
+- Most of D5's table was already in place after A1 and A2: `CorePaneIo` stored its session, the link read it,
+  `PaneIo::reattach_core` reached the link's session, and the sweep guard and the spaces publisher used the pane's
+  own and the primary's connection. B adds the label, the per-session orphan scan and notice, and the registry.
+- V19 runs with the scratch sessions `herdrdev-v10` and `herdrdev-v10-b`, not `herdr` and `herdr-<name>`: the live
+  test is a debug build. With placement unchanged, the only way to get a pane into a second session is a link that
+  names it, so the test kills the server (core programs live on), points pane G's saved link at a program labelled
+  for G in the second session, and starts the server again.
+- V6 runs in a debug unit test, where `herdr` and `default` are known only through panes' links, so the test claims
+  a terminal in each; the release-only rule for `herdr` and `default` has its own unit test.
 
 ## R0. The PR B beta on both Macs (no code)
 
