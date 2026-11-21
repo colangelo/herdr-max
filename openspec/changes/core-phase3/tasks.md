@@ -214,6 +214,65 @@ D as built:
 - Limit: a primary pane's leaf is only checked against the link's session; the live test does not put a legacy
   pane beside a primary one in a published document.
 
+## Security follow-ups (#297)
+
+From security's two-vendor review of A1, A2 and C (ac/security 1571d47,
+`docs/reviews/2026-11-21-herdr-core-phase3.md`), on branch `issue/297-core-second-copy` over PR D. M1 (a
+`herdr.pane_key` label), M6 (session-name validation) and M8 (rollback past B) are separate changes.
+
+- [x] M3 (Sol H5) A durable hold for the link. `CoreWaiting` carries `CoreWaitReason`: `Unreachable`,
+  `Conflict(found)` and `DirectoryUnavailable`. A restore with several labelled terminals, or with the saved
+  directory gone, holds the link instead of an unavailable pane without it, and the waiting-pane retry holds a
+  conflict found later too. Test: `a_held_link_survives_every_save_and_restore` (restore, save, restore, save)
+  and the conflict case in `two_labelled_terminals_start_nothing_and_none_starts_fresh`.
+- [x] M3 (Sol H6) A failed probe is not gone. `StartTokenLookup` returns `ProcessStart` (`Started`,
+  `NoSuchProcess` from `ESRCH` or a missing `/proc` entry, `Unknown`); Windows and other platforms never say
+  `NoSuchProcess`. The link saves the agent's identity (`agent_pid`, `agent_pid_started`, optional), and
+  `ProgramLiveness::of_pane` counts a running or unknown agent. The search returns `PaneCoreSearch` with
+  `complete`; `CoreError::NoCore` (no socket) counts as answered. Tests: `a_failed_probe_or_a_surviving_agent_is_not_gone`,
+  `an_unanswered_session_makes_an_empty_search_wait` (a refusing secondary, then no socket, then a secondary that
+  reveals the terminal), the probe rows in `the_dead_program_check_applies_to_every_cause`, and
+  `a_reaped_child_has_no_process_and_a_live_one_its_token` against the real process table.
+- [x] M3 (Sol H7) The PTY only after a definite failure. `StartedCore::start` returns `StartFailure::NotStarted`
+  (connect failed, the run refused, or the kill confirmed) or `Unknown`; only the first falls back. Each run
+  carries a random 128-bit `herdr.launch` label; a lost answer is looked up by it and attached. Tests:
+  `a_lost_run_answer_is_found_by_its_launch_label`, `only_a_definite_failure_allows_the_pty`, and
+  `a_launch_core_may_run_never_falls_back_to_the_pty` (a real PTY spawn that would write a marker).
+- [x] M3 (Sol H8) Reserve the pane from launch to install. `ResumeQueue::in_flight` is the set of panes the
+  worker is starting; respawns of them (API, agent resume, the exit path) start nothing, `pane.respawn` answers
+  `pane_resuming`, and a live handoff is refused. Tests: `a_resuming_pane_is_reserved_from_launch_to_install`,
+  `a_live_handoff_waits_for_resumes_in_flight`.
+- [x] M4 The allow-list for `hc server start` (design D3, changed): `CORE_START_ENV_KEEP` and the `LC_`/`XDG_`
+  prefixes in `client.rs`; dropped names logged at info, values never. Decided against the Claude half's
+  `SSH_AUTH_SOCK`: herdr's panes get it from herdr's spawn, and other clients' terminals should not. Tests:
+  `the_core_starts_without_our_panes_identity` (the exact kept set) and the live check in
+  `scripts/core_live_test.sh` (a token and an `SSH_AUTH_SOCK` sentinel absent after the first and the recovery
+  start).
+- [x] M5 Installed `hc` first, 10 s start limit: `choose_hc`, `run_start`, `wait_at_most` in `client.rs`.
+  Tests: `the_installed_hc_wins_over_one_earlier_on_path`, `a_hanging_start_is_stopped_at_its_limit`.
+- [x] M7 A stopped secondary counts in readiness: `ResumeReady { primary, stopped }` per job; the worker asks
+  each stopped session once per batch with `core_session_answers`, never starting it. Test:
+  `a_stopped_secondary_holds_its_panes_with_the_primary_up`.
+- [ ] Check: `just check` 0, `just core-live-test` 0, CI green; one security read of the fix
+  (RULES/security-fix-recheck-single-reader)
+
+Decisions and limits:
+
+- With core answering `not_found` and the probe failing, the D1b table still searches (as for a phase 2 link
+  with no identity): core's own answer is evidence. Only an unreachable core plus a failed probe waits.
+- A refused socket (a killed core, whose holder may live) leaves the search incomplete, so a pane can wait for
+  a dead secondary until it is started or its socket removed. A clean `hc server stop` removes the socket
+  (measured with hc 0.1.21 in a scratch session), so a stopped legacy core does not hold panes.
+- A lost `terminal.run` answer whose launch label lists nothing stays unknown: the spawn fails and the person
+  respawns. A run that lands after the lookup is an orphan, named by the next orphan scan.
+- The installed `hc` is followed through its symlink at each start, so an `hc update` takes effect. The target
+  is logged once, at the first use; a later swap of the link is not detected. A same-user writer can replace
+  `~/.local/bin/hc` itself, so pinning a target would only stop updates.
+- A `herdr server restart` does not wait for resumes in flight; the next server's known-session search finds a
+  launch that landed before it.
+- A pane restored without a public pane id is still not searched for (as before): the session label alone would
+  match every pane. M1 adds the per-pane key.
+
 ## M. CPU re-measure (no code; after PR C, on its release build)
 
 - [ ] M.1 D11 protocol on m4m: alternating PTY and core, eight runs a side, default and `V12_ONE_PROCESS=1`,

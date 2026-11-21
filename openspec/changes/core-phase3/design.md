@@ -176,6 +176,18 @@ None starts the pane fresh.
 A waiting pane is not Suspended: its program may run, so no resume timer touches it. It is a separate state,
 `CoreWaiting`, so the suspended-pane resume (D2) cannot pick it up.
 
+**Changed by the security follow-ups (#297, review M3):**
+
+- `CoreWaiting` is the link's durable home and carries why it holds: `Unreachable`, `Conflict` (the several
+  matches, which used to drop the link at the next save), or `DirectoryUnavailable` (a saved directory that is
+  gone, which also used to drop it). Every save keeps the link until the pane attaches or its program is proven
+  gone. A conflict resolves when a person closes the extra terminals; a gone directory only ever attaches.
+- "Not running" needs proof. The probe answers `Started`, `NoSuchProcess` or `Unknown`; a probe that fails is
+  `Unknown`, so with core unreachable the pane waits. The link also records the agent detection saw (a shell's
+  child with its own pid), and a running agent counts as a running program.
+- The known-session search reports sessions that did not answer. Nothing found while one did not answer waits;
+  a session with no socket has no core and counts as answered.
+
 ### D2. Resume waits for its backend, proves the old program is gone, and runs off the server loop
 
 **Readiness.** `pane_jobs_ready_probe` becomes a readiness check for the backend a resumed pane will start on:
@@ -190,6 +202,12 @@ its own pid). If either still runs, the pane is not resumed: it stays suspended 
 still runs" and is checked again at the next retry. A pid of 0 or an identity never recorded counts as **may
 run**: such a pane is not resumed automatically, and shows "Cannot confirm the old program ended; run `herdr
 pane respawn`".
+
+**Changed by the security follow-ups (#297).** A failed probe of either identity counts as may run (M3). A
+person's stop of a secondary session holds its panes until that session answers, with the primary up or not, and
+that session is only asked, never started (M7). A pane whose program the worker is starting is reserved from the
+launch to the install: a respawn of it starts nothing, `pane.respawn` answers `pane_resuming`, and a live handoff
+is refused until the worker's answers land (M3).
 
 **Off the server loop.** Today `resume_suspended_panes_if_due` spawns every pane synchronously, and a core spawn
 is a `terminal.run` plus an attach with 5 s timeouts each: 50 panes on a slow core block the loop for minutes. In
@@ -231,6 +249,15 @@ with 50 terminals leaves the socket missing about 0.4 s and never refusing; a st
 exits 5 without a second core; six starts at once give one core. The 3 s window is therefore not what keeps the
 core single (hc's start is exclusive); it stops herdr from adding a start to every planned restart and update.
 A start that exits 5 (`unavailable`, restarted while it ran) is a success for the rule: the socket is polled again.
+
+**Changed by the security follow-ups (#297).** The start gets an allow-list of herdr's environment, not a
+deny-list (M4): `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `XDG_*`, `TERM`,
+`TERMINFO`, `TERMINFO_DIRS`, `COLORTERM`, `HC_SOCKET` and `HC_INSTALL_DIR`, plus the `HC_SESSION` herdr sets.
+herdr's own panes get their full environment from herdr's spawn, so only terminals other clients start lose the
+rest. `hc` is `~/.local/bin/hc` when it is there, else the first on `PATH` with a warning, and a start that runs
+past 10 s is stopped (M5). A core start whose outcome is unknown (the `terminal.run` answer lost, or an attach
+that failed with a kill core did not confirm) never falls back to the PTY; the run carries a random
+`herdr.launch` label, and a lost answer is looked up by it and attached (M3).
 
 **D3a. `CoreLossGuard` counts losses, not starts.** A holder that keeps dying starts no core (the core server
 lives on and makes a new holder at the next `terminal.run`), so counting starts would never trip. The guard counts
