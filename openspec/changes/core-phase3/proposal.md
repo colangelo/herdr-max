@@ -86,7 +86,8 @@ opt-in per new pane"), and the core session named `herdr` for the default herdr 
 - Docs: `docs/next` config reference (core loss, the default session, the rollback rule), the herdr skill line
   about quitting Herdr Core.
 - Outside this repo: the chezmoi `~/.zshenv` bridge on both Macs is removed at the end (relayed to the dotfiles
-  owner); the old `herdr` core is stopped by ac once it is empty.
+  owner); the old `herdr` core is stopped once it is empty by each Mac's agent (mac-m4 on m4m, mac-m5 on
+  ac-mbm5), announced first.
 - Rollback: the build that reads sessions `default` and `herdr` (PR B) ships as its own beta on both Macs before
   the placement move, and is the rollback target. Builds older than that ignore panes in `default` and restore them
   fresh; the rollback rule from core-backend D10 extends to both sessions for them.

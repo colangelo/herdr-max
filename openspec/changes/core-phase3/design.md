@@ -279,8 +279,8 @@ never a feature request. Two candidate bugs, each measured first in a throwaway 
    entry whose stop ends every terminal of that holder (the #288 mechanism applied to core).
 2. Activity Monitor "Quit" of Herdr Core ends every terminal with no prompt.
 
-Only a reproduced case becomes a one-screen report (current, expected, shortest repro, impact, version), drafted
-for ac on the desk; ac decides whether to submit it. A design wish (holder per terminal) is a GitHub Discussions
+Only a reproduced case becomes a one-screen report (current, expected, shortest repro, impact, version), sent as
+an `ASK:` to manager-lab's desk when ready; ac decides whether to submit it, and submits it himself. A design wish (holder per terminal) is a GitHub Discussions
 post by ac, not an agent's issue. Until upstream changes, the docs and the herdr skill say: quitting Herdr Core
 suspends every core pane and they resume; do not stop "Running in Background" entries of apps launched from a
 pane.
@@ -494,7 +494,8 @@ On each Mac, in order:
    both at once. Never edited from this repo. The app's recorded probe command, run through `zsh -c` with an
    SSH-like environment and a `terminal.list`, then lists the default core's terminals, herdr-max's included. ac
    checks the phone (V24). Panes still in the legacy core stay off the phone until they move or end (D7).
-4. With the legacy core holding no live terminal, ac stops it: `HC_SESSION=herdr hc server stop`. herdr-max drops
+4. With the legacy core holding no live terminal, the Mac's agent (mac-m4 on m4m, mac-m5 on ac-mbm5) announces the
+   stop, then runs it: `HC_SESSION=herdr hc server stop`. herdr-max drops
    the secondary connection when the socket goes. A legacy core is a secondary, so D3b's stop record does not
    apply and no pane is suspended (none remain).
 
@@ -595,10 +596,10 @@ after a beta, by the named actor.
 | V22 | CPU gate | `scripts/core_busy_profile.sh`, D11 protocol | PTY runs of the same series; phase 2 totals | gate 1 and gate 2 met in both profiles, with the noise band recorded; else PR E, then this row again |
 | V23 | render path, if PR E lands | `just bench-render-scale`, 1 and 15 panes | `openspec/changes/core-backend/bench-render-phase2.txt` | median within noise; scaling delta reported |
 | V24 | on the Mac: the phone (ac) | Herdr Mobile on m4m, then ac-mbm5, bridge removed | #293 row 16 | herdr-max panes listed from `default`; the Inbox shows their states |
-| V25 | on the Mac: canary move (herdr, with ac's go) | `scripts/core_move_idle_panes.sh` on m4m, then ac-mbm5 | D9 | the canary keeps its conversation id, name, model, effort and permission mode; then the batch; `*-hlp` panes refused `excluded`; no PTY pane left outside the exclusions |
+| V25 | on the Mac: canary move (mac-m4 on m4m, mac-m5 on ac-mbm5, announced first) | `scripts/core_move_idle_panes.sh` on m4m, then ac-mbm5 | D9 | the canary keeps its conversation id, name, model, effort and permission mode; then the batch; `*-hlp` panes refused `excluded`; no PTY pane left outside the exclusions |
 | V26 | on the Mac: quit drill (ac or a computer-use session) | a named throwaway herdr session (own core `herdr-<name>`); Activity Monitor "Quit" on that core's holder pid | D1, D2 | its panes suspended and resumed; ac's own sessions untouched |
-| V27 | on the Mac: retire the legacy core (ac) | D12 steps 3 and 4 | D12 | probe command lists `default`; legacy core stopped; herdr logs no error; no orphan notice |
-| V28 | upstream evidence (herdr-core) | throwaway core: D4 cases 1 and 2 | D4 | each case recorded as reproduced or not, with versions; a reproduced one drafted for ac in bug-template form |
+| V27 | on the Mac: retire the legacy core (mac-m4 on m4m, mac-m5 on ac-mbm5, announced first) | D12 steps 3 and 4 | D12 | probe command lists `default`; legacy core stopped; herdr logs no error; no orphan notice |
+| V28 | upstream evidence (herdr-core) | throwaway core: D4 cases 1 and 2 | D4 | each case recorded as reproduced or not, with versions; a reproduced one drafted in bug-template form and sent as an `ASK:` to manager-lab's desk for ac to submit |
 | V29 | live server: unreachable core is never a fresh start (D1b) | `scripts/core_live_test.sh`, two cases. (a) primary: SIGKILL the scratch core server, then within 3 s a herdr restart, and separately a live handoff. (b) secondary: a pane in scratch `herdr` while the primary is scratch `default`; SIGKILL that core server, never started again; herdr restart, then live handoff | D1a, D1b | every program's pid unchanged and no `terminal.run` and no PTY spawn for those panes; (a) reattached once the primary core is back; (b) panes `CoreWaiting` through both, then reattached after `hc server start` by hand |
 | V30 | restore outcome table (D1b) | unit, `src/persist/restore.rs`, fake core and fake process table | D1b table | each row gives its action; a phase 2 link (no pid) with the core unreachable waits; gone with no identity runs the known-session search first |
 | V31 | link fields backward compatible (D1b) | unit, `snapshot.rs` | D1b | a phase 2 link parses with `pid: None`; a phase 3 link parses into a copy of the phase 2 struct; `pid` absent from JSON when `None` |

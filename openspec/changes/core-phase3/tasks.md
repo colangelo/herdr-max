@@ -121,10 +121,12 @@ rollout R.
   panes kept; `runtime = "core"` and `core_pty_panes` confirmed in both configs
 - [ ] R.2 V26 quit drill in a named throwaway session on m4m
 - [ ] R.3 V40 live part (real Claude Code, no-connector settings) in a throwaway session
-- [ ] R.4 V25 canary move on m4m with ac's go on the desk, then the batch; then ac-mbm5
+- [ ] R.4 V25 canary move on m4m by mac-m4, announced first, then the batch; then on ac-mbm5 by mac-m5, announced
+  first (no fresh go from ac: he asked for step 3 on 2026-11-21, decide-from-acs-principles-v2)
 - [ ] R.5 D12: per-host bridge removal relayed to the dotfiles owner; V24 phone check by ac; V27 legacy core stopped
-  by ac
-- [ ] R.6 V28 upstream evidence (any time after PR A1); a reproduced case drafted for ac in bug-template form
+  by mac-m4 on m4m and mac-m5 on ac-mbm5, each announced first
+- [ ] R.6 V28 upstream evidence (any time after PR A1); a reproduced case drafted in bug-template form and sent as an
+  `ASK:` to manager-lab's desk; ac submits it
 - [ ] R.7 V46 when ac next updates hc
 - [ ] R.8 SHAs, beta number and notes on #295, #287 and #293; close #287's herdr-max half and #293 1b after the
   checks; tick phase 3 in `openspec/changes/herdr-core-client/design.md` § 6.4
