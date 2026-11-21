@@ -932,6 +932,8 @@ impl App {
             });
         }
 
+        self.mirror_pane_core_status(update.ws_idx, update.pane_id);
+
         let previous_agent_status = pane_agent_status(update.previous_state, update.previous_seen);
         let agent_status = self
             .state

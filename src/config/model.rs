@@ -1908,6 +1908,11 @@ pub struct ExperimentalConfig {
     /// starts again in place with its agent resumed. Existing panes keep how
     /// they started. macOS only. Default: false.
     pub pane_jobs: bool,
+    /// Mirror each herdr-core pane's agent status into herdr-core as an OSC
+    /// 7501 record, written to the program's terminal, so clients of core
+    /// (Herdr Mobile's Inbox) see it. herdr still takes no status from core.
+    /// Unix only. Default: false.
+    pub core_status_mirror: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -3389,6 +3394,19 @@ pane_jobs = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.pane_jobs);
+    }
+
+    #[test]
+    fn core_status_mirror_is_opt_in() {
+        assert!(!Config::default().experimental.core_status_mirror);
+
+        let toml = r#"
+[experimental]
+core_status_mirror = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert!(config.experimental.core_status_mirror);
     }
 
     #[test]

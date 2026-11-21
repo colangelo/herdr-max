@@ -19,6 +19,7 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod core_status_mirror;
 mod core_terminals;
 mod creation;
 mod custom_commands;
@@ -205,6 +206,8 @@ pub struct App {
     /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
     window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
+    /// `[experimental] core_status_mirror` (openspec/changes/core-status-mirror).
+    core_status_mirror: bool,
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.
@@ -885,6 +888,7 @@ impl App {
             next_tab_bar_datetime_refresh: None,
             window_title_template: None,
             persist_pane_history: config.experimental.pane_history,
+            core_status_mirror: config.experimental.core_status_mirror,
             last_render_at: None,
             last_presentation_at: None,
             api_rx,
@@ -907,6 +911,9 @@ impl App {
         // reports once its panes are back, or every terminal looks unclaimed.
         if app.policy.restore_session {
             app.report_unclaimed_core_terminals();
+        }
+        if app.core_status_mirror {
+            app.sync_core_status_mirror();
         }
         Ok(app)
     }
@@ -974,6 +981,9 @@ impl App {
         });
         app.refresh_restored_workspace_git_metadata();
         app.report_unclaimed_core_terminals();
+        if app.core_status_mirror {
+            app.sync_core_status_mirror();
+        }
         Ok(app)
     }
 
@@ -1250,6 +1260,7 @@ impl App {
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
             apply_pane_runtime_choice(config.experimental.runtime);
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
+            self.set_core_status_mirror(config.experimental.core_status_mirror);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();
