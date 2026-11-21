@@ -57,6 +57,26 @@ pub(crate) fn unclaimed_core_terminals(claimed: &[String]) -> Vec<(String, Optio
     }
 }
 
+/// Hands the `herdr-app` document (`Null` clears it) to the background writer
+/// (openspec/changes/core-spaces-doc, D5). Without a core backend, nothing.
+/// Test builds reach it only from the Unix live tests (D7).
+#[cfg(any(unix, not(test)))]
+pub(crate) fn publish_core_spaces(value: serde_json::Value) {
+    #[cfg(unix)]
+    core_backend::spaces_doc::publish(value);
+    #[cfg(not(unix))]
+    let _ = value;
+}
+
+/// A raw call on the server's core connection, for live tests of documents.
+#[cfg(all(test, unix))]
+pub(crate) fn core_call_for_test(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    core_backend::spaces_doc::call_for_test(method, params).map_err(|err| err.to_string())
+}
+
 /// The herdr-core session this herdr session's panes run in (D2).
 pub(crate) fn core_session_name() -> String {
     #[cfg(unix)]

@@ -22,6 +22,8 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
+#[cfg(not(test))]
+pub(crate) use runtime_io::publish_core_spaces;
 pub(crate) use runtime_io::set_preferred_runtime;
 pub(crate) use runtime_io::CoreTerminalLink;
 use runtime_io::PaneIo;
