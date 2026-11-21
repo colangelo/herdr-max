@@ -1913,6 +1913,11 @@ pub struct ExperimentalConfig {
     /// (Herdr Mobile's Inbox) see it. herdr still takes no status from core.
     /// Unix only. Default: false.
     pub core_status_mirror: bool,
+    /// Publish herdr's workspaces, tabs and splits into herdr-core as the
+    /// `herdr-app` document, so the Herdr apps (Herdr Mobile) show them as
+    /// spaces with the core panes as terminals. herdr's layout is the source:
+    /// an edit made in an app is overwritten. Unix only. Default: false.
+    pub core_spaces_doc: bool,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
     /// the pane requested `?25l`, so macOS native input methods keep tracking
     /// the candidate window when TUIs paint their own cursor (Claude Code, pi,
@@ -3394,6 +3399,19 @@ pane_jobs = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.pane_jobs);
+    }
+
+    #[test]
+    fn core_spaces_doc_is_opt_in() {
+        assert!(!Config::default().experimental.core_spaces_doc);
+
+        let toml = r#"
+[experimental]
+core_spaces_doc = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+
+        assert!(config.experimental.core_spaces_doc);
     }
 
     #[test]

@@ -1130,6 +1130,10 @@ pub struct AppState {
     /// the only session content that exists nowhere else, so a forced
     /// shutdown inside the debounce window must not lose them.
     pub session_save_urgent: bool,
+    /// Set with `session_dirty`: the `herdr-app` document may have changed
+    /// (openspec/changes/core-spaces-doc, D4). Kept apart because pane-exit
+    /// checkpoints clear `session_dirty` without a schedule pass.
+    pub(crate) core_spaces_dirty: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1138,12 +1142,14 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+        self.core_spaces_dirty = true;
     }
 
     /// [`Self::mark_session_dirty`] for content that skips the save debounce.
     pub(crate) fn mark_session_dirty_urgent(&mut self) {
         self.session_dirty = true;
         self.session_save_urgent = true;
+        self.core_spaces_dirty = true;
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1376,6 +1382,7 @@ impl AppState {
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
             session_save_urgent: false,
+            core_spaces_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

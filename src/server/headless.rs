@@ -520,6 +520,7 @@ impl HeadlessServer {
 
             self.app.sync_focus_events();
             self.app.sync_session_save_schedule();
+            self.app.sync_core_spaces_schedule();
 
             // 4. Accept new client connections.
             self.accept_client_connections()?;
@@ -3349,6 +3350,7 @@ impl HeadlessServer {
         {
             self.app.start_background_session_save();
         }
+        self.app.publish_core_spaces_if_due(now);
 
         if let Some(deadline) = self
             .app
