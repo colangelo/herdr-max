@@ -238,6 +238,7 @@ pub enum AppEvent {
     CoreUnreachable { pane_id: PaneId, since: Option<u64> },
     /// Herdr Core kept ending panes, so the server gave up on it: no more
     /// core starts, panes resume on the PTY (core-phase3 D3a).
+    #[cfg(unix)]
     CoreGaveUp,
     /// The resume worker's answer for one suspended pane (core-phase3 D2).
     PaneResumed {

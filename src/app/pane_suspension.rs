@@ -291,6 +291,7 @@ impl App {
 
     /// The core loss guard gave up (core-phase3 D3a): one notice; panes
     /// resume on the PTY from now on.
+    #[cfg(unix)]
     pub(crate) fn core_gave_up(&mut self) {
         let previous = self.state.toast.clone();
         self.state.post_notification(ToastNotification {
@@ -419,6 +420,7 @@ impl App {
 
     /// Its agent by its resume plan, else its launch command or a shell. A
     /// pane that cannot start says so and stops waiting.
+    #[cfg(unix)]
     pub(super) fn resume_suspended_pane(&mut self, pane_id: PaneId) -> bool {
         if self.respawn_pane_agent(pane_id).is_some()
             || self.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv)
