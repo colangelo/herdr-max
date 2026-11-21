@@ -428,7 +428,9 @@ on any client, and repeating the request gets the same answer. With
 `"force": true` the respawn goes ahead and the result is
 `{"type": "respawned", "stopped_process": {"pid": ..., "name": ...}, "open_todos": [...]}`:
 the process it stopped (`null` when none was running) and the open todos the
-pane keeps. Unknown pane ids fail with `pane_not_found`.
+pane keeps. Unknown pane ids fail with `pane_not_found`. A suspended pane
+whose program Herdr is starting again fails with `pane_resuming` and changes
+nothing; respawn it once it has started.
 
 `pane.respawn_agent` takes the same parameters and answers the same way, but
 the pane comes back running its agent: a fresh shell in the pane's current

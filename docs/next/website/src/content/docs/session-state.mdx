@@ -145,6 +145,10 @@ Before a pane starts again, Herdr checks that the old program, and the agent tha
 
 If Herdr Core does not answer, the program keeps running. The pane keeps retrying, and after a minute it shows that Herdr Core is not answering. It attaches again as soon as the core answers. Herdr never starts a second copy of a program that may still run. A restored pane whose core does not answer shows `Waiting for Herdr Core (session <name>)` and starts nothing. It attaches when that core answers. To start it fresh instead, run `herdr pane respawn` on it.
 
+Herdr counts a program as ended only when the process table says no such process runs. A lookup that fails counts as "may still run". The same holds for the agent that detection saw in a core pane, which Herdr saves with the pane. A restored pane also waits when a Herdr Core session that might hold its program does not answer. When more than one Herdr Core terminal is labelled for the pane, the pane names them and starts nothing. Close the ones that are not the pane's, and the pane attaches to the one that is left. A restored pane whose directory is gone attaches to its program if it still runs in Herdr Core, and otherwise starts nothing. In each case the pane keeps its link to the program across saves, restarts and live handoffs.
+
+When Herdr Core may have started a program but did not answer, Herdr does not start the program on the PTY. It looks for the program in Herdr Core and attaches to it. While a suspended pane is starting again, `herdr pane respawn` on it is refused, and so is a live handoff. Try again a few seconds later.
+
 When the core's socket has been missing or refusing connections for at least 3 seconds, Herdr starts its core again. This happens when the core server was killed. Its programs keep running, and the panes attach to them again. A planned core restart or update is shorter than 3 seconds, so Herdr does not start a core during one.
 
 If you stop the core with `hc server stop`, the core panes wait for it, and Herdr does not start it. The panes start again after you run `hc server start`, or at the next Herdr start.
