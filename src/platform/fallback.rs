@@ -35,6 +35,11 @@ pub(super) fn process_name_and_parent(_pid: u32) -> Option<(String, u32)> {
 }
 
 #[cfg(unix)]
+pub(super) fn controlling_terminal_device(_pid: u32) -> Option<(PathBuf, u64)> {
+    None
+}
+
+#[cfg(unix)]
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
 pub(crate) fn forward_remote_bridge_stdio(

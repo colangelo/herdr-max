@@ -496,6 +496,62 @@ pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     super::process_name_and_parent(pid).map(|(_, parent)| parent)
 }
 
+/// Writes `bytes` to the controlling terminal of `pid` as terminal output, as
+/// `write(1)` does (openspec/changes/core-status-mirror, D4). `WouldBlock`
+/// means the terminal's buffer is full and the caller may retry.
+pub(crate) fn write_to_process_terminal(pid: u32, bytes: &[u8]) -> std::io::Result<()> {
+    let (path, device) = super::controlling_terminal_device(pid).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("process {pid} has no terminal device"),
+        )
+    })?;
+    write_to_terminal_device(&path, device, bytes)
+}
+
+/// Opens `path` without making it our controlling terminal and writes `bytes`
+/// in one call, only when it is a terminal with device id `device` owned by
+/// our effective uid. A short write is finished within a bounded wait, so a
+/// record is not left cut in two when the buffer is merely slow.
+fn write_to_terminal_device(path: &Path, device: u64, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    let ours = meta.file_type().is_char_device()
+        && meta.rdev() == device
+        && meta.uid() == unsafe { libc::geteuid() }
+        && unsafe { libc::isatty(file.as_raw_fd()) } == 1;
+    if !ours {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not the program's own terminal", path.display()),
+        ));
+    }
+    let mut written = 0;
+    let mut waits = 0;
+    while written < bytes.len() {
+        match (&file).write(&bytes[written..]) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(count) => written += count,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock && written > 0 && waits < 20 =>
+            {
+                waits += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 /// Describes the process on the other end of a local socket, for logs.
 pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
     use std::os::fd::{AsFd as _, AsRawFd as _};
@@ -741,6 +797,56 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_write_reaches_the_master_and_refuses_what_is_not_a_terminal() {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let (mut master_fd, mut slave_fd) = (-1, -1);
+        let opened = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty");
+        let mut master = unsafe { std::fs::File::from_raw_fd(master_fd) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
+        let name = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave_fd)) }
+            .to_str()
+            .expect("tty name")
+            .to_string();
+        let device = slave.metadata().expect("fstat slave").rdev();
+
+        let record = b"\x1b]7501;state=working:app=claude\x1b\\";
+        write_to_terminal_device(Path::new(&name), device, record).expect("write");
+        let mut got = vec![0; 256];
+        let read = master.read(&mut got).expect("read master");
+        assert_eq!(&got[..read], record);
+
+        let wrong_device = write_to_terminal_device(Path::new(&name), device + 1, record);
+        assert_eq!(
+            wrong_device.map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+        let file = std::env::temp_dir().join(format!("herdr-not-a-tty-{}", std::process::id()));
+        std::fs::write(&file, b"").expect("scratch file");
+        let file_device = std::fs::metadata(&file).expect("stat").rdev();
+        let not_a_tty = write_to_terminal_device(&file, file_device, record);
+        let written = std::fs::read(&file).expect("read scratch");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(
+            not_a_tty.map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(written.is_empty(), "nothing written to a file");
+        drop(slave);
+    }
 
     #[test]
     fn only_this_user_reaches_the_socket() {

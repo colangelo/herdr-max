@@ -392,6 +392,18 @@ fn controlling_terminal(pid: u32) -> Option<u64> {
     controlling_terminal_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
+/// The controlling terminal of `pid` and its device id, found among the
+/// program's standard streams (openspec/changes/core-status-mirror, D4).
+pub(super) fn controlling_terminal_device(pid: u32) -> Option<(std::path::PathBuf, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let device = controlling_terminal(pid)?;
+    (0..3).find_map(|fd| {
+        let path = std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok()?;
+        let meta = std::fs::metadata(&path).ok()?;
+        (meta.rdev() == device).then_some((path, device))
+    })
+}
+
 /// When a process started, in unix ms.
 pub fn process_started_at_ms(pid: u32) -> Option<i64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;

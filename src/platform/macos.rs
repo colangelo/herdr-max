@@ -539,6 +539,23 @@ fn controlling_terminal(pid: u32) -> Option<u64> {
     (terminal != u32::MAX).then_some(u64::from(terminal))
 }
 
+/// The controlling terminal of `pid` as a path under `/dev` and its device id
+/// (openspec/changes/core-status-mirror, D4).
+pub(super) fn controlling_terminal_device(pid: u32) -> Option<(PathBuf, u64)> {
+    // `devname` answers in one static buffer.
+    static DEVNAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let device = controlling_terminal(pid)?;
+    let _guard = DEVNAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let name = unsafe { libc::devname(device as libc::dev_t, libc::S_IFCHR) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().ok()?;
+    (!name.contains('/')).then(|| (Path::new("/dev").join(name), device))
+}
+
 fn process_group_pids(process_group_id: u32) -> Vec<u32> {
     listed_pids(PROC_PGRP_ONLY, process_group_id)
 }
