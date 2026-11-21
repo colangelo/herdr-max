@@ -1360,11 +1360,6 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
     )
 }
 
-/// Publish the process group an agent was identified in below the pane's own
-/// PTY, so the working directory the pane reports follows that job instead of
-/// the wrapper's. Zero means the pane identified from its own foreground job,
-/// or identified nothing.
-#[cfg(unix)]
 /// Publishes the agent process detection holds, for the dead-program check
 /// before a resume (core-phase3 D2). Locks only when it changed.
 fn publish_agent_program(
@@ -1383,6 +1378,11 @@ fn publish_agent_program(
     }
 }
 
+/// Publish the process group an agent was identified in below the pane's own
+/// PTY, so the working directory the pane reports follows that job instead of
+/// the wrapper's. Zero means the pane identified from its own foreground job,
+/// or identified nothing.
+#[cfg(unix)]
 fn publish_nested_agent_process_group(cell: &AtomicU32, probe: &ProcessProbeResult) {
     cell.store(
         probe.nested_process_group_id.unwrap_or(0),
