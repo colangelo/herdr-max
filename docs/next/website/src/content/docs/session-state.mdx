@@ -137,6 +137,22 @@ Plain `herdr update` installs the new client and keeps endpoint-generation-1 ser
 
 `herdr update --handoff` only applies to installs managed by Herdr's own updater. Homebrew, mise, and Nix installs are updated through their package managers, so `herdr update` is disabled there and cannot perform live handoff.
 
+## Herdr Core panes: when the core stops or crashes
+
+With `[experimental] runtime = "core"`, a pane's program runs in Herdr Core. The process that Activity Monitor shows as Herdr Core holds every core pane's program. When it quits or crashes, when the login session ends, or when a core restart loses programs, Herdr keeps each affected pane in its place. The pane shows that it is suspended. When the old program has ended, the pane starts again in place, and its agent resumes by its resume plan. Herdr shows one notice for each such event, with the number of panes.
+
+Before a pane starts again, Herdr checks that the old program, and the agent that detection saw in the pane, have ended. If either still runs, the pane stays suspended and names the process. If Herdr cannot confirm that the program ended, the pane stays suspended until you run `herdr pane respawn` on it. Suspended panes start again in batches of eight, and the server keeps answering while they start.
+
+If Herdr Core does not answer, the program keeps running. The pane keeps retrying, and after a minute it shows that Herdr Core is not answering. It attaches again as soon as the core answers. Herdr never starts a second copy of a program that may still run. A restored pane whose core does not answer shows `Waiting for Herdr Core (session <name>)` and starts nothing. It attaches when that core answers. To start it fresh instead, run `herdr pane respawn` on it.
+
+When the core's socket has been missing or refusing connections for at least 3 seconds, Herdr starts its core again. This happens when the core server was killed. Its programs keep running, and the panes attach to them again. A planned core restart or update is shorter than 3 seconds, so Herdr does not start a core during one.
+
+If you stop the core with `hc server stop`, the core panes wait for it, and Herdr does not start it. The panes start again after you run `hc server start`, or at the next Herdr start.
+
+If Herdr Core ends panes three times within ten minutes, Herdr stops using it. Panes then start again on the PTY, new panes also use the PTY, and `herdr status server` shows `core: gave_up`. Run `herdr server reload-config` to use Herdr Core again. A live handoff or a server restart starts a new server, which uses Herdr Core again.
+
+Quitting Herdr Core in Activity Monitor ends every core pane's program, so those panes start again. A macOS app started from a pane can appear in the Dock as "Running in Background". Do not stop such an entry: on macOS, stopping it can end every program in the same core.
+
 ## macOS: after a logout
 
 On macOS, a server that Herdr starts in the background (the usual `herdr` launch) runs in your account's per-user context, which survives logging out. A server started another way, or carried forward by live handoffs from such a server, can run in a login session's context instead. When that login ends, for example after a crash logs you out, every pane the server starts can no longer resolve host names, read the keychain, or use `launchctl`.
