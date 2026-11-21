@@ -716,3 +716,75 @@ async fn core_v3_a_burst_beyond_the_credit_window_arrives() {
     );
     runtime.shutdown();
 }
+
+/// The `herdr-app` document as core holds it: `(value, version)`.
+async fn core_doc(expect: impl Fn(&serde_json::Value) -> bool) -> (serde_json::Value, u64) {
+    let read = || {
+        let reply =
+            runtime_io::core_call_for_test("doc.get", serde_json::json!({"name": "herdr-app"}))
+                .expect("doc.get");
+        (
+            reply["value"].clone(),
+            reply["version"].as_u64().expect("version"),
+        )
+    };
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let doc = read();
+            if expect(&doc.0) {
+                return doc;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("herdr-app document: last {:?}", read()))
+}
+
+// core-spaces-doc verifier 10-11: the publisher writes the document into
+// core, overwrites a foreign write after a conflict, and clears it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_spaces_doc_is_written_overwritten_and_cleared() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-spaces");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    let address = runtime
+        .core_terminal()
+        .expect("a core pane has a link")
+        .address;
+    let document = |name: &str| {
+        serde_json::json!({"spaces": [{"id": "w1", "name": name, "folder": "/work", "tabs": [
+            {"id": "w1:t1", "name": "1", "root": {"id": "w1:t1", "type": "row", "children": [
+                {"id": "w1:p1", "type": "block", "content": {"terminal": address}}]}}]}]})
+    };
+
+    runtime_io::publish_core_spaces(document("first"));
+    let (value, version) = core_doc(|value| value == &document("first")).await;
+    assert!(version > 0, "{value}");
+
+    let foreign = runtime_io::core_call_for_test(
+        "doc.set",
+        serde_json::json!({"name": "herdr-app", "value": {"spaces": []}, "version": version}),
+    )
+    .expect("a foreign write");
+    assert!(foreign["version"].as_u64() > Some(version));
+    runtime_io::publish_core_spaces(document("second"));
+    core_doc(|value| value == &document("second")).await;
+
+    runtime_io::publish_core_spaces(serde_json::Value::Null);
+    let (_, cleared_at) = core_doc(serde_json::Value::is_null).await;
+    assert!(cleared_at > version + 1, "null is a write, not a reset");
+    runtime.shutdown();
+}

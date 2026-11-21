@@ -3,8 +3,9 @@
 # herdr with one PTY pane and one herdr-core pane. V15: the core it starts is
 # not tied to it; V11: a hook in the core pane reports through our API, and
 # with `core_status_mirror` on, the status reaches core's record
-# (openspec/changes/core-status-mirror); V10: a live handoff, then `herdr
-# server restart`, then `herdr server stop`.
+# (openspec/changes/core-status-mirror); with `core_spaces_doc` on, the layout
+# reaches core's `herdr-app` document (openspec/changes/core-spaces-doc); V10:
+# a live handoff, then `herdr server restart`, then `herdr server stop`.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -119,9 +120,37 @@ core_terminals() {
 }
 
 set_runtime() {
-  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\n' "$1" \
-    > "$CONFIG_HOME/herdr-dev/config.toml"
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_spaces_doc = %s\n' \
+    "$1" "${2:-true}" > "$CONFIG_HOME/herdr-dev/config.toml"
 }
+
+# The terminal blocks of core's `herdr-app` document, as `pane=address`
+# (`null` when there is no document). doc.get has no CLI verb: plain-mode
+# JSON-RPC through `hc connect`.
+doc_leaves() {
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' \
+    | hc_scratch connect \
+    | python3 -I -c '
+import json, sys
+value = json.load(sys.stdin)["result"]["value"]
+def blocks(node):
+    if node.get("type") == "block":
+        yield "%s=%s" % (node["id"], node["content"]["terminal"])
+    for child in node.get("children", []):
+        yield from blocks(child)
+print("null" if value is None else " ".join(
+    leaf for space in value["spaces"] for tab in space["tabs"] for leaf in blocks(tab["root"])))'
+}
+# Another client's write: an empty document, at core's current version.
+doc_clobber() {
+  local version
+  version="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' \
+    | hc_scratch connect | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
+  printf '{"jsonrpc":"2.0","id":2,"method":"doc.set","params":{"name":"herdr-app","value":{"spaces":[]},"version":%s}}\n' \
+    "$version" | hc_scratch connect | grep -q '"result"' || fail "the foreign doc.set was refused"
+}
+published() { [[ "$(doc_leaves)" == "$B=$ADDR" ]]; }
+unpublished() { [[ "$(doc_leaves)" == null ]]; }
 
 echo "herdr: $HERDR_BIN"
 echo "scratch: $BASE"
@@ -190,6 +219,8 @@ core_status() {
 mirrored() { [[ "$(core_status)" == "working pi" ]]; }
 wait_until "B's status mirrored into core" mirrored
 echo "ok: core_status_mirror put B's status in core: $(core_status)"
+wait_until "the layout in core's herdr-app document" published
+echo "ok: core_spaces_doc published B as $(doc_leaves); PTY pane A is left out"
 
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
@@ -204,6 +235,9 @@ wait_until "input to B after the handoff" file_has_line "$BASE/b.handoff"
 no_orphan_report "the live handoff"
 echo "ok: live handoff kept both programs and the core; B reattached to $ADDR and takes input"
 
+doc_clobber
+[[ -z "$(doc_leaves)" ]] || fail "the foreign write did not land: $(doc_leaves)"
+
 # 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
 #    pane is kept and reattached.
 run_herdr server restart --yes >"$BASE/restart.out" 2>&1 &
@@ -217,6 +251,11 @@ wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
 [[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the restart"
 no_orphan_report "the restart"
 echo "ok: server restart kept the core and B's program in $ADDR, and reattached it"
+wait_until "the restarted server's layout over the foreign write" published
+set_runtime core false
+run_herdr server reload-config >/dev/null
+wait_until "the herdr-app document cleared by the reload" unpublished
+echo "ok: core_spaces_doc: the restarted server overwrote a foreign write; reload turned it off"
 
 # 4. herdr server stop ends the core pane's program.
 run_herdr server stop >/dev/null
@@ -228,4 +267,4 @@ fi
 # and stopping our server leave the core running.
 alive "$CORE" || fail "core ended with our server"
 echo "ok: server stop ended B's program and left the core $CORE running"
-echo "PASS: core live test (V10 server half, V11, V15)"
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc)"
