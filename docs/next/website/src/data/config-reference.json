@@ -1932,7 +1932,7 @@
           "key": "experimental.runtime",
           "type": "enum",
           "default": "\"pty\"",
-          "description": "Which backend new panes run on: \"pty\" or \"core\" (a herdr-core terminal; Unix only; falls back to the PTY when herdr-core is not usable). Restored panes keep their backend. A pane whose program Herdr Core ended is kept and starts again in place (see Session state). Before rolling back to an older herdr with core panes open, close them, or kill their terminals (hc ls --label herdr.session=<name>): an older herdr does not see them and their programs keep running.",
+          "description": "Which backend new panes run on: \"pty\" or \"core\" (a herdr-core terminal; Unix only; falls back to the PTY when herdr-core is not usable). Restored panes keep their backend. A pane whose program Herdr Core ended is kept and starts again in place (see Session state). The default herdr session runs core panes in the Herdr Core session default, and a named session in herdr-<name> (see Session state). Before rolling back to beta 202 or older with core panes open, close them, or list their terminals (HC_SESSION=default hc ls --label herdr.session=herdr): that herdr does not see them, and their programs keep running.",
           "values": [
             "pty",
             "core"

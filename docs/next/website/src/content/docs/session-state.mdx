@@ -153,6 +153,32 @@ If Herdr Core ends panes three times within ten minutes, Herdr stops using it. P
 
 Quitting Herdr Core in Activity Monitor ends every core pane's program, so those panes start again. A macOS app started from a pane can appear in the Dock as "Running in Background". Do not stop such an entry: on macOS, stopping it can end every program in the same core.
 
+### Which core session a pane runs in
+
+Herdr Core keeps separate sessions, and each session holds its own programs. Herdr runs the core panes of each herdr session in one Herdr Core session:
+
+| Herdr session | Herdr Core session |
+|---|---|
+| The default session (`herdr`) | `default` |
+| A named session (`herdr --session work`) | `herdr-work` |
+
+`default` is Herdr Core's own session, which Herdr Mobile and the Herdr apps show, so the default session's panes appear there. Other programs can also run terminals in `default`. Herdr marks its own terminals with the label `herdr.session=herdr` (`herdr.session=herdr-work` for a named session). Herdr never attaches to, lists, or ends a terminal without its label.
+
+Earlier versions ran the default session's core panes in the Herdr Core session `herdr`. After an update, a restart, or a live handoff, Herdr finds those panes in `herdr` and attaches to them again. New panes start in `default`. Herdr does not start the `herdr` session.
+
+If the Herdr Core in `default` was started over SSH, Herdr shows the notice `Herdr Core in session default was started over SSH; restart it from a desktop terminal`. Herdr does not restart that core, because other programs share it.
+
+### Rolling back with core panes open
+
+Rolling back to the previous version (the one that reads both `default` and `herdr`) is safe: it attaches to the panes in both sessions again. An older version, beta 202 or earlier, looks only in `herdr`. It starts each pane from `default` again as a new program and leaves the old program running. Before such a rollback, close the core panes, or list their terminals:
+
+```sh
+HC_SESSION=default hc ls --label herdr.session=herdr
+HC_SESSION=herdr hc ls --label herdr.session=herdr
+```
+
+When you return to this version, a notice names the terminals that were left running without a pane. Herdr leaves them running. End one with `HC_SESSION=default hc kill <address>`.
+
 ### Keeping a pane on the PTY
 
 Some programs must not move to Herdr Core. On macOS, a privacy grant such as Screen Recording or Accessibility belongs to the process that asked for it, and a program in Herdr Core asks as Herdr Core. To keep such panes on the PTY, list their names in `[experimental] core_pty_panes`:
