@@ -191,8 +191,8 @@ impl ResumeQueue {
         self.in_flight.contains(&pane_id)
     }
 
-    /// Marks `pane_id` as being started, for tests outside this module.
-    #[cfg(test)]
+    /// Marks `pane_id` as being started, for the Unix handoff test.
+    #[cfg(all(test, unix))]
     pub(crate) fn reserve_for_test(&mut self, pane_id: PaneId) {
         self.in_flight.insert(pane_id);
     }

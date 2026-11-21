@@ -344,8 +344,14 @@ impl StartedCore {
                     Ok((client, listed))
                 });
                 let (client, listed) = found.map_err(|_| StartFailure::Unknown(err.clone()))?;
-                match listed["terminals"].as_array().map(Vec::as_slice) {
-                    Some([one]) => {
+                let ours: Vec<&Value> = listed["terminals"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|terminal| terminal["labels"][LAUNCH_LABEL] == launch.as_str())
+                    .collect();
+                match ours.as_slice() {
+                    [one] => {
                         let address = one["address"]
                             .as_str()
                             .ok_or_else(|| StartFailure::Unknown(err.clone()))?
