@@ -22,6 +22,9 @@ pub(crate) struct FakeConfig {
     pub hello_line: Option<Vec<u8>>,
     /// False: after hello, never read again, as a stalled core.
     pub reads_after_hello: bool,
+    /// How long `terminal.run` takes to answer, as a slow core; other calls
+    /// on the connection are answered meanwhile.
+    pub run_delay: std::time::Duration,
 }
 
 impl Default for FakeConfig {
@@ -34,6 +37,7 @@ impl Default for FakeConfig {
             pid: 4242,
             hello_line: None,
             reads_after_hello: true,
+            run_delay: std::time::Duration::ZERO,
         }
     }
 }
@@ -51,6 +55,9 @@ struct Shared {
     gone: std::collections::HashSet<String>,
     /// The client closed its connection.
     client_gone: bool,
+    /// `terminal.run` calls not answered yet, and the most there were.
+    runs_pending: usize,
+    runs_pending_max: usize,
 }
 
 pub(crate) struct FakeCore {
@@ -174,6 +181,11 @@ impl FakeCore {
         shared.terminals.insert(address, record);
     }
 
+    /// The most `terminal.run` calls that waited for an answer at once.
+    pub(crate) fn most_runs_at_once(&self) -> usize {
+        lock(&self.shared).runs_pending_max
+    }
+
     /// Core forgets the terminal, as after its holder was lost and swept.
     pub(crate) fn forget_terminal(&self, address: &str) {
         let mut shared = lock(&self.shared);
@@ -262,7 +274,7 @@ fn serve(stream: UnixStream, config: &FakeConfig, shared: Arc<Mutex<Shared>>) {
 fn answer(
     request: &Value,
     config: &FakeConfig,
-    shared: &Mutex<Shared>,
+    shared: &Arc<Mutex<Shared>>,
     next_channel: &mut u32,
     out: &mut UnixStream,
 ) {
@@ -358,6 +370,25 @@ fn answer(
     let _ = Frame::new(0, kind::DATA, payload).encode_into(&mut bytes);
     if let Some(frame) = then {
         let _ = frame.encode_into(&mut bytes);
+    }
+    if method == "terminal.run" && !config.run_delay.is_zero() {
+        let Ok(mut out) = out.try_clone() else {
+            return;
+        };
+        {
+            let mut state = lock(shared);
+            state.runs_pending += 1;
+            state.runs_pending_max = state.runs_pending_max.max(state.runs_pending);
+        }
+        let shared = Arc::clone(shared);
+        let delay = config.run_delay;
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let mut state = lock(&shared);
+            state.runs_pending -= 1;
+            let _ = out.write_all(&bytes);
+        });
+        return;
     }
     // The requester's own connection: with several clients, the latest one
     // is not necessarily it.

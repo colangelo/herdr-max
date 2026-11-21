@@ -290,6 +290,9 @@ pub struct Suspension {
     pub core_link: Option<crate::pane::CoreTerminalLink>,
     /// Why the last resume did not start it.
     pub blocked: Option<ResumeBlock>,
+    /// Its program is being started again off the server loop
+    /// (core-phase3 D2); input waits until it lands.
+    pub resuming: bool,
 }
 
 impl Suspension {
@@ -300,6 +303,7 @@ impl Suspension {
             agent: None,
             core_link: None,
             blocked: None,
+            resuming: false,
         }
     }
 }
@@ -384,6 +388,13 @@ impl TerminalState {
 
     pub fn is_suspended(&self) -> bool {
         matches!(self.hold, Some(PaneHold::Suspended(_)))
+    }
+
+    pub fn suspension(&self) -> Option<&Suspension> {
+        match &self.hold {
+            Some(PaneHold::Suspended(suspension)) => Some(suspension),
+            _ => None,
+        }
     }
 
     pub fn core_waiting(&self) -> Option<&CoreWaiting> {

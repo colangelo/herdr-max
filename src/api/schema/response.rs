@@ -60,6 +60,11 @@ pub enum ResponseResult {
         /// an older server.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         macos_services: Option<MacosServicesInfo>,
+        /// `gave_up` once Herdr Core kept ending panes and the server stopped
+        /// using it until a config reload. Absent otherwise and on an older
+        /// server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        core: Option<String>,
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,

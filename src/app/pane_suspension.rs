@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use super::api::RespawnTarget;
-use super::state::AppState;
+use super::state::{AppState, ToastKind, ToastNotification};
 use super::App;
 use crate::layout::PaneId;
-use crate::platform::{ProgramIdentity, ProgramLiveness, StartTokenLookup};
+use crate::platform::{ProgramIdentity, ProgramLiveness, StartTokenLookup, SuspendCause};
 use crate::terminal::state::{ResumeBlock, Suspension};
 
 /// Keepers ending this close together read as one burst (a logout looks like
@@ -28,18 +28,81 @@ const SETTLE_AFTER_BURST: Duration = Duration::from_secs(30);
 /// How often to look again while launchd accepts no pane jobs (logged out).
 const RETRY_EVERY: Duration = Duration::from_secs(10);
 
-/// When suspended panes start again, and the burst count. Pure: the clock is
-/// passed in.
+/// When suspended panes start again, the burst count, and the notices a
+/// burst raises (core-phase3 D2). Pure: the clock is passed in.
 #[derive(Debug, Default)]
 pub(crate) struct PaneSuspensions {
     burst: Option<Burst>,
     resume_at: Option<Instant>,
+    /// Panes per notice in the burst being counted, posted together once
+    /// the burst is over.
+    notices: Vec<(CoreNotice, usize)>,
+    notice_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Burst {
     last: Instant,
     count: usize,
+}
+
+/// What a core loss notice says (core-phase3 D2's table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreNotice {
+    HolderLost,
+    HostShutdown,
+    CoreStopped,
+    ProgramsLost,
+    Unreachable,
+}
+
+impl CoreNotice {
+    /// The notice a suspension raises; a pane job's end raises none.
+    pub(crate) fn for_cause(cause: SuspendCause) -> Option<Self> {
+        match cause {
+            SuspendCause::HolderLost => Some(Self::HolderLost),
+            SuspendCause::HostShutdown => Some(Self::HostShutdown),
+            SuspendCause::CoreStopped => Some(Self::CoreStopped),
+            SuspendCause::StoppedByRestart | SuspendCause::TerminalGone => Some(Self::ProgramsLost),
+            SuspendCause::PaneJobEnded => None,
+        }
+    }
+
+    pub(crate) fn text(self, count: usize) -> String {
+        let one = count == 1;
+        match self {
+            Self::HolderLost if one => {
+                "Herdr Core quit or crashed and ended 1 pane; it resumes in place".into()
+            }
+            Self::HolderLost => format!(
+                "Herdr Core quit or crashed and ended {count} panes; they resume in place"
+            ),
+            Self::HostShutdown if one => {
+                "The login session ended 1 core pane; it resumes in place".into()
+            }
+            Self::HostShutdown => {
+                format!("The login session ended {count} core panes; they resume in place")
+            }
+            Self::CoreStopped if one => {
+                "Herdr Core was stopped; 1 pane resumes when it runs again".into()
+            }
+            Self::CoreStopped => {
+                format!("Herdr Core was stopped; {count} panes resume when it runs again")
+            }
+            Self::ProgramsLost if one => {
+                "Herdr Core lost 1 pane's program; it resumes in place".into()
+            }
+            Self::ProgramsLost => {
+                format!("Herdr Core lost {count} panes' programs; they resume in place")
+            }
+            Self::Unreachable if one => {
+                "Herdr Core is not answering; 1 program keeps running and reattaches when it answers".into()
+            }
+            Self::Unreachable => format!(
+                "Herdr Core is not answering; {count} programs keep running and reattach when it answers"
+            ),
+        }
+    }
 }
 
 impl PaneSuspensions {
@@ -61,21 +124,50 @@ impl PaneSuspensions {
         (count == BURST_SIZE).then_some(count)
     }
 
+    /// Counts one pane for `notice`, posted once nothing more is counted
+    /// for `BURST_WINDOW`: one notice per burst and cause.
+    pub(crate) fn count_notice(&mut self, notice: CoreNotice, now: Instant) {
+        match self.notices.iter_mut().find(|(kind, _)| *kind == notice) {
+            Some((_, count)) => *count += 1,
+            None => self.notices.push((notice, 1)),
+        }
+        self.notice_at = Some(now + BURST_WINDOW);
+    }
+
+    /// The notices whose burst is over.
+    pub(crate) fn take_due_notices(&mut self, now: Instant) -> Vec<(CoreNotice, usize)> {
+        if self.notice_at.is_none_or(|at| now < at) {
+            return Vec::new();
+        }
+        self.notice_at = None;
+        std::mem::take(&mut self.notices)
+    }
+
     /// A client attached: someone is back, so try at once.
     pub(crate) fn request_now(&mut self, now: Instant) {
         self.resume_at = Some(now);
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.resume_at
+        self.resume_at.into_iter().chain(self.notice_at).min()
+    }
+
+    fn notice_deadline(&self) -> Option<Instant> {
+        self.notice_at
     }
 
     fn is_due(&self, now: Instant) -> bool {
         self.resume_at.is_some_and(|at| now >= at)
     }
 
-    fn retry_later(&mut self, now: Instant) {
-        self.resume_at = Some(now + RETRY_EVERY);
+    /// Look again in `RETRY_EVERY`, or sooner when a newer loss already
+    /// asked for an earlier time.
+    pub(crate) fn retry_later(&mut self, now: Instant) {
+        let retry = now + RETRY_EVERY;
+        self.resume_at = Some(match self.resume_at {
+            Some(at) if at > now => at.min(retry),
+            _ => retry,
+        });
     }
 
     fn done(&mut self) {
@@ -127,11 +219,7 @@ impl App {
     /// The program of `pane_id` ended without its own exit. Keeps the pane,
     /// suspended, and returns true; false for a pane that closes as before
     /// (a popup, an overlay, one a worktree removal is stopping).
-    pub(super) fn suspend_pane_after_exit(
-        &mut self,
-        pane_id: PaneId,
-        cause: crate::platform::SuspendCause,
-    ) -> bool {
+    pub(super) fn suspend_pane_after_exit(&mut self, pane_id: PaneId, cause: SuspendCause) -> bool {
         if self.overlay_panes.contains_key(&pane_id)
             || self
                 .pending_worktree_remove_runtime_exits
@@ -159,12 +247,21 @@ impl App {
             }
         }
         let now = Instant::now();
+        let on_core = suspension.core_link.is_some();
         self.state.suspend_pane(pane_id, now, suspension);
         info!(
             pane = pane_id.raw(),
             ?cause,
             "pane suspended: its runtime or session ended its program; it starts again in place"
         );
+        if let Some(notice) = CoreNotice::for_cause(cause) {
+            self.pane_suspensions.count_notice(notice, now);
+        }
+        // A person's stop is not a loss (D3b); every other core suspension
+        // counts toward the loss guard (D3a).
+        if on_core && cause != SuspendCause::CoreStopped {
+            crate::pane::note_core_loss(now);
+        }
         if let Some(count) = self.pane_suspensions.record(now) {
             warn!(
                 count,
@@ -183,46 +280,114 @@ impl App {
         }
     }
 
+    /// When the suspension timers next need the loop: none while a resume
+    /// round is in flight, whose answers wake it.
     pub(crate) fn suspended_pane_resume_deadline(&self) -> Option<Instant> {
+        if self.resume_queue.busy() {
+            return self.pane_suspensions.notice_deadline();
+        }
         self.pane_suspensions.deadline()
     }
 
-    /// Starts every suspended pane again in place once it is time and
-    /// launchd accepts pane jobs. Returns whether anything changed.
-    pub(crate) fn resume_suspended_panes_if_due(&mut self, now: Instant) -> bool {
-        if !self.pane_suspensions.is_due(now) {
+    /// The core loss guard gave up (core-phase3 D3a): one notice; panes
+    /// resume on the PTY from now on.
+    pub(crate) fn core_gave_up(&mut self) {
+        let previous = self.state.toast.clone();
+        self.state.post_notification(ToastNotification {
+            kind: ToastKind::NeedsAttention,
+            title: "Herdr Core".into(),
+            context: "Herdr Core keeps ending; panes resume on the PTY. Reload the config to try core again.".into(),
+            position: None,
+            target: None,
+            anchor_pane: None,
+        });
+        self.sync_toast_deadline(previous);
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    /// Posts the core loss notices whose burst is over, one per cause.
+    fn post_due_core_notices(&mut self, now: Instant) -> bool {
+        let due = self.pane_suspensions.take_due_notices(now);
+        if due.is_empty() {
             return false;
         }
-        let panes = self.state.suspended_panes();
+        for (notice, count) in due {
+            let previous = self.state.toast.clone();
+            self.state.post_notification(ToastNotification {
+                kind: ToastKind::NeedsAttention,
+                title: "Herdr Core".into(),
+                context: notice.text(count),
+                position: None,
+                target: None,
+                anchor_pane: None,
+            });
+            self.sync_toast_deadline(previous);
+        }
+        true
+    }
+
+    /// Starts every suspended pane again in place once it is time and its
+    /// backend is ready, in batches off the server loop (core-phase3 D2).
+    /// Returns whether anything changed.
+    pub(crate) fn resume_suspended_panes_if_due(&mut self, now: Instant) -> bool {
+        let noticed = self.post_due_core_notices(now);
+        if self.resume_queue.busy() || !self.pane_suspensions.is_due(now) {
+            return noticed;
+        }
+        let panes: Vec<PaneId> = self
+            .state
+            .suspended_panes()
+            .into_iter()
+            .filter(|pane_id| !self.pane_suspension(*pane_id).is_some_and(|s| s.resuming))
+            .collect();
         if panes.is_empty() {
             self.pane_suspensions.done();
-            return false;
+            return noticed;
         }
-        if !(self.pane_jobs_ready_probe)() {
+        let on_core = crate::pane::resumes_on_core();
+        if !on_core && !(self.pane_jobs_ready_probe)() {
             self.pane_suspensions.retry_later(now);
-            return false;
+            return noticed;
         }
-        let (mut resumed, mut failed, mut still_running, mut unconfirmed) = (0, 0, 0, 0);
+        let (mut queued, mut failed, mut still_running, mut unconfirmed) = (0, 0, 0, 0);
         for pane_id in &panes {
             match self.check_old_program_gone(*pane_id) {
                 Some(ResumeBlock::StillRuns(_)) => still_running += 1,
                 Some(ResumeBlock::CannotConfirm) => unconfirmed += 1,
-                None if self.resume_suspended_pane(*pane_id) => resumed += 1,
-                None => failed += 1,
+                None => {
+                    // A core a person stopped is waited for in every case (D3b).
+                    let needs_core = on_core
+                        || self
+                            .pane_suspension(*pane_id)
+                            .is_some_and(|s| s.cause == SuspendCause::CoreStopped);
+                    if self.queue_resume(*pane_id, needs_core) {
+                        queued += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
             }
         }
         info!(
-            resumed,
+            queued,
             failed, still_running, unconfirmed, "suspended panes checked for a resume"
         );
+        self.pane_suspensions.done();
         if still_running > 0 {
+            self.resume_queue.ask_retry();
+        }
+        self.dispatch_resume_batch();
+        if !self.resume_queue.busy() && self.resume_queue.take_retry() {
             self.pane_suspensions.retry_later(now);
-        } else {
-            self.pane_suspensions.done();
         }
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
         true
+    }
+
+    fn pane_suspension(&self, pane_id: PaneId) -> Option<&Suspension> {
+        self.state.pane_terminal(pane_id)?.suspension()
     }
 
     /// D2's dead-program check, recorded on the pane: `None` when it may
@@ -296,7 +461,7 @@ pub(crate) fn resume_block(
 mod tests {
     use super::*;
     use crate::events::AppEvent;
-    use crate::platform::{ChildExitReason, SuspendCause};
+    use crate::platform::ChildExitReason;
 
     #[test]
     fn a_lone_keeper_end_resumes_after_the_settle_time() {
@@ -335,6 +500,47 @@ mod tests {
         assert!(suspensions.is_due(now));
         suspensions.retry_later(now);
         assert_eq!(suspensions.deadline(), Some(now + RETRY_EVERY));
+    }
+
+    // A2.5 (core-phase3 D2): one notice per burst and cause, with the
+    // burst's count, once the burst is over.
+    #[test]
+    fn a_burst_raises_one_notice_per_cause() {
+        let mut suspensions = PaneSuspensions::default();
+        let start = Instant::now();
+        for step in 0..3 {
+            suspensions.count_notice(
+                CoreNotice::HolderLost,
+                start + Duration::from_millis(500 * step),
+            );
+        }
+        suspensions.count_notice(CoreNotice::Unreachable, start + Duration::from_millis(1200));
+        let last = start + Duration::from_millis(1200);
+        assert_eq!(suspensions.deadline(), Some(last + BURST_WINDOW));
+        assert!(suspensions
+            .take_due_notices(last + Duration::from_millis(1999))
+            .is_empty());
+        let due = suspensions.take_due_notices(last + BURST_WINDOW);
+        assert_eq!(
+            due,
+            [(CoreNotice::HolderLost, 3), (CoreNotice::Unreachable, 1)]
+        );
+        assert!(suspensions
+            .take_due_notices(last + BURST_WINDOW * 2)
+            .is_empty());
+        assert_eq!(
+            CoreNotice::HolderLost.text(3),
+            "Herdr Core quit or crashed and ended 3 panes; they resume in place"
+        );
+        assert_eq!(
+            CoreNotice::Unreachable.text(1),
+            "Herdr Core is not answering; 1 program keeps running and reattaches when it answers"
+        );
+        assert_eq!(CoreNotice::for_cause(SuspendCause::PaneJobEnded), None);
+        assert_eq!(
+            CoreNotice::for_cause(SuspendCause::TerminalGone),
+            Some(CoreNotice::ProgramsLost)
+        );
     }
 
     #[test]
@@ -421,6 +627,25 @@ mod tests {
         panic!("the pane never showed {needle:?}: {screen}");
     }
 
+    /// Runs a resume round and installs the resume worker's answers. Other
+    /// events are dropped: the exit the old runtime reports when the test's
+    /// made-up suspension shuts it down would close the pane.
+    #[cfg(unix)]
+    async fn resume_and_wait(app: &mut App, now: Instant) -> bool {
+        let changed = app.resume_suspended_panes_if_due(now);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "the resume never landed");
+            while let Ok(ev) = app.event_rx.try_recv() {
+                if matches!(ev, AppEvent::PaneResumed { .. }) {
+                    app.handle_internal_event(ev);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        changed
+    }
+
     #[cfg(unix)]
     fn shutdown_runtimes(app: &mut App) {
         for (_, runtime) in app.terminal_runtimes.drain() {
@@ -432,6 +657,9 @@ mod tests {
     /// its resume plan, in the session too, and the pane comes back resumed.
     #[cfg(unix)]
     #[tokio::test]
+    // The config env lock must cover the whole test, the resume's wait too;
+    // nothing else on this current-thread runtime takes it.
+    #[allow(clippy::await_holding_lock)]
     async fn a_pane_whose_keeper_ended_is_kept_saved_and_resumed_in_place() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let config_home = std::env::temp_dir().join(format!(
@@ -491,7 +719,7 @@ mod tests {
         app.pane_jobs_ready_probe = || true;
         let now = Instant::now();
         app.request_suspended_pane_resume(now);
-        assert!(app.resume_suspended_panes_if_due(now));
+        assert!(resume_and_wait(&mut app, now).await);
         assert!(!app.state.terminals[&terminal_id].is_suspended());
         assert_eq!(app.suspended_pane_resume_deadline(), None);
         assert_eq!(
@@ -516,7 +744,7 @@ mod tests {
             exit_reason: ChildExitReason::Suspended(SuspendCause::PaneJobEnded),
         });
         let now = Instant::now() + SETTLE;
-        assert!(app.resume_suspended_panes_if_due(now));
+        assert!(resume_and_wait(&mut app, now).await);
         assert!(app.terminal_runtimes.get(&terminal_id).is_some());
         assert!(!app.state.terminals[&terminal_id].is_suspended());
 
@@ -692,7 +920,7 @@ mod tests {
         set_program(&mut app, Some(PROGRAM));
         app.program_start_token = |_| None;
         app.request_suspended_pane_resume(now);
-        assert!(app.resume_suspended_panes_if_due(now));
+        assert!(resume_and_wait(&mut app, now).await);
         assert!(
             !app.state.terminals[&terminal_id].is_suspended(),
             "gone: resumed"
@@ -801,7 +1029,7 @@ mod tests {
             .filter(|method| *method == "terminal.run")
             .count();
         app.request_suspended_pane_resume(Instant::now());
-        assert!(app.resume_suspended_panes_if_due(Instant::now()));
+        assert!(resume_and_wait(&mut app, Instant::now()).await);
         assert!(app.state.suspended_panes().is_empty());
         let runs: Vec<_> = core
             .requests()

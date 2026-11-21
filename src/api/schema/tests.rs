@@ -948,6 +948,7 @@ fn success_response_round_trips() {
                 context: "user".into(),
                 reachable: true,
             }),
+            core: Some("gave_up".into()),
         },
     };
 
@@ -1052,6 +1053,7 @@ fn worktree_request_and_response_round_trip() {
                 suspended: false,
                 core_waiting: false,
                 core_unreachable_since: None,
+                suspend_cause: None,
                 label: None,
                 agent: None,
                 title: None,
@@ -1494,6 +1496,7 @@ fn create_response_round_trips_with_root_pane() {
                 suspended: false,
                 core_waiting: false,
                 core_unreachable_since: None,
+                suspend_cause: None,
                 label: None,
                 agent: None,
                 title: None,

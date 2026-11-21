@@ -27,6 +27,7 @@ mod custom_commands;
 mod default_workspace;
 mod git_refresh;
 mod ids;
+mod pane_resume;
 mod pane_suspension;
 mod popup;
 mod runtime;
@@ -195,6 +196,8 @@ pub struct App {
     server_hangup_probe: fn() -> bool,
     /// When suspended panes start again (fork issue 288).
     pub(crate) pane_suspensions: pane_suspension::PaneSuspensions,
+    /// Suspended panes on their way back, off the loop (core-phase3 D2).
+    pub(crate) resume_queue: pane_resume::ResumeQueue,
     /// When to open the next default workspace after one died at once.
     default_workspace_reopen: default_workspace::DefaultWorkspaceReopen,
     /// Whether launchd accepts pane jobs now, so suspended panes may start.
@@ -583,6 +586,7 @@ impl App {
         crate::platform::set_pane_jobs(config.experimental.pane_jobs);
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
+        crate::pane::set_core_events(event_tx.clone());
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(crate::render_signal::RenderSignal::new());
 
@@ -889,6 +893,7 @@ impl App {
             #[cfg(test)]
             server_hangup_probe: || false,
             pane_suspensions: pane_suspension::PaneSuspensions::default(),
+            resume_queue: pane_resume::ResumeQueue::default(),
             default_workspace_reopen: default_workspace::DefaultWorkspaceReopen::default(),
             #[cfg(not(test))]
             pane_jobs_ready_probe: crate::platform::pane_jobs_ready_for_resume,
@@ -1282,6 +1287,9 @@ impl App {
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
             apply_pane_runtime_choice(config.experimental.runtime);
+            // A reload is a person's act: the core loss guard starts afresh
+            // (core-phase3 D3a).
+            crate::pane::reset_core_loss_guard();
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
             self.set_core_status_mirror(config.experimental.core_status_mirror);
             self.set_core_spaces_doc(config.experimental.core_spaces_doc);

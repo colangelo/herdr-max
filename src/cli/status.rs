@@ -76,6 +76,7 @@ enum ServerRuntimeStatus {
         protocol: Option<u32>,
         capabilities: Option<crate::api::schema::ServerCapabilities>,
         macos_services: Option<crate::api::schema::MacosServicesInfo>,
+        core: Option<String>,
     },
     NotRunning,
 }
@@ -154,6 +155,7 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
             protocol,
             capabilities,
             macos_services,
+            core,
         } => {
             println!("{indent}status: running");
             println!("{indent}version: {}", option_label(version.as_deref()));
@@ -170,6 +172,9 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
             if let Some(services) = macos_services {
                 println!("{indent}macos_services: {}", macos_services_label(services));
             }
+            if let Some(core) = core {
+                println!("{indent}core: {core}");
+            }
         }
         ServerRuntimeStatus::NotRunning => {
             println!("{indent}status: not running");
@@ -185,6 +190,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
             protocol: status.protocol,
             capabilities: status.capabilities,
             macos_services: status.macos_services,
+            core: status.core,
         }),
         Err(err) if super::target::is_remote() => Err(super::target::remote_error(
             super::api_client_error_to_io(err),
@@ -293,6 +299,9 @@ struct ServerStatusJson {
     server_binary_stale: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     macos_services: Option<crate::api::schema::MacosServicesInfo>,
+    /// `gave_up` when the server stopped using Herdr Core (core-phase3 D3a).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    core: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -336,6 +345,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             protocol,
             capabilities,
             macos_services,
+            core,
         } => ServerStatusJson {
             status: "running",
             running: true,
@@ -362,6 +372,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             restart_needed: restart_needed_bool(server),
             server_binary_stale: server_binary_stale_bool(server),
             macos_services: macos_services.clone(),
+            core: core.clone(),
         },
         ServerRuntimeStatus::NotRunning => ServerStatusJson {
             status: "not_running",
@@ -376,6 +387,7 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             restart_needed: Some(false),
             server_binary_stale: Some(false),
             macos_services: None,
+            core: None,
         },
     };
     if let Some((_, session)) = super::target::remote_identity() {
@@ -452,6 +464,7 @@ mod tests {
                 ssh_agent_registration: false,
             }),
             macos_services: None,
+            core: None,
         }
     }
 

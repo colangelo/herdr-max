@@ -113,6 +113,7 @@ impl ApiClient {
                 capabilities,
                 exe,
                 macos_services,
+                core,
                 ..
             } => Ok(crate::api::RuntimeStatus {
                 version: Some(version),
@@ -120,6 +121,7 @@ impl ApiClient {
                 capabilities,
                 exe,
                 macos_services,
+                core,
             }),
             result => Err(ApiClientError::UnexpectedResult(format!("{result:?}"))),
         }

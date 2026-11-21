@@ -1,0 +1,673 @@
+//! Suspended panes start again off the server loop (openspec/changes/
+//! core-phase3, D2). The loop builds each pane's spawn, which is pure and
+//! in memory, and hands batches of at most `RESUME_BATCH` to one resume
+//! worker. The worker runs the spawns (on core, a `terminal.run` and an
+//! attach, each with a 5 s timeout) and sends each runtime back as
+//! `AppEvent::PaneResumed`, which the loop installs like a respawn. The next
+//! batch leaves only when the last one has answered.
+//!
+//! Cardinality: per loss burst times suspended panes, never per render or
+//! per byte. The loop's work per pane is one spec build and one install.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio::sync::mpsc;
+use tracing::{info, warn};
+
+use super::agent_resume::{AgentResumeFinish, AgentResumeLaunch};
+use super::api::RespawnTarget;
+use super::App;
+use crate::events::{AppEvent, ResumeOutcome};
+use crate::layout::PaneId;
+use crate::terminal::state::PaneHold;
+use crate::terminal::TerminalId;
+
+/// Panes started per batch, so a mass resume never puts more than this
+/// many `terminal.run` calls on core at once.
+pub(super) const RESUME_BATCH: usize = 8;
+
+/// What a pane's runtime runs.
+pub(crate) enum SpawnProgram {
+    Shell {
+        shell: String,
+        mode: crate::config::ShellModeConfig,
+    },
+    Argv(Vec<String>),
+}
+
+/// Everything one `TerminalRuntime` spawn needs, owned, so it can run on
+/// another thread.
+pub(crate) struct RuntimeSpawn {
+    pane_id: PaneId,
+    rows: u16,
+    cols: u16,
+    cwd: std::path::PathBuf,
+    scrollback_limit_bytes: usize,
+    theme: crate::terminal_theme::TerminalTheme,
+    appearance: Option<crate::terminal_theme::HostAppearance>,
+    launch_env: crate::pane::PaneLaunchEnv,
+    program: SpawnProgram,
+    events: mpsc::Sender<AppEvent>,
+    render_notify: Arc<tokio::sync::Notify>,
+    render_dirty: Arc<crate::render_signal::RenderSignal>,
+}
+
+impl RuntimeSpawn {
+    /// Starts the program. Needs a tokio runtime entered: the pane's tasks
+    /// run there.
+    pub(crate) fn run(self) -> std::io::Result<crate::terminal::TerminalRuntime> {
+        match &self.program {
+            SpawnProgram::Shell { shell, mode } => crate::terminal::TerminalRuntime::spawn(
+                self.pane_id,
+                self.rows,
+                self.cols,
+                self.cwd,
+                self.scrollback_limit_bytes,
+                self.theme,
+                self.appearance,
+                crate::pane::PaneShellConfig::new(shell, *mode),
+                &self.launch_env,
+                self.events,
+                self.render_notify,
+                self.render_dirty,
+            ),
+            SpawnProgram::Argv(argv) => crate::terminal::TerminalRuntime::spawn_argv_command(
+                self.pane_id,
+                self.rows,
+                self.cols,
+                self.cwd,
+                argv,
+                &self.launch_env,
+                crate::pane::AgentDetection::Enabled,
+                self.scrollback_limit_bytes,
+                self.theme,
+                self.appearance,
+                self.events,
+                self.render_notify,
+                self.render_dirty,
+            ),
+        }
+    }
+}
+
+/// A spawn and what to record once it runs.
+pub(super) struct Prepared<F> {
+    pub terminal_id: TerminalId,
+    pub spawn: RuntimeSpawn,
+    pub finish: F,
+}
+
+/// What a respawn records once its runtime runs.
+pub(super) struct RespawnFinish {
+    pub cwd: std::path::PathBuf,
+    pub launch_argv: Option<Vec<String>>,
+}
+
+enum ResumeFinish {
+    Agent {
+        cwd: std::path::PathBuf,
+        agent: String,
+        finish: AgentResumeFinish,
+    },
+    Respawn(RespawnFinish),
+}
+
+struct ResumeJob {
+    pane_id: PaneId,
+    terminal_id: TerminalId,
+    /// The primary core must answer first: the pane resumes on core, or a
+    /// person stopped core and the pane waits for it (D3b).
+    needs_core: bool,
+    spawn: RuntimeSpawn,
+}
+
+/// Suspended panes on their way back.
+#[derive(Default)]
+pub(crate) struct ResumeQueue {
+    queued: VecDeque<ResumeJob>,
+    /// Every queued or in-flight pane's finish, by pane.
+    finishes: HashMap<PaneId, (TerminalId, ResumeFinish)>,
+    in_flight: usize,
+    /// Some pane of this round must be looked at again later.
+    retry: bool,
+    /// The most panes one batch sent at once, for tests.
+    #[cfg(test)]
+    pub(super) widest_batch: usize,
+}
+
+impl ResumeQueue {
+    pub(crate) fn busy(&self) -> bool {
+        self.in_flight > 0 || !self.queued.is_empty()
+    }
+
+    pub(super) fn ask_retry(&mut self) {
+        self.retry = true;
+    }
+
+    pub(super) fn take_retry(&mut self) -> bool {
+        std::mem::take(&mut self.retry)
+    }
+}
+
+enum Prepare {
+    Job(Box<ResumeJob>, ResumeFinish),
+    /// The pane cannot start and now says why.
+    Settled,
+    Failed,
+}
+
+impl App {
+    pub(super) fn shell_program(&self) -> SpawnProgram {
+        SpawnProgram::Shell {
+            shell: self.state.default_shell.clone(),
+            mode: self.state.shell_mode,
+        }
+    }
+
+    pub(super) fn runtime_spawn(
+        &self,
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        cwd: std::path::PathBuf,
+        launch_env: crate::pane::PaneLaunchEnv,
+        program: SpawnProgram,
+    ) -> RuntimeSpawn {
+        RuntimeSpawn {
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes: self.state.pane_scrollback_limit_bytes,
+            theme: self.state.host_terminal_theme,
+            appearance: self.pane_host_terminal_appearance(),
+            launch_env,
+            program,
+            events: self.event_tx.clone(),
+            render_notify: self.render_notify.clone(),
+            render_dirty: self.render_dirty.clone(),
+        }
+    }
+
+    /// Queues `pane_id` to start again: its agent by its resume plan, else
+    /// its launch command or a shell. False when it cannot start; the pane
+    /// then says so.
+    pub(super) fn queue_resume(&mut self, pane_id: PaneId, needs_core: bool) -> bool {
+        match self.prepare_resume(pane_id, needs_core) {
+            Prepare::Job(job, finish) => {
+                let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
+                    return false;
+                };
+                if let Some(PaneHold::Suspended(suspension)) = terminal.hold.as_mut() {
+                    suspension.resuming = true;
+                    terminal.revision = terminal.revision.saturating_add(1);
+                }
+                self.resume_queue
+                    .finishes
+                    .insert(pane_id, (job.terminal_id.clone(), finish));
+                self.resume_queue.queued.push_back(*job);
+                true
+            }
+            Prepare::Settled => {
+                if let Some(terminal) = self.state.pane_terminal_mut(pane_id) {
+                    terminal.hold = None;
+                }
+                false
+            }
+            Prepare::Failed => {
+                self.pane_could_not_resume(pane_id);
+                false
+            }
+        }
+    }
+
+    fn prepare_resume(&mut self, pane_id: PaneId, needs_core: bool) -> Prepare {
+        let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
+            return Prepare::Failed;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        if let Some(plan) = self.pane_agent_resume_plan(pane_id) {
+            let Some(cwd) = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .map(|terminal| terminal.cwd.clone())
+            else {
+                return Prepare::Failed;
+            };
+            let (rows, cols) = self.respawn_size(ws_idx, pane_id, &terminal_id);
+            match self.agent_resume_launch(
+                pane_id,
+                &terminal_id,
+                cwd.clone(),
+                &plan,
+                rows,
+                cols,
+                true,
+            ) {
+                AgentResumeLaunch::Spawn(spawn, finish) => {
+                    let job = ResumeJob {
+                        pane_id,
+                        terminal_id,
+                        needs_core,
+                        spawn: *spawn,
+                    };
+                    let finish = ResumeFinish::Agent {
+                        cwd,
+                        agent: plan.agent,
+                        finish,
+                    };
+                    return Prepare::Job(Box::new(job), finish);
+                }
+                AgentResumeLaunch::Settled => return Prepare::Settled,
+                AgentResumeLaunch::NotNow => {}
+            }
+        }
+        let Some((_, prepared)) = self.prepare_respawn(pane_id, RespawnTarget::LaunchArgv) else {
+            return Prepare::Failed;
+        };
+        let job = ResumeJob {
+            pane_id,
+            terminal_id: prepared.terminal_id,
+            needs_core,
+            spawn: prepared.spawn,
+        };
+        Prepare::Job(Box::new(job), ResumeFinish::Respawn(prepared.finish))
+    }
+
+    fn pane_could_not_resume(&mut self, pane_id: PaneId) {
+        if let Some(terminal) = self.state.pane_terminal_mut(pane_id) {
+            terminal.hold = None;
+            terminal.restore_error = Some(
+                "This pane could not start again after the session ended it. Run `herdr pane respawn` on it to try again."
+                    .into(),
+            );
+            terminal.revision = terminal.revision.saturating_add(1);
+        }
+    }
+
+    /// Whether `pane_id` still shows `terminal_id`, suspended and waiting
+    /// for its resume, with no runtime: a close, a respawn by a person or a
+    /// new suspension in between makes a resume's result stale.
+    fn awaits_resume(&self, pane_id: PaneId, terminal_id: &TerminalId) -> bool {
+        self.find_pane(pane_id)
+            .is_some_and(|(_, pane)| &pane.attached_terminal_id == terminal_id)
+            && self.terminal_runtimes.get(terminal_id).is_none()
+            && self
+                .state
+                .terminals
+                .get(terminal_id)
+                .and_then(|terminal| terminal.suspension())
+                .is_some_and(|suspension| suspension.resuming)
+    }
+
+    /// Sends the next batch to the resume worker when none is in flight.
+    pub(super) fn dispatch_resume_batch(&mut self) {
+        if self.resume_queue.in_flight > 0 {
+            return;
+        }
+        let mut batch = Vec::new();
+        while batch.len() < RESUME_BATCH {
+            let Some(job) = self.resume_queue.queued.pop_front() else {
+                break;
+            };
+            if self.awaits_resume(job.pane_id, &job.terminal_id) {
+                batch.push(job);
+            } else {
+                self.resume_queue.finishes.remove(&job.pane_id);
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.resume_queue.widest_batch = self.resume_queue.widest_batch.max(batch.len());
+        }
+        let panes: Vec<(PaneId, TerminalId)> = batch
+            .iter()
+            .map(|job| (job.pane_id, job.terminal_id.clone()))
+            .collect();
+        self.resume_queue.in_flight = batch.len();
+        let events = self.event_tx.clone();
+        let worker = tokio::runtime::Handle::try_current()
+            .map_err(std::io::Error::other)
+            .and_then(|handle| {
+                std::thread::Builder::new()
+                    .name("resume-worker".into())
+                    .spawn(move || run_resume_batch(batch, &events, &handle))
+            });
+        if let Err(err) = worker {
+            warn!(err = %err, "could not start the resume worker; suspended panes retry later");
+            self.resume_queue.in_flight = 0;
+            for (pane_id, terminal_id) in panes {
+                self.resume_not_ready(pane_id, &terminal_id);
+            }
+        }
+    }
+
+    fn resume_not_ready(&mut self, pane_id: PaneId, terminal_id: &TerminalId) {
+        self.resume_queue.finishes.remove(&pane_id);
+        self.resume_queue.retry = true;
+        if let Some(terminal) = self.state.terminals.get_mut(terminal_id) {
+            if let Some(PaneHold::Suspended(suspension)) = terminal.hold.as_mut() {
+                suspension.resuming = false;
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+        }
+    }
+
+    /// The worker's answer for one pane: install its runtime like a
+    /// respawn, or leave the pane as the answer says.
+    pub(crate) fn install_resumed_pane(
+        &mut self,
+        pane_id: PaneId,
+        terminal_id: TerminalId,
+        outcome: ResumeOutcome,
+        now: Instant,
+    ) {
+        self.resume_queue.in_flight = self.resume_queue.in_flight.saturating_sub(1);
+        let current = self.awaits_resume(pane_id, &terminal_id);
+        let finish = self
+            .resume_queue
+            .finishes
+            .remove(&pane_id)
+            .filter(|(id, _)| *id == terminal_id)
+            .map(|(_, finish)| finish);
+        match (outcome, finish) {
+            (ResumeOutcome::Started(runtime), Some(finish)) if current => {
+                self.install_resumed_runtime(pane_id, terminal_id, finish, *runtime);
+            }
+            (ResumeOutcome::Started(runtime), _) => {
+                info!(
+                    pane = pane_id.raw(),
+                    "a resumed program arrived for a pane that no longer waits for it; ending it"
+                );
+                runtime.shutdown();
+            }
+            (ResumeOutcome::Failed(err), _) if current => {
+                warn!(pane = pane_id.raw(), err = %err, "suspended pane could not start again");
+                self.pane_could_not_resume(pane_id);
+            }
+            (ResumeOutcome::CoreNotReady, _) if current => {
+                self.resume_not_ready(pane_id, &terminal_id);
+            }
+            (ResumeOutcome::Failed(_) | ResumeOutcome::CoreNotReady, _) => {}
+        }
+        self.dispatch_resume_batch();
+        if !self.resume_queue.busy() && self.resume_queue.take_retry() {
+            self.pane_suspensions.retry_later(now);
+        }
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
+    fn install_resumed_runtime(
+        &mut self,
+        pane_id: PaneId,
+        terminal_id: TerminalId,
+        finish: ResumeFinish,
+        runtime: crate::terminal::TerminalRuntime,
+    ) {
+        match finish {
+            ResumeFinish::Respawn(finish) => {
+                self.install_respawn(pane_id, terminal_id, finish, runtime);
+            }
+            ResumeFinish::Agent { cwd, agent, finish } => {
+                if self
+                    .mark_agent_respawned(&terminal_id, cwd, &agent)
+                    .is_none()
+                {
+                    runtime.shutdown();
+                    return;
+                }
+                if !self.finish_agent_resume(pane_id, terminal_id, finish, runtime) {
+                    self.pane_could_not_resume(pane_id);
+                }
+                self.schedule_session_save();
+            }
+        }
+    }
+}
+
+/// The resume worker: one batch, each pane on a thread of its own so the
+/// batch takes as long as its slowest pane, and each answer sent as it
+/// lands.
+fn run_resume_batch(
+    batch: Vec<ResumeJob>,
+    events: &mpsc::Sender<AppEvent>,
+    handle: &tokio::runtime::Handle,
+) {
+    let core_answers = batch
+        .iter()
+        .any(|job| job.needs_core)
+        .then(crate::pane::primary_core_answers);
+    std::thread::scope(|scope| {
+        for job in batch {
+            scope.spawn(move || {
+                let ResumeJob {
+                    pane_id,
+                    terminal_id,
+                    needs_core,
+                    spawn,
+                } = job;
+                let outcome = if needs_core && core_answers == Some(false) {
+                    ResumeOutcome::CoreNotReady
+                } else {
+                    let _runtime = handle.enter();
+                    match spawn.run() {
+                        Ok(runtime) => ResumeOutcome::Started(Box::new(runtime)),
+                        Err(err) => ResumeOutcome::Failed(err.to_string()),
+                    }
+                };
+                let _ = events.blocking_send(AppEvent::PaneResumed {
+                    pane_id,
+                    terminal_id,
+                    outcome,
+                });
+            });
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::platform::{ProgramIdentity, SuspendCause};
+    use crate::terminal::state::Suspension;
+    use std::time::Duration;
+
+    const GONE: ProgramIdentity = ProgramIdentity {
+        pid: 10,
+        started: 1,
+    };
+
+    fn app_with_suspended_panes(count: usize, on_core: bool) -> (App, Vec<PaneId>) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = (0..count)
+            .map(|index| crate::workspace::Workspace::test_new(&format!("resume-{index}")))
+            .collect();
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "/bin/cat".into();
+        app.program_start_token = |_| None;
+        // After `App::new`, which applies the config's runtime.
+        crate::pane::set_preferred_runtime(on_core);
+        let panes: Vec<PaneId> = app
+            .state
+            .workspaces
+            .iter()
+            .map(|ws| ws.tabs[0].root_pane)
+            .collect();
+        let now = Instant::now();
+        for pane in &panes {
+            let mut suspension = Suspension::new(SuspendCause::HolderLost);
+            suspension.program = Some(GONE);
+            assert!(app.state.suspend_pane(*pane, now, suspension));
+        }
+        (app, panes)
+    }
+
+    /// Drives the loop's two resume entry points until the round is over;
+    /// returns the longest single call.
+    async fn longest_turn_while_resuming(app: &mut App) -> Duration {
+        let mut longest = Duration::ZERO;
+        let mut timed = |app: &mut App, turn: &dyn Fn(&mut App)| {
+            let started = Instant::now();
+            turn(app);
+            longest = longest.max(started.elapsed());
+        };
+        app.request_suspended_pane_resume(Instant::now());
+        timed(app, &|app| {
+            app.resume_suspended_panes_if_due(Instant::now());
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "the resume never landed");
+            timed(app, &|app| {
+                app.drain_internal_events();
+            });
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        longest
+    }
+
+    // V43 (core-phase3 D2): with a core that takes 2 s per `terminal.run`,
+    // suspended panes resume in batches of at most 8, one batch in flight,
+    // and the loop's longest turn stays under 50 ms for 1 and for 16 panes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn suspended_panes_resume_off_the_loop_in_batches_of_eight() {
+        let core = crate::pane::FakeCore::start_with(|config| {
+            config.run_delay = Duration::from_secs(2);
+        });
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let mut turns = Vec::new();
+        for count in [1, 16] {
+            let (mut app, panes) = app_with_suspended_panes(count, true);
+            let runs_before = core
+                .methods()
+                .iter()
+                .filter(|method| *method == "terminal.run")
+                .count();
+            let longest = longest_turn_while_resuming(&mut app).await;
+            eprintln!(
+                "V43: {count} suspended pane(s), the loop's longest turn while they resumed: {longest:?}"
+            );
+            turns.push((count, longest));
+            assert!(
+                app.state.suspended_panes().is_empty(),
+                "{count}: all resumed"
+            );
+            for pane in &panes {
+                let terminal_id = app.state.workspaces[0..count]
+                    .iter()
+                    .find_map(|ws| ws.terminal_id(*pane).cloned())
+                    .expect("terminal");
+                let runtime = app.terminal_runtimes.get(&terminal_id).expect("a runtime");
+                assert!(
+                    runtime.core_terminal().is_some(),
+                    "{count}: resumed on core"
+                );
+            }
+            let runs = core
+                .methods()
+                .iter()
+                .filter(|method| *method == "terminal.run")
+                .count();
+            assert_eq!(runs - runs_before, count, "one start per pane");
+            assert!(app.resume_queue.widest_batch <= RESUME_BATCH);
+            for (_, runtime) in app.terminal_runtimes.drain() {
+                runtime.shutdown();
+            }
+        }
+        assert!(
+            core.most_runs_at_once() <= RESUME_BATCH,
+            "one batch in flight: {} runs at once",
+            core.most_runs_at_once()
+        );
+        assert_eq!(
+            core.most_runs_at_once(),
+            RESUME_BATCH,
+            "16 panes fill a batch"
+        );
+        for (count, longest) in turns {
+            assert!(
+                longest < Duration::from_millis(50),
+                "{count} panes: the loop's longest turn was {longest:?}"
+            );
+        }
+    }
+
+    // D2: a pane closed while its program starts gets no program, and the
+    // started one is ended.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pane_closed_during_its_resume_gets_no_program() {
+        let core = crate::pane::FakeCore::start_with(|config| {
+            config.run_delay = Duration::from_millis(300);
+        });
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _panes) = app_with_suspended_panes(1, true);
+        app.request_suspended_pane_resume(Instant::now());
+        assert!(app.resume_suspended_panes_if_due(Instant::now()));
+        assert!(app.resume_queue.busy());
+        app.state.workspaces.clear();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "the resume never answered");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            app.terminal_runtimes.values().next().is_none(),
+            "no runtime installed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !core
+            .methods()
+            .iter()
+            .any(|method| method == "terminal.kill")
+        {
+            assert!(Instant::now() < deadline, "{:?}", core.methods());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // D3b: a pane a person's core stop suspended waits for the core even
+    // with the PTY runtime, and never resumes while it does not answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_core_stopped_pane_waits_for_the_core() {
+        let missing = std::env::temp_dir().join(format!("hcm-{}.sock", std::process::id()));
+        std::env::set_var("HC_SOCKET", &missing);
+        let (mut app, panes) = app_with_suspended_panes(1, false);
+        let terminal = app.state.pane_terminal_mut(panes[0]).expect("terminal");
+        let Some(PaneHold::Suspended(suspension)) = terminal.hold.as_mut() else {
+            panic!("suspended");
+        };
+        suspension.cause = SuspendCause::CoreStopped;
+        let now = Instant::now();
+        app.request_suspended_pane_resume(now);
+        assert!(app.resume_suspended_panes_if_due(now));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.resume_queue.busy() {
+            assert!(Instant::now() < deadline, "no answer");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(app.state.suspended_panes(), panes, "still suspended");
+        assert!(app.terminal_runtimes.values().next().is_none());
+        assert!(
+            app.suspended_pane_resume_deadline()
+                .is_some_and(|at| at > Instant::now()),
+            "looked at again later"
+        );
+    }
+}

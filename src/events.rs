@@ -73,6 +73,25 @@ pub(crate) struct WorktreeReadData {
     pub entries: Vec<crate::worktree::ExistingWorktree>,
 }
 
+/// What the resume worker did for one suspended pane (core-phase3 D2).
+pub enum ResumeOutcome {
+    Started(Box<crate::terminal::TerminalRuntime>),
+    /// The program could not start.
+    Failed(String),
+    /// The core it needs did not answer: the pane stays suspended.
+    CoreNotReady,
+}
+
+impl std::fmt::Debug for ResumeOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started(_) => f.write_str("Started"),
+            Self::Failed(err) => f.debug_tuple("Failed").field(err).finish(),
+            Self::CoreNotReady => f.write_str("CoreNotReady"),
+        }
+    }
+}
+
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -217,6 +236,15 @@ pub enum AppEvent {
     /// A core pane's core stopped answering (`since`, unix ms) or answers
     /// again (`None`); its program keeps running (core-phase3 D1a).
     CoreUnreachable { pane_id: PaneId, since: Option<u64> },
+    /// Herdr Core kept ending panes, so the server gave up on it: no more
+    /// core starts, panes resume on the PTY (core-phase3 D3a).
+    CoreGaveUp,
+    /// The resume worker's answer for one suspended pane (core-phase3 D2).
+    PaneResumed {
+        pane_id: PaneId,
+        terminal_id: crate::terminal::TerminalId,
+        outcome: ResumeOutcome,
+    },
     /// Of the core sessions panes wait for, the ones that answered a probe
     /// (core-phase3 D1b).
     #[cfg(unix)]

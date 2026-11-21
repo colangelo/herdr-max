@@ -34,7 +34,10 @@ use runtime_io::PtyReadResult;
 pub(crate) use runtime_io::{
     core_attach_failure, core_session_answers, find_pane_core_terminals, CoreAttachFailure,
 };
-pub(crate) use runtime_io::{core_session_name, unclaimed_core_terminals};
+pub(crate) use runtime_io::{
+    core_gave_up, core_session_name, note_core_loss, primary_core_answers, reset_core_loss_guard,
+    resumes_on_core, set_core_events, unclaimed_core_terminals,
+};
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 mod agent_detection;

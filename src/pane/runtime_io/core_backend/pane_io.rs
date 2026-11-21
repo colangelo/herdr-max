@@ -722,6 +722,9 @@ fn spawn_parser(
         .spawn(move || {
             let mut on_exit = Some(on_exit);
             let mut finish = |reason: ChildExitReason| {
+                if reason == ChildExitReason::Suspended(SuspendCause::CoreStopped) {
+                    super::note_stopped_by_person(&shared.session);
+                }
                 child_wait_completed.store(true, Ordering::Release);
                 if let Some(on_exit) = on_exit.take() {
                     on_exit(reason);

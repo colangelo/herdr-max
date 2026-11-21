@@ -151,6 +151,68 @@ pub(crate) fn find_pane_core_terminals(
         .collect()
 }
 
+/// A core loss event for the guard (core-phase3 D3a): core panes were
+/// suspended.
+pub(crate) fn note_core_loss(now: std::time::Instant) {
+    #[cfg(unix)]
+    core_backend::note_core_loss(now);
+    #[cfg(not(unix))]
+    let _ = now;
+}
+
+/// Whether the core loss guard gave up on core (core-phase3 D3a).
+pub(crate) fn core_gave_up() -> bool {
+    #[cfg(unix)]
+    {
+        core_backend::gave_up()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// A config reload resets the core loss guard (core-phase3 D3a).
+pub(crate) fn reset_core_loss_guard() {
+    #[cfg(unix)]
+    core_backend::reset_loss_guard();
+}
+
+/// Where the core backend reports that the guard gave up.
+pub(crate) fn set_core_events(events: mpsc::Sender<crate::events::AppEvent>) {
+    #[cfg(unix)]
+    core_backend::set_events(events);
+    #[cfg(not(unix))]
+    let _ = events;
+}
+
+/// Whether a resumed program starts on core: `runtime = "core"` and the
+/// guard has not given up.
+pub(crate) fn resumes_on_core() -> bool {
+    #[cfg(unix)]
+    {
+        core_backend::uses_core()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Whether the primary core answers, starting it by D3's rule when it has
+/// been down; blocks up to a connect and a start, so never on the server
+/// loop.
+pub(crate) fn primary_core_answers() -> bool {
+    #[cfg(unix)]
+    {
+        core_backend::primary_answers()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// Whether the core session `session` answers now, never starting it.
 #[cfg(unix)]
 pub(crate) fn core_session_answers(session: &str) -> bool {
@@ -205,7 +267,7 @@ impl PaneIo {
         on_unavailable: impl FnOnce(String),
     ) -> std::io::Result<Self> {
         #[cfg(unix)]
-        if core_backend::preferred() {
+        if core_backend::uses_core() {
             let started =
                 core_backend::core_spawn_from(pane_id, &spec.command, spec.rows, spec.cols)
                     .ok_or_else(|| {

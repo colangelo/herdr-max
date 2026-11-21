@@ -711,6 +711,7 @@ mod tests {
             suspended: false,
             core_waiting: false,
             core_unreachable_since: None,
+            suspend_cause: None,
             label: None,
             agent: None,
             title: None,

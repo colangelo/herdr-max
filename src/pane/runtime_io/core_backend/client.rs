@@ -600,43 +600,101 @@ pub(crate) fn core_start_command(
     command
 }
 
-/// Connects to the core session `session` and refuses a core older than
-/// [`MIN_CORE_VERSION`]. With `start_if_missing`, a missing socket starts the
-/// core; without it (a reconnect while a core restarts, when its socket is
-/// briefly gone), it is an error the caller retries.
-pub(crate) fn connect_session(
-    session: &str,
-    on_event: Option<EventHandler>,
-    start_if_missing: bool,
-) -> Result<CoreClient, CoreError> {
-    let socket = socket_path(session);
-    let started = !socket.exists();
-    if started {
-        if !start_if_missing {
-            return Err(CoreError::Unavailable(format!(
-                "no herdr-core socket at {}",
-                socket.display()
-            )));
-        }
-        let status = core_start_command(hc_binary()?, session, std::env::vars())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|err| CoreError::Unavailable(format!("cannot run hc: {err}")))?;
-        if !status.success() {
-            return Err(CoreError::Unavailable(format!(
-                "hc server start exited with {status}"
-            )));
-        }
+/// Connects to the core at `socket` and refuses a core older than
+/// [`MIN_CORE_VERSION`]. Returns core's `server.status` too. Never starts a
+/// core.
+pub(crate) fn connect_at(socket: &Path) -> Result<(CoreClient, Value), CoreError> {
+    if !socket.exists() {
+        return Err(CoreError::Unavailable(format!(
+            "no herdr-core socket at {}",
+            socket.display()
+        )));
     }
-    let client = CoreClient::connect(&socket, on_event)?;
+    let client = CoreClient::connect(socket, None)?;
     let status = check_version(&client)?;
+    Ok((client, status))
+}
+
+/// How the socket at `socket` is down after a connect failed: missing, or
+/// there and refusing (core-phase3 D3). `None` when something accepts, so
+/// the core runs and only did not answer.
+pub(crate) fn socket_down(socket: &Path) -> Option<super::primary::SocketDown> {
+    use super::primary::SocketDown;
+    match UnixStream::connect(socket) {
+        Ok(_) => None,
+        Err(err) => match err.kind() {
+            std::io::ErrorKind::NotFound => Some(SocketDown::Missing),
+            std::io::ErrorKind::ConnectionRefused => Some(SocketDown::Refused),
+            _ => None,
+        },
+    }
+}
+
+/// `hc server start` exit codes that leave a core running: 0, and 5 when
+/// the core restarted while the start ran (an update), which started no
+/// second core (core-phase3 D3, design.md § Context).
+fn start_left_a_core(code: Option<i32>) -> bool {
+    matches!(code, Some(0) | Some(5))
+}
+
+/// Starts the core session `session` with the environment D2 asks for.
+#[cfg(not(test))]
+pub(crate) fn start_core(session: &str) -> Result<(), CoreError> {
+    run_core_start(session)
+}
+
+/// Unit tests never start a real core: one would outlive the test and could
+/// reach a person's own sessions. A test installs its own start.
+#[cfg(test)]
+type CoreStart = fn(&str) -> Result<(), CoreError>;
+
+#[cfg(test)]
+pub(crate) static TEST_CORE_START: Mutex<Option<CoreStart>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn start_core(session: &str) -> Result<(), CoreError> {
+    match *lock(&TEST_CORE_START) {
+        Some(start) => start(session),
+        None => Err(CoreError::Unavailable("unit tests start no core".into())),
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))] // tests use TEST_CORE_START instead
+fn run_core_start(session: &str) -> Result<(), CoreError> {
+    let status = core_start_command(hc_binary()?, session, std::env::vars())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|err| CoreError::Unavailable(format!("cannot run hc: {err}")))?;
+    if !start_left_a_core(status.code()) {
+        return Err(CoreError::Unavailable(format!(
+            "hc server start exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// How long a start waits for the core's socket to answer: a start that
+/// landed during a restart returns before the restarted core listens.
+const START_POLL_LIMIT: Duration = Duration::from_secs(2);
+
+/// Starts `session` and connects to it once it answers at `socket`.
+pub(crate) fn start_and_connect(session: &str, socket: &Path) -> Result<CoreClient, CoreError> {
+    start_core(session)?;
+    let deadline = std::time::Instant::now() + START_POLL_LIMIT;
+    let (client, status) = loop {
+        match connect_at(socket) {
+            Ok(connected) => break connected,
+            Err(err) if std::time::Instant::now() >= deadline => return Err(err),
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
     // core-backend D2: a core we start must outlive us. On macOS `hc server
     // start` goes through launchd; a start that fell back to our own child
     // would end with this server.
     let core_pid = status["pid"].as_u64().unwrap_or(0) as u32;
-    if started && is_our_child(core_pid) {
+    if is_our_child(core_pid) {
         tracing::warn!(
             core_pid,
             session,
@@ -650,16 +708,7 @@ pub(crate) fn connect_session(
 /// session's own socket even when `HC_SOCKET` is set, and never starts it
 /// (core-phase3 D6).
 pub(crate) fn connect_secondary(session: &str) -> Result<CoreClient, CoreError> {
-    let socket = secondary_socket_path(session);
-    if !socket.exists() {
-        return Err(CoreError::Unavailable(format!(
-            "no herdr-core socket at {}",
-            socket.display()
-        )));
-    }
-    let client = CoreClient::connect(&socket, None)?;
-    check_version(&client)?;
-    Ok(client)
+    connect_at(&secondary_socket_path(session)).map(|(client, _)| client)
 }
 
 fn secondary_socket_path(session: &str) -> PathBuf {

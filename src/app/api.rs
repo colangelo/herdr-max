@@ -153,6 +153,28 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::PaneResumed {
+            pane_id,
+            terminal_id,
+            outcome,
+        } = ev
+        {
+            self.install_resumed_pane(pane_id, terminal_id, outcome, std::time::Instant::now());
+            return Vec::new();
+        }
+
+        if matches!(ev, AppEvent::CoreGaveUp) {
+            self.core_gave_up();
+            return Vec::new();
+        }
+
+        if let AppEvent::CoreUnreachable { since: Some(_), .. } = &ev {
+            self.pane_suspensions.count_notice(
+                super::pane_suspension::CoreNotice::Unreachable,
+                std::time::Instant::now(),
+            );
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,
@@ -661,13 +683,41 @@ impl App {
         target: RespawnTarget,
         focus_pane: bool,
     ) -> bool {
-        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
+        let Some((ws_idx, prepared)) = self.prepare_respawn(pane_id, target) else {
             return false;
         };
+        let runtime = match prepared.spawn.run() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    pane = pane_id.raw(),
+                    terminal = %prepared.terminal_id,
+                    err = %err,
+                    "failed to respawn pane runtime"
+                );
+                return false;
+            }
+        };
+        self.install_respawn(pane_id, prepared.terminal_id, prepared.finish, runtime);
+        if focus_pane {
+            self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        }
+        true
+    }
+
+    /// What a respawn of `pane_id` starts, without starting it: the spawn,
+    /// and what to record once it runs. Reads state only.
+    pub(super) fn prepare_respawn(
+        &self,
+        pane_id: crate::layout::PaneId,
+        target: RespawnTarget,
+    ) -> Option<(
+        usize,
+        super::pane_resume::Prepared<super::pane_resume::RespawnFinish>,
+    )> {
+        let (ws_idx, pane_state) = self.find_pane(pane_id)?;
         let terminal_id = pane_state.attached_terminal_id.clone();
-        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
-            return false;
-        };
+        let terminal = self.state.terminals.get(&terminal_id)?;
 
         // The pane's *current* directory, not the one it was launched in. A
         // respawn restarts where the pane actually is, and `terminal.cwd` only
@@ -684,9 +734,32 @@ impl App {
             RespawnTarget::LaunchArgv => terminal.launch_argv.clone(),
             RespawnTarget::Shell => None,
         };
-        let (rows, cols) = self
-            .terminal_runtimes
-            .get(&terminal_id)
+        let (rows, cols) = self.respawn_size(ws_idx, pane_id, &terminal_id);
+        let launch_env = self.pane_launch_env(ws_idx, pane_id, Vec::new())?;
+        let program = match &launch_argv {
+            Some(argv) => super::pane_resume::SpawnProgram::Argv(argv.clone()),
+            None => self.shell_program(),
+        };
+        let spawn = self.runtime_spawn(pane_id, rows, cols, cwd.clone(), launch_env, program);
+        Some((
+            ws_idx,
+            super::pane_resume::Prepared {
+                terminal_id,
+                spawn,
+                finish: super::pane_resume::RespawnFinish { cwd, launch_argv },
+            },
+        ))
+    }
+
+    /// The size a respawned pane starts at: its runtime's, else the layout's.
+    pub(super) fn respawn_size(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> (u16, u16) {
+        self.terminal_runtimes
+            .get(terminal_id)
             .map(|runtime| runtime.current_size())
             .unwrap_or_else(|| {
                 self.state
@@ -694,54 +767,17 @@ impl App {
                         ws_idx,
                         pane: pane_id,
                     })
-            });
-        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
-            return false;
-        };
-        let spawned = match &launch_argv {
-            Some(argv) => crate::terminal::TerminalRuntime::spawn_argv_command(
-                pane_id,
-                rows,
-                cols,
-                cwd.clone(),
-                argv,
-                &launch_env,
-                crate::pane::AgentDetection::Enabled,
-                self.state.pane_scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.pane_host_terminal_appearance(),
-                self.event_tx.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            ),
-            None => crate::terminal::TerminalRuntime::spawn(
-                pane_id,
-                rows,
-                cols,
-                cwd.clone(),
-                self.state.pane_scrollback_limit_bytes,
-                self.state.host_terminal_theme,
-                self.pane_host_terminal_appearance(),
-                crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-                &launch_env,
-                self.event_tx.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            ),
-        };
-        let runtime = match spawned {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::warn!(
-                    pane = pane_id.raw(),
-                    terminal = %terminal_id,
-                    err = %err,
-                    "failed to respawn pane runtime"
-                );
-                return false;
-            }
-        };
+            })
+    }
 
+    /// Installs a respawn's runtime behind its terminal id, keeping the pane.
+    pub(super) fn install_respawn(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        terminal_id: crate::terminal::TerminalId,
+        finish: super::pane_resume::RespawnFinish,
+        runtime: crate::terminal::TerminalRuntime,
+    ) {
         let replaced = self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(replaced) = replaced {
             // The replaced process is still alive here; killing it makes it
@@ -756,22 +792,18 @@ impl App {
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             // The pane is genuinely rooted here now, so the recorded cwd
             // follows it rather than persisting the launch directory.
-            terminal.cwd = cwd;
+            terminal.cwd = finish.cwd;
             terminal.hold = None;
             terminal.clear_agent_runtime_identity_after_respawn();
             // The clear drops `launch_argv` because the agent-exit path leaves a
             // shell behind. Here the command is what came back, so put it
             // back - otherwise a second respawn would silently degrade to a
             // shell.
-            if let Some(argv) = launch_argv {
+            if let Some(argv) = finish.launch_argv {
                 terminal.launch_argv = Some(argv);
             }
         }
-        if focus_pane {
-            self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        }
         self.schedule_session_save();
-        true
     }
 
     /// The command that would resume this pane's agent, or `None` when it has
@@ -825,17 +857,7 @@ impl App {
                     .get(&terminal_id)
                     .map(|t| t.cwd.clone())
             })?;
-        let (rows, cols) = self
-            .terminal_runtimes
-            .get(&terminal_id)
-            .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| {
-                self.state
-                    .new_pane_size(crate::ui::NewPanePlacement::Existing {
-                        ws_idx,
-                        pane: pane_id,
-                    })
-            });
+        let (rows, cols) = self.respawn_size(ws_idx, pane_id, &terminal_id);
         if let Some(replaced) = self.terminal_runtimes.remove(&terminal_id) {
             // Same as a respawn: absorb the exit the stopped process reports.
             if replaced.child_pid().is_some() {
@@ -844,13 +866,31 @@ impl App {
             replaced.shutdown();
         }
         let agent = plan.agent.clone();
-        let detected = crate::detect::parse_agent_label(&agent);
-        let terminal = self.state.terminals.get_mut(&terminal_id)?;
+        let terminal = self.mark_agent_respawned(&terminal_id, cwd, &agent)?;
+        terminal.pending_agent_resume_plan = Some(plan);
+        if !self.start_pending_agent_resume_for_terminal(&terminal_id, rows, cols, true) {
+            // Not started yet (for example no screen size): the pending-resume
+            // loop starts it as it does after a restore.
+            self.sync_pending_agent_resume_deadline(std::time::Instant::now());
+        }
+        self.schedule_session_save();
+        Some(agent)
+    }
+
+    /// What an agent respawn records on the pane before its shell types
+    /// the resume command: its directory, no hold or error, and the agent,
+    /// shown idle at once as a restored pane is.
+    pub(super) fn mark_agent_respawned(
+        &mut self,
+        terminal_id: &crate::terminal::TerminalId,
+        cwd: std::path::PathBuf,
+        agent: &str,
+    ) -> Option<&mut crate::terminal::TerminalState> {
+        let detected = crate::detect::parse_agent_label(agent);
+        let terminal = self.state.terminals.get_mut(terminal_id)?;
         terminal.cwd = cwd;
         terminal.restore_error = None;
         terminal.hold = None;
-        terminal.pending_agent_resume_plan = Some(plan);
-        // Shown as the agent at once, idle, as a restored pane is.
         if let Some(detected) = detected {
             let _ = terminal.set_detected_state_with_screen_signals_at(
                 Some(detected),
@@ -863,13 +903,7 @@ impl App {
             );
         }
         terminal.revision = terminal.revision.saturating_add(1);
-        if !self.start_pending_agent_resume_for_terminal(&terminal_id, rows, cols, true) {
-            // Not started yet (for example no screen size): the pending-resume
-            // loop starts it as it does after a restore.
-            self.sync_pending_agent_resume_deadline(std::time::Instant::now());
-        }
-        self.schedule_session_save();
-        Some(agent)
+        Some(terminal)
     }
 
     pub(crate) fn claim_worktree_runtime_restore_failure(

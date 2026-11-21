@@ -642,6 +642,12 @@ pub struct PaneInfo {
     /// answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_unreachable_since: Option<u64>,
+    /// Why the pane is suspended: `holder_lost`, `host_shutdown`,
+    /// `core_stopped`, `stopped_by_restart`, `terminal_gone` or
+    /// `pane_job_ended`; a newer server may add others. Absent while the pane
+    /// is not suspended and on an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_cause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
