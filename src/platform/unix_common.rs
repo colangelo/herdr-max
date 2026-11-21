@@ -496,25 +496,64 @@ pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     super::process_name_and_parent(pid).map(|(_, parent)| parent)
 }
 
-/// Writes `bytes` to the controlling terminal of `pid` as terminal output, as
-/// `write(1)` does (openspec/changes/core-status-mirror, D4). `WouldBlock`
-/// means the terminal's buffer is full and the caller may retry.
-pub(crate) fn write_to_process_terminal(pid: u32, bytes: &[u8]) -> std::io::Result<()> {
-    let (path, device) = super::controlling_terminal_device(pid).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("process {pid} has no terminal device"),
-        )
-    })?;
-    write_to_terminal_device(&path, device, bytes)
+/// A program's own terminal, pinned when herdr attached to the program: its
+/// pid, that process's identity and its terminal's device id
+/// (openspec/changes/core-status-mirror, D4; security review 2026-11-21 M1).
+/// A write goes only to that terminal while that same process still has it,
+/// so a reused pid never receives a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessTerminal {
+    pid: u32,
+    identity: ProcessIdentity,
+    device: u64,
 }
 
-/// Opens `path` without making it our controlling terminal and writes `bytes`
-/// in one call, only when it is a terminal with device id `device` owned by
-/// our effective uid. A short write is finished within a bounded wait, so a
-/// record is not left cut in two when the buffer is merely slow.
-fn write_to_terminal_device(path: &Path, device: u64, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+impl ProcessTerminal {
+    /// The terminal of `pid` now, or `None` when it has none or the process
+    /// changed while it was read.
+    pub(crate) fn of(pid: u32) -> Option<Self> {
+        let identity = ProcessIdentity::of(pid)?;
+        let (_, device) = super::controlling_terminal_device(pid)?;
+        (ProcessIdentity::of(pid) == Some(identity)).then_some(Self {
+            pid,
+            identity,
+            device,
+        })
+    }
+
+    fn still_ours(&self) -> bool {
+        ProcessIdentity::of(self.pid) == Some(self.identity)
+    }
+
+    /// Writes `bytes` to the terminal as output, as `write(1)` does, failing
+    /// closed unless the pinned process still owns the pinned device, before
+    /// and after the open. `WouldBlock` means the buffer is full and nothing
+    /// was written, so the caller may retry.
+    pub(crate) fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        let refused = || {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("process {} no longer owns its terminal", self.pid),
+            )
+        };
+        if !self.still_ours() {
+            return Err(refused());
+        }
+        let (path, device) = super::controlling_terminal_device(self.pid).ok_or_else(refused)?;
+        if device != self.device {
+            return Err(refused());
+        }
+        let file = open_terminal_device(&path, device)?;
+        if !self.still_ours() {
+            return Err(refused());
+        }
+        write_bounded(&file, bytes)
+    }
+}
+
+/// Opens `path` without making it our controlling terminal, only when it is a
+/// terminal with device id `device` owned by our effective uid.
+fn open_terminal_device(path: &Path, device: u64) -> std::io::Result<std::fs::File> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 
@@ -533,23 +572,53 @@ fn write_to_terminal_device(path: &Path, device: u64, bytes: &[u8]) -> std::io::
             format!("{} is not the program's own terminal", path.display()),
         ));
     }
+    Ok(file)
+}
+
+/// Writes all of `bytes` within a bounded wait (interrupts and a full buffer
+/// count alike, 20 x 5 ms at most). A record cut short is closed with ST, so
+/// the terminal does not stay inside an unfinished OSC (security M4).
+fn write_bounded(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    const WAITS: u32 = 20;
     let mut written = 0;
     let mut waits = 0;
     while written < bytes.len() {
-        match (&file).write(&bytes[written..]) {
-            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+        match (&*file).write(&bytes[written..]) {
+            Ok(0) => break,
             Ok(count) => written += count,
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if written == 0 && err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(err);
+            }
             Err(err)
-                if err.kind() == std::io::ErrorKind::WouldBlock && written > 0 && waits < 20 =>
+                if waits < WAITS
+                    && matches!(
+                        err.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) =>
             {
                 waits += 1;
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
             }
-            Err(err) => return Err(err),
+            Err(err) if written == 0 => return Err(err),
+            Err(_) => break,
         }
     }
-    Ok(())
+    if written == bytes.len() {
+        return Ok(());
+    }
+    if written > 0 {
+        let _ = (&*file).write(b"\x1b\\");
+    }
+    Err(std::io::ErrorKind::WriteZero.into())
+}
+
+#[cfg(test)]
+fn write_to_terminal_device(path: &Path, device: u64, bytes: &[u8]) -> std::io::Result<()> {
+    write_bounded(&open_terminal_device(path, device)?, bytes)
 }
 
 /// Describes the process on the other end of a local socket, for logs.
@@ -797,6 +866,24 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_terminal_refuses_a_process_that_is_not_the_one_pinned() {
+        let pid = std::process::id();
+        let identity = ProcessIdentity::of(pid).expect("our own identity");
+        let reused = ProcessTerminal {
+            pid,
+            identity: ProcessIdentity {
+                started: identity.started.wrapping_add(1),
+                ..identity
+            },
+            device: 0,
+        };
+        assert_eq!(
+            reused.write(b"x").map_err(|err| err.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+    }
 
     #[test]
     fn a_terminal_write_reaches_the_master_and_refuses_what_is_not_a_terminal() {

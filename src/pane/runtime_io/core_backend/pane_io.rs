@@ -129,9 +129,12 @@ struct Shared {
     /// Set when the next server takes the program over (`herdr server
     /// restart`, D10): dropping the pane then detaches without a kill.
     keep_on_drop: AtomicBool,
-    /// The program's pid from core, 0 when unknown: its terminal device is
-    /// where mirrored status goes (core-status-mirror D4).
+    /// The program's pid from core, 0 when unknown.
     pid: u32,
+    /// The program's own terminal, pinned at attach (or at the first record
+    /// when it had none yet): where mirrored status goes, and only while
+    /// that same process owns it (core-status-mirror D4, security M1).
+    terminal: Mutex<Option<crate::platform::ProcessTerminal>>,
     /// The latest status record to mirror, until the parser takes it: one
     /// slot, so a burst of changes never queues (core-status-mirror D3).
     mirror_slot: Mutex<Option<CoreStatusRecord>>,
@@ -331,6 +334,11 @@ impl StartedCore {
                 closing: AtomicBool::new(false),
                 keep_on_drop: AtomicBool::new(false),
                 pid,
+                terminal: Mutex::new(
+                    (pid > 0)
+                        .then(|| crate::platform::ProcessTerminal::of(pid))
+                        .flatten(),
+                ),
                 mirror_slot: Mutex::new(None),
             }),
             events_rx,
@@ -722,7 +730,22 @@ fn write_mirrored_status(shared: &Shared, mirror: &mut StatusMirror) {
     let Some(record) = mirror.take_due(Instant::now()) else {
         return;
     };
-    match crate::platform::write_to_process_terminal(shared.pid, &record.encode()) {
+    let terminal = {
+        let mut pinned = lock(&shared.terminal);
+        if pinned.is_none() && shared.pid > 0 {
+            *pinned = crate::platform::ProcessTerminal::of(shared.pid);
+        }
+        *pinned
+    };
+    let Some(terminal) = terminal else {
+        debug!(
+            pane = shared.pane_id.raw(),
+            terminal = %shared.address,
+            "no program terminal to mirror agent status into"
+        );
+        return;
+    };
+    match terminal.write(&record.encode()) {
         Ok(()) => mirror.written(record),
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
             mirror.busy(record, Instant::now());
