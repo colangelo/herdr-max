@@ -1587,6 +1587,65 @@ mod tests {
         assert!(history.lines >= 3);
     }
 
+    // V7 (core-phase3 D6): a pane reattached in a core session other than
+    // the primary saves that session, so the next restore looks there.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pane_reattached_in_another_core_session_saves_that_session() {
+        let runtime_dir = PathBuf::from(format!("/tmp/hcv7-{}", std::process::id()));
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+        let primary = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &primary.socket);
+        let legacy =
+            crate::pane::FakeCore::start_in(runtime_dir.join("herdr-core"), "herdr.sock", |_| {});
+        legacy.add_terminal(serde_json::json!({"address": "t7", "state": "live",
+            "labels": {"herdr.session": crate::pane::core_session_name(), "herdr.pane_id": "w1-p1"}}));
+        let state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let (events, _rx) = tokio::sync::mpsc::channel(64);
+        let runtime = crate::terminal::TerminalRuntime::reattach_core(
+            root,
+            24,
+            80,
+            crate::pane::CoreTerminalLink {
+                session: "herdr".into(),
+                address: "t7".into(),
+                program: None,
+            },
+            Some("w1-p1".into()),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("attached in session herdr");
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        terminal_runtimes.insert(terminal_id, runtime);
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let saved = serde_json::to_value(&snapshot.workspaces[0].tabs[0].panes[&root.raw()])
+            .expect("pane json");
+        assert_eq!(saved["core_terminal"]["session"], "herdr", "{saved}");
+        assert_eq!(saved["core_terminal"]["address"], "t7", "{saved}");
+        assert!(
+            !primary
+                .methods()
+                .iter()
+                .any(|method| method.starts_with("terminal.")),
+            "the primary was not asked: {:?}",
+            primary.methods()
+        );
+        for (_, runtime) in terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(runtime_dir);
+    }
+
     #[tokio::test]
     async fn capture_contract_tracks_history_for_each_pane() {
         let mut state = state_with_workspaces(&["one"]);

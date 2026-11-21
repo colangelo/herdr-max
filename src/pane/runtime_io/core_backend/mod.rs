@@ -674,6 +674,41 @@ mod tests {
         assert!(unclaimed_in(&serde_json::json!({}), &[]).is_empty());
     }
 
+    // The orphan scan against a core: the live terminals labelled for this
+    // session that no pane claims, never another client's, and nothing is
+    // killed (core-backend D10 "Orphans").
+    #[test]
+    fn the_orphan_scan_lists_our_unclaimed_terminals_and_kills_nothing() {
+        let core = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        set_preferred(true);
+        let ours = |address: &str, pane: &str| {
+            serde_json::json!({"address": address, "pid": 7, "state": "live",
+                "labels": {"herdr.session": core_session_name(), "herdr.pane_id": pane}})
+        };
+        core.add_terminal(ours("t1", "w1-p1"));
+        core.add_terminal(ours("t2", "w1-p2"));
+        core.add_terminal(
+            serde_json::json!({"address": "t3", "state": "live", "labels": {"app": "phone"}}),
+        );
+
+        assert_eq!(
+            unclaimed_terminals(&["t1".to_string()]),
+            vec![UnclaimedTerminal {
+                address: "t2".into(),
+                pane_id: Some("w1-p2".into())
+            }]
+        );
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            core.methods()
+        );
+    }
+
     static STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static STARTED: Mutex<Option<fake::FakeCore>> = Mutex::new(None);
     static STARTED_AT: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
