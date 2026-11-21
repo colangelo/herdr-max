@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
-use super::api::RespawnTarget;
 use super::state::{AppState, ToastKind, ToastNotification};
 use super::App;
 use crate::layout::PaneId;
@@ -423,7 +422,7 @@ impl App {
     #[cfg(unix)]
     pub(super) fn resume_suspended_pane(&mut self, pane_id: PaneId) -> bool {
         if self.respawn_pane_agent(pane_id).is_some()
-            || self.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv)
+            || self.respawn_pane_runtime(pane_id, super::api::RespawnTarget::LaunchArgv)
         {
             return true;
         }
@@ -588,7 +587,7 @@ mod tests {
         app.state.ensure_test_terminals();
         // `cat` as the shell: a typed resume command is echoed, never run.
         app.state.default_shell = "/bin/cat".into();
-        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::Shell));
+        assert!(app.respawn_pane_runtime(pane_id, super::super::api::RespawnTarget::Shell));
         if !agent {
             return (app, pane_id, terminal_id);
         }
@@ -977,7 +976,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.default_shell = "/bin/cat".into();
         for pane in &panes {
-            assert!(app.respawn_pane_runtime(*pane, RespawnTarget::Shell));
+            assert!(app.respawn_pane_runtime(*pane, super::super::api::RespawnTarget::Shell));
         }
         let terminal_of =
             |app: &App, pane: PaneId| app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
