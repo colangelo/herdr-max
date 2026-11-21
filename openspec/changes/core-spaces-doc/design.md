@@ -132,8 +132,8 @@ The answer key for 1 to 4 is the Herdr app's own serde shapes. A test-only copy 
 `herdr-app` `src/mirror.rs` and `src/layout.rs` decodes what herdr writes, and that
 copy also decodes the app's own fixture from
 `unknown_space_and_tab_fields_survive_a_read_and_write`. Rows 1 to 9 are unit tests.
-Rows 10 and 11 run with `just core-live-test` against a throwaway `hc` 0.1.21. Row 12
-is ac's own check on the phone.
+Rows 10, 11 and 13 run with `just core-live-test` against a throwaway `hc` 0.1.21.
+Row 12 is ac's own check on the phone.
 
 | # | Proves | Where | Pass when |
 |---|---|---|---|
@@ -149,3 +149,4 @@ is ac's own check on the phone.
 | 10 | live: core stores the document | live, `src/pane/core_backend_live_tests.rs` | after `publish_core_spaces` with a document whose leaf is a real core pane's address, `doc.get herdr-app` returns that value and a version > 0 |
 | 11 | live: conflict and clear | live, same test | after a foreign `doc.set` bumps the version, the next publish still lands; publishing `null` leaves `value: null` |
 | 12 | the phone shows spaces | ac, Herdr Mobile on m4m, beta with the flag on | ac's workspaces appear as spaces with their tabs and terminals (not run by the builder) |
+| 13 | live: the server path | `scripts/core_live_test.sh` | with the flag on, split core pane B is `B=<address>` in the document and PTY pane A is not; a restarted server overwrites a foreign write; reload with the flag off leaves `null` |
