@@ -4,7 +4,8 @@
 # not tied to it; V11: a hook in the core pane reports through our API, and
 # with `core_status_mirror` on, the status reaches core's record
 # (openspec/changes/core-status-mirror); with `core_spaces_doc` on, the layout
-# reaches core's `herdr-app` document (openspec/changes/core-spaces-doc); V10:
+# merges into core's `herdr-app` document beside another client's space
+# (openspec/changes/core-spaces-doc); V10:
 # a live handoff, then `herdr server restart`, then `herdr server stop`.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
@@ -124,10 +125,11 @@ set_runtime() {
     "$1" "${2:-true}" > "$CONFIG_HOME/herdr-dev/config.toml"
 }
 
-# The terminal blocks of core's `herdr-app` document, as `pane=address`
+# Core's `herdr-app` document as `<spaces> | <leaves>`: each space id, with
+# `+` when herdr-max marked it, then each terminal block as `pane=address`
 # (`null` when there is no document). doc.get has no CLI verb: plain-mode
 # JSON-RPC through `hc connect`.
-doc_leaves() {
+doc_summary() {
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' \
     | hc_scratch connect \
     | python3 -I -c '
@@ -138,19 +140,28 @@ def blocks(node):
         yield "%s=%s" % (node["id"], node["content"]["terminal"])
     for child in node.get("children", []):
         yield from blocks(child)
-print("null" if value is None else " ".join(
-    leaf for space in value["spaces"] for tab in space["tabs"] for leaf in blocks(tab["root"])))'
+if value is None:
+    print("null")
+else:
+    spaces = value["spaces"]
+    print(" ".join(("+" if "herdr_max" in s else "") + s["id"] for s in spaces), "|",
+          " ".join(leaf for s in spaces for tab in s["tabs"] for leaf in blocks(tab["root"])))'
 }
-# Another client's write: an empty document, at core's current version.
+# The id of herdr-max's marked space (the one workspace).
+our_space() { doc_summary | tr ' ' '\n' | sed -n 's/^+//p' | head -n 1; }
+# Another client's write at core's current version: its own space `s9` in
+# front, herdr-max's spaces dropped, as a phone that lost them would write.
+FOREIGN='{"id":"s9","name":"phone","folder":"/p","color":"teal","tabs":[]}'
 doc_clobber() {
   local version
   version="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' \
     | hc_scratch connect | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["result"]["version"])')"
-  printf '{"jsonrpc":"2.0","id":2,"method":"doc.set","params":{"name":"herdr-app","value":{"spaces":[]},"version":%s}}\n' \
-    "$version" | hc_scratch connect | grep -q '"result"' || fail "the foreign doc.set was refused"
+  printf '{"jsonrpc":"2.0","id":2,"method":"doc.set","params":{"name":"herdr-app","value":{"spaces":[%s]},"version":%s}}\n' \
+    "$FOREIGN" "$version" | hc_scratch connect | grep -q '"result"' || fail "the foreign doc.set was refused"
 }
-published() { [[ "$(doc_leaves)" == "$B=$ADDR" ]]; }
-unpublished() { [[ "$(doc_leaves)" == null ]]; }
+published() { [[ "$(doc_summary)" == "+$(our_space) | $B=$ADDR" ]]; }
+merged() { [[ "$(doc_summary)" == "s9 +$(our_space) | $B=$ADDR" ]]; }
+withdrawn() { [[ "$(doc_summary)" == "s9 | " ]]; }
 
 echo "herdr: $HERDR_BIN"
 echo "scratch: $BASE"
@@ -220,7 +231,7 @@ mirrored() { [[ "$(core_status)" == "working pi" ]]; }
 wait_until "B's status mirrored into core" mirrored
 echo "ok: core_status_mirror put B's status in core: $(core_status)"
 wait_until "the layout in core's herdr-app document" published
-echo "ok: core_spaces_doc published B as $(doc_leaves); PTY pane A is left out"
+echo "ok: core_spaces_doc published B as $(doc_summary); PTY pane A is left out"
 
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
@@ -236,7 +247,7 @@ no_orphan_report "the live handoff"
 echo "ok: live handoff kept both programs and the core; B reattached to $ADDR and takes input"
 
 doc_clobber
-[[ -z "$(doc_leaves)" ]] || fail "the foreign write did not land: $(doc_leaves)"
+[[ "$(doc_summary)" == "s9 | " ]] || fail "the foreign write did not land: $(doc_summary)"
 
 # 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
 #    pane is kept and reattached.
@@ -251,11 +262,11 @@ wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
 [[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the restart"
 no_orphan_report "the restart"
 echo "ok: server restart kept the core and B's program in $ADDR, and reattached it"
-wait_until "the restarted server's layout over the foreign write" published
+wait_until "the restarted server's layout merged beside the foreign space" merged
 set_runtime core false
 run_herdr server reload-config >/dev/null
-wait_until "the herdr-app document cleared by the reload" unpublished
-echo "ok: core_spaces_doc: the restarted server overwrote a foreign write; reload turned it off"
+wait_until "only the foreign space left after the reload" withdrawn
+echo "ok: core_spaces_doc: the restarted server kept the foreign space; reload withdrew only ours"
 
 # 4. herdr server stop ends the core pane's program.
 run_herdr server stop >/dev/null
