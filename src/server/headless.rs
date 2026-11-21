@@ -3342,6 +3342,7 @@ impl HeadlessServer {
         }
 
         changed |= self.app.resume_suspended_panes_if_due(now);
+        changed |= self.app.retry_core_waiting_panes_if_due(now);
 
         if self
             .app

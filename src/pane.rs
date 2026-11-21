@@ -26,8 +26,14 @@ use crate::render_signal::RenderSignal;
 pub(crate) use runtime_io::publish_core_spaces;
 pub(crate) use runtime_io::set_preferred_runtime;
 pub(crate) use runtime_io::CoreTerminalLink;
+#[cfg(all(test, unix))]
+pub(crate) use runtime_io::FakeCore;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
+#[cfg(unix)]
+pub(crate) use runtime_io::{
+    core_attach_failure, core_session_answers, find_pane_core_terminals, CoreAttachFailure,
+};
 pub(crate) use runtime_io::{core_session_name, unclaimed_core_terminals};
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
@@ -1359,6 +1365,24 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
 /// the wrapper's. Zero means the pane identified from its own foreground job,
 /// or identified nothing.
 #[cfg(unix)]
+/// Publishes the agent process detection holds, for the dead-program check
+/// before a resume (core-phase3 D2). Locks only when it changed.
+fn publish_agent_program(
+    cell: &Mutex<Option<crate::platform::ProgramIdentity>>,
+    last: &mut Option<crate::platform::ProgramIdentity>,
+    agent_job: &AgentJobTracker,
+) {
+    let now = agent_job
+        .process()
+        .map(|(pid, started)| crate::platform::ProgramIdentity { pid, started });
+    if now != *last {
+        *last = now;
+        if let Ok(mut cell) = cell.lock() {
+            *cell = now;
+        }
+    }
+}
+
 fn publish_nested_agent_process_group(cell: &AtomicU32, probe: &ProcessProbeResult) {
     cell.store(
         probe.nested_process_group_id.unwrap_or(0),
@@ -1380,6 +1404,7 @@ fn spawn_basic_detection_task(
     full_lifecycle_authority_active: Arc<AtomicBool>,
     self_reported_agent_active: Arc<AtomicBool>,
     managed_start_probe_window: Arc<Mutex<Option<std::time::Instant>>>,
+    agent_program: Arc<Mutex<Option<crate::platform::ProgramIdentity>>>,
     state_events: mpsc::Sender<AppEvent>,
     agent_seed: Option<(Agent, AgentState)>,
 ) -> (
@@ -1424,6 +1449,7 @@ fn spawn_basic_detection_task(
         let mut last_background_count = u8::MAX;
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
+        let mut last_agent_program = None;
         let mut last_resolved_cwd_refresh = None;
 
         loop {
@@ -1555,6 +1581,7 @@ fn spawn_basic_detection_task(
                     &PlatformAgentProcesses,
                     pane_id,
                 );
+                publish_agent_program(&agent_program, &mut last_agent_program, &agent_job);
                 last_foreground_pgid = tracked_process_group_id;
                 if new_agent.is_some() {
                     acquisition_started_at = None;
@@ -2015,6 +2042,11 @@ pub struct PaneRuntime {
     io: PaneIo,
     current_size: Cell<(u16, u16, u32, u32)>,
     child_pid: Arc<AtomicU32>,
+    /// The program as it was right after it started (core-phase3 D2).
+    program: Option<crate::platform::ProgramIdentity>,
+    /// The agent process detection holds in this pane, published by the
+    /// detection task (core-phase3 D2).
+    agent_program: Arc<Mutex<Option<crate::platform::ProgramIdentity>>>,
     /// Process group an agent was identified in one PTY below this pane's own,
     /// published by the detection task. Zero when the pane identified normally.
     /// Unix-only: no Windows wrapper presents a nested PTY to descend into.
@@ -3063,7 +3095,11 @@ impl PaneRuntime {
             PaneIo::adopt_handoff_fd(
                 pane_id,
                 master_fd,
-                runtime_io::PaneIoSink { on_read, on_exit },
+                runtime_io::PaneIoSink {
+                    on_read,
+                    on_exit,
+                    on_core_unreachable: Box::new(|_| {}),
+                },
                 job_exit,
             )?
         };
@@ -3071,6 +3107,7 @@ impl PaneRuntime {
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let self_reported_agent_active = Arc::new(AtomicBool::new(false));
         let managed_start_probe_window = Arc::new(Mutex::new(None));
+        let agent_program = Arc::new(Mutex::new(None));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
             pane_id,
             child_pid.clone(),
@@ -3082,8 +3119,13 @@ impl PaneRuntime {
             full_lifecycle_authority_active.clone(),
             self_reported_agent_active.clone(),
             managed_start_probe_window.clone(),
+            agent_program.clone(),
             events,
             agent_seed,
+        );
+        let program = crate::platform::ProgramIdentity::of(
+            child_pid.load(Ordering::Acquire),
+            crate::platform::process_start_token,
         );
 
         Ok(Self {
@@ -3092,6 +3134,8 @@ impl PaneRuntime {
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
             child_pid,
+            program,
+            agent_program,
             nested_agent_process_group_id,
             reported_cwd,
             persistence_cwd: Mutex::new(None),
@@ -3181,7 +3225,9 @@ impl PaneRuntime {
         };
 
         let spawn_child_pid = Arc::clone(&child_pid);
+        let agent_program = Arc::new(Mutex::new(None));
         let unavailable_events = events.clone();
+        let unreachable_events = events.clone();
         let io = {
             let terminal = terminal.clone();
             let response_writer = response_tx.clone();
@@ -3246,7 +3292,15 @@ impl PaneRuntime {
                     terminal_responses: result.terminal_responses,
                 }
             });
-            let sink = runtime_io::PaneIoSink { on_read, on_exit };
+            let on_core_unreachable: Box<dyn FnMut(Option<u64>) + Send> = Box::new(move |since| {
+                let _ =
+                    unreachable_events.blocking_send(AppEvent::CoreUnreachable { pane_id, since });
+            });
+            let sink = runtime_io::PaneIoSink {
+                on_read,
+                on_exit,
+                on_core_unreachable,
+            };
             match launch {
                 PaneLaunch::Command {
                     cmd,
@@ -3329,6 +3383,7 @@ impl PaneRuntime {
             let pending_release = Arc::new(Mutex::new(None));
             let pending_release_for_task = pending_release.clone();
             let resolved_cwd_for_task = resolved_cwd.clone();
+            let agent_program_for_task = agent_program.clone();
 
             let handle = tokio::spawn(async move {
                 let mut agent_presence =
@@ -3362,6 +3417,7 @@ impl PaneRuntime {
                 let mut last_background_count = u8::MAX;
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
+                let mut last_agent_program = None;
                 let mut last_resolved_cwd_refresh = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3551,6 +3607,11 @@ impl PaneRuntime {
                                 },
                                 &PlatformAgentProcesses,
                                 pane_id,
+                            );
+                            publish_agent_program(
+                                &agent_program_for_task,
+                                &mut last_agent_program,
+                                &agent_job,
                             );
                             last_foreground_pgid = tracked_process_group_id;
                             if new_agent.is_some() {
@@ -3802,12 +3863,18 @@ impl PaneRuntime {
             (None, Arc::new(Notify::new()), Arc::new(Mutex::new(None)))
         };
 
+        let program = crate::platform::ProgramIdentity::of(
+            child_pid.load(Ordering::Acquire),
+            crate::platform::process_start_token,
+        );
         Ok(Self {
             pane_id,
             terminal,
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
             child_pid,
+            program,
+            agent_program,
             #[cfg(unix)]
             nested_agent_process_group_id,
             reported_cwd,
@@ -4457,6 +4524,23 @@ impl PaneRuntime {
             .or_else(|| self.reported_cwd.lock().ok().and_then(|cwd| cwd.clone()))
     }
 
+    /// The pane's program as it was right after it started, and the agent
+    /// detection holds in it, for the dead-program check before a resume
+    /// (core-phase3 D2). A core pane's program is the one core named.
+    pub fn program_identities(
+        &self,
+    ) -> (
+        Option<crate::platform::ProgramIdentity>,
+        Option<crate::platform::ProgramIdentity>,
+    ) {
+        let program = self
+            .io
+            .core_terminal()
+            .map_or(self.program, |link| link.program);
+        let agent = self.agent_program.lock().ok().and_then(|agent| *agent);
+        (program, agent)
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         let pid = self.child_pid.load(Ordering::Acquire);
         (pid > 0).then_some(pid)
@@ -4568,6 +4652,7 @@ impl PaneRuntime {
             self.full_lifecycle_authority_active.clone(),
             self.self_reported_agent_active.clone(),
             self.managed_start_probe_window.clone(),
+            self.agent_program.clone(),
             events,
             None,
         );
@@ -4707,6 +4792,8 @@ impl PaneRuntime {
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
                 child_pid: Arc::new(AtomicU32::new(0)),
+                program: None,
+                agent_program: Arc::new(Mutex::new(None)),
                 #[cfg(unix)]
                 nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
@@ -6199,6 +6286,8 @@ mod tests {
             // No child process, so the direct-child fallback cannot answer and
             // the precedence being asserted is the only thing in play.
             child_pid: Arc::new(AtomicU32::new(0)),
+            program: None,
+            agent_program: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
@@ -6246,6 +6335,8 @@ mod tests {
         ));
         let compression = TerminalCompressionTask::spawn(PaneId::from_raw(0), terminal.clone());
         let runtime = PaneRuntime {
+            program: None,
+            agent_program: Arc::new(Mutex::new(None)),
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             managed_start_probe_window: Arc::new(Mutex::new(None)),
             pane_id: PaneId::from_raw(0),
@@ -6299,6 +6390,8 @@ mod tests {
         ));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
+            program: None,
+            agent_program: Arc::new(Mutex::new(None)),
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
@@ -6344,6 +6437,8 @@ mod tests {
         ));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
+            program: None,
+            agent_program: Arc::new(Mutex::new(None)),
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),

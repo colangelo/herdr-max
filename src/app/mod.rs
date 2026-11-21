@@ -199,6 +199,11 @@ pub struct App {
     default_workspace_reopen: default_workspace::DefaultWorkspaceReopen,
     /// Whether launchd accepts pane jobs now, so suspended panes may start.
     pane_jobs_ready_probe: fn() -> bool,
+    /// The process table the dead-program check reads (core-phase3 D2);
+    /// tests pass a fake one.
+    program_start_token: crate::platform::StartTokenLookup,
+    /// When panes waiting for Herdr Core next try to attach (core-phase3 D1b).
+    core_waiting_retry_at: Option<std::time::Instant>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
@@ -889,6 +894,8 @@ impl App {
             pane_jobs_ready_probe: crate::platform::pane_jobs_ready_for_resume,
             #[cfg(test)]
             pane_jobs_ready_probe: || true,
+            program_start_token: crate::platform::process_start_token,
+            core_waiting_retry_at: None,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
@@ -925,6 +932,7 @@ impl App {
         // reports once its panes are back, or every terminal looks unclaimed.
         if app.policy.restore_session {
             app.report_unclaimed_core_terminals();
+            app.schedule_core_waiting_retry(std::time::Instant::now());
         }
         if app.core_status_mirror {
             app.sync_core_status_mirror();
@@ -995,6 +1003,7 @@ impl App {
         });
         app.refresh_restored_workspace_git_metadata();
         app.report_unclaimed_core_terminals();
+        app.schedule_core_waiting_retry(std::time::Instant::now());
         if app.core_status_mirror {
             app.sync_core_status_mirror();
         }

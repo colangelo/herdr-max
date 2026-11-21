@@ -18,6 +18,8 @@ mod core_backend;
 mod core_status;
 mod pty;
 
+#[cfg(all(test, unix))]
+pub(crate) use core_backend::fake::FakeCore;
 pub(crate) use core_status::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 /// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
@@ -33,11 +35,14 @@ pub(in crate::pane) struct SpawnSpec {
 /// A pane's program in herdr-core, saved with the pane so the next server
 /// attaches to it instead of starting it again (core-backend D10).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CoreTerminalLink {
+pub struct CoreTerminalLink {
     /// The core session (`herdr`, `herdr-dev`, `herdr-<name>`; D2).
     pub session: String,
     /// The terminal's address in that session (`t7`).
     pub address: String,
+    /// The program as herdr saw it at attach, `None` when core gave no pid
+    /// or the link predates the field (core-phase3 D1b).
+    pub program: Option<crate::platform::ProgramIdentity>,
 }
 
 /// Live herdr-core terminals labelled for this session that no pane claimed
@@ -90,11 +95,77 @@ pub(crate) fn core_session_name() -> String {
     }
 }
 
+/// What restoring a pane's saved core terminal found, when it did not attach
+/// (core-phase3 D1b).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreAttachFailure {
+    /// Core answered that the terminal is gone or finished.
+    Gone,
+    /// The address is live but labelled for another pane.
+    NotOurs,
+    /// Core did not answer.
+    Unreachable,
+}
+
+/// Why `PaneRuntime::reattach_core` failed. Anything that is not core's own
+/// answer counts as unreachable, so the program is never taken for gone.
+#[cfg(unix)]
+pub(crate) fn core_attach_failure(err: &std::io::Error) -> CoreAttachFailure {
+    match err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<core_backend::ReattachError>())
+    {
+        Some(core_backend::ReattachError::Gone(_)) => CoreAttachFailure::Gone,
+        Some(core_backend::ReattachError::NotOurs(_)) => CoreAttachFailure::NotOurs,
+        Some(core_backend::ReattachError::Unreachable(_)) | None => CoreAttachFailure::Unreachable,
+    }
+}
+
+/// Live core terminals labelled for the pane `public_pane_id` in every core
+/// session herdr knows and can reach without starting one (core-phase3 D1b,
+/// the known-session search). Empty without a pane id: the session label
+/// alone would match every pane.
+#[cfg(unix)]
+pub(crate) fn find_pane_core_terminals(
+    link_session: &str,
+    public_pane_id: Option<&str>,
+) -> Vec<CoreTerminalLink> {
+    if public_pane_id.is_none() {
+        return Vec::new();
+    }
+    let sessions: Vec<_> = core_backend::known_sessions(link_session)
+        .into_iter()
+        .map(|session| {
+            let connector = core_backend::existing_session_connector(&session);
+            (session, connector)
+        })
+        .collect();
+    core_backend::find_labelled_terminals(&sessions, &core_backend::pane_labels(public_pane_id))
+        .into_iter()
+        .map(|(session, address)| CoreTerminalLink {
+            session,
+            address,
+            program: None,
+        })
+        .collect()
+}
+
+/// Whether the core session `session` answers now, never starting it.
+#[cfg(unix)]
+pub(crate) fn core_session_answers(session: &str) -> bool {
+    core_backend::existing_session_connector(session)().is_ok()
+}
+
 pub(in crate::pane) struct PaneIoSink {
     /// Feeds the pane's terminal parser; called for every chunk read.
     pub on_read: ReadCallback,
     /// Called once, after the wait is marked complete.
     pub on_exit: Box<dyn FnOnce(crate::platform::ChildExitReason) + Send>,
+    /// A core pane's backend says when core stops answering (unix ms) and
+    /// when it answers again (`None`); other backends never call it.
+    #[cfg_attr(not(unix), allow(dead_code))] // only the Unix-only core backend calls it
+    pub on_core_unreachable: Box<dyn FnMut(Option<u64>) + Send>,
 }
 
 pub(super) enum PaneIo {
@@ -151,9 +222,13 @@ impl PaneIo {
                     });
             match started {
                 Ok(started) => {
-                    let PaneIoSink { on_read, on_exit } = sink;
+                    let PaneIoSink {
+                        on_read,
+                        on_exit,
+                        on_core_unreachable,
+                    } = sink;
                     return started
-                        .into_pane(on_read, on_exit, child_wait_completed)
+                        .into_pane(on_read, on_exit, on_core_unreachable, child_wait_completed)
                         .map(PaneIo::Core);
                 }
                 Err(err) => {
@@ -169,9 +244,10 @@ impl PaneIo {
     }
 
     /// Attaches to a program an earlier server left in herdr-core (D10
-    /// "Arriving"). Fails, without touching the terminal, when it is in
-    /// another core session, gone, finished or labelled for another pane; the
-    /// caller then starts the pane fresh.
+    /// "Arriving"), in the core session its link names, which is never
+    /// started. Fails, without touching the terminal, when core does not
+    /// answer, or the terminal is gone, finished or labelled for another pane;
+    /// `core_attach_failure` tells which (core-phase3 D1b).
     #[cfg(unix)]
     // The reattach threads the pane's geometry, sink and pid slots, as spawn does.
     #[allow(clippy::too_many_arguments)]
@@ -185,15 +261,9 @@ impl PaneIo {
         child_pid: &std::sync::atomic::AtomicU32,
         child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> std::io::Result<Self> {
-        let session = core_backend::core_session_name();
-        if link.session != session {
-            return Err(std::io::Error::other(format!(
-                "terminal {} is in core session {}, not {session}",
-                link.address, link.session
-            )));
-        }
         let target = core_backend::CoreReattach {
             pane_id,
+            session: link.session.clone(),
             address: link.address.clone(),
             labels: core_backend::pane_labels(public_pane_id),
             rows,
@@ -202,12 +272,16 @@ impl PaneIo {
         let started = core_backend::StartedCore::reattach(
             target,
             child_pid,
-            core_backend::existing_core_connector(),
+            core_backend::existing_session_connector(&link.session),
         )
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let PaneIoSink { on_read, on_exit } = sink;
+        .map_err(std::io::Error::other)?;
+        let PaneIoSink {
+            on_read,
+            on_exit,
+            on_core_unreachable,
+        } = sink;
         started
-            .into_pane(on_read, on_exit, child_wait_completed)
+            .into_pane(on_read, on_exit, on_core_unreachable, child_wait_completed)
             .map(PaneIo::Core)
     }
 
@@ -215,10 +289,7 @@ impl PaneIo {
     pub(super) fn core_terminal(&self) -> Option<CoreTerminalLink> {
         match self {
             #[cfg(unix)]
-            PaneIo::Core(core) => Some(CoreTerminalLink {
-                session: core_backend::core_session_name(),
-                address: core.address().to_string(),
-            }),
+            PaneIo::Core(core) => Some(core.link()),
             _ => None,
         }
     }

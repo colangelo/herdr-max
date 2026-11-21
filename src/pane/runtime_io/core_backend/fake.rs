@@ -47,6 +47,8 @@ struct Shared {
     requests: Vec<Value>,
     /// Terminal records by address: run here, or left by an earlier server.
     terminals: std::collections::HashMap<String, Value>,
+    /// Addresses core no longer knows: `terminal.get` answers `not_found`.
+    gone: std::collections::HashSet<String>,
     /// The client closed its connection.
     client_gone: bool,
 }
@@ -63,26 +65,40 @@ impl FakeCore {
     }
 
     pub(crate) fn start_with(configure: impl FnOnce(&mut FakeConfig)) -> Self {
-        let mut config = FakeConfig::default();
-        configure(&mut config);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         // Short: Unix socket paths have a small length limit.
         let dir = std::env::temp_dir().join(format!("hcf-{}-{nanos}", std::process::id()));
+        Self::start_in(dir, "c.sock", configure)
+    }
+
+    /// A fake core whose socket is `dir/name`, as core lays out a session's
+    /// socket, so a test can stand it in for a named session.
+    pub(crate) fn start_in(
+        dir: PathBuf,
+        name: &str,
+        configure: impl FnOnce(&mut FakeConfig),
+    ) -> Self {
+        let mut config = FakeConfig::default();
+        configure(&mut config);
         std::fs::create_dir_all(&dir).expect("fake core dir");
         // As core's own: a socket folder others can write to is refused.
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .expect("fake core dir mode");
-        let socket = dir.join("c.sock");
+        let socket = dir.join(name);
         let listener = UnixListener::bind(&socket).expect("fake core bind");
         let shared = Arc::new(Mutex::new(Shared::default()));
         let thread_shared = Arc::clone(&shared);
+        let config = Arc::new(config);
         std::thread::spawn(move || {
-            // One client per fake core is all the tests need.
-            if let Ok((stream, _)) = listener.accept() {
-                serve(stream, config, thread_shared);
+            // Each client is served on its own thread; `send` and `hang_up`
+            // act on the latest one.
+            for stream in listener.incoming().flatten() {
+                let config = Arc::clone(&config);
+                let shared = Arc::clone(&thread_shared);
+                std::thread::spawn(move || serve(stream, &config, shared));
             }
         });
         Self {
@@ -113,6 +129,12 @@ impl FakeCore {
             assert!(std::time::Instant::now() < deadline, "no client connected");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// Ends stream `channel` with `reason` (a JSON finished record, or empty
+    /// for a stream that only dropped).
+    pub(crate) fn close_stream(&self, channel: u32, reason: &[u8]) {
+        self.send(Frame::new(channel, kind::CLOSE, reason.to_vec()));
     }
 
     /// Whether the client closed its connection.
@@ -147,7 +169,16 @@ impl FakeCore {
     /// answers with `record`.
     pub(crate) fn add_terminal(&self, record: Value) {
         let address = record["address"].as_str().unwrap_or("t1").to_string();
-        lock(&self.shared).terminals.insert(address, record);
+        let mut shared = lock(&self.shared);
+        shared.gone.remove(&address);
+        shared.terminals.insert(address, record);
+    }
+
+    /// Core forgets the terminal, as after its holder was lost and swept.
+    pub(crate) fn forget_terminal(&self, address: &str) {
+        let mut shared = lock(&self.shared);
+        shared.terminals.remove(address);
+        shared.gone.insert(address.to_string());
     }
 }
 
@@ -165,7 +196,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
+fn serve(stream: UnixStream, config: &FakeConfig, shared: Arc<Mutex<Shared>>) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
@@ -214,7 +245,7 @@ fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
             if frame.channel == 0 && frame.kind == kind::DATA {
                 if let Ok(request) = serde_json::from_slice::<Value>(&frame.payload) {
                     lock(&shared).requests.push(request.clone());
-                    answer(&request, &config, &shared, &mut next_channel);
+                    answer(&request, config, &shared, &mut next_channel, &mut writer);
                 }
             }
         }
@@ -228,7 +259,13 @@ fn serve(stream: UnixStream, config: FakeConfig, shared: Arc<Mutex<Shared>>) {
     }
 }
 
-fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_channel: &mut u32) {
+fn answer(
+    request: &Value,
+    config: &FakeConfig,
+    shared: &Mutex<Shared>,
+    next_channel: &mut u32,
+    out: &mut UnixStream,
+) {
     let id = request["id"].clone();
     let method = request["method"].as_str().unwrap_or_default();
     let params = &request["params"];
@@ -277,6 +314,17 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
                         "data": {"kind": "not_found", "hint": ""}})),
             None,
         ),
+        "terminal.get"
+            if lock(shared)
+                .gone
+                .contains(params["terminal"].as_str().unwrap_or_default()) =>
+        {
+            (
+                Err(json!({"code": -32000, "message": "no such terminal",
+                        "data": {"kind": "not_found", "hint": ""}})),
+                None,
+            )
+        }
         "terminal.get" => {
             let address = params["terminal"].as_str().unwrap_or_default();
             let known = lock(shared).terminals.get(address).cloned();
@@ -284,6 +332,20 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
                 Ok(known.unwrap_or_else(|| json!({"address": address, "state": "live"}))),
                 None,
             )
+        }
+        "terminal.list" => {
+            let want = params["labels"].as_object().cloned().unwrap_or_default();
+            let mut terminals: Vec<Value> = lock(shared)
+                .terminals
+                .values()
+                .filter(|record| {
+                    want.iter()
+                        .all(|(key, value)| &record["labels"][key] == value)
+                })
+                .cloned()
+                .collect();
+            terminals.sort_by_key(|record| record["address"].to_string());
+            (Ok(json!({"terminals": terminals})), None)
         }
         _ => (Ok(json!({})), None),
     };
@@ -297,7 +359,8 @@ fn answer(request: &Value, config: &FakeConfig, shared: &Mutex<Shared>, next_cha
     if let Some(frame) = then {
         let _ = frame.encode_into(&mut bytes);
     }
-    if let Some(stream) = lock(shared).stream.as_mut() {
-        let _ = stream.write_all(&bytes);
-    }
+    // The requester's own connection: with several clients, the latest one
+    // is not necessarily it.
+    let _guard = lock(shared);
+    let _ = out.write_all(&bytes);
 }

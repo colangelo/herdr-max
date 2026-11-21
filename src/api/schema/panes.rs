@@ -632,6 +632,16 @@ pub struct PaneInfo {
     /// agent, once launchd accepts pane jobs. Absent means false.
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub suspended: bool,
+    /// The pane's program may still run in a herdr-core session that does
+    /// not answer, so nothing was started for it; it attaches when that core
+    /// answers. Absent means false.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub core_waiting: bool,
+    /// Since when (unix ms) herdr-core has not answered this core pane; its
+    /// program keeps running and the pane keeps retrying. Absent while core
+    /// answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_unreachable_since: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

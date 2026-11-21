@@ -343,7 +343,9 @@ impl App {
                 .foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
                 .map(|cwd| cwd.display().to_string()),
             restore_error: terminal.restore_error.clone(),
-            suspended: terminal.suspended,
+            suspended: terminal.is_suspended(),
+            core_waiting: terminal.core_waiting().is_some(),
+            core_unreachable_since: terminal.core_unreachable_since,
             label: terminal.manual_label.clone(),
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,

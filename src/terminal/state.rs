@@ -256,11 +256,69 @@ pub struct TerminalState {
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
-    /// The session ended the pane's program, not the program itself: its
-    /// macOS pane job was stopped, or a logout ended it (fork issue 288). The
-    /// pane has no runtime and keeps its place and resume plan until it is
-    /// started again. Not saved: a restore starts every pane anyway.
-    pub suspended: bool,
+    /// Why the pane has no runtime but keeps its place and its resume plan
+    /// (fork issue 288; openspec/changes/core-phase3, D1 and D1b).
+    pub hold: Option<PaneHold>,
+    /// When herdr-core stopped answering this core pane (unix ms), while it
+    /// keeps retrying; the program keeps running (core-phase3 D1a).
+    pub core_unreachable_since: Option<u64>,
+}
+
+/// Why a pane without a runtime keeps its place (core-phase3 D1, D1b, D2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneHold {
+    /// The session or the runtime ended the program, not the program itself:
+    /// the pane starts again in place once its old program is gone.
+    Suspended(Suspension),
+    /// Its program may still run in a core herdr cannot reach: nothing is
+    /// started for the pane until it attaches again.
+    // Only the Unix-only core backend restores a pane waiting for core.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    CoreWaiting(CoreWaiting),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suspension {
+    pub cause: crate::platform::SuspendCause,
+    /// The pane's program as recorded when it started (D2's dead-program check).
+    pub program: Option<crate::platform::ProgramIdentity>,
+    /// The agent process detection saw in the pane, which a shell may have
+    /// started with its own pid.
+    pub agent: Option<crate::platform::ProgramIdentity>,
+    /// Where the program ran in herdr-core, saved so a restore checks it
+    /// before starting the pane fresh.
+    pub core_link: Option<crate::pane::CoreTerminalLink>,
+    /// Why the last resume did not start it.
+    pub blocked: Option<ResumeBlock>,
+}
+
+impl Suspension {
+    pub(crate) fn new(cause: crate::platform::SuspendCause) -> Self {
+        Self {
+            cause,
+            program: None,
+            agent: None,
+            core_link: None,
+            blocked: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeBlock {
+    /// The old program, by pid, still runs.
+    StillRuns(u32),
+    /// No identity was recorded, so the old program may run.
+    CannotConfirm,
+}
+
+// Only the Unix-only core backend restores a pane waiting for core.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreWaiting {
+    pub link: crate::pane::CoreTerminalLink,
+    /// The pane id the terminal's labels name.
+    pub public_pane_id: Option<String>,
 }
 
 impl TerminalState {
@@ -319,7 +377,19 @@ impl TerminalState {
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
             restore_error: None,
-            suspended: false,
+            hold: None,
+            core_unreachable_since: None,
+        }
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        matches!(self.hold, Some(PaneHold::Suspended(_)))
+    }
+
+    pub fn core_waiting(&self) -> Option<&CoreWaiting> {
+        match &self.hold {
+            Some(PaneHold::CoreWaiting(waiting)) => Some(waiting),
+            _ => None,
         }
     }
 
@@ -2559,11 +2629,12 @@ impl TerminalState {
     /// The command a restore of the current snapshot would run: the reported
     /// resume command, else the built-in one for the saved session, with the
     /// launch flags added. Same order as `persist::restore`.
-    /// Marks the pane suspended (see [`Self::suspended`]). An agent whose
+    /// Marks the pane suspended (see [`PaneHold::Suspended`]). An agent whose
     /// process the session ended reads as idle until it is resumed, and the
     /// session it resumes stays on record: this is not the agent leaving.
-    pub(crate) fn suspend(&mut self, now: Instant) {
-        self.suspended = true;
+    pub(crate) fn suspend(&mut self, now: Instant, suspension: Suspension) {
+        self.hold = Some(PaneHold::Suspended(suspension));
+        self.core_unreachable_since = None;
         if let Some(agent) = self.effective_known_agent().or(self.detected_agent) {
             let _ = self.set_detected_state_with_screen_signals_at(
                 Some(agent),

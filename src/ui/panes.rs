@@ -484,6 +484,64 @@ fn compute_pane_infos(
 /// What a suspended pane shows until it starts again (fork issue 288).
 pub(crate) const SUSPENDED_PANE_NOTICE: &str = "Suspended: macOS ended this pane's program (a logout, or its pane job was stopped). It starts again here, and its agent resumes, once macOS accepts new pane jobs.";
 
+/// What a suspended core pane shows until it starts again (core-phase3 D1).
+const CORE_SUSPENDED_PANE_NOTICE: &str =
+    "Suspended: Herdr Core ended this pane's program. It starts again here, and its agent resumes.";
+/// Drawn over a core pane's last row while core does not answer (core-phase3 D1a).
+const CORE_UNREACHABLE_LINE: &str = " Herdr Core is not answering; the program keeps running ";
+
+/// The text a pane without a runtime shows in place (core-phase3 D1b, D2).
+fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow<'static, str> {
+    use crate::terminal::state::{PaneHold, ResumeBlock};
+    match hold {
+        PaneHold::Suspended(suspension) => match suspension.blocked {
+            Some(ResumeBlock::StillRuns(pid)) => format!(
+                "Suspended: the old program (pid {pid}) still runs. This pane starts again once it ends."
+            )
+            .into(),
+            Some(ResumeBlock::CannotConfirm) => {
+                "Suspended: cannot confirm the old program ended. Run `herdr pane respawn` on this pane to start it again.".into()
+            }
+            None if suspension.cause == crate::platform::SuspendCause::PaneJobEnded => {
+                SUSPENDED_PANE_NOTICE.into()
+            }
+            None => CORE_SUSPENDED_PANE_NOTICE.into(),
+        },
+        PaneHold::CoreWaiting(waiting) => format!(
+            "Waiting for Herdr Core (session `{}`): this pane's program may still run there, so nothing starts here. It attaches when that core answers; `herdr pane respawn` starts it fresh instead.",
+            waiting.link.session
+        )
+        .into(),
+    }
+}
+
+fn render_core_unreachable_line(
+    app: &AppState,
+    ws: &crate::workspace::Workspace,
+    tab_index: usize,
+    info: &PaneInfo,
+    frame: &mut Frame,
+) {
+    let unreachable = ws
+        .tabs
+        .get(tab_index)
+        .and_then(|tab| tab.terminal_id(info.id))
+        .and_then(|id| app.terminals.get(id))
+        .is_some_and(|terminal| terminal.core_unreachable_since.is_some());
+    if !unreachable || info.inner_rect.height == 0 {
+        return;
+    }
+    let mut line = info.inner_rect;
+    line.y = line.y.saturating_add(line.height - 1);
+    line.height = 1;
+    frame.render_widget(
+        Paragraph::new(CORE_UNREACHABLE_LINE).style(
+            ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+        ),
+        line,
+    );
+}
+
 pub(super) fn render_panes(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -507,6 +565,7 @@ pub(super) fn render_panes(
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
+            render_core_unreachable_line(app, ws, target.tab_index, info, frame);
             let multi_pane = ws
                 .tabs
                 .get(target.tab_index)
@@ -524,12 +583,12 @@ pub(super) fn render_panes(
             .get(target.tab_index)
             .and_then(|tab| tab.terminal_id(info.id))
             .and_then(|id| app.terminals.get(id))
-            .and_then(|terminal| {
-                if terminal.suspended {
-                    Some(SUSPENDED_PANE_NOTICE)
-                } else {
-                    terminal.restore_error.as_deref()
-                }
+            .and_then(|terminal| match &terminal.hold {
+                Some(hold) => Some(held_pane_notice(hold)),
+                None => terminal
+                    .restore_error
+                    .as_deref()
+                    .map(std::borrow::Cow::Borrowed),
             })
         {
             frame.render_widget(
@@ -1155,7 +1214,11 @@ mod tests {
         app.active = Some(0);
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
-        assert!(app.suspend_pane(pane_id, std::time::Instant::now()));
+        assert!(app.suspend_pane(
+            pane_id,
+            std::time::Instant::now(),
+            crate::terminal::state::Suspension::new(crate::platform::SuspendCause::PaneJobEnded)
+        ));
         let runtimes = TerminalRuntimeRegistry::new();
         let area = Rect::new(0, 0, 80, 24);
         let layout = crate::ui::compute_tab_surface_for(

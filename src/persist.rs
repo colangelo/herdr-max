@@ -14,6 +14,8 @@ pub use self::io::{clear_history, load, load_history};
 
 pub(crate) use self::restore::restored_worktree_space_membership;
 #[cfg(unix)]
+pub(crate) use self::restore::{after_failed_attach, AfterFailedAttach};
+#[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::restore::{restore, restored_former_public_ids};
 pub use self::snapshot::{

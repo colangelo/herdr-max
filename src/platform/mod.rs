@@ -213,10 +213,73 @@ pub enum ChildExitReason {
     #[cfg(unix)]
     Handoff,
     /// The program ended without its own exit: the session ended its pane
-    /// job (fork issue 288). The pane is kept and started again later.
+    /// job (fork issue 288), or herdr-core's runtime ended it
+    /// (openspec/changes/core-phase3, D1). The pane is kept and started
+    /// again later.
     #[cfg(unix)]
-    Suspended,
+    Suspended(SuspendCause),
     WaitFailed,
+}
+
+/// What ended a suspended pane's program, when the program did not end
+/// itself (openspec/changes/core-phase3, D1).
+// Windows has neither pane jobs nor the core backend, so nothing suspends there.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspendCause {
+    /// Herdr Core's holder quit or crashed (`holder_lost`).
+    HolderLost,
+    /// The login session ended (`host_shutdown`).
+    HostShutdown,
+    /// Someone stopped Herdr Core (`server_stop`).
+    CoreStopped,
+    /// A core restart lost the program (`stopped_by_restart`).
+    StoppedByRestart,
+    /// Core no longer has the terminal and its program is gone.
+    TerminalGone,
+    /// The session ended the pane's macOS pane job (fork issue 288).
+    PaneJobEnded,
+}
+
+/// A process as herdr saw it: its pid and its start token, which tells it
+/// apart from a later process that reuses the pid (core-phase3 D1a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramIdentity {
+    pub pid: u32,
+    pub started: u64,
+}
+
+/// The start token of `pid` now, `None` when no such process. Tests pass a
+/// fake process table.
+pub(crate) type StartTokenLookup = fn(u32) -> Option<u64>;
+
+/// Whether a recorded program still runs. `Unknown` when it was never
+/// recorded (pid 0): such a program may run (core-phase3 D1a, D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgramLiveness {
+    Runs,
+    Gone,
+    Unknown,
+}
+
+impl ProgramIdentity {
+    /// `pid` as it is now; `None` for pid 0 or a process already gone.
+    pub(crate) fn of(pid: u32, lookup: StartTokenLookup) -> Option<Self> {
+        (pid > 0)
+            .then(|| lookup(pid))
+            .flatten()
+            .map(|started| Self { pid, started })
+    }
+
+    pub(crate) fn liveness(identity: Option<Self>, lookup: StartTokenLookup) -> ProgramLiveness {
+        match identity {
+            None => ProgramLiveness::Unknown,
+            Some(identity) if lookup(identity.pid) == Some(identity.started) => {
+                ProgramLiveness::Runs
+            }
+            Some(_) => ProgramLiveness::Gone,
+        }
+    }
 }
 
 impl ChildExitReason {
@@ -224,21 +287,22 @@ impl ChildExitReason {
         match self {
             Self::Interrupted => true,
             #[cfg(unix)]
-            Self::Handoff | Self::Suspended => true,
+            Self::Handoff | Self::Suspended(_) => true,
             _ => false,
         }
     }
 
-    /// The pane stays, suspended, instead of closing.
-    pub(crate) fn suspends_pane(self) -> bool {
+    /// Why the pane stays, suspended, instead of closing; `None` closes it.
+    pub(crate) fn suspend_cause(self) -> Option<SuspendCause> {
         #[cfg(unix)]
-        {
-            self == Self::Suspended
+        if let Self::Suspended(cause) = self {
+            return Some(cause);
         }
-        #[cfg(not(unix))]
-        {
-            false
-        }
+        None
+    }
+
+    pub(crate) fn suspends_pane(self) -> bool {
+        self.suspend_cause().is_some()
     }
 }
 
@@ -1147,7 +1211,11 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     #[cfg(unix)]
     for keeper_status in [unix_common::PANE_JOB_STOPPED, unix_common::PANE_KEEPER_LOST] {
         let reason = classify_child_exit(&portable_pty::ExitStatus::with_signal(keeper_status));
-        assert_eq!(reason, ChildExitReason::Suspended, "{keeper_status}");
+        assert_eq!(
+            reason,
+            ChildExitReason::Suspended(SuspendCause::PaneJobEnded),
+            "{keeper_status}"
+        );
         assert!(reason.suspends_pane());
         assert!(reason.requires_session_checkpoint());
     }

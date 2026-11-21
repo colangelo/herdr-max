@@ -172,6 +172,38 @@ pub struct PaneSnapshot {
 pub struct PaneCoreTerminalSnapshot {
     pub session: String,
     pub address: String,
+    /// The program's pid and start token as recorded at attach, so a restore
+    /// can tell a gone program from an unreachable core (core-phase3 D1b).
+    /// Absent in older files and when core gave no pid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_started: Option<u64>,
+}
+
+impl PaneCoreTerminalSnapshot {
+    pub(crate) fn from_link(link: crate::pane::CoreTerminalLink) -> Self {
+        Self {
+            session: link.session,
+            address: link.address,
+            pid: link.program.map(|program| program.pid),
+            pid_started: link.program.map(|program| program.started),
+        }
+    }
+
+    // A restore reattaches core panes on Unix only.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn link(&self) -> crate::pane::CoreTerminalLink {
+        crate::pane::CoreTerminalLink {
+            session: self.session.clone(),
+            address: self.address.clone(),
+            program: self
+                .pid
+                .zip(self.pid_started)
+                .filter(|(pid, _)| *pid > 0)
+                .map(|(pid, started)| crate::platform::ProgramIdentity { pid, started }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,13 +537,14 @@ fn capture_tab(
         let pin_order = terminal.and_then(|terminal| terminal.pin_order);
         let pane_key = terminal.map(|terminal| terminal.pane_key.clone());
         let run_id = terminal.and_then(|terminal| terminal.run_id.clone());
+        // A pane without a runtime keeps the link it was suspended or
+        // restored with, so the next restore still checks that terminal
+        // before it starts anything (core-phase3 D1b).
         let core_terminal = terminal_id
             .and_then(|id| terminal_runtimes.get(id))
             .and_then(|runtime| runtime.core_terminal())
-            .map(|link| PaneCoreTerminalSnapshot {
-                session: link.session,
-                address: link.address,
-            });
+            .or_else(|| terminal.and_then(held_core_link))
+            .map(PaneCoreTerminalSnapshot::from_link);
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
         // bottom of the buffer once per capture, only for a Claude record.
@@ -582,6 +615,15 @@ pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
     value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
     let bytes = serde_json::to_vec(&value).ok()?;
     Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn held_core_link(
+    terminal: &crate::terminal::state::TerminalState,
+) -> Option<crate::pane::CoreTerminalLink> {
+    match terminal.hold.as_ref()? {
+        crate::terminal::state::PaneHold::CoreWaiting(waiting) => Some(waiting.link.clone()),
+        crate::terminal::state::PaneHold::Suspended(suspension) => suspension.core_link.clone(),
+    }
 }
 
 /// Capture a pane's todos. The link target is stored as the pane's current raw
@@ -1848,7 +1890,9 @@ mod tests {
             pane.core_terminal,
             Some(PaneCoreTerminalSnapshot {
                 session: "herdr".into(),
-                address: "t7".into()
+                address: "t7".into(),
+                pid: None,
+                pid_started: None,
             })
         );
         let back = serde_json::to_value(&pane).unwrap();
@@ -1860,6 +1904,55 @@ mod tests {
         assert_eq!(old.core_terminal, None);
         let written = serde_json::to_value(&old).unwrap();
         assert!(written.get("core_terminal").is_none(), "{written}");
+    }
+
+    // V31 (core-phase3 D1b): the link's pid fields are optional both ways.
+    #[test]
+    fn a_core_link_records_its_program_and_phase_2_links_still_load() {
+        let phase2: PaneCoreTerminalSnapshot =
+            serde_json::from_str(r#"{"session":"herdr","address":"t7"}"#).unwrap();
+        assert_eq!((phase2.pid, phase2.pid_started), (None, None));
+        assert_eq!(phase2.link().program, None);
+        let written = serde_json::to_value(&phase2).unwrap();
+        assert!(written.get("pid").is_none(), "{written}");
+        assert!(written.get("pid_started").is_none(), "{written}");
+
+        let link = crate::pane::CoreTerminalLink {
+            session: "herdr".into(),
+            address: "t7".into(),
+            program: Some(crate::platform::ProgramIdentity {
+                pid: 4242,
+                started: 99,
+            }),
+        };
+        let saved = PaneCoreTerminalSnapshot::from_link(link.clone());
+        let json = serde_json::to_string(&saved).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PaneCoreTerminalSnapshot>(&json)
+                .unwrap()
+                .link(),
+            link
+        );
+
+        // A phase 2 build reads a phase 3 link and drops the new fields.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Phase2Link {
+            session: String,
+            address: String,
+        }
+        assert_eq!(
+            serde_json::from_str::<Phase2Link>(&json).unwrap(),
+            Phase2Link {
+                session: "herdr".into(),
+                address: "t7".into()
+            }
+        );
+
+        // A pid of 0 is no identity.
+        let zero: PaneCoreTerminalSnapshot =
+            serde_json::from_str(r#"{"session":"herdr","address":"t7","pid":0,"pid_started":5}"#)
+                .unwrap();
+        assert_eq!(zero.link().program, None);
     }
 
     #[test]

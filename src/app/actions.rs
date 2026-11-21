@@ -1472,6 +1472,18 @@ impl AppState {
                 }
                 Vec::new()
             }
+            // The app attaches the waiting panes; the state has nothing to do.
+            #[cfg(unix)]
+            AppEvent::CoreSessionsAnswered { .. } => Vec::new(),
+            AppEvent::CoreUnreachable { pane_id, since } => {
+                if let Some(terminal) = self.pane_terminal_mut(pane_id) {
+                    if terminal.core_unreachable_since != since {
+                        terminal.core_unreachable_since = since;
+                        terminal.revision = terminal.revision.saturating_add(1);
+                    }
+                }
+                Vec::new()
+            }
             AppEvent::CoreUnavailable { reason } => {
                 self.post_notification(ToastNotification {
                     kind: ToastKind::NeedsAttention,

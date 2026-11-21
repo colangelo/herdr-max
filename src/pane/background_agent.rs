@@ -36,6 +36,12 @@ pub(super) struct AgentJobTracker {
 }
 
 impl AgentJobTracker {
+    /// The agent process held now, as pid and start token.
+    pub(super) fn process(&self) -> Option<(u32, u64)> {
+        self.process
+            .map(|process| (process.pid, process.start_token))
+    }
+
     /// A held agent must be rechecked even when lifecycle-hook authority would
     /// otherwise skip probing, so a job killed in the background is noticed.
     pub(super) fn in_background(&self) -> bool {

@@ -44,7 +44,7 @@ impl AppState {
 
     /// The terminal behind a pane, mutably. The pin lives on the terminal, so
     /// it follows the agent when the pane moves between tabs and spaces.
-    fn pane_terminal_mut(
+    pub(crate) fn pane_terminal_mut(
         &mut self,
         pane_id: PaneId,
     ) -> Option<&mut crate::terminal::TerminalState> {

@@ -354,7 +354,7 @@ fn resource_facts(
         if terminal.background_count() > 0 {
             background_count.insert(public.pane_id.clone(), terminal.background_count());
         }
-        if terminal.suspended {
+        if terminal.is_suspended() {
             pane_process.insert(
                 public.pane_id.clone(),
                 protocol::ClientPaneProcessState::Suspended,
@@ -815,7 +815,11 @@ mod tests {
         assert_eq!(shell.resource_facts.unwrap().pane_process, None);
 
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        assert!(app.state.suspend_pane(pane_id, std::time::Instant::now()));
+        assert!(app.state.suspend_pane(
+            pane_id,
+            std::time::Instant::now(),
+            crate::terminal::state::Suspension::new(crate::platform::SuspendCause::PaneJobEnded)
+        ));
         let (shell, _) = snapshot_with_completions(&app, "boot", 2, None, None);
         let public = app.public_pane_id(0, pane_id).unwrap();
         assert_eq!(

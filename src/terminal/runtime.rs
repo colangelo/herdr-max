@@ -113,6 +113,17 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// The program and the agent it runs, for the dead-program check
+    /// before a resume (core-phase3 D2).
+    pub fn program_identities(
+        &self,
+    ) -> (
+        Option<crate::platform::ProgramIdentity>,
+        Option<crate::platform::ProgramIdentity>,
+    ) {
+        self.0.program_identities()
+    }
+
     /// The herdr-core terminal this runtime shows, if any (D10).
     pub fn core_terminal(&self) -> Option<crate::pane::CoreTerminalLink> {
         self.0.core_terminal()

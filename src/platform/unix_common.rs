@@ -59,7 +59,9 @@ pub(crate) const PANE_KEEPER_LOST: &str = "pane keeper lost";
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     match status.signal() {
-        Some(PANE_JOB_STOPPED | PANE_KEEPER_LOST) => super::ChildExitReason::Suspended,
+        Some(PANE_JOB_STOPPED | PANE_KEEPER_LOST) => {
+            super::ChildExitReason::Suspended(super::SuspendCause::PaneJobEnded)
+        }
         Some(_) => super::ChildExitReason::Interrupted,
         None => super::ChildExitReason::Exited,
     }

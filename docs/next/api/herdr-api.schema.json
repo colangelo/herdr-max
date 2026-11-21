@@ -983,6 +983,19 @@
                 "null"
               ]
             },
+            "core_unreachable_since": {
+              "description": "Since when (unix ms) herdr-core has not answered this core pane; its\nprogram keeps running and the pane keeps retrying. Absent while core\nanswers.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "core_waiting": {
+              "description": "The pane's program may still run in a herdr-core session that does\nnot answer, so nothing was started for it; it attaches when that core\nanswers. Absent means false.",
+              "type": "boolean"
+            },
             "cwd": {
               "type": [
                 "string",
@@ -11098,6 +11111,19 @@
                 "integer",
                 "null"
               ]
+            },
+            "core_unreachable_since": {
+              "description": "Since when (unix ms) herdr-core has not answered this core pane; its\nprogram keeps running and the pane keeps retrying. Absent while core\nanswers.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "core_waiting": {
+              "description": "The pane's program may still run in a herdr-core session that does\nnot answer, so nothing was started for it; it attaches when that core\nanswers. Absent means false.",
+              "type": "boolean"
             },
             "cwd": {
               "type": [

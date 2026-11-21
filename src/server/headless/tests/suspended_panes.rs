@@ -31,10 +31,12 @@ async fn a_suspended_agent_pane_keeps_its_resume_plan_through_the_server() {
 
     server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
         pane_id,
-        exit_reason: crate::platform::ChildExitReason::Suspended,
+        exit_reason: crate::platform::ChildExitReason::Suspended(
+            crate::platform::SuspendCause::PaneJobEnded,
+        ),
     });
 
-    assert!(server.app.state.terminals[&terminal_id].suspended);
+    assert!(server.app.state.terminals[&terminal_id].is_suspended());
     assert!(
         server.app.pane_agent_resume_plan(pane_id).is_some(),
         "the suspended agent keeps the plan it resumes by"

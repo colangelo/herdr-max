@@ -25,15 +25,19 @@ use super::client::{
 use super::frame::{kind, Frame};
 use super::status_mirror::StatusMirror;
 use crate::layout::PaneId;
-use crate::pane::runtime_io::CoreStatusRecord;
-use crate::platform::ChildExitReason;
+use crate::pane::runtime_io::{CoreStatusRecord, CoreTerminalLink};
+use crate::platform::{
+    ChildExitReason, ProgramIdentity, ProgramLiveness, StartTokenLookup, SuspendCause,
+};
 use crate::pty::actor::{PtyReadResult, ReadCallback};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_QUEUE: usize = 1024;
-/// How long a pane keeps trying to reach its terminal again after the
-/// connection drops (a core update takes well under a second, Q6).
+/// How long a pane retries quickly after the connection drops before it says
+/// core is not answering (a core update takes well under a second, Q6). It
+/// keeps retrying after that, every `SLOW_RETRY` (core-phase3 D1a).
 const REATTACH_LIMIT: Duration = Duration::from_secs(60);
+const SLOW_RETRY: Duration = Duration::from_secs(10);
 /// Scrollback lines asked for on a pane's first attach: more than any pane
 /// keeps, so all of it arrives.
 const FIRST_ATTACH_HISTORY_LINES: u32 = 1_000_000;
@@ -41,9 +45,35 @@ const FIRST_ATTACH_HISTORY_LINES: u32 = 1_000_000;
 /// Returns a live client, reconnecting when the last one closed.
 pub(crate) type Connector = Arc<dyn Fn() -> Result<CoreClient, CoreError> + Send + Sync>;
 
+/// Told when core stops answering a pane (the unix ms it started) and when
+/// it answers again (`None`), core-phase3 D1a.
+pub(crate) type UnreachableCallback = Box<dyn FnMut(Option<u64>) + Send>;
+
+/// How a pane reaches its terminal again after its stream ends, and how it
+/// tells whether the program still runs (core-phase3 D1a). Tests shorten the
+/// times and pass a fake process table.
+#[derive(Clone, Copy)]
+pub(crate) struct ReattachPolicy {
+    pub limit: Duration,
+    pub slow_retry: Duration,
+    pub start_token: StartTokenLookup,
+}
+
+impl Default for ReattachPolicy {
+    fn default() -> Self {
+        Self {
+            limit: REATTACH_LIMIT,
+            slow_retry: SLOW_RETRY,
+            start_token: crate::platform::process_start_token,
+        }
+    }
+}
+
 /// What `terminal.run` needs for one pane.
 pub(crate) struct CoreSpawn {
     pub pane_id: PaneId,
+    /// The core session the terminal runs in, saved in the pane's link.
+    pub session: String,
     pub argv: Vec<String>,
     pub cwd: Option<String>,
     pub env: serde_json::Map<String, Value>,
@@ -55,6 +85,7 @@ pub(crate) struct CoreSpawn {
 /// A terminal an earlier server left running, to attach to again (D10).
 pub(crate) struct CoreReattach {
     pub pane_id: PaneId,
+    pub session: String,
     pub address: String,
     /// Labels the terminal must carry to be this pane's program.
     pub labels: serde_json::Map<String, Value>,
@@ -64,6 +95,7 @@ pub(crate) struct CoreReattach {
 
 struct Attach {
     pane_id: PaneId,
+    session: String,
     address: String,
     pid: u32,
     rows: u16,
@@ -115,7 +147,12 @@ enum WriteCmd {
 
 struct Shared {
     pane_id: PaneId,
+    session: String,
     address: String,
+    /// The program as it was at attach, for telling a gone program from one
+    /// core lost track of (core-phase3 D1a).
+    program: Option<ProgramIdentity>,
+    policy: ReattachPolicy,
     connector: Connector,
     client: Mutex<CoreClient>,
     channel: AtomicU32,
@@ -165,17 +202,20 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-/// Maps a stream CLOSE reason or a finished terminal record to an exit (D7).
-/// `None`: not an exit (our own detach, or a record still live).
+/// Maps a stream CLOSE reason or a finished terminal record to an exit
+/// (core-phase3 D1). The program's own end, or a person's kill, ends the
+/// pane; a runtime that ended the program suspends it. `None`: not an exit
+/// (our own detach, or a record still live).
 pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
     let reason = record.get("reason")?.as_str()?;
     let signal = record.get("signal").is_some_and(|signal| !signal.is_null());
     Some(match reason {
         "exited" | "killed" if signal => ChildExitReason::Interrupted,
         "exited" | "killed" => ChildExitReason::Exited,
-        "server_stop" | "host_shutdown" | "holder_lost" | "stopped_by_restart" | "signaled" => {
-            ChildExitReason::Interrupted
-        }
+        "holder_lost" => ChildExitReason::Suspended(SuspendCause::HolderLost),
+        "host_shutdown" => ChildExitReason::Suspended(SuspendCause::HostShutdown),
+        "server_stop" => ChildExitReason::Suspended(SuspendCause::CoreStopped),
+        "stopped_by_restart" => ChildExitReason::Suspended(SuspendCause::StoppedByRestart),
         _ => ChildExitReason::Interrupted,
     })
 }
@@ -197,6 +237,15 @@ impl StartedCore {
         spawn: CoreSpawn,
         child_pid: &AtomicU32,
         connector: Connector,
+    ) -> Result<Self, CoreError> {
+        Self::start_with(spawn, child_pid, connector, ReattachPolicy::default())
+    }
+
+    pub(crate) fn start_with(
+        spawn: CoreSpawn,
+        child_pid: &AtomicU32,
+        connector: Connector,
+        policy: ReattachPolicy,
     ) -> Result<Self, CoreError> {
         let client = connector()?;
         let record = client.call(
@@ -225,6 +274,7 @@ impl StartedCore {
             client,
             Attach {
                 pane_id: spawn.pane_id,
+                session: spawn.session,
                 address,
                 pid,
                 rows: spawn.rows,
@@ -233,28 +283,38 @@ impl StartedCore {
             },
             child_pid,
             connector,
+            policy,
         )
     }
 
     /// Attaches to a terminal an earlier server left running (D10 "Arriving").
     /// It must still be live and carry `labels`, or it is not this pane's
-    /// program: the caller then starts the pane fresh. A refusal never kills
-    /// the terminal, since it may be someone else's.
+    /// program. A refusal never kills the terminal, since it may be someone
+    /// else's. The error says what core answered, so the caller can tell a
+    /// gone program from an unreachable core (core-phase3 D1b).
     pub(crate) fn reattach(
         target: CoreReattach,
         child_pid: &AtomicU32,
         connector: Connector,
-    ) -> Result<Self, CoreError> {
-        let client = connector()?;
-        let record = client.call(
+    ) -> Result<Self, ReattachError> {
+        let client = connector().map_err(ReattachError::Unreachable)?;
+        let record = match client.call(
             "terminal.get",
             json!({"terminal": target.address}),
             CALL_TIMEOUT,
-        )?;
+        ) {
+            Ok(record) => record,
+            Err(CoreError::Rpc { kind, message }) if kind == "not_found" => {
+                return Err(ReattachError::Gone(message));
+            }
+            Err(err) => return Err(ReattachError::Unreachable(err)),
+        };
         if let Some(refusal) = reattach_refusal(&record, &target.labels) {
-            return Err(CoreError::Rpc {
-                kind: "not_ours".into(),
-                message: format!("terminal {} {refusal}", target.address),
+            let message = format!("terminal {} {refusal}", target.address);
+            return Err(if record["state"] == "live" {
+                ReattachError::NotOurs(message)
+            } else {
+                ReattachError::Gone(message)
             });
         }
         let pid = core_pid(&record["pid"]);
@@ -262,6 +322,7 @@ impl StartedCore {
             client,
             Attach {
                 pane_id: target.pane_id,
+                session: target.session,
                 address: target.address,
                 pid,
                 rows: target.rows,
@@ -270,7 +331,9 @@ impl StartedCore {
             },
             child_pid,
             connector,
+            ReattachPolicy::default(),
         )
+        .map_err(ReattachError::Unreachable)
     }
 
     fn attach(
@@ -278,9 +341,11 @@ impl StartedCore {
         attach: Attach,
         child_pid: &AtomicU32,
         connector: Connector,
+        policy: ReattachPolicy,
     ) -> Result<Self, CoreError> {
         let Attach {
             pane_id,
+            session,
             address,
             pid,
             rows,
@@ -325,7 +390,10 @@ impl StartedCore {
         Ok(Self {
             shared: Arc::new(Shared {
                 pane_id,
+                session,
                 address,
+                program: ProgramIdentity::of(pid, policy.start_token),
+                policy,
                 connector,
                 client: Mutex::new(client),
                 channel: AtomicU32::new(channel),
@@ -351,6 +419,7 @@ impl StartedCore {
         self,
         on_read: ReadCallback,
         on_exit: Box<dyn FnOnce(ChildExitReason) + Send>,
+        on_unreachable: UnreachableCallback,
         child_wait_completed: Arc<AtomicBool>,
     ) -> std::io::Result<CorePaneIo> {
         let Self {
@@ -367,6 +436,7 @@ impl StartedCore {
                     writer.clone(),
                     on_read,
                     on_exit,
+                    on_unreachable,
                     child_wait_completed,
                 )
             });
@@ -467,9 +537,13 @@ impl CorePaneIo {
         lock(&self.writer).take();
     }
 
-    /// The terminal's address in core, saved with the pane (D10).
-    pub(crate) fn address(&self) -> &str {
-        &self.shared.address
+    /// The terminal in core, saved with the pane (D10, core-phase3 D1b).
+    pub(crate) fn link(&self) -> CoreTerminalLink {
+        CoreTerminalLink {
+            session: self.shared.session.clone(),
+            address: self.shared.address.clone(),
+            program: self.shared.program,
+        }
     }
 
     /// Whether dropping the pane leaves the program running (D10).
@@ -639,6 +713,7 @@ fn spawn_parser(
     writer: mpsc::Sender<WriteCmd>,
     mut on_read: ReadCallback,
     on_exit: Box<dyn FnOnce(ChildExitReason) + Send>,
+    mut on_unreachable: UnreachableCallback,
     child_wait_completed: Arc<AtomicBool>,
 ) -> Result<(), CoreError> {
     let name = format!("herdr-core-r-{}", shared.pane_id.raw());
@@ -696,7 +771,7 @@ fn spawn_parser(
                         if shared.closing.load(Ordering::Acquire) {
                             return;
                         }
-                        if let Some(exit) = reattach(&shared) {
+                        if let Some(exit) = reattach(&shared, &mut on_unreachable) {
                             finish(exit);
                             return;
                         }
@@ -711,7 +786,7 @@ fn spawn_parser(
                         if !shared.client().is_closed() {
                             let _ = shared.send(kind::CLOSE, Vec::new());
                         }
-                        if let Some(exit) = reattach(&shared) {
+                        if let Some(exit) = reattach(&shared, &mut on_unreachable) {
                             finish(exit);
                             return;
                         }
@@ -759,80 +834,175 @@ fn write_mirrored_status(shared: &Shared, mirror: &mut StatusMirror) {
     }
 }
 
+/// Why a saved terminal was not attached (core-phase3 D1b).
+#[derive(Debug)]
+pub(crate) enum ReattachError {
+    /// Core answered: it no longer has the terminal, or the program finished.
+    Gone(String),
+    /// The address is live but labelled for another pane.
+    NotOurs(String),
+    /// Core did not answer.
+    Unreachable(CoreError),
+}
+
+impl std::fmt::Display for ReattachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gone(message) | Self::NotOurs(message) => f.write_str(message),
+            Self::Unreachable(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ReattachError {}
+
+/// What one try to reach the terminal again found (core-phase3 D1a).
+#[derive(Debug, PartialEq, Eq)]
+enum ReattachOutcome {
+    Reattached,
+    /// Core answered and the program is gone: the pane reports this exit.
+    Gone(ChildExitReason),
+    /// Core did not answer, or answered while the program may still run.
+    Unreachable,
+}
+
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Reaches the terminal again after its stream ended without an exit (D5).
-/// `Some(reason)`: the program is gone, report it. `None`: reattached.
-fn reattach(shared: &Shared) -> Option<ChildExitReason> {
-    let deadline = Instant::now() + REATTACH_LIMIT;
+/// `Some(reason)`: the program is gone, report it. `None`: reattached, or the
+/// pane is closing. An unreachable core never ends the pane: after the
+/// policy's limit the pane is told, and retries go on (core-phase3 D1a).
+fn reattach(shared: &Shared, on_unreachable: &mut UnreachableCallback) -> Option<ChildExitReason> {
+    let started = Instant::now();
     let mut backoff = Duration::from_millis(50);
+    let mut reported = false;
     loop {
         if shared.closing.load(Ordering::Acquire) {
             return None;
         }
         match try_reattach(shared) {
-            Ok(None) => return None,
-            Ok(Some(exit)) => return Some(exit),
-            Err(err) => {
-                debug!(pane = shared.pane_id.raw(), err = %err, "herdr-core reattach failed; retrying");
+            ReattachOutcome::Reattached => {
+                if reported {
+                    on_unreachable(None);
+                }
+                return None;
             }
+            ReattachOutcome::Gone(exit) => return Some(exit),
+            ReattachOutcome::Unreachable => {}
         }
-        if Instant::now() >= deadline {
+        let slow = started.elapsed() >= shared.policy.limit;
+        if slow && !reported {
             warn!(
                 pane = shared.pane_id.raw(),
+                session = %shared.session,
                 terminal = %shared.address,
-                "herdr-core terminal unreachable for 60 s; the pane ends"
+                "herdr-core is not answering; the program keeps running and the pane keeps retrying"
             );
-            return Some(ChildExitReason::WaitFailed);
+            on_unreachable(Some(unix_ms_now()));
+            reported = true;
         }
-        std::thread::sleep(backoff);
+        let pause = if slow {
+            shared.policy.slow_retry
+        } else {
+            backoff
+        };
+        sleep_unless_closing(shared, pause);
         backoff = (backoff * 2).min(Duration::from_secs(2));
     }
 }
 
-fn try_reattach(shared: &Shared) -> Result<Option<ChildExitReason>, CoreError> {
+fn sleep_unless_closing(shared: &Shared, pause: Duration) {
+    let until = Instant::now() + pause;
+    while !shared.closing.load(Ordering::Acquire) {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+    }
+}
+
+fn try_reattach(shared: &Shared) -> ReattachOutcome {
     let client = {
         let current = shared.client();
         if current.is_closed() {
-            let fresh = (shared.connector)()?;
-            *lock(&shared.client) = fresh.clone();
-            fresh
+            match (shared.connector)() {
+                Ok(fresh) => {
+                    *lock(&shared.client) = fresh.clone();
+                    fresh
+                }
+                Err(err) => {
+                    debug!(pane = shared.pane_id.raw(), err = %err, "herdr-core reconnect failed; retrying");
+                    return ReattachOutcome::Unreachable;
+                }
+            }
         } else {
             current
         }
     };
-    let record = match client.call(
+    let answered = match client.call(
         "terminal.get",
         json!({"terminal": shared.address}),
         CALL_TIMEOUT,
     ) {
-        Ok(record) => record,
+        Ok(record) if record["state"] == "live" => None,
+        Ok(record) => Some(
+            exit_reason(&record).unwrap_or(ChildExitReason::Suspended(SuspendCause::TerminalGone)),
+        ),
         Err(CoreError::Rpc { kind, .. }) if kind == "not_found" => {
-            return Ok(Some(ChildExitReason::WaitFailed));
+            Some(ChildExitReason::Suspended(SuspendCause::TerminalGone))
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            debug!(pane = shared.pane_id.raw(), err = %err, "herdr-core terminal.get failed; retrying");
+            return ReattachOutcome::Unreachable;
+        }
     };
-    if record["state"] != "live" {
-        return Ok(Some(
-            exit_reason(&record).unwrap_or(ChildExitReason::WaitFailed),
-        ));
+    if let Some(exit) = answered {
+        return match ProgramIdentity::liveness(shared.program, shared.policy.start_token) {
+            ProgramLiveness::Gone => ReattachOutcome::Gone(exit),
+            ProgramLiveness::Runs | ProgramLiveness::Unknown => {
+                debug!(
+                    pane = shared.pane_id.raw(),
+                    terminal = %shared.address,
+                    pid = shared.program.map_or(0, |program| program.pid),
+                    "herdr-core says the terminal is gone, but its program may still run; retrying"
+                );
+                ReattachOutcome::Unreachable
+            }
+        };
     }
     let (rows, cols) = *lock(&shared.size);
-    let attach = client.attach(
+    match client.attach(
         json!({"terminal": shared.address, "cols": cols, "rows": rows, "resumed": true}),
         shared.sink.clone(),
         CALL_TIMEOUT,
-    )?;
-    let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
-    shared.channel.store(channel, Ordering::Release);
-    debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "herdr-core stream reattached");
-    Ok(None)
+    ) {
+        Ok(attach) => {
+            let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
+            shared.channel.store(channel, Ordering::Release);
+            debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "herdr-core stream reattached");
+            ReattachOutcome::Reattached
+        }
+        Err(err) => {
+            debug!(pane = shared.pane_id.raw(), err = %err, "herdr-core reattach failed; retrying");
+            ReattachOutcome::Unreachable
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // V1 (core-phase3 D1): the program's own end and a person's kill end the
+    // pane; a runtime that ended the program suspends it, by cause.
     #[test]
-    fn exit_reasons_map_as_design_d7() {
+    fn exit_reasons_map_as_core_phase3_d1() {
         let case = |v: Value| exit_reason(&v);
         assert_eq!(
             case(json!({"reason": "exited", "exit_code": 3, "signal": null})),
@@ -843,18 +1013,23 @@ mod tests {
             Some(ChildExitReason::Interrupted)
         );
         assert_eq!(
-            case(json!({"reason": "killed", "exit_code": null, "signal": null})),
-            Some(ChildExitReason::Exited)
+            case(json!({"reason": "killed", "exit_code": null, "signal": 15})),
+            Some(ChildExitReason::Interrupted)
         );
-        for reason in [
-            "server_stop",
-            "host_shutdown",
-            "holder_lost",
-            "stopped_by_restart",
+        assert_eq!(
+            case(json!({"reason": "killed", "exit_code": null, "signal": null})),
+            Some(ChildExitReason::Exited),
+            "a close, `hc kill` or a phone close ends the pane"
+        );
+        for (reason, cause) in [
+            ("holder_lost", SuspendCause::HolderLost),
+            ("host_shutdown", SuspendCause::HostShutdown),
+            ("server_stop", SuspendCause::CoreStopped),
+            ("stopped_by_restart", SuspendCause::StoppedByRestart),
         ] {
             assert_eq!(
                 case(json!({"reason": reason})),
-                Some(ChildExitReason::Interrupted),
+                Some(ChildExitReason::Suspended(cause)),
                 "{reason}"
             );
         }
@@ -895,6 +1070,7 @@ mod tests {
     fn target(address: &str, pane: &str) -> CoreReattach {
         CoreReattach {
             pane_id: PaneId::from_raw(3),
+            session: "herdr-test".into(),
             address: address.into(),
             labels: labels(pane),
             rows: 24,
@@ -959,6 +1135,7 @@ mod tests {
         });
         let spawn = CoreSpawn {
             pane_id: PaneId::from_raw(4),
+            session: "herdr-test".into(),
             argv: vec!["sh".into()],
             cwd: None,
             env: serde_json::Map::new(),
@@ -969,7 +1146,12 @@ mod tests {
         let pid = AtomicU32::new(0);
         let pane = StartedCore::start(spawn, &pid, connector)
             .expect("start")
-            .into_pane(on_read, Box::new(|_| {}), Arc::new(AtomicBool::new(false)))
+            .into_pane(
+                on_read,
+                Box::new(|_| {}),
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
             .expect("pane");
 
         pane.shutdown();
@@ -1029,5 +1211,213 @@ mod tests {
                 "{case}: never attached, never killed"
             );
         }
+    }
+
+    /// A started pane on `core` whose exits and unreachable reports arrive
+    /// on the returned channels.
+    fn pane_on(
+        connector: Connector,
+        policy: ReattachPolicy,
+    ) -> (
+        CorePaneIo,
+        std_mpsc::Receiver<ChildExitReason>,
+        std_mpsc::Receiver<Option<u64>>,
+    ) {
+        let (exit_tx, exit_rx) = std_mpsc::channel();
+        let (unreachable_tx, unreachable_rx) = std_mpsc::channel();
+        let spawn = CoreSpawn {
+            pane_id: PaneId::from_raw(6),
+            session: "herdr-test".into(),
+            argv: vec!["sh".into()],
+            cwd: None,
+            env: serde_json::Map::new(),
+            labels: labels("w1-p6"),
+            rows: 24,
+            cols: 80,
+        };
+        let pid = AtomicU32::new(0);
+        let pane = StartedCore::start_with(spawn, &pid, connector, policy)
+            .expect("start")
+            .into_pane(
+                Box::new(|_: &[u8]| PtyReadResult {
+                    terminal_responses: Vec::new(),
+                }),
+                Box::new(move |reason| {
+                    let _ = exit_tx.send(reason);
+                }),
+                Box::new(move |since| {
+                    let _ = unreachable_tx.send(since);
+                }),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("pane");
+        (pane, exit_rx, unreachable_rx)
+    }
+
+    fn short_policy(start_token: StartTokenLookup) -> ReattachPolicy {
+        ReattachPolicy {
+            limit: Duration::from_millis(200),
+            slow_retry: Duration::from_millis(50),
+            start_token,
+        }
+    }
+
+    /// Ends the pane's stream the way a dropped stream does, with the
+    /// connection still up, so the pane asks core about its terminal again.
+    fn drop_stream(core: &FakeCore) {
+        core.close_stream(1, b"");
+    }
+
+    const NO_EXIT: Duration = Duration::from_millis(600);
+
+    // V3 (D1a): a core that never answers again does not end the pane; after
+    // the limit the pane is told, and it keeps retrying.
+    #[test]
+    fn an_unreachable_core_never_ends_the_pane_and_the_loop_keeps_retrying() {
+        static CALLS: AtomicU32 = AtomicU32::new(0);
+        let core = FakeCore::start();
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let connector: Connector = Arc::new(move || {
+            if CALLS.fetch_add(1, Ordering::AcqRel) == 0 {
+                Ok(client.clone())
+            } else {
+                Err(CoreError::Unavailable("socket refused".into()))
+            }
+        });
+        let (pane, exits, unreachable) =
+            pane_on(connector, short_policy(|pid| (pid == 4242).then_some(7)));
+
+        core.hang_up();
+        let since = unreachable
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the pane is told core is not answering");
+        assert!(since.is_some_and(|since| since > 0), "{since:?}");
+        let calls = CALLS.load(Ordering::Acquire);
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "never an exit");
+        assert!(
+            CALLS.load(Ordering::Acquire) > calls,
+            "the loop still retries after the limit"
+        );
+        pane.shutdown();
+    }
+
+    static TOKEN_OF_4242: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7);
+
+    fn token_of_4242(pid: u32) -> Option<u64> {
+        let token = TOKEN_OF_4242.load(Ordering::Acquire);
+        (pid == 4242 && token > 0).then_some(token)
+    }
+
+    // V3 (D1a): core says `not_found`, the outcome depends on the program
+    // recorded at attach: running, reused (another start token) or gone.
+    #[test]
+    fn not_found_is_gone_only_when_the_recorded_program_is() {
+        let core = FakeCore::start();
+        let (pane, exits, unreachable) = pane_on(connector_to(&core), short_policy(token_of_4242));
+        assert_eq!(
+            pane.link().program,
+            Some(ProgramIdentity {
+                pid: 4242,
+                started: 7
+            })
+        );
+
+        core.forget_terminal("t1");
+        drop_stream(&core);
+        assert!(
+            unreachable
+                .recv_timeout(Duration::from_secs(5))
+                .ok()
+                .flatten()
+                .is_some(),
+            "running: not answering as far as the pane can tell"
+        );
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "running: no exit");
+
+        // The pid now belongs to another process.
+        TOKEN_OF_4242.store(8, Ordering::Release);
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::TerminalGone)),
+            "reused pid: gone"
+        );
+    }
+
+    #[test]
+    fn not_found_with_the_program_gone_suspends_the_pane() {
+        static ALIVE: AtomicBool = AtomicBool::new(true);
+        fn lookup(pid: u32) -> Option<u64> {
+            (pid == 4242 && ALIVE.load(Ordering::Acquire)).then_some(7)
+        }
+        let core = FakeCore::start();
+        let (_pane, exits, _unreachable) = pane_on(connector_to(&core), short_policy(lookup));
+        ALIVE.store(false, Ordering::Release);
+        core.forget_terminal("t1");
+        drop_stream(&core);
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::TerminalGone))
+        );
+    }
+
+    // V3 (D1a): core gave no pid, so the program may run: never gone.
+    #[test]
+    fn not_found_with_no_recorded_pid_is_unreachable() {
+        let core = FakeCore::start_with(|config| config.pid = 0);
+        let (pane, exits, unreachable) = pane_on(connector_to(&core), short_policy(|_| Some(1)));
+        assert_eq!(pane.link().program, None);
+        core.forget_terminal("t1");
+        drop_stream(&core);
+        assert!(unreachable
+            .recv_timeout(Duration::from_secs(5))
+            .ok()
+            .flatten()
+            .is_some());
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None);
+        pane.shutdown();
+    }
+
+    // V34 (D1a): with a real process standing in for the program, `not_found`
+    // keeps the pane while it runs, and suspends it once it is gone.
+    #[test]
+    fn not_found_while_a_real_program_runs_waits_for_it_to_end() {
+        let mut sleep = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = sleep.id();
+        let core = FakeCore::start_with(|config| config.pid = pid);
+        let (pane, exits, unreachable) = pane_on(
+            connector_to(&core),
+            short_policy(crate::platform::process_start_token),
+        );
+        assert_eq!(pane.link().program.map(|program| program.pid), Some(pid));
+        core.forget_terminal("t1");
+        drop_stream(&core);
+        assert!(unreachable
+            .recv_timeout(Duration::from_secs(5))
+            .ok()
+            .flatten()
+            .is_some());
+        assert_eq!(
+            exits.recv_timeout(NO_EXIT).ok(),
+            None,
+            "no suspension while it runs"
+        );
+        assert_eq!(
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.run")
+                .count(),
+            1,
+            "no second program"
+        );
+
+        sleep.kill().expect("kill sleep");
+        sleep.wait().expect("reap sleep");
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::TerminalGone))
+        );
     }
 }

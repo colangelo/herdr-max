@@ -1,8 +1,9 @@
 //! Panes whose program the session ended, not the program itself: a macOS
 //! pane job that was stopped, or a logout (fork issue 288, design D3 of
-//! openspec/changes/pane-launchd-jobs). Such a pane keeps its place, its
+//! openspec/changes/pane-launchd-jobs), or herdr-core's runtime
+//! (openspec/changes/core-phase3, D1). Such a pane keeps its place, its
 //! workspace and its resume plan, and starts again in place once launchd
-//! accepts pane jobs again.
+//! accepts pane jobs again and its old program is gone (core-phase3 D2).
 
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ use super::api::RespawnTarget;
 use super::state::AppState;
 use super::App;
 use crate::layout::PaneId;
+use crate::platform::{ProgramIdentity, ProgramLiveness, StartTokenLookup};
+use crate::terminal::state::{ResumeBlock, Suspension};
 
 /// Keepers ending this close together read as one burst (a logout looks like
 /// one), reported once.
@@ -82,7 +85,12 @@ impl PaneSuspensions {
 
 impl AppState {
     /// Keeps `pane_id` in its layout as suspended. False when no pane has it.
-    pub(crate) fn suspend_pane(&mut self, pane_id: PaneId, now: Instant) -> bool {
+    pub(crate) fn suspend_pane(
+        &mut self,
+        pane_id: PaneId,
+        now: Instant,
+        suspension: Suspension,
+    ) -> bool {
         let Some(pane) = self
             .workspaces
             .iter_mut()
@@ -97,7 +105,7 @@ impl AppState {
         if terminal.state != crate::detect::AgentState::Idle {
             pane.seen = true;
         }
-        terminal.suspend(now);
+        terminal.suspend(now, suspension);
         true
     }
 
@@ -109,7 +117,7 @@ impl AppState {
             .flat_map(|tab| tab.layout.pane_ids())
             .filter(|pane_id| {
                 self.pane_terminal(*pane_id)
-                    .is_some_and(|terminal| terminal.suspended)
+                    .is_some_and(|terminal| terminal.is_suspended())
             })
             .collect()
     }
@@ -119,7 +127,11 @@ impl App {
     /// The program of `pane_id` ended without its own exit. Keeps the pane,
     /// suspended, and returns true; false for a pane that closes as before
     /// (a popup, an overlay, one a worktree removal is stopping).
-    pub(super) fn suspend_pane_after_exit(&mut self, pane_id: PaneId) -> bool {
+    pub(super) fn suspend_pane_after_exit(
+        &mut self,
+        pane_id: PaneId,
+        cause: crate::platform::SuspendCause,
+    ) -> bool {
         if self.overlay_panes.contains_key(&pane_id)
             || self
                 .pending_worktree_remove_runtime_exits
@@ -136,7 +148,10 @@ impl App {
         // A logout may take the server next: save the session as it stands,
         // history included, before the runtime goes.
         self.checkpoint_session_before_pane_exit();
+        let mut suspension = Suspension::new(cause);
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            (suspension.program, suspension.agent) = runtime.program_identities();
+            suspension.core_link = runtime.core_terminal();
             let cwd = runtime.cwd_for_persistence();
             runtime.shutdown();
             if let (Some(cwd), Some(terminal)) = (cwd, self.state.terminals.get_mut(&terminal_id)) {
@@ -144,10 +159,11 @@ impl App {
             }
         }
         let now = Instant::now();
-        self.state.suspend_pane(pane_id, now);
+        self.state.suspend_pane(pane_id, now, suspension);
         info!(
             pane = pane_id.raw(),
-            "pane suspended: the session ended its program; it starts again in place"
+            ?cause,
+            "pane suspended: its runtime or session ended its program; it starts again in place"
         );
         if let Some(count) = self.pane_suspensions.record(now) {
             warn!(
@@ -186,25 +202,59 @@ impl App {
             self.pane_suspensions.retry_later(now);
             return false;
         }
-        let mut failed = 0;
+        let (mut resumed, mut failed, mut still_running, mut unconfirmed) = (0, 0, 0, 0);
         for pane_id in &panes {
-            if !self.resume_suspended_pane(*pane_id) {
-                failed += 1;
+            match self.check_old_program_gone(*pane_id) {
+                Some(ResumeBlock::StillRuns(_)) => still_running += 1,
+                Some(ResumeBlock::CannotConfirm) => unconfirmed += 1,
+                None if self.resume_suspended_pane(*pane_id) => resumed += 1,
+                None => failed += 1,
             }
         }
         info!(
-            resumed = panes.len() - failed,
-            failed, "suspended panes started again"
+            resumed,
+            failed, still_running, unconfirmed, "suspended panes checked for a resume"
         );
-        self.pane_suspensions.done();
+        if still_running > 0 {
+            self.pane_suspensions.retry_later(now);
+        } else {
+            self.pane_suspensions.done();
+        }
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
         true
     }
 
+    /// D2's dead-program check, recorded on the pane: `None` when it may
+    /// start again.
+    fn check_old_program_gone(&mut self, pane_id: PaneId) -> Option<ResumeBlock> {
+        let lookup = self.program_start_token;
+        let terminal = self
+            .find_pane(pane_id)
+            .map(|(_, pane)| pane.attached_terminal_id.clone())
+            .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))?;
+        let Some(crate::terminal::state::PaneHold::Suspended(suspension)) = terminal.hold.as_mut()
+        else {
+            return None;
+        };
+        let block = resume_block(suspension, lookup);
+        if suspension.blocked != block {
+            if let Some(block) = block {
+                warn!(
+                    pane = pane_id.raw(),
+                    ?block,
+                    "suspended pane not resumed: its old program may still run"
+                );
+            }
+            suspension.blocked = block;
+            terminal.revision = terminal.revision.saturating_add(1);
+        }
+        block
+    }
+
     /// Its agent by its resume plan, else its launch command or a shell. A
     /// pane that cannot start says so and stops waiting.
-    fn resume_suspended_pane(&mut self, pane_id: PaneId) -> bool {
+    pub(super) fn resume_suspended_pane(&mut self, pane_id: PaneId) -> bool {
         if self.respawn_pane_agent(pane_id).is_some()
             || self.respawn_pane_runtime(pane_id, RespawnTarget::LaunchArgv)
         {
@@ -215,7 +265,7 @@ impl App {
             .map(|(_, pane)| pane.attached_terminal_id.clone())
             .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
         {
-            terminal.suspended = false;
+            terminal.hold = None;
             terminal.restore_error = Some(
                 "This pane could not start again after the session ended it. Run `herdr pane respawn` on it to try again."
                     .into(),
@@ -226,11 +276,27 @@ impl App {
     }
 }
 
+/// Whether a suspended pane's old program may still run (core-phase3 D2):
+/// the program it last ran, or the agent detection saw in it. An identity
+/// never recorded may run.
+pub(crate) fn resume_block(
+    suspension: &Suspension,
+    lookup: StartTokenLookup,
+) -> Option<ResumeBlock> {
+    let runs = |identity: Option<ProgramIdentity>| {
+        identity.filter(|_| ProgramIdentity::liveness(identity, lookup) == ProgramLiveness::Runs)
+    };
+    if let Some(running) = runs(suspension.program).or(runs(suspension.agent)) {
+        return Some(ResumeBlock::StillRuns(running.pid));
+    }
+    (suspension.program.is_none()).then_some(ResumeBlock::CannotConfirm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::AppEvent;
-    use crate::platform::ChildExitReason;
+    use crate::platform::{ChildExitReason, SuspendCause};
 
     #[test]
     fn a_lone_keeper_end_resumes_after_the_settle_time() {
@@ -279,13 +345,21 @@ mod tests {
         let workspaces = state.workspaces.len();
         let panes = state.workspaces[0].tabs[0].layout.pane_count();
 
-        assert!(state.suspend_pane(pane_id, Instant::now()));
+        assert!(state.suspend_pane(
+            pane_id,
+            Instant::now(),
+            Suspension::new(SuspendCause::PaneJobEnded)
+        ));
 
         assert_eq!(state.workspaces.len(), workspaces);
         assert_eq!(state.workspaces[0].tabs[0].layout.pane_count(), panes);
         assert_eq!(state.suspended_panes(), vec![pane_id]);
         state.assert_invariants_for_test();
-        assert!(!state.suspend_pane(PaneId::from_raw(u32::MAX), Instant::now()));
+        assert!(!state.suspend_pane(
+            PaneId::from_raw(u32::MAX),
+            Instant::now(),
+            Suspension::new(SuspendCause::PaneJobEnded)
+        ));
     }
 
     #[cfg(unix)]
@@ -377,14 +451,14 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
-            exit_reason: ChildExitReason::Suspended,
+            exit_reason: ChildExitReason::Suspended(SuspendCause::PaneJobEnded),
         });
 
         assert_eq!(app.state.workspaces.len(), 1, "the workspace stays");
         assert!(app.find_pane(pane_id).is_some(), "the pane stays");
         assert!(app.terminal_runtimes.get(&terminal_id).is_none());
         let terminal = &app.state.terminals[&terminal_id];
-        assert!(terminal.suspended);
+        assert!(terminal.is_suspended());
         assert_eq!(terminal.state, crate::detect::AgentState::Idle);
         assert_eq!(
             app.pane_metadata(0, pane_id).unwrap().agent_status,
@@ -407,7 +481,7 @@ mod tests {
         let now = Instant::now();
         app.request_suspended_pane_resume(now);
         assert!(!app.resume_suspended_panes_if_due(now));
-        assert!(app.state.terminals[&terminal_id].suspended);
+        assert!(app.state.terminals[&terminal_id].is_suspended());
         assert_eq!(
             app.suspended_pane_resume_deadline(),
             Some(now + RETRY_EVERY)
@@ -418,7 +492,7 @@ mod tests {
         let now = Instant::now();
         app.request_suspended_pane_resume(now);
         assert!(app.resume_suspended_panes_if_due(now));
-        assert!(!app.state.terminals[&terminal_id].suspended);
+        assert!(!app.state.terminals[&terminal_id].is_suspended());
         assert_eq!(app.suspended_pane_resume_deadline(), None);
         assert_eq!(
             app.state.workspaces[0].terminal_id(pane_id),
@@ -439,12 +513,12 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
-            exit_reason: ChildExitReason::Suspended,
+            exit_reason: ChildExitReason::Suspended(SuspendCause::PaneJobEnded),
         });
         let now = Instant::now() + SETTLE;
         assert!(app.resume_suspended_panes_if_due(now));
         assert!(app.terminal_runtimes.get(&terminal_id).is_some());
-        assert!(!app.state.terminals[&terminal_id].suspended);
+        assert!(!app.state.terminals[&terminal_id].is_suspended());
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
@@ -472,5 +546,282 @@ mod tests {
 
         assert!(state.workspaces.is_empty());
         state.assert_invariants_for_test();
+    }
+
+    const ALL_CAUSES: [SuspendCause; 6] = [
+        SuspendCause::HolderLost,
+        SuspendCause::HostShutdown,
+        SuspendCause::CoreStopped,
+        SuspendCause::StoppedByRestart,
+        SuspendCause::TerminalGone,
+        SuspendCause::PaneJobEnded,
+    ];
+
+    const PROGRAM: ProgramIdentity = ProgramIdentity {
+        pid: 10,
+        started: 1,
+    };
+    const AGENT: ProgramIdentity = ProgramIdentity {
+        pid: 20,
+        started: 5,
+    };
+
+    // V35 (core-phase3 D2): for every cause, a resume waits for the old
+    // program and the detected agent to be gone; an unknown pid may run.
+    #[test]
+    fn the_dead_program_check_applies_to_every_cause() {
+        for cause in ALL_CAUSES {
+            let mut suspension = Suspension::new(cause);
+            suspension.program = Some(PROGRAM);
+            assert_eq!(
+                resume_block(&suspension, |pid| (pid == 10).then_some(1)),
+                Some(ResumeBlock::StillRuns(10)),
+                "{cause:?}: running"
+            );
+            assert_eq!(resume_block(&suspension, |_| None), None, "{cause:?}: gone");
+            assert_eq!(
+                resume_block(&suspension, |pid| (pid == 10).then_some(2)),
+                None,
+                "{cause:?}: pid reused"
+            );
+            suspension.agent = Some(AGENT);
+            assert_eq!(
+                resume_block(&suspension, |pid| (pid == 20).then_some(5)),
+                Some(ResumeBlock::StillRuns(20)),
+                "{cause:?}: the agent runs with the terminal's program gone"
+            );
+            suspension.program = None;
+            assert_eq!(
+                resume_block(&suspension, |_| None),
+                Some(ResumeBlock::CannotConfirm),
+                "{cause:?}: never recorded"
+            );
+        }
+    }
+
+    // V13: identity invariants hold with suspended and waiting core panes,
+    // and after they come back.
+    #[test]
+    fn invariants_hold_with_suspended_and_waiting_core_panes() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        let panes: Vec<PaneId> = state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.layout.pane_ids())
+            .collect();
+        assert!(panes.len() >= 2, "{panes:?}");
+        let mut suspension = Suspension::new(SuspendCause::HolderLost);
+        suspension.program = Some(PROGRAM);
+        assert!(state.suspend_pane(panes[0], Instant::now(), suspension));
+        let waiting = crate::terminal::state::CoreWaiting {
+            link: crate::pane::CoreTerminalLink {
+                session: "herdr".into(),
+                address: "t7".into(),
+                program: Some(PROGRAM),
+            },
+            public_pane_id: Some("w1-p2".into()),
+        };
+        let terminal_id = state.workspaces[0].terminal_id(panes[1]).cloned().unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().hold =
+            Some(crate::terminal::state::PaneHold::CoreWaiting(waiting));
+        state.assert_invariants_for_test();
+        assert_eq!(
+            state.suspended_panes(),
+            vec![panes[0]],
+            "a waiting pane is not suspended"
+        );
+
+        for terminal in state.terminals.values_mut() {
+            terminal.hold = None;
+        }
+        state.assert_invariants_for_test();
+        assert!(state.suspended_panes().is_empty());
+    }
+
+    // V35 through the app: a pane whose old program still runs is not
+    // resumed and says so, then resumes once it is gone; one never recorded
+    // is not resumed automatically.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_suspended_pane_resumes_only_after_its_old_program_is_gone() {
+        let (mut app, pane_id, terminal_id) = app_with_one_pane(false);
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: ChildExitReason::Suspended(SuspendCause::HolderLost),
+        });
+        let set_program = |app: &mut App, program| {
+            let Some(crate::terminal::state::PaneHold::Suspended(suspension)) = app
+                .state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .hold
+                .as_mut()
+            else {
+                panic!("suspended");
+            };
+            suspension.program = program;
+        };
+        set_program(&mut app, Some(PROGRAM));
+        app.program_start_token = |pid| (pid == 10).then_some(1);
+        let now = Instant::now() + SETTLE;
+        assert!(app.resume_suspended_panes_if_due(now));
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(terminal.is_suspended(), "the old program still runs");
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_none(),
+            "no second copy"
+        );
+        assert!(matches!(
+            terminal.hold,
+            Some(crate::terminal::state::PaneHold::Suspended(Suspension {
+                blocked: Some(ResumeBlock::StillRuns(10)),
+                ..
+            }))
+        ));
+        assert_eq!(
+            app.suspended_pane_resume_deadline(),
+            Some(now + RETRY_EVERY)
+        );
+
+        set_program(&mut app, None);
+        assert!(app.resume_suspended_panes_if_due(now + RETRY_EVERY));
+        assert!(app.state.terminals[&terminal_id].is_suspended(), "may run");
+        assert_eq!(app.suspended_pane_resume_deadline(), None, "not retried");
+
+        set_program(&mut app, Some(PROGRAM));
+        app.program_start_token = |_| None;
+        app.request_suspended_pane_resume(now);
+        assert!(app.resume_suspended_panes_if_due(now));
+        assert!(
+            !app.state.terminals[&terminal_id].is_suspended(),
+            "gone: resumed"
+        );
+        assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+        shutdown_runtimes(&mut app);
+    }
+
+    /// A `sleep` in a session of its own, standing in for the programs core
+    /// runs, so the close-path sweep reaches it and nothing else.
+    #[cfg(unix)]
+    fn program_in_its_own_session() -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60");
+        // SAFETY: setsid is async-signal-safe and touches no parent state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        command.spawn().expect("spawn sleep")
+    }
+
+    // V2 (core-phase3 D1, D2): a holder loss closes three core panes' streams
+    // with `holder_lost`; the panes stay suspended in their tab, and once
+    // their program is gone each starts again, the agent by its plan.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_holder_loss_suspends_core_panes_in_place_and_they_resume() {
+        let mut program = program_in_its_own_session();
+        let core = crate::pane::FakeCore::start_with(|config| config.pid = program.id());
+        std::env::set_var("HC_SOCKET", &core.socket);
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        crate::pane::set_preferred_runtime(true);
+        let mut workspace = crate::workspace::Workspace::test_new("holder");
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.test_split(ratatui::layout::Direction::Vertical);
+        let panes = workspace.tabs[0].layout.pane_ids();
+        assert_eq!(panes.len(), 3);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "/bin/cat".into();
+        for pane in &panes {
+            assert!(app.respawn_pane_runtime(*pane, RespawnTarget::Shell));
+        }
+        let terminal_of =
+            |app: &App, pane: PaneId| app.state.workspaces[0].terminal_id(pane).cloned().unwrap();
+        for pane in &panes {
+            let runtime = app
+                .terminal_runtimes
+                .get(&terminal_of(&app, *pane))
+                .unwrap();
+            assert!(runtime.core_terminal().is_some(), "a core pane");
+        }
+        let agent_terminal = terminal_of(&app, panes[0]);
+        app.state
+            .terminals
+            .get_mut(&agent_terminal)
+            .unwrap()
+            .restore_reported_resume(crate::agent_resume::ReportedAgentResume {
+                source: "herdr-test".into(),
+                agent: "claude".into(),
+                argv: vec!["herdr-p3-stub".into(), "--resume".into(), "sess-p3".into()],
+            });
+
+        for channel in 1..=3 {
+            core.close_stream(channel, br#"{"reason":"holder_lost"}"#);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.state.suspended_panes().len() < 3 {
+            assert!(Instant::now() < deadline, "panes not suspended");
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(app.state.workspaces.len(), 1, "the workspace stays");
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_ids(), panes);
+        for pane in &panes {
+            let terminal = &app.state.terminals[&terminal_of(&app, *pane)];
+            let Some(crate::terminal::state::PaneHold::Suspended(suspension)) = &terminal.hold
+            else {
+                panic!("suspended");
+            };
+            assert_eq!(suspension.cause, SuspendCause::HolderLost);
+            assert_eq!(suspension.program.map(|p| p.pid), Some(program.id()));
+            assert!(suspension.core_link.is_some(), "kept for the next restore");
+        }
+        app.state.assert_invariants_for_test();
+        assert!(app.pane_agent_resume_plan(panes[0]).is_some());
+
+        let _ = program.kill();
+        let _ = program.wait();
+        let runs_before = core
+            .methods()
+            .iter()
+            .filter(|method| *method == "terminal.run")
+            .count();
+        app.request_suspended_pane_resume(Instant::now());
+        assert!(app.resume_suspended_panes_if_due(Instant::now()));
+        assert!(app.state.suspended_panes().is_empty());
+        let runs: Vec<_> = core
+            .requests()
+            .into_iter()
+            .filter(|request| request["method"] == "terminal.run")
+            .collect();
+        assert_eq!(runs.len() - runs_before, 3, "each pane started again");
+        let sent: String = runs
+            .iter()
+            .map(|run| run["params"]["argv"].to_string())
+            .chain(
+                core.received()
+                    .iter()
+                    .map(|frame| String::from_utf8_lossy(&frame.payload).into_owned()),
+            )
+            .collect();
+        assert!(
+            sent.contains("sess-p3"),
+            "the agent resumed by its plan: {sent}"
+        );
+        shutdown_runtimes(&mut app);
     }
 }

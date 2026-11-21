@@ -16,7 +16,9 @@ use serde_json::{Map, Value};
 use tracing::warn;
 
 use client::{CoreClient, CoreError};
-pub(crate) use pane_io::{Connector, CorePaneIo, CoreReattach, CoreSpawn, StartedCore};
+pub(crate) use pane_io::{
+    Connector, CorePaneIo, CoreReattach, CoreSpawn, ReattachError, StartedCore,
+};
 
 use crate::layout::PaneId;
 
@@ -76,6 +78,85 @@ pub(crate) fn server_connector() -> Connector {
 /// holds no terminal to reattach to (D10).
 pub(crate) fn existing_core_connector() -> Connector {
     connector(false)
+}
+
+/// A connector to `session` that never starts a core: the primary's shared
+/// connection, or for any other session a connection of its own at that
+/// session's own socket (core-phase3 D1b, D6).
+pub(crate) fn existing_session_connector(session: &str) -> Connector {
+    if session == core_session_name() {
+        return existing_core_connector();
+    }
+    let session = session.to_string();
+    Arc::new(move || client::connect_secondary(&session))
+}
+
+/// The core sessions a restore looks in for a pane's terminal before it
+/// starts the pane fresh, none of which it starts (core-phase3 D1b): the
+/// primary, the link's own, `herdr`, and `default` for the release default
+/// herdr session only.
+pub(crate) fn known_sessions(link_session: &str) -> Vec<String> {
+    known_sessions_for(
+        &core_session_name(),
+        link_session,
+        crate::session::active_name().is_none() && !cfg!(debug_assertions),
+    )
+}
+
+fn known_sessions_for(primary: &str, link_session: &str, release_default: bool) -> Vec<String> {
+    let mut sessions = vec![primary.to_string()];
+    let mut add = |session: &str| {
+        if !sessions.iter().any(|known| known == session) {
+            sessions.push(session.to_string());
+        }
+    };
+    add(link_session);
+    if release_default {
+        add("herdr");
+        add("default");
+    }
+    sessions
+}
+
+/// Live terminals carrying every one of `labels`, in each session that
+/// answers, as `(session, address)` (core-phase3 D1b). A session that does
+/// not answer is skipped; none is started.
+pub(crate) fn find_labelled_terminals(
+    sessions: &[(String, Connector)],
+    labels: &Map<String, Value>,
+) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for (session, connector) in sessions {
+        let Ok(client) = connector() else {
+            continue;
+        };
+        let listed = match client.call(
+            "terminal.list",
+            serde_json::json!({"labels": labels}),
+            std::time::Duration::from_secs(5),
+        ) {
+            Ok(listed) => listed,
+            Err(err) => {
+                tracing::debug!(%session, err = %err, "could not list herdr-core terminals");
+                continue;
+            }
+        };
+        found.extend(
+            listed["terminals"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|terminal| terminal["state"] == "live")
+                .filter(|terminal| {
+                    labels
+                        .iter()
+                        .all(|(key, want)| &terminal["labels"][key] == want)
+                })
+                .filter_map(|terminal| terminal["address"].as_str())
+                .map(|address| (session.clone(), address.to_string())),
+        );
+    }
+    found
 }
 
 fn connector(may_start: bool) -> Connector {
@@ -183,6 +264,7 @@ pub(crate) fn core_spawn_from(
     );
     Some(CoreSpawn {
         pane_id,
+        session: core_session_name(),
         argv,
         cwd,
         env,
@@ -525,6 +607,7 @@ mod tests {
         let connector: Connector = Arc::new(move || Ok(client.clone()));
         let spawn = CoreSpawn {
             pane_id: PaneId::from_raw(5),
+            session: core_session_name(),
             argv: vec!["sh".into()],
             cwd: None,
             env: Map::new(),
@@ -539,6 +622,7 @@ mod tests {
                 Box::new(|_: &[u8]| crate::pty::actor::PtyReadResult {
                     terminal_responses: Vec::new(),
                 }),
+                Box::new(|_| {}),
                 Box::new(|_| {}),
                 Arc::new(AtomicBool::new(false)),
             )

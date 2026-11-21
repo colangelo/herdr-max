@@ -709,6 +709,8 @@ mod tests {
             foreground_cwd: None,
             restore_error: None,
             suspended: false,
+            core_waiting: false,
+            core_unreachable_since: None,
             label: None,
             agent: None,
             title: None,

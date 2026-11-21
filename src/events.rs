@@ -214,6 +214,13 @@ pub enum AppEvent {
     /// `[experimental] runtime = "core"` is set but herdr-core cannot be used,
     /// so new panes run on the PTY (core-backend D1). Sent once per server.
     CoreUnavailable { reason: String },
+    /// A core pane's core stopped answering (`since`, unix ms) or answers
+    /// again (`None`); its program keeps running (core-phase3 D1a).
+    CoreUnreachable { pane_id: PaneId, since: Option<u64> },
+    /// Of the core sessions panes wait for, the ones that answered a probe
+    /// (core-phase3 D1b).
+    #[cfg(unix)]
+    CoreSessionsAnswered { sessions: Vec<String> },
     /// `[experimental] pane_jobs` is on but a pane started without its own
     /// launchd job (fork issue 288). Sent once per server.
     PaneJobsUnavailable { reason: String },

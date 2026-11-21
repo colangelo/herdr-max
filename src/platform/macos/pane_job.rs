@@ -1186,7 +1186,9 @@ mod tests {
         assert_eq!(received.status().signal(), Some(KEEPER_STOPPED));
         assert_eq!(
             crate::platform::classify_child_exit(&received.status()),
-            crate::platform::ChildExitReason::Suspended,
+            crate::platform::ChildExitReason::Suspended(
+                crate::platform::SuspendCause::PaneJobEnded
+            ),
             "a program the stopped keeper hung up on suspends its pane"
         );
     }

@@ -646,6 +646,33 @@ pub(crate) fn connect_session(
     Ok(client)
 }
 
+/// Connects to a core session other than the server's own, at that
+/// session's own socket even when `HC_SOCKET` is set, and never starts it
+/// (core-phase3 D6).
+pub(crate) fn connect_secondary(session: &str) -> Result<CoreClient, CoreError> {
+    let socket = secondary_socket_path(session);
+    if !socket.exists() {
+        return Err(CoreError::Unavailable(format!(
+            "no herdr-core socket at {}",
+            socket.display()
+        )));
+    }
+    let client = CoreClient::connect(&socket, None)?;
+    check_version(&client)?;
+    Ok(client)
+}
+
+fn secondary_socket_path(session: &str) -> PathBuf {
+    socket_path_from(
+        session,
+        None,
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+        Path::new(&format!("/run/user/{}", unsafe { libc::getuid() })).is_dir(),
+    )
+}
+
 /// True when `pid` is this process's child: a core that fell back to a
 /// direct child would be (D2); a launchd-started one has parent 1. (Comparing
 /// sessions would not do: a herdr launchd started is in launchd's session.)

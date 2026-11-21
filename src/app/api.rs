@@ -147,6 +147,12 @@ impl App {
             return Vec::new();
         }
 
+        #[cfg(unix)]
+        if let AppEvent::CoreSessionsAnswered { sessions } = ev {
+            self.attach_waiting_panes(&sessions, std::time::Instant::now());
+            return Vec::new();
+        }
+
         if let AppEvent::GitStatusRefreshed {
             results,
             cache_updates,
@@ -260,8 +266,10 @@ impl App {
                 self.close_popup_pane();
                 return Vec::new();
             }
-            if exit_reason.suspends_pane() && self.suspend_pane_after_exit(*pane_id) {
-                return Vec::new();
+            if let Some(cause) = exit_reason.suspend_cause() {
+                if self.suspend_pane_after_exit(*pane_id, cause) {
+                    return Vec::new();
+                }
             }
             if worktree_restore_failed {
                 worktree_restore_updates
@@ -749,7 +757,7 @@ impl App {
             // The pane is genuinely rooted here now, so the recorded cwd
             // follows it rather than persisting the launch directory.
             terminal.cwd = cwd;
-            terminal.suspended = false;
+            terminal.hold = None;
             terminal.clear_agent_runtime_identity_after_respawn();
             // The clear drops `launch_argv` because the agent-exit path leaves a
             // shell behind. Here the command is what came back, so put it
@@ -840,7 +848,7 @@ impl App {
         let terminal = self.state.terminals.get_mut(&terminal_id)?;
         terminal.cwd = cwd;
         terminal.restore_error = None;
-        terminal.suspended = false;
+        terminal.hold = None;
         terminal.pending_agent_resume_plan = Some(plan);
         // Shown as the agent at once, idle, as a restored pane is.
         if let Some(detected) = detected {
