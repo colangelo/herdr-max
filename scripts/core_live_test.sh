@@ -46,6 +46,7 @@ run_herdr() {
     -u CLAUDECODE \
     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
     SHELL=/bin/sh PATH="$BASE/bin:$PATH" \
+    HERDR_M4_SENTINEL_TOKEN=leak SSH_AUTH_SOCK="$BASE/sentinel-agent.sock" \
     "$HERDR_BIN" --session "$SESSION" "$@"
 }
 
@@ -226,15 +227,21 @@ CORE="$(core_pid)"
 [[ "$(sid "$CORE")" != "$(sid "$SERVER_PID")" ]] || fail "core $CORE is in our server's session"
 # What core hands its programs is what counts (it keeps its starter's
 # environment, phase 0): run one from a clean caller environment and read it.
-env -i HOME="$HOME" PATH="/usr/bin:/bin:/opt/homebrew/bin:$HOME/.local/bin" \
-  XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" HC_SESSION="$CORE_SESSION" \
-  hc run --bg "env > $BASE/core.env" >/dev/null
-wait_until "the core's environment" file_has_line "$BASE/core.env"
-grep -q '^PATH=' "$BASE/core.env" || fail "could not read the core's environment"
-if grep -Eq '^(HERDR_PANE_ID|HERDR_TAB_ID|HERDR_WORKSPACE_ID|CLAUDE_CODE_[A-Z_]*|ANTHROPIC_[A-Z_]*|CLAUDECODE)=' "$BASE/core.env"; then
-  fail "core hands its programs a pane's or an agent's variables: $(grep -E '^(HERDR_|CLAUDE|ANTHROPIC)' "$BASE/core.env" | cut -d= -f1 | tr '\n' ' ')"
-fi
-echo "ok: core $CORE runs outside our server's session, without pane or agent variables"
+# herdr's environment has two sentinels (security review M4); neither may
+# reach the core, after this first start or after the recovery start (3d).
+core_env_is_clean() {
+  local out="$BASE/core.$1.env"
+  env -i HOME="$HOME" PATH="/usr/bin:/bin:/opt/homebrew/bin:$HOME/.local/bin" \
+    XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" HC_SESSION="$CORE_SESSION" \
+    hc run --bg "env > $out" >/dev/null
+  wait_until "the core's environment ($1)" file_has_line "$out"
+  grep -q '^PATH=' "$out" || fail "could not read the core's environment ($1)"
+  if grep -Eq '^(HERDR_PANE_ID|HERDR_TAB_ID|HERDR_WORKSPACE_ID|HERDR_M4_SENTINEL_TOKEN|SSH_AUTH_SOCK|CLAUDE_CODE_[A-Z_]*|ANTHROPIC_[A-Z_]*|CLAUDECODE)=' "$out"; then
+    fail "core ($1) hands its programs herdr's variables: $(grep -E '^(HERDR_|SSH_AUTH_SOCK|CLAUDE|ANTHROPIC)' "$out" | cut -d= -f1 | tr '\n' ' ')"
+  fi
+}
+core_env_is_clean first
+echo "ok: core $CORE runs outside our server's session, without pane, agent or sentinel variables"
 
 # V11: a hook inside a core pane still reports through our API, to its pane.
 pane_get() {
@@ -425,7 +432,8 @@ done
 [[ "$(core_pid)" != "$CORE" ]] || fail "the core pid did not change"
 send_line "$B" "echo after-v15 > $BASE/b.v15"
 wait_until "input to B after the core came back" file_has_line "$BASE/b.v15"
-echo "ok: herdr started the killed core again after $GAP s; B, C and D kept their programs"
+core_env_is_clean recovery
+echo "ok: herdr started the killed core again after $GAP s; B, C and D kept their programs; its environment is clean"
 
 # 3e. V37 (core-phase3 D3b): `hc server stop` is a person's stop. The panes
 #     are suspended, `core_stopped`, and herdr does not start the core; once

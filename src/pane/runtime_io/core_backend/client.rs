@@ -518,17 +518,37 @@ fn route_rpc(inner: &Inner, payload: &[u8]) {
     }
 }
 
-/// Variables a core must not inherit from our server (design D2): the core
-/// keeps the environment it starts with and hands it to every program.
-const CORE_START_ENV_REMOVE: &[&str] = &[
-    "HERDR_PANE_ID",
-    "HERDR_TAB_ID",
-    "HERDR_WORKSPACE_ID",
-    "HC_TERMINAL_ID",
-    "HC_TERMINAL_SOCKET",
-    "HC_SCOPE",
+/// The only variables of herdr's environment a core it starts gets (design
+/// D2, security review M4): what core needs to find its home, state and
+/// socket, and to run programs in the user's locale and terminal. A core
+/// keeps the environment it starts with and hands it to every terminal any
+/// client starts there, so anything else, a token or `SSH_AUTH_SOCK`
+/// included, stays out. herdr's own panes get their full environment from
+/// herdr's spawn, not from core.
+const CORE_START_ENV_KEEP: &[&str] = &[
+    "HOME",
+    "PATH",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "LANG",
+    "TERM",
+    "TERMINFO",
+    "TERMINFO_DIRS",
+    "COLORTERM",
+    // Where core's socket and install are, when the user moved them.
+    "HC_SOCKET",
+    "HC_INSTALL_DIR",
 ];
-const CORE_START_ENV_REMOVE_PREFIXES: &[&str] = &["CLAUDE_CODE_", "ANTHROPIC_"];
+const CORE_START_ENV_KEEP_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+fn core_start_keeps(key: &str) -> bool {
+    CORE_START_ENV_KEEP.contains(&key)
+        || CORE_START_ENV_KEEP_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
 
 /// The `hc` binary: found on `PATH` once, then used by that absolute path,
 /// so a later `PATH` cannot swap it. Its path and version are logged then.
@@ -581,8 +601,8 @@ fn binary_version(binary: &Path) -> Option<String> {
     Some(out.trim().to_string())
 }
 
-/// The `hc server start` command for `session`, with the environment D2 asks
-/// for.
+/// The `hc server start` command for `session`, with only the variables
+/// `CORE_START_ENV_KEEP` names.
 pub(crate) fn core_start_command(
     hc: &Path,
     session: &str,
@@ -591,17 +611,22 @@ pub(crate) fn core_start_command(
     let mut command = std::process::Command::new(hc);
     command.args(["server", "start"]);
     command.env_clear();
+    let mut dropped = Vec::new();
     for (key, value) in inherited {
-        let stripped = CORE_START_ENV_REMOVE.contains(&key.as_str())
-            || CORE_START_ENV_REMOVE_PREFIXES
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-            || key == "CLAUDECODE";
-        if !stripped {
+        if core_start_keeps(&key) {
             command.env(key, value);
+        } else if key != "HC_SESSION" {
+            dropped.push(key);
         }
     }
     command.env("HC_SESSION", session);
+    dropped.sort_unstable();
+    // Names only, never values.
+    info!(
+        session,
+        dropped = %dropped.join(" "),
+        "herdr-core is started without these variables"
+    );
     command
 }
 
@@ -944,16 +969,25 @@ mod tests {
         assert!(matches!(err, CoreError::Unavailable(reason) if reason.contains("0.1.17")));
     }
 
+    // Security review M4: an allow-list, so a token or an agent socket in
+    // herdr's environment never reaches the core.
     #[test]
     fn the_core_starts_without_our_panes_identity() {
         let inherited = [
             ("PATH", "/usr/bin"),
             ("HOME", "/home/u"),
+            ("LC_ALL", "en_US.UTF-8"),
+            ("XDG_RUNTIME_DIR", "/run/u"),
+            ("HC_SOCKET", "/run/u/hc.sock"),
+            ("HC_SESSION", "other"),
             ("HERDR_PANE_ID", "w1:p1"),
             ("CLAUDECODE", "1"),
             ("CLAUDE_CODE_CHILD_SESSION", "1"),
             ("ANTHROPIC_BASE_URL", "http://proxy"),
             ("HC_TERMINAL_ID", "t7"),
+            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
+            ("GITEA_TOKEN", "secret"),
+            ("OP_SESSION_x", "secret"),
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()));
         let command = core_start_command(Path::new("/opt/hc/bin/hc"), "herdr", inherited);
@@ -966,14 +1000,27 @@ mod tests {
                 )
             })
             .collect();
-        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(keys.contains(&"PATH") && keys.contains(&"HOME"), "{keys:?}");
+        let mut keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "HC_SESSION",
+                "HC_SOCKET",
+                "HOME",
+                "LC_ALL",
+                "PATH",
+                "XDG_RUNTIME_DIR"
+            ]
+        );
         for stripped in [
             "HERDR_PANE_ID",
             "CLAUDECODE",
             "CLAUDE_CODE_CHILD_SESSION",
             "ANTHROPIC_BASE_URL",
             "HC_TERMINAL_ID",
+            "SSH_AUTH_SOCK",
+            "GITEA_TOKEN",
         ] {
             assert!(!keys.contains(&stripped), "{stripped} leaked: {keys:?}");
         }
