@@ -48,11 +48,22 @@ pub(crate) fn herdr_session_label() -> String {
     )
 }
 
-/// The primary core session, where new panes go (D5, core-backend D2). It is
-/// still the label's name: placement moves only with core-phase3 PR C
-/// (D14), after a build that reads both sessions has shipped.
+/// The primary core session, where new panes go (D5). A release build's
+/// default herdr session runs in core's own default session `default`, the
+/// one Herdr Mobile and the Herdr apps reach; every other herdr session keeps
+/// its label's name, so only that one session ever shares a core.
 pub(crate) fn core_session_name() -> String {
-    herdr_session_label()
+    core_session_for(
+        crate::session::active_name().as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+fn core_session_for(herdr_session: Option<&str>, debug_build: bool) -> String {
+    if herdr_session.is_none() && !debug_build {
+        return "default".into();
+    }
+    session_name_for(herdr_session, debug_build)
 }
 
 fn session_name_for(herdr_session: Option<&str>, debug_build: bool) -> String {
@@ -203,16 +214,31 @@ mod tests {
     use super::super::fake;
     use super::*;
 
+    // V5 (D5): the release default herdr session runs in core session
+    // `default` and keeps the label `herdr`; every other session runs where
+    // its label names.
     #[test]
-    fn core_session_names_follow_design_d2() {
-        assert_eq!(session_name_for(None, false), "herdr");
-        assert_eq!(session_name_for(None, true), "herdrdev");
-        assert_eq!(session_name_for(Some("trial"), false), "herdr-trial");
-        assert_eq!(session_name_for(Some("trial"), true), "herdrdev-trial");
+    fn the_session_moves_to_default_and_the_label_stays() {
+        let names = |herdr: Option<&str>, debug| {
+            (
+                session_name_for(herdr, debug),
+                core_session_for(herdr, debug),
+            )
+        };
+        assert_eq!(names(None, false), ("herdr".into(), "default".into()));
+        assert_eq!(
+            names(Some("trial"), false),
+            ("herdr-trial".into(), "herdr-trial".into())
+        );
+        assert_eq!(names(None, true), ("herdrdev".into(), "herdrdev".into()));
+        assert_eq!(
+            names(Some("trial"), true),
+            ("herdrdev-trial".into(), "herdrdev-trial".into())
+        );
         // A release session named `dev` must not reach a debug build's core.
         assert_ne!(
-            session_name_for(Some("dev"), false),
-            session_name_for(None, true)
+            core_session_for(Some("dev"), false),
+            core_session_for(None, true)
         );
     }
 

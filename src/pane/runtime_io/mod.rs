@@ -41,7 +41,9 @@ pub(in crate::pane) struct SpawnSpec {
 /// attaches to it instead of starting it again (core-backend D10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTerminalLink {
-    /// The core session (`herdr`, `herdr-dev`, `herdr-<name>`; D2).
+    /// The core session the program runs in: `default` (or `herdr`, where
+    /// earlier builds put it) for a release build's default herdr session,
+    /// else `herdr-<name>` or `herdrdev[-<name>]` (core-phase3 D5).
     pub session: String,
     /// The terminal's address in that session (`t7`).
     pub address: String,
@@ -111,7 +113,8 @@ pub(crate) fn herdr_session_label() -> String {
     }
 }
 
-/// The herdr-core session this herdr session's new panes run in (D2).
+/// The herdr-core session this herdr session's new panes run in
+/// (core-phase3 D5).
 #[cfg(all(test, unix))]
 pub(crate) fn core_session_name() -> String {
     core_backend::core_session_name()
