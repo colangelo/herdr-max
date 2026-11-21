@@ -36,6 +36,7 @@ pub(crate) use runtime_io::PtyReason;
 #[cfg(unix)]
 pub(crate) use runtime_io::{
     core_attach_failure, core_session_answers, find_pane_core_terminals, CoreAttachFailure,
+    PaneCoreSearch,
 };
 pub(crate) use runtime_io::{
     core_gave_up, herdr_session_label, note_core_loss, primary_core_answers, reset_core_loss_guard,
@@ -2887,8 +2888,12 @@ impl PaneRuntime {
     }
 
     /// The herdr-core terminal this pane shows, saved with the pane (D10).
+    /// With the agent detection holds in it, so a save keeps both
+    /// (security review M3, Sol H6).
     pub fn core_terminal(&self) -> Option<CoreTerminalLink> {
-        self.io.core_terminal()
+        let mut link = self.io.core_terminal()?;
+        link.agent = self.agent_program.lock().ok().and_then(|agent| *agent);
+        Some(link)
     }
 
     /// Whether a core pane's program outlives this runtime, for the next
@@ -3099,7 +3104,7 @@ impl PaneRuntime {
         );
         let program = crate::platform::ProgramIdentity::of(
             child_pid.load(Ordering::Acquire),
-            crate::platform::process_start_token,
+            crate::platform::process_start,
         );
 
         Ok(Self {
@@ -3830,7 +3835,7 @@ impl PaneRuntime {
 
         let program = crate::platform::ProgramIdentity::of(
             child_pid.load(Ordering::Acquire),
-            crate::platform::process_start_token,
+            crate::platform::process_start,
         );
         Ok(Self {
             pane_id,

@@ -56,30 +56,41 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
+/// What a label search found, as `(session, address)`, and the sessions
+/// that did not answer: those may hold a match, so an empty search with
+/// one is no proof of none (security review M3, Sol H6).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LabelledTerminals {
+    pub found: Vec<(String, String)>,
+    pub unanswered: Vec<String>,
+}
+
 /// Live terminals carrying every one of `labels`, in each session that
-/// answers, as `(session, address)` (core-phase3 D1b). A session that does
-/// not answer is skipped; none is started.
+/// answers (core-phase3 D1b). None is started. A session with no socket
+/// has no core and so no terminal; any other failure leaves it unanswered.
 pub(crate) fn find_labelled_terminals(
     sessions: &[(String, Connector)],
     labels: &Map<String, Value>,
-) -> Vec<(String, String)> {
-    let mut found = Vec::new();
+) -> LabelledTerminals {
+    let mut search = LabelledTerminals::default();
     for (session, connector) in sessions {
-        let Ok(client) = connector() else {
-            continue;
-        };
-        let listed = match client.call(
-            "terminal.list",
-            serde_json::json!({"labels": labels}),
-            std::time::Duration::from_secs(5),
-        ) {
+        let listed = connector().and_then(|client| {
+            client.call(
+                "terminal.list",
+                serde_json::json!({"labels": labels}),
+                std::time::Duration::from_secs(5),
+            )
+        });
+        let listed = match listed {
             Ok(listed) => listed,
+            Err(CoreError::NoCore(_)) => continue,
             Err(err) => {
-                tracing::debug!(%session, err = %err, "could not list herdr-core terminals");
+                tracing::warn!(%session, err = %err, "could not list herdr-core terminals; the search is incomplete");
+                search.unanswered.push(session.clone());
                 continue;
             }
         };
-        found.extend(
+        search.found.extend(
             listed["terminals"]
                 .as_array()
                 .into_iter()
@@ -94,7 +105,7 @@ pub(crate) fn find_labelled_terminals(
                 .map(|address| (session.clone(), address.to_string())),
         );
     }
-    found
+    search
 }
 
 /// A loss event for the guard (core-phase3 D3a): core panes suspended, or

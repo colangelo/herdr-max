@@ -900,7 +900,7 @@ impl App {
             pane_jobs_ready_probe: crate::platform::pane_jobs_ready_for_resume,
             #[cfg(test)]
             pane_jobs_ready_probe: || true,
-            program_start_token: crate::platform::process_start_token,
+            program_start_token: crate::platform::process_start,
             core_waiting_retry_at: None,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,

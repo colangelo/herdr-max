@@ -36,6 +36,9 @@ const STREAM_QUEUE_LIMIT: usize = 2 * CREDIT_WINDOW as usize;
 pub(crate) enum CoreError {
     /// No core to talk to, or one this client refuses (reason for the notice).
     Unavailable(String),
+    /// The session's socket does not exist: no core runs there, so it holds
+    /// no terminal (security review M3, Sol H6).
+    NoCore(String),
     /// Core answered with an error.
     Rpc {
         kind: String,
@@ -49,7 +52,9 @@ pub(crate) enum CoreError {
 impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoreError::Unavailable(reason) => write!(f, "herdr-core unavailable: {reason}"),
+            CoreError::Unavailable(reason) | CoreError::NoCore(reason) => {
+                write!(f, "herdr-core unavailable: {reason}")
+            }
             CoreError::Rpc { kind, message } => write!(f, "herdr-core {kind}: {message}"),
             CoreError::Timeout(what) => write!(f, "herdr-core did not answer {what} in time"),
             CoreError::Closed => write!(f, "herdr-core connection closed"),
@@ -605,7 +610,7 @@ pub(crate) fn core_start_command(
 /// core.
 pub(crate) fn connect_at(socket: &Path) -> Result<(CoreClient, Value), CoreError> {
     if !socket.exists() {
-        return Err(CoreError::Unavailable(format!(
+        return Err(CoreError::NoCore(format!(
             "no herdr-core socket at {}",
             socket.display()
         )));

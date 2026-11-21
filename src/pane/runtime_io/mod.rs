@@ -50,6 +50,10 @@ pub struct CoreTerminalLink {
     /// The program as herdr saw it at attach, `None` when core gave no pid
     /// or the link predates the field (core-phase3 D1b).
     pub program: Option<crate::platform::ProgramIdentity>,
+    /// The agent detection saw in the program, which a shell may have
+    /// started with a pid of its own and which can outlive it (security
+    /// review M3, Sol H6). `None` when detection saw none.
+    pub agent: Option<crate::platform::ProgramIdentity>,
 }
 
 /// A live herdr-core terminal labelled for this herdr session that no pane
@@ -153,6 +157,16 @@ pub(crate) fn core_attach_failure(err: &std::io::Error) -> CoreAttachFailure {
     }
 }
 
+/// What the known-session search found for a pane: live core terminals
+/// labelled for it, and whether every session that may hold one answered
+/// (security review M3, Sol H6).
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PaneCoreSearch {
+    pub found: Vec<CoreTerminalLink>,
+    pub complete: bool,
+}
+
 /// Live core terminals labelled for the pane `public_pane_id` in every core
 /// session herdr knows and can reach without starting one (core-phase3 D1b,
 /// the known-session search). Empty without a pane id: the session label
@@ -161,9 +175,12 @@ pub(crate) fn core_attach_failure(err: &std::io::Error) -> CoreAttachFailure {
 pub(crate) fn find_pane_core_terminals(
     link_session: &str,
     public_pane_id: Option<&str>,
-) -> Vec<CoreTerminalLink> {
+) -> PaneCoreSearch {
     if public_pane_id.is_none() {
-        return Vec::new();
+        return PaneCoreSearch {
+            found: Vec::new(),
+            complete: true,
+        };
     }
     let sessions: Vec<_> = core_backend::known_sessions([link_session])
         .into_iter()
@@ -172,14 +189,23 @@ pub(crate) fn find_pane_core_terminals(
             (session, connector)
         })
         .collect();
-    core_backend::find_labelled_terminals(&sessions, &core_backend::pane_labels(public_pane_id))
-        .into_iter()
-        .map(|(session, address)| CoreTerminalLink {
-            session,
-            address,
-            program: None,
-        })
-        .collect()
+    let search = core_backend::find_labelled_terminals(
+        &sessions,
+        &core_backend::pane_labels(public_pane_id),
+    );
+    PaneCoreSearch {
+        found: search
+            .found
+            .into_iter()
+            .map(|(session, address)| CoreTerminalLink {
+                session,
+                address,
+                program: None,
+                agent: None,
+            })
+            .collect(),
+        complete: search.unanswered.is_empty(),
+    }
 }
 
 /// A core loss event for the guard (core-phase3 D3a): core panes were

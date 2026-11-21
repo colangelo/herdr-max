@@ -755,6 +755,25 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
     process_job_stat(pid).map(|stat| stat.start_time)
 }
 
+/// `pid`'s start token, or `NoSuchProcess` only when `/proc` has no such
+/// process; a read or parse failure is `Unknown`.
+pub fn process_start(pid: u32) -> super::ProcessStart {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => process_job_stat_from_stat(&stat)
+            .map_or(super::ProcessStart::Unknown, |stat| {
+                super::ProcessStart::Started(stat.start_time)
+            }),
+        Err(err)
+            if pid > 0
+                && (err.kind() == std::io::ErrorKind::NotFound
+                    || err.raw_os_error() == Some(libc::ESRCH)) =>
+        {
+            super::ProcessStart::NoSuchProcess
+        }
+        Err(_) => super::ProcessStart::Unknown,
+    }
+}
+
 /// Process group of `pid` while that same process, matched by its start
 /// token, is alive in the terminal session of the pane shell `shell_pid`.
 /// A stopped or backgrounded job still counts.

@@ -263,12 +263,46 @@ pub struct ProgramIdentity {
     pub started: u64,
 }
 
-/// The start token of `pid` now, `None` when no such process. Tests pass a
-/// fake process table.
-pub(crate) type StartTokenLookup = fn(u32) -> Option<u64>;
+/// What the process table says about a pid: its start token, that no
+/// process has it, or nothing certain (a refused or failed probe). Only
+/// `NoSuchProcess` proves a program gone (security review M3, Sol H6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStart {
+    Started(u64),
+    // Only the Linux and macOS probes can tell a missing process.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    NoSuchProcess,
+    Unknown,
+}
+
+impl ProcessStart {
+    /// A fake process table's answer: a token, or no such process.
+    #[cfg(test)]
+    pub(crate) fn table(token: Option<u64>) -> Self {
+        token.map_or(Self::NoSuchProcess, Self::Started)
+    }
+
+    pub(crate) fn token(self) -> Option<u64> {
+        match self {
+            Self::Started(token) => Some(token),
+            Self::NoSuchProcess | Self::Unknown => None,
+        }
+    }
+}
+
+/// How a probe answers for `pid` now. Tests pass a fake process table.
+pub(crate) type StartTokenLookup = fn(u32) -> ProcessStart;
+
+/// Where the process table cannot tell a missing process from a failed
+/// probe, no probe proves a program gone.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_start(pid: u32) -> ProcessStart {
+    process_start_token(pid).map_or(ProcessStart::Unknown, ProcessStart::Started)
+}
 
 /// Whether a recorded program still runs. `Unknown` when it was never
-/// recorded (pid 0): such a program may run (core-phase3 D1a, D2).
+/// recorded (pid 0) or the probe failed: such a program may run
+/// (core-phase3 D1a, D2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgramLiveness {
     Runs,
@@ -276,22 +310,46 @@ pub(crate) enum ProgramLiveness {
     Unknown,
 }
 
+impl ProgramLiveness {
+    /// Together, a pane's program and the agent detection saw in it: one
+    /// that runs wins, then one that may run. An agent never recorded adds
+    /// nothing; a program never recorded may run.
+    pub(crate) fn of_pane(
+        program: Option<ProgramIdentity>,
+        agent: Option<ProgramIdentity>,
+        lookup: StartTokenLookup,
+    ) -> Self {
+        let program = ProgramIdentity::liveness(program, lookup);
+        let agent = agent.map_or(Self::Gone, |agent| {
+            ProgramIdentity::liveness(Some(agent), lookup)
+        });
+        match (program, agent) {
+            (Self::Runs, _) | (_, Self::Runs) => Self::Runs,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Gone, Self::Gone) => Self::Gone,
+        }
+    }
+}
+
 impl ProgramIdentity {
-    /// `pid` as it is now; `None` for pid 0 or a process already gone.
+    /// `pid` as it is now; `None` for pid 0 or when the probe has no token.
     pub(crate) fn of(pid: u32, lookup: StartTokenLookup) -> Option<Self> {
         (pid > 0)
-            .then(|| lookup(pid))
+            .then(|| lookup(pid).token())
             .flatten()
             .map(|started| Self { pid, started })
     }
 
+    /// Gone only when no process has the pid or another process reuses it;
+    /// a probe that fails says nothing (security review M3, Sol H6).
     pub(crate) fn liveness(identity: Option<Self>, lookup: StartTokenLookup) -> ProgramLiveness {
-        match identity {
-            None => ProgramLiveness::Unknown,
-            Some(identity) if lookup(identity.pid) == Some(identity.started) => {
-                ProgramLiveness::Runs
-            }
-            Some(_) => ProgramLiveness::Gone,
+        let Some(identity) = identity else {
+            return ProgramLiveness::Unknown;
+        };
+        match lookup(identity.pid) {
+            ProcessStart::Started(token) if token == identity.started => ProgramLiveness::Runs,
+            ProcessStart::Started(_) | ProcessStart::NoSuchProcess => ProgramLiveness::Gone,
+            ProcessStart::Unknown => ProgramLiveness::Unknown,
         }
     }
 }
@@ -1280,6 +1338,23 @@ mod tests {
         // SAFETY: waits on the child this test just spawned.
         let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
         assert_eq!(reaped, pid as libc::pid_t, "the replacement is our child");
+    }
+
+    // Security review M3 (Sol H6): only a missing process reads as gone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_reaped_child_has_no_process_and_a_live_one_its_token() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        assert_eq!(process_start(pid), ProcessStart::NoSuchProcess);
+        assert_eq!(
+            process_start(std::process::id()).token(),
+            process_start_token(std::process::id())
+        );
+        assert!(process_start(std::process::id()).token().is_some());
     }
 
     #[cfg(target_os = "linux")]

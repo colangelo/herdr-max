@@ -539,7 +539,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
         app.state.default_shell = "/bin/cat".into();
-        app.program_start_token = |_| None;
+        app.program_start_token = |_| crate::platform::ProcessStart::table(None);
         // After `App::new`, which applies the config's runtime.
         crate::pane::set_preferred_runtime(on_core);
         let panes: Vec<PaneId> = app

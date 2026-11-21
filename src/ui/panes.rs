@@ -495,7 +495,7 @@ const CORE_UNREACHABLE_LINE: &str = " Herdr Core is not answering; the program k
 
 /// The text a pane without a runtime shows in place (core-phase3 D1b, D2).
 fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow<'static, str> {
-    use crate::terminal::state::{PaneHold, ResumeBlock};
+    use crate::terminal::state::{CoreWaitReason, PaneHold, ResumeBlock};
     match hold {
         PaneHold::Suspended(suspension) if suspension.resuming => {
             "Resuming: this pane's program is starting again.".into()
@@ -516,11 +516,27 @@ fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow
             }
             None => CORE_SUSPENDED_PANE_NOTICE.into(),
         },
-        PaneHold::CoreWaiting(waiting) => format!(
-            "Waiting for Herdr Core (session `{}`): this pane's program may still run there, so nothing starts here. It attaches when that core answers; `herdr pane respawn` starts it fresh instead.",
-            waiting.link.session
-        )
-        .into(),
+        PaneHold::CoreWaiting(waiting) => match &waiting.why {
+            CoreWaitReason::Unreachable => format!(
+                "Waiting for Herdr Core (session `{}`): this pane's program may still run there, so nothing starts here. It attaches when that core answers; `herdr pane respawn` starts it fresh instead.",
+                waiting.link.session
+            )
+            .into(),
+            CoreWaitReason::Conflict(found) => format!(
+                "More than one Herdr Core terminal is labelled for this pane ({}), so none was attached and nothing was started. Close the ones that are not this pane's; it then attaches to the one left, or run `herdr pane respawn` on it.",
+                found
+                    .iter()
+                    .map(|link| format!("{} in session {}", link.address, link.session))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into(),
+            CoreWaitReason::DirectoryUnavailable => format!(
+                "Saved directory is unavailable. This pane's program may still run in Herdr Core (session `{}`): it attaches when found, and nothing starts here. Restore the directory and restart this session to start it fresh.",
+                waiting.link.session
+            )
+            .into(),
+        },
     }
 }
 

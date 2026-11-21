@@ -166,18 +166,23 @@ impl App {
         }
     }
 
-    /// One waiting pane's try. Returns whether the pane changed.
+    /// One waiting pane's try. Returns whether the pane changed. The link
+    /// stays held until the program attaches or is proven gone (security
+    /// review M3, Sol H5).
     #[cfg(unix)]
     fn attach_waiting_pane(
         &mut self,
         pane_id: PaneId,
         waiting: crate::terminal::state::CoreWaiting,
     ) -> bool {
-        let found = match self.attach_core_terminal(pane_id, &waiting) {
+        use crate::persist::SearchOutcome;
+        use crate::terminal::state::{CoreWaitReason, CoreWaiting, PaneHold};
+        let outcome = match self.attach_core_terminal(pane_id, &waiting) {
             Ok(()) => return true,
             Err(failure) => {
-                let program = crate::platform::ProgramIdentity::liveness(
+                let program = crate::platform::ProgramLiveness::of_pane(
                     waiting.link.program,
+                    waiting.link.agent,
                     self.program_start_token,
                 );
                 if crate::persist::after_failed_attach(failure, program)
@@ -185,17 +190,26 @@ impl App {
                 {
                     return false;
                 }
-                crate::pane::find_pane_core_terminals(
+                crate::persist::search_outcome(crate::pane::find_pane_core_terminals(
                     &waiting.link.session,
                     waiting.public_pane_id.as_deref(),
-                )
+                ))
             }
         };
         let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
             return false;
         };
-        match found.as_slice() {
-            [] => {
+        let directory_gone = waiting.why == CoreWaitReason::DirectoryUnavailable;
+        match outcome {
+            SearchOutcome::Fresh if directory_gone => {
+                terminal.hold = None;
+                terminal.restore_error = Some(
+                    "Saved directory is unavailable. Restore the directory and restart this session."
+                        .into(),
+                );
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+            SearchOutcome::Fresh => {
                 terminal.hold = None;
                 tracing::info!(
                     pane = pane_id.raw(),
@@ -204,26 +218,29 @@ impl App {
                 );
                 self.resume_suspended_pane(pane_id);
             }
-            [one] => {
-                let moved = crate::terminal::state::CoreWaiting {
-                    link: one.clone(),
+            SearchOutcome::Incomplete => return false,
+            SearchOutcome::One(one) => {
+                let moved = CoreWaiting {
+                    link: one,
                     public_pane_id: waiting.public_pane_id.clone(),
+                    why: if directory_gone {
+                        CoreWaitReason::DirectoryUnavailable
+                    } else {
+                        CoreWaitReason::Unreachable
+                    },
                 };
-                terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(moved.clone()));
+                terminal.hold = Some(PaneHold::CoreWaiting(moved.clone()));
+                terminal.revision = terminal.revision.saturating_add(1);
                 if self.attach_core_terminal(pane_id, &moved).is_err() {
                     return true;
                 }
             }
-            _ => {
-                terminal.hold = None;
-                terminal.restore_error = Some(format!(
-                    "More than one Herdr Core terminal is labelled for this pane ({}), so none was attached and nothing was started. Close the ones that are not this pane's, then run `herdr pane respawn` on it.",
-                    found
-                        .iter()
-                        .map(|link| format!("{} in session {}", link.address, link.session))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+            SearchOutcome::Conflict(found) => {
+                let why = CoreWaitReason::Conflict(found);
+                if waiting.why == why {
+                    return false;
+                }
+                terminal.hold = Some(PaneHold::CoreWaiting(CoreWaiting { why, ..waiting }));
                 terminal.revision = terminal.revision.saturating_add(1);
             }
         }

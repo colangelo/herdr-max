@@ -641,6 +641,7 @@ mod tests {
 
     fn link(session: &str, address: &str) -> CoreTerminalLink {
         CoreTerminalLink {
+            agent: None,
             session: session.into(),
             address: address.into(),
             program: None,

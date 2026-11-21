@@ -179,6 +179,13 @@ pub struct PaneCoreTerminalSnapshot {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_started: Option<u64>,
+    /// The agent detection saw in the program, so a restore does not take
+    /// a dead wrapper for a gone agent (security review M3, Sol H6). Absent
+    /// in older files and when detection saw none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid_started: Option<u64>,
 }
 
 impl PaneCoreTerminalSnapshot {
@@ -188,20 +195,24 @@ impl PaneCoreTerminalSnapshot {
             address: link.address,
             pid: link.program.map(|program| program.pid),
             pid_started: link.program.map(|program| program.started),
+            agent_pid: link.agent.map(|agent| agent.pid),
+            agent_pid_started: link.agent.map(|agent| agent.started),
         }
     }
 
     // A restore reattaches core panes on Unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn link(&self) -> crate::pane::CoreTerminalLink {
+        let identity = |pid: Option<u32>, started: Option<u64>| {
+            pid.zip(started)
+                .filter(|(pid, _)| *pid > 0)
+                .map(|(pid, started)| crate::platform::ProgramIdentity { pid, started })
+        };
         crate::pane::CoreTerminalLink {
             session: self.session.clone(),
             address: self.address.clone(),
-            program: self
-                .pid
-                .zip(self.pid_started)
-                .filter(|(pid, _)| *pid > 0)
-                .map(|(pid, started)| crate::platform::ProgramIdentity { pid, started }),
+            program: identity(self.pid, self.pid_started),
+            agent: identity(self.agent_pid, self.agent_pid_started),
         }
     }
 }
@@ -1611,6 +1622,7 @@ mod tests {
             24,
             80,
             crate::pane::CoreTerminalLink {
+                agent: None,
                 session: "herdr".into(),
                 address: "t7".into(),
                 program: None,
@@ -1953,6 +1965,8 @@ mod tests {
                 address: "t7".into(),
                 pid: None,
                 pid_started: None,
+                agent_pid: None,
+                agent_pid_started: None,
             })
         );
         let back = serde_json::to_value(&pane).unwrap();
@@ -1983,6 +1997,11 @@ mod tests {
             program: Some(crate::platform::ProgramIdentity {
                 pid: 4242,
                 started: 99,
+            }),
+            // Security review M3: the agent survives a save as well.
+            agent: Some(crate::platform::ProgramIdentity {
+                pid: 4343,
+                started: 98,
             }),
         };
         let saved = PaneCoreTerminalSnapshot::from_link(link.clone());

@@ -64,7 +64,7 @@ impl Default for ReattachPolicy {
         Self {
             limit: REATTACH_LIMIT,
             slow_retry: SLOW_RETRY,
-            start_token: crate::platform::process_start_token,
+            start_token: crate::platform::process_start,
         }
     }
 }
@@ -540,6 +540,7 @@ impl CorePaneIo {
     /// The terminal in core, saved with the pane (D10, core-phase3 D1b).
     pub(crate) fn link(&self) -> CoreTerminalLink {
         CoreTerminalLink {
+            agent: None,
             session: self.shared.session.clone(),
             address: self.shared.address.clone(),
             program: self.shared.program,
@@ -1287,8 +1288,10 @@ mod tests {
                 Err(CoreError::Unavailable("socket refused".into()))
             }
         });
-        let (pane, exits, unreachable) =
-            pane_on(connector, short_policy(|pid| (pid == 4242).then_some(7)));
+        let (pane, exits, unreachable) = pane_on(
+            connector,
+            short_policy(|pid| crate::platform::ProcessStart::table((pid == 4242).then_some(7))),
+        );
 
         core.hang_up();
         let since = unreachable
@@ -1306,9 +1309,9 @@ mod tests {
 
     static TOKEN_OF_4242: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7);
 
-    fn token_of_4242(pid: u32) -> Option<u64> {
+    fn token_of_4242(pid: u32) -> crate::platform::ProcessStart {
         let token = TOKEN_OF_4242.load(Ordering::Acquire);
-        (pid == 4242 && token > 0).then_some(token)
+        crate::platform::ProcessStart::table((pid == 4242 && token > 0).then_some(token))
     }
 
     // V3 (D1a): core says `not_found`, the outcome depends on the program
@@ -1349,8 +1352,10 @@ mod tests {
     #[test]
     fn not_found_with_the_program_gone_suspends_the_pane() {
         static ALIVE: AtomicBool = AtomicBool::new(true);
-        fn lookup(pid: u32) -> Option<u64> {
-            (pid == 4242 && ALIVE.load(Ordering::Acquire)).then_some(7)
+        fn lookup(pid: u32) -> crate::platform::ProcessStart {
+            crate::platform::ProcessStart::table(
+                (pid == 4242 && ALIVE.load(Ordering::Acquire)).then_some(7),
+            )
         }
         let core = FakeCore::start();
         let (_pane, exits, _unreachable) = pane_on(connector_to(&core), short_policy(lookup));
@@ -1367,7 +1372,10 @@ mod tests {
     #[test]
     fn not_found_with_no_recorded_pid_is_unreachable() {
         let core = FakeCore::start_with(|config| config.pid = 0);
-        let (pane, exits, unreachable) = pane_on(connector_to(&core), short_policy(|_| Some(1)));
+        let (pane, exits, unreachable) = pane_on(
+            connector_to(&core),
+            short_policy(|_| crate::platform::ProcessStart::Started(1)),
+        );
         assert_eq!(pane.link().program, None);
         core.forget_terminal("t1");
         drop_stream(&core);
@@ -1392,7 +1400,7 @@ mod tests {
         let core = FakeCore::start_with(|config| config.pid = pid);
         let (pane, exits, unreachable) = pane_on(
             connector_to(&core),
-            short_policy(crate::platform::process_start_token),
+            short_policy(crate::platform::process_start),
         );
         assert_eq!(pane.link().program.map(|program| program.pid), Some(pid));
         core.forget_terminal("t1");

@@ -466,7 +466,10 @@ pub(crate) fn resume_block(
     if let Some(running) = runs(suspension.program).or(runs(suspension.agent)) {
         return Some(ResumeBlock::StillRuns(running.pid));
     }
-    (suspension.program.is_none()).then_some(ResumeBlock::CannotConfirm)
+    // A failed probe proves nothing gone (security review M3, Sol H6).
+    (ProgramLiveness::of_pane(suspension.program, suspension.agent, lookup)
+        == ProgramLiveness::Unknown)
+        .then_some(ResumeBlock::CannotConfirm)
 }
 
 #[cfg(test)]
@@ -814,25 +817,48 @@ mod tests {
             let mut suspension = Suspension::new(cause);
             suspension.program = Some(PROGRAM);
             assert_eq!(
-                resume_block(&suspension, |pid| (pid == 10).then_some(1)),
+                resume_block(&suspension, |pid| crate::platform::ProcessStart::table(
+                    (pid == 10).then_some(1)
+                )),
                 Some(ResumeBlock::StillRuns(10)),
                 "{cause:?}: running"
             );
-            assert_eq!(resume_block(&suspension, |_| None), None, "{cause:?}: gone");
             assert_eq!(
-                resume_block(&suspension, |pid| (pid == 10).then_some(2)),
+                resume_block(&suspension, |_| crate::platform::ProcessStart::table(None)),
+                None,
+                "{cause:?}: gone"
+            );
+            assert_eq!(
+                resume_block(&suspension, |pid| crate::platform::ProcessStart::table(
+                    (pid == 10).then_some(2)
+                )),
                 None,
                 "{cause:?}: pid reused"
             );
+            assert_eq!(
+                resume_block(&suspension, |_| crate::platform::ProcessStart::Unknown),
+                Some(ResumeBlock::CannotConfirm),
+                "{cause:?}: a failed probe is not gone"
+            );
             suspension.agent = Some(AGENT);
             assert_eq!(
-                resume_block(&suspension, |pid| (pid == 20).then_some(5)),
+                resume_block(&suspension, |pid| match pid {
+                    20 => crate::platform::ProcessStart::Unknown,
+                    _ => crate::platform::ProcessStart::NoSuchProcess,
+                }),
+                Some(ResumeBlock::CannotConfirm),
+                "{cause:?}: the agent's probe failed"
+            );
+            assert_eq!(
+                resume_block(&suspension, |pid| crate::platform::ProcessStart::table(
+                    (pid == 20).then_some(5)
+                )),
                 Some(ResumeBlock::StillRuns(20)),
                 "{cause:?}: the agent runs with the terminal's program gone"
             );
             suspension.program = None;
             assert_eq!(
-                resume_block(&suspension, |_| None),
+                resume_block(&suspension, |_| crate::platform::ProcessStart::table(None)),
                 Some(ResumeBlock::CannotConfirm),
                 "{cause:?}: never recorded"
             );
@@ -855,11 +881,13 @@ mod tests {
         assert!(state.suspend_pane(panes[0], Instant::now(), suspension));
         let waiting = crate::terminal::state::CoreWaiting {
             link: crate::pane::CoreTerminalLink {
+                agent: None,
                 session: "herdr".into(),
                 address: "t7".into(),
                 program: Some(PROGRAM),
             },
             public_pane_id: Some("w1-p2".into()),
+            why: crate::terminal::state::CoreWaitReason::Unreachable,
         };
         let terminal_id = state.workspaces[0].terminal_id(panes[1]).cloned().unwrap();
         state.terminals.get_mut(&terminal_id).unwrap().hold =
@@ -903,7 +931,8 @@ mod tests {
             suspension.program = program;
         };
         set_program(&mut app, Some(PROGRAM));
-        app.program_start_token = |pid| (pid == 10).then_some(1);
+        app.program_start_token =
+            |pid| crate::platform::ProcessStart::table((pid == 10).then_some(1));
         let now = Instant::now() + SETTLE;
         assert!(app.resume_suspended_panes_if_due(now));
         let terminal = &app.state.terminals[&terminal_id];
@@ -930,7 +959,7 @@ mod tests {
         assert_eq!(app.suspended_pane_resume_deadline(), None, "not retried");
 
         set_program(&mut app, Some(PROGRAM));
-        app.program_start_token = |_| None;
+        app.program_start_token = |_| crate::platform::ProcessStart::table(None);
         app.request_suspended_pane_resume(now);
         assert!(resume_and_wait(&mut app, now).await);
         assert!(

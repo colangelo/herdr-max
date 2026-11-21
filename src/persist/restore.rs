@@ -735,13 +735,30 @@ fn restore_tab(
         let cwd = saved_cwd;
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
         if !has_import && !cwd.is_dir() {
-            let terminal = unavailable_restored_terminal(
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut terminal = unavailable_restored_terminal(
                 saved_pane,
                 cwd,
                 "Saved directory is unavailable. Restore the directory and restart this session."
                     .into(),
                 todo_links,
             );
+            // Its program may still run in herdr-core: the link stays held,
+            // so no save drops it and the pane attaches when it can
+            // (security review M3, Sol H5).
+            #[cfg(unix)]
+            if let Some(saved) = saved_pane.and_then(|pane| pane.core_terminal.as_ref()) {
+                terminal.restore_error = None;
+                terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(
+                    crate::terminal::state::CoreWaiting {
+                        link: saved.link(),
+                        public_pane_id: old_id
+                            .and_then(|old_id| public_pane_ids_by_old_raw.get(old_id))
+                            .cloned(),
+                        why: crate::terminal::state::CoreWaitReason::DirectoryUnavailable,
+                    },
+                ));
+            }
             panes.insert(*id, PaneState::new(terminal.id.clone()));
             terminals.push(terminal);
             continue;
@@ -832,7 +849,7 @@ fn restore_tab(
                 &saved.link(),
                 public_pane_id,
                 runtime_context,
-                crate::platform::process_start_token,
+                crate::platform::process_start,
             ),
             _ => CoreRestore::Fresh,
         };
@@ -854,24 +871,6 @@ fn restore_tab(
                 );
                 terminal.restore_error = None;
                 terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(waiting));
-                panes.insert(*id, PaneState::new(terminal.id.clone()));
-                terminals.push(terminal);
-                continue;
-            }
-            CoreRestore::Ambiguous(found) => {
-                let named: Vec<String> = found
-                    .iter()
-                    .map(|link| format!("{} in session {}", link.address, link.session))
-                    .collect();
-                let terminal = unavailable_restored_terminal(
-                    saved_pane,
-                    cwd,
-                    format!(
-                        "More than one Herdr Core terminal is labelled for this pane ({}), so none was attached and nothing was started. Close the ones that are not this pane's, then run `herdr pane respawn` on it.",
-                        named.join(", ")
-                    ),
-                    todo_links,
-                );
                 panes.insert(*id, PaneState::new(terminal.id.clone()));
                 terminals.push(terminal);
                 continue;
@@ -1149,10 +1148,10 @@ enum CoreRestore {
     Attached(Box<TerminalRuntime>),
     /// Its program is gone: the pane starts fresh.
     Fresh,
-    /// Its program may run where core does not answer: start nothing.
+    /// Its program may run where core does not answer, or several live
+    /// terminals are labelled for the pane: start nothing, and hold the
+    /// link (security review M3, Sol H5).
     Waiting(crate::terminal::state::CoreWaiting),
-    /// Several live terminals are labelled for the pane: start nothing.
-    Ambiguous(Vec<crate::pane::CoreTerminalLink>),
 }
 
 /// After the saved terminal did not attach: wait while the program may run
@@ -1178,6 +1177,34 @@ pub(crate) fn after_failed_attach(
     }
 }
 
+/// What the known-session search decides for a pane whose saved terminal
+/// did not attach (core-phase3 D1b): nothing found where every session
+/// answered starts it fresh; nothing found while one did not answer waits
+/// (security review M3, Sol H6); one found attaches; several wait for a
+/// person.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SearchOutcome {
+    Fresh,
+    Incomplete,
+    One(crate::pane::CoreTerminalLink),
+    Conflict(Vec<crate::pane::CoreTerminalLink>),
+}
+
+#[cfg(unix)]
+pub(crate) fn search_outcome(search: crate::pane::PaneCoreSearch) -> SearchOutcome {
+    let crate::pane::PaneCoreSearch {
+        mut found,
+        complete,
+    } = search;
+    match (found.len(), complete) {
+        (0, true) => SearchOutcome::Fresh,
+        (0, false) => SearchOutcome::Incomplete,
+        (1, _) => SearchOutcome::One(found.remove(0)),
+        _ => SearchOutcome::Conflict(found),
+    }
+}
+
 /// Attaches a restored pane to the herdr-core terminal its link names, or
 /// decides what else to do by the D1b table: never a fresh start while the
 /// program may run, and never before the known-session search.
@@ -1191,12 +1218,20 @@ fn restore_core_pane(
     runtime_context: &RestoreRuntimeContext<'_>,
     lookup: crate::platform::StartTokenLookup,
 ) -> CoreRestore {
+    use crate::terminal::state::{CoreWaitReason, CoreWaiting};
     let failure = match attach_core_link(pane_id, rows, cols, link, public_pane_id, runtime_context)
     {
         Ok(runtime) => return CoreRestore::Attached(Box::new(runtime)),
         Err(failure) => failure,
     };
-    let program = crate::platform::ProgramIdentity::liveness(link.program, lookup);
+    let waiting = |link: &crate::pane::CoreTerminalLink, why| {
+        CoreRestore::Waiting(CoreWaiting {
+            link: link.clone(),
+            public_pane_id: public_pane_id.map(str::to_string),
+            why,
+        })
+    };
+    let program = crate::platform::ProgramLiveness::of_pane(link.program, link.agent, lookup);
     if after_failed_attach(failure, program) == AfterFailedAttach::Wait {
         tracing::warn!(
             pane_id = pane_id.raw(),
@@ -1206,14 +1241,13 @@ fn restore_core_pane(
             ?program,
             "herdr-core terminal not attached and its program may still run; the pane waits for core"
         );
-        return CoreRestore::Waiting(crate::terminal::state::CoreWaiting {
-            link: link.clone(),
-            public_pane_id: public_pane_id.map(str::to_string),
-        });
+        return waiting(link, CoreWaitReason::Unreachable);
     }
-    let found = crate::pane::find_pane_core_terminals(&link.session, public_pane_id);
-    match found.as_slice() {
-        [] => {
+    match search_outcome(crate::pane::find_pane_core_terminals(
+        &link.session,
+        public_pane_id,
+    )) {
+        SearchOutcome::Fresh => {
             tracing::info!(
                 pane_id = pane_id.raw(),
                 session = %link.session,
@@ -1222,25 +1256,31 @@ fn restore_core_pane(
             );
             CoreRestore::Fresh
         }
-        [one] => {
-            match attach_core_link(pane_id, rows, cols, one, public_pane_id, runtime_context) {
+        SearchOutcome::Incomplete => {
+            tracing::warn!(
+                pane_id = pane_id.raw(),
+                session = %link.session,
+                address = %link.address,
+                "a herdr-core session did not answer the search for this pane; the pane waits"
+            );
+            waiting(link, CoreWaitReason::Unreachable)
+        }
+        SearchOutcome::One(one) => {
+            match attach_core_link(pane_id, rows, cols, &one, public_pane_id, runtime_context) {
                 Ok(runtime) => CoreRestore::Attached(Box::new(runtime)),
                 Err(crate::pane::CoreAttachFailure::Unreachable) => {
-                    CoreRestore::Waiting(crate::terminal::state::CoreWaiting {
-                        link: one.clone(),
-                        public_pane_id: public_pane_id.map(str::to_string),
-                    })
+                    waiting(&one, CoreWaitReason::Unreachable)
                 }
                 Err(_) => CoreRestore::Fresh,
             }
         }
-        _ => {
+        SearchOutcome::Conflict(found) => {
             tracing::warn!(
                 pane_id = pane_id.raw(),
                 found = ?found,
                 "several herdr-core terminals are labelled for one pane; starting nothing"
             );
-            CoreRestore::Ambiguous(found)
+            waiting(link, CoreWaitReason::Conflict(found))
         }
     }
 }
@@ -3862,6 +3902,7 @@ mod core_restore_tests {
     use crate::pane::CoreAttachFailure;
     use crate::pane::FakeCore;
     use crate::platform::{ProgramIdentity, ProgramLiveness};
+    use crate::terminal::state::{CoreWaitReason, CoreWaiting};
 
     // V30: the table after a failed attach.
     #[test]
@@ -3919,7 +3960,7 @@ mod core_restore_tests {
     }
 
     fn own_program() -> Option<ProgramIdentity> {
-        ProgramIdentity::of(std::process::id(), crate::platform::process_start_token)
+        ProgramIdentity::of(std::process::id(), crate::platform::process_start)
     }
 
     fn labelled(address: &str, pane: &str) -> serde_json::Value {
@@ -3936,7 +3977,7 @@ mod core_restore_tests {
             link,
             Some(pane),
             &context(events),
-            crate::platform::process_start_token,
+            crate::platform::process_start,
         )
     }
 
@@ -3953,6 +3994,7 @@ mod core_restore_tests {
         core.forget_terminal("t7");
         std::env::set_var("HC_SOCKET", &core.socket);
         let link = crate::pane::CoreTerminalLink {
+            agent: None,
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: own_program(),
@@ -3972,6 +4014,7 @@ mod core_restore_tests {
             format!("/tmp/hcr-none-{}.sock", std::process::id()),
         );
         let link = crate::pane::CoreTerminalLink {
+            agent: None,
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: None,
@@ -3993,6 +4036,7 @@ mod core_restore_tests {
         primary.add_terminal(labelled("t4", "w1-p9"));
         std::env::set_var("HC_SOCKET", &primary.socket);
         let link = crate::pane::CoreTerminalLink {
+            agent: None,
             session: "herdr".into(),
             address: "t7".into(),
             program: None,
@@ -4011,6 +4055,196 @@ mod core_restore_tests {
         let _ = std::fs::remove_dir_all(runtime_dir);
     }
 
+    fn restore_with(
+        link: &crate::pane::CoreTerminalLink,
+        pane: &str,
+        lookup: crate::platform::StartTokenLookup,
+    ) -> CoreRestore {
+        let (events, _rx) = mpsc::channel(64);
+        restore_core_pane(
+            PaneId::alloc(),
+            24,
+            80,
+            link,
+            Some(pane),
+            &context(events),
+            lookup,
+        )
+    }
+
+    const WRAPPER: ProgramIdentity = ProgramIdentity {
+        pid: 4100,
+        started: 1,
+    };
+    const AGENT: ProgramIdentity = ProgramIdentity {
+        pid: 4101,
+        started: 2,
+    };
+
+    // Security review M3 (Sol H6): with core down, a probe that fails keeps
+    // the pane waiting where one that finds no process lets it start fresh;
+    // with core saying the terminal is gone, an agent that outlived its
+    // wrapper keeps it waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_probe_or_a_surviving_agent_is_not_gone() {
+        use crate::platform::ProcessStart;
+        let link = crate::pane::CoreTerminalLink {
+            session: crate::pane::core_session_name(),
+            address: "t7".into(),
+            program: Some(WRAPPER),
+            agent: Some(AGENT),
+        };
+        std::env::set_var(
+            "HC_SOCKET",
+            format!("/tmp/hcp-none-{}.sock", std::process::id()),
+        );
+        assert!(matches!(
+            restore_with(&link, "w1-p2", |_| ProcessStart::Unknown),
+            CoreRestore::Waiting(_)
+        ));
+        assert!(matches!(
+            restore_with(&link, "w1-p2", |_| ProcessStart::NoSuchProcess),
+            CoreRestore::Fresh
+        ));
+
+        let core = FakeCore::start();
+        core.forget_terminal("t7");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        assert!(matches!(
+            restore_with(&link, "w1-p2", |pid| match pid {
+                4101 => ProcessStart::Started(2),
+                _ => ProcessStart::NoSuchProcess,
+            }),
+            CoreRestore::Waiting(_)
+        ));
+        assert!(matches!(
+            restore_with(&link, "w1-p2", |_| ProcessStart::NoSuchProcess),
+            CoreRestore::Fresh
+        ));
+        assert!(!started_anything(&core), "{:?}", core.methods());
+    }
+
+    // Security review M3 (Sol H6): a session that does not answer may hold
+    // the pane's terminal, so an empty search waits; a session with no
+    // socket holds none. Once the session answers, the pane attaches to the
+    // terminal it held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unanswered_session_makes_an_empty_search_wait() {
+        let runtime_dir = PathBuf::from(format!("/tmp/hcu-{}", std::process::id()));
+        let sockets = runtime_dir.join("herdr-core");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::set_permissions(
+            &sockets,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+        let primary = FakeCore::start();
+        primary.forget_terminal("t7");
+        std::env::set_var("HC_SOCKET", &primary.socket);
+        let link = crate::pane::CoreTerminalLink {
+            session: crate::pane::core_session_name(),
+            address: "t7".into(),
+            program: None,
+            agent: None,
+        };
+
+        // A secondary herdr knows whose socket is there and refuses.
+        let refusing = sockets.join("herdrdev-h6.sock");
+        drop(std::os::unix::net::UnixListener::bind(&refusing).unwrap());
+        let _ = crate::pane::core_session_answers("herdrdev-h6");
+        assert!(matches!(
+            restore_with(&link, "w1-p2", crate::platform::process_start),
+            CoreRestore::Waiting(CoreWaiting {
+                why: CoreWaitReason::Unreachable,
+                ..
+            })
+        ));
+
+        // The same session with no socket: no core, so nothing to find.
+        std::fs::remove_file(&refusing).unwrap();
+        assert!(matches!(
+            restore_with(&link, "w1-p2", crate::platform::process_start),
+            CoreRestore::Fresh
+        ));
+
+        // It answers and holds the pane's terminal: the pane attaches.
+        let secondary = FakeCore::start_in(sockets.clone(), "herdrdev-h6.sock", |_| {});
+        secondary.add_terminal(labelled("t9", "w1-p2"));
+        let CoreRestore::Attached(runtime) =
+            restore_with(&link, "w1-p2", crate::platform::process_start)
+        else {
+            panic!("expected the pane to attach once the session answers");
+        };
+        let found = runtime.core_terminal().expect("a core link");
+        assert_eq!(
+            (found.session.as_str(), found.address.as_str()),
+            ("herdrdev-h6", "t9")
+        );
+        assert!(!started_anything(&primary), "{:?}", primary.methods());
+        let _ = std::fs::remove_dir_all(runtime_dir);
+    }
+
+    // Security review M3 (Sol H5): a pane whose directory is gone keeps its
+    // core link through a save and the next restore, twice, and starts
+    // nothing.
+    #[tokio::test]
+    async fn a_held_link_survives_every_save_and_restore() {
+        let mut snapshot: SessionSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        let missing = std::env::current_dir()
+            .unwrap()
+            .join("__herdr_missing_core_restore_directory__");
+        assert!(!missing.exists());
+        let saved = super::super::snapshot::PaneCoreTerminalSnapshot::from_link(
+            crate::pane::CoreTerminalLink {
+                session: "herdr".into(),
+                address: "t7".into(),
+                program: Some(WRAPPER),
+                agent: Some(AGENT),
+            },
+        );
+        let pane = snapshot.workspaces[0].tabs[0].panes.get_mut(&1).unwrap();
+        pane.cwd = missing;
+        pane.core_terminal = Some(saved.clone());
+        for _ in 0..2 {
+            let (events, _rx) = mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = super::restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                0,
+                "/bin/sh",
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let root = workspaces[0].tabs[0].root_pane;
+            let terminal = &terminals[workspaces[0].tabs[0].terminal_id(root).unwrap()];
+            assert!(runtimes.get(&terminal.id).is_none(), "nothing started");
+            assert!(matches!(
+                terminal.core_waiting(),
+                Some(CoreWaiting {
+                    why: CoreWaitReason::DirectoryUnavailable,
+                    ..
+                })
+            ));
+            snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
+            assert_eq!(
+                snapshot.workspaces[0].tabs[0].panes[&root.raw()].core_terminal,
+                Some(saved.clone()),
+                "the link is saved again"
+            );
+        }
+    }
+
     // V45: two terminals labelled for the pane start nothing; none starts it
     // fresh.
     #[tokio::test(flavor = "multi_thread")]
@@ -4021,12 +4255,18 @@ mod core_restore_tests {
         primary.add_terminal(labelled("t5", "w1-p2"));
         std::env::set_var("HC_SOCKET", &primary.socket);
         let link = crate::pane::CoreTerminalLink {
+            agent: None,
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: None,
         };
         match restore(&link, "w1-p2") {
-            CoreRestore::Ambiguous(found) => {
+            CoreRestore::Waiting(CoreWaiting {
+                link: held,
+                why: CoreWaitReason::Conflict(found),
+                ..
+            }) => {
+                assert_eq!(held, link, "the saved link stays held");
                 let addresses: Vec<_> = found.iter().map(|link| link.address.as_str()).collect();
                 assert_eq!(addresses, ["t3", "t5"]);
             }

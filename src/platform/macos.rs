@@ -1007,6 +1007,31 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
     process_bsdinfo(pid).map(|info| bsdinfo_start_token(&info))
 }
 
+/// `pid`'s start token, or `NoSuchProcess` only when the kernel says so
+/// (`ESRCH`); any other failure is `Unknown`.
+pub fn process_start(pid: u32) -> super::ProcessStart {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let ret = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if ret == size {
+        return super::ProcessStart::Started(bsdinfo_start_token(&info));
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    if pid > 0 && ret <= 0 && errno == Some(libc::ESRCH) {
+        super::ProcessStart::NoSuchProcess
+    } else {
+        super::ProcessStart::Unknown
+    }
+}
+
 /// Process group of `pid` while that same process, matched by its start
 /// token, is alive on the terminal of the pane shell `shell_pid`. A stopped or
 /// backgrounded job still counts.

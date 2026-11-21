@@ -323,6 +323,23 @@ pub struct CoreWaiting {
     pub link: crate::pane::CoreTerminalLink,
     /// The pane id the terminal's labels name.
     pub public_pane_id: Option<String>,
+    pub why: CoreWaitReason,
+}
+
+/// Why a pane holds its core link and starts nothing. The hold is the
+/// link's durable home: every save keeps it until it resolves (security
+/// review M3, Sol H5).
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreWaitReason {
+    /// Its program may run where a core did not answer.
+    Unreachable,
+    /// Several live terminals are labelled for the pane: a person closes
+    /// the ones that are not its own.
+    Conflict(Vec<crate::pane::CoreTerminalLink>),
+    /// Its saved directory is gone: the pane only attaches to its program,
+    /// never starts one.
+    DirectoryUnavailable,
 }
 
 impl TerminalState {
