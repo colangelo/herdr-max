@@ -19,6 +19,7 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod core_spaces_doc;
 mod core_status_mirror;
 mod core_terminals;
 mod creation;
@@ -208,6 +209,12 @@ pub struct App {
     pub(crate) persist_pane_history: bool,
     /// `[experimental] core_status_mirror` (openspec/changes/core-status-mirror).
     core_status_mirror: bool,
+    /// `[experimental] core_spaces_doc` (openspec/changes/core-spaces-doc).
+    core_spaces_doc: bool,
+    /// When the `herdr-app` document is built next (core-spaces-doc D4).
+    core_spaces_deadline: Option<Instant>,
+    /// Where the document goes: the core writer, a recorder in tests (D7).
+    core_spaces_publish: fn(serde_json::Value),
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.
@@ -761,6 +768,7 @@ impl App {
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
             session_save_urgent: false,
+            core_spaces_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
@@ -889,6 +897,12 @@ impl App {
             window_title_template: None,
             persist_pane_history: config.experimental.pane_history,
             core_status_mirror: config.experimental.core_status_mirror,
+            core_spaces_doc: config.experimental.core_spaces_doc,
+            core_spaces_deadline: config.experimental.core_spaces_doc.then(Instant::now),
+            #[cfg(not(test))]
+            core_spaces_publish: crate::pane::publish_core_spaces,
+            #[cfg(test)]
+            core_spaces_publish: |_| {},
             last_render_at: None,
             last_presentation_at: None,
             api_rx,
@@ -1261,6 +1275,7 @@ impl App {
             apply_pane_runtime_choice(config.experimental.runtime);
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
             self.set_core_status_mirror(config.experimental.core_status_mirror);
+            self.set_core_spaces_doc(config.experimental.core_spaces_doc);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();

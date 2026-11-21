@@ -1951,6 +1951,12 @@
           "description": "Mirror each herdr-core pane's agent status (working, blocked, done, idle) into herdr-core as an OSC 7501 record written to the program's terminal, so clients of herdr-core such as Herdr Mobile's Inbox see it. herdr still takes no status from herdr-core. Applies on reload: turning it on mirrors current status, turning it off clears it. PTY panes are not affected. Unix only. Default: false."
         },
         {
+          "key": "experimental.core_spaces_doc",
+          "type": "boolean",
+          "default": "false",
+          "description": "Publish herdr's workspaces, tabs and splits into herdr-core as the `herdr-app` document, so the Herdr apps such as Herdr Mobile show them as spaces, with each herdr-core pane as a terminal. PTY panes are left out. herdr's layout is the source: a change made to the spaces in an app is replaced at herdr's next layout change. Applies on reload: turning it on publishes the layout, turning it off removes the document. Unix only. Default: false."
+        },
+        {
           "key": "experimental.reveal_hidden_cursor_for_cjk_ime",
           "type": "boolean",
           "default": "false",

@@ -12,6 +12,7 @@ enum SessionSaveJob {
 
 impl App {
     pub(super) fn schedule_session_save(&mut self) {
+        self.state.core_spaces_dirty = true;
         if self.policy.persist_session {
             self.pane_exit_checkpoint_pending = false;
             self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
@@ -23,6 +24,7 @@ impl App {
     /// a forced shutdown loses the change shrinks from the debounce to the
     /// write itself.
     fn schedule_session_save_now(&mut self) {
+        self.state.core_spaces_dirty = true;
         if self.policy.persist_session {
             self.session_save_deadline = Some(Instant::now());
         }
