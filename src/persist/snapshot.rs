@@ -1599,7 +1599,7 @@ mod tests {
         let legacy =
             crate::pane::FakeCore::start_in(runtime_dir.join("herdr-core"), "herdr.sock", |_| {});
         legacy.add_terminal(serde_json::json!({"address": "t7", "state": "live",
-            "labels": {"herdr.session": crate::pane::core_session_name(), "herdr.pane_id": "w1-p1"}}));
+            "labels": {"herdr.session": crate::pane::herdr_session_label(), "herdr.pane_id": "w1-p1"}}));
         let state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].tabs[0].panes[&root]

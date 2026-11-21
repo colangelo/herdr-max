@@ -18,25 +18,29 @@ impl App {
     /// restored pane attached to stay running (they may hold an agent's
     /// work), each logged at warn and all named in one notice.
     pub(crate) fn report_unclaimed_core_terminals(&mut self) {
-        // Addresses are per core session: only the server's own session's
-        // claims count against its orphan list.
-        let session = crate::pane::core_session_name();
-        let claimed: Vec<String> = self
+        // Claims are `(session, address)`: addresses are per core session
+        // (core-phase3 D6). A pane waiting for its core claims its terminal
+        // too, in case that core answers by now.
+        let waiting = self
+            .core_waiting_panes()
+            .into_iter()
+            .map(|(_, waiting)| waiting.link);
+        let claimed: Vec<(String, String)> = self
             .terminal_runtimes
             .values()
             .filter_map(|runtime| runtime.core_terminal())
-            .filter(|link| link.session == session)
-            .map(|link| link.address)
+            .chain(waiting)
+            .map(|link| (link.session, link.address))
             .collect();
         let unclaimed = crate::pane::unclaimed_core_terminals(&claimed);
         if unclaimed.is_empty() {
             return;
         }
-        for (address, pane_id) in &unclaimed {
+        for terminal in &unclaimed {
             warn!(
-                %address,
-                pane_id = pane_id.as_deref().unwrap_or("-"),
-                %session,
+                address = %terminal.address,
+                pane_id = terminal.pane_id.as_deref().unwrap_or("-"),
+                session = %terminal.session,
                 "herdr-core terminal of this session has no pane; left running"
             );
         }
@@ -48,15 +52,32 @@ impl App {
                 unclaimed.len(),
                 if unclaimed.len() == 1 { "" } else { "s" }
             ),
-            context: format!(
-                "Left running. See them: HC_SESSION={session} hc ls --label herdr.session={session}"
-            ),
+            context: unclaimed_notice_context(&unclaimed, &crate::pane::herdr_session_label()),
             position: None,
             target: None,
             anchor_pane: None,
         });
         self.sync_toast_deadline(previous);
     }
+}
+
+/// The orphan notice's look-up command, once per core session that holds
+/// one (core-phase3 D5): the session to reach and the label that is ours.
+fn unclaimed_notice_context(
+    unclaimed: &[crate::pane::UnclaimedCoreTerminal],
+    label: &str,
+) -> String {
+    let mut sessions: Vec<&str> = Vec::new();
+    for terminal in unclaimed {
+        if !sessions.contains(&terminal.session.as_str()) {
+            sessions.push(&terminal.session);
+        }
+    }
+    let commands: Vec<String> = sessions
+        .iter()
+        .map(|session| format!("HC_SESSION={session} hc ls --label herdr.session={label}"))
+        .collect();
+    format!("Left running. See them: {}", commands.join("; "))
 }
 
 impl App {
@@ -252,5 +273,34 @@ impl App {
             terminal.revision = terminal.revision.saturating_add(1);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unclaimed_notice_context;
+    use crate::pane::UnclaimedCoreTerminal;
+
+    // V6 (core-phase3 D5): one look-up per session that holds an orphan,
+    // each with that session and this herdr session's label.
+    #[test]
+    fn the_orphan_notice_names_each_session_with_our_label() {
+        let orphan = |session: &str, address: &str| UnclaimedCoreTerminal {
+            session: session.into(),
+            address: address.into(),
+            pane_id: None,
+        };
+        assert_eq!(
+            unclaimed_notice_context(
+                &[
+                    orphan("herdr", "t8"),
+                    orphan("herdr", "t9"),
+                    orphan("default", "t7")
+                ],
+                "herdr"
+            ),
+            "Left running. See them: HC_SESSION=herdr hc ls --label herdr.session=herdr; \
+             HC_SESSION=default hc ls --label herdr.session=herdr"
+        );
     }
 }

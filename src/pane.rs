@@ -22,6 +22,8 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
+#[cfg(all(test, unix))]
+pub(crate) use runtime_io::core_session_name;
 #[cfg(not(test))]
 pub(crate) use runtime_io::publish_core_spaces;
 pub(crate) use runtime_io::set_preferred_runtime;
@@ -37,9 +39,9 @@ pub(crate) use runtime_io::{
     core_attach_failure, core_session_answers, find_pane_core_terminals, CoreAttachFailure,
 };
 pub(crate) use runtime_io::{
-    core_gave_up, core_session_name, note_core_loss, primary_core_answers, reset_core_loss_guard,
+    core_gave_up, herdr_session_label, note_core_loss, primary_core_answers, reset_core_loss_guard,
     set_core_events, set_core_pty_panes, stable_name, starts_on_core, unclaimed_core_terminals,
-    RuntimeChoice,
+    RuntimeChoice, UnclaimedCoreTerminal,
 };
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 

@@ -611,13 +611,15 @@ async fn core_v10_a_kept_pane_is_reattached_by_the_next_server() {
     assert!(
         unclaimed
             .iter()
-            .any(|(address, pane)| *address == link.address && pane.as_deref() == Some("w9-p1")),
+            .any(|terminal| terminal.session == link.session
+                && terminal.address == link.address
+                && terminal.pane_id.as_deref() == Some("w9-p1")),
         "{unclaimed:?}"
     );
     assert!(
-        !crate::pane::unclaimed_core_terminals(std::slice::from_ref(&link.address))
+        !crate::pane::unclaimed_core_terminals(&[(link.session.clone(), link.address.clone())])
             .iter()
-            .any(|(address, _)| *address == link.address),
+            .any(|terminal| terminal.address == link.address),
         "a claimed terminal is not an orphan"
     );
 

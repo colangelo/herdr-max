@@ -22,10 +22,11 @@ pub(crate) use pane_io::{
     Connector, CorePaneIo, CoreReattach, CoreSpawn, ReattachError, StartedCore,
 };
 pub(crate) use sessions::{
-    core_session_name, existing_core_connector, existing_session_connector, known_sessions,
-    note_stopped_by_person, server_connector,
+    core_session_name, existing_core_connector, existing_session_connector, herdr_session_label,
+    known_sessions, note_stopped_by_person, release_secondary, server_connector,
 };
 
+use super::UnclaimedCoreTerminal;
 use crate::layout::PaneId;
 
 /// `[experimental] runtime = "core"` (design D1), set at startup and on reload.
@@ -222,46 +223,63 @@ pub(crate) fn core_spawn_from(
     })
 }
 
-/// A live core terminal labelled for this herdr session that no pane shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnclaimedTerminal {
-    pub address: String,
-    /// The pane it was started for (`herdr.pane_id`), when labelled.
-    pub pane_id: Option<String>,
-}
-
-/// Live terminals labelled `herdr.session=<ours>` whose address is not in
-/// `claimed` (D10 "Orphans"). Never starts a core: with none running there
-/// are none, and an unreachable core answers an empty list.
-pub(crate) fn unclaimed_terminals(claimed: &[String]) -> Vec<UnclaimedTerminal> {
+/// Live terminals labelled `herdr.session=<label>` that no pane claims, in
+/// every core session herdr knows (D10 "Orphans", core-phase3 D5 and D6).
+/// Claims are `(session, address)`: addresses are per core, so `t7` can
+/// live in two. Never starts a core: one that does not answer has none to
+/// list. A secondary that no pane claims and that holds none is released.
+pub(crate) fn unclaimed_terminals(claimed: &[(String, String)]) -> Vec<UnclaimedCoreTerminal> {
     // A server that neither prefers core nor attached to a core pane does not
     // use core: it does not go looking in one. (A saved core pane that failed
     // to reattach under `runtime = "pty"` is logged at warn by the restore.)
     if !preferred() && claimed.is_empty() {
         return Vec::new();
     }
-    let client = match existing_core_connector()() {
+    let label = herdr_session_label();
+    let primary = core_session_name();
+    let mut unclaimed = Vec::new();
+    for session in known_sessions(claimed.iter().map(|(session, _)| session.as_str())) {
+        let claimed_here: Vec<&str> = claimed
+            .iter()
+            .filter(|(claim_session, _)| *claim_session == session)
+            .map(|(_, address)| address.as_str())
+            .collect();
+        let found = unclaimed_in_session(&session, &label, &claimed_here);
+        if session != primary && claimed_here.is_empty() && found.is_empty() {
+            release_secondary(&session);
+        }
+        unclaimed.extend(found);
+    }
+    unclaimed
+}
+
+fn unclaimed_in_session(
+    session: &str,
+    label: &str,
+    claimed: &[&str],
+) -> Vec<UnclaimedCoreTerminal> {
+    let client = match existing_session_connector(session)() {
         Ok(client) => client,
         Err(err) => {
-            tracing::debug!(err = %err, "no herdr-core to look for unclaimed terminals in");
+            tracing::debug!(%session, err = %err, "no herdr-core to look for unclaimed terminals in");
             return Vec::new();
         }
     };
     let listed = match client.call(
         "terminal.list",
-        serde_json::json!({"labels": {"herdr.session": core_session_name()}}),
+        serde_json::json!({"labels": {"herdr.session": label}}),
         std::time::Duration::from_secs(5),
     ) {
         Ok(listed) => listed,
         Err(err) => {
-            warn!(err = %err, "could not list herdr-core terminals to find unclaimed ones");
+            warn!(%session, err = %err, "could not list herdr-core terminals to find unclaimed ones");
             return Vec::new();
         }
     };
-    unclaimed_in(&listed, claimed)
+    unclaimed_in(session, &listed, claimed)
 }
 
-fn unclaimed_in(listed: &Value, claimed: &[String]) -> Vec<UnclaimedTerminal> {
+fn unclaimed_in(session: &str, listed: &Value, claimed: &[&str]) -> Vec<UnclaimedCoreTerminal> {
     listed["terminals"]
         .as_array()
         .into_iter()
@@ -269,7 +287,8 @@ fn unclaimed_in(listed: &Value, claimed: &[String]) -> Vec<UnclaimedTerminal> {
         .filter(|terminal| terminal["state"] == "live")
         .filter_map(|terminal| {
             let address = terminal["address"].as_str()?;
-            (!claimed.iter().any(|claimed| claimed == address)).then(|| UnclaimedTerminal {
+            (!claimed.contains(&address)).then(|| UnclaimedCoreTerminal {
+                session: session.to_string(),
                 address: address.to_string(),
                 pane_id: terminal["labels"]["herdr.pane_id"]
                     .as_str()
@@ -283,7 +302,7 @@ fn unclaimed_in(listed: &Value, claimed: &[String]) -> Vec<UnclaimedTerminal> {
 /// D10): set on `terminal.run`, checked before a reattach.
 pub(crate) fn pane_labels(public_pane_id: Option<&str>) -> Map<String, Value> {
     let mut labels = Map::new();
-    labels.insert("herdr.session".into(), Value::String(core_session_name()));
+    labels.insert("herdr.session".into(), Value::String(herdr_session_label()));
     if let Some(public) = public_pane_id {
         labels.insert("herdr.pane_id".into(), Value::String(public.to_string()));
     }
@@ -516,19 +535,21 @@ mod tests {
             {"address": "t4", "state": "live", "labels": {}},
         ]});
         assert_eq!(
-            unclaimed_in(&listed, &["t1".to_string()]),
+            unclaimed_in("herdr", &listed, &["t1"]),
             vec![
-                UnclaimedTerminal {
+                UnclaimedCoreTerminal {
+                    session: "herdr".into(),
                     address: "t2".into(),
                     pane_id: Some("w1-p2".into())
                 },
-                UnclaimedTerminal {
+                UnclaimedCoreTerminal {
+                    session: "herdr".into(),
                     address: "t4".into(),
                     pane_id: None
                 },
             ]
         );
-        assert!(unclaimed_in(&serde_json::json!({}), &[]).is_empty());
+        assert!(unclaimed_in("herdr", &serde_json::json!({}), &[]).is_empty());
     }
 
     // The orphan scan against a core: the live terminals labelled for this
@@ -541,7 +562,7 @@ mod tests {
         set_preferred(true);
         let ours = |address: &str, pane: &str| {
             serde_json::json!({"address": address, "pid": 7, "state": "live",
-                "labels": {"herdr.session": core_session_name(), "herdr.pane_id": pane}})
+                "labels": {"herdr.session": herdr_session_label(), "herdr.pane_id": pane}})
         };
         core.add_terminal(ours("t1", "w1-p1"));
         core.add_terminal(ours("t2", "w1-p2"));
@@ -550,8 +571,9 @@ mod tests {
         );
 
         assert_eq!(
-            unclaimed_terminals(&["t1".to_string()]),
-            vec![UnclaimedTerminal {
+            unclaimed_terminals(&[(core_session_name(), "t1".to_string())]),
+            vec![UnclaimedCoreTerminal {
+                session: core_session_name(),
                 address: "t2".into(),
                 pane_id: Some("w1-p2".into())
             }]
@@ -564,6 +586,74 @@ mod tests {
             "{:?}",
             core.methods()
         );
+    }
+
+    fn kill_free(core: &fake::FakeCore) -> bool {
+        !core
+            .methods()
+            .iter()
+            .any(|method| method == "terminal.kill")
+    }
+
+    // V6 (core-phase3 D5, D6): two core sessions, `t7` in both. Each `t7` is
+    // claimed only by the pane linked to its own session; an unlabelled
+    // terminal in `default` is never listed or killed; orphans come back
+    // with their session; a secondary with no claim and no orphan is
+    // released.
+    #[test]
+    fn claims_are_per_core_session_and_orphans_name_their_session() {
+        let dir = std::env::temp_dir().join(format!("hcv6-{}", std::process::id()));
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        let primary = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &primary.socket);
+        set_preferred(true);
+        let ours = |address: &str, pane: &str| {
+            serde_json::json!({"address": address, "pid": 7, "state": "live",
+                "labels": {"herdr.session": herdr_session_label(), "herdr.pane_id": pane}})
+        };
+        let herdr = fake::FakeCore::start_in(dir.join("herdr-core"), "herdr.sock", |_| {});
+        herdr.add_terminal(ours("t7", "w1-p1"));
+        herdr.add_terminal(ours("t8", "w1-p8"));
+        let default = fake::FakeCore::start_in(dir.join("herdr-core"), "default.sock", |_| {});
+        default.add_terminal(ours("t7", "w1-p2"));
+        default.add_terminal(ours("t5", "w1-p5"));
+        default.add_terminal(
+            serde_json::json!({"address": "t9", "state": "live", "labels": {"app": "phone"}}),
+        );
+        let empty = fake::FakeCore::start_in(dir.join("herdr-core"), "herdr-x.sock", |_| {});
+        existing_session_connector("herdr-x")().expect("herdr-x answers");
+
+        let claim = |session: &str, address: &str| (session.to_string(), address.to_string());
+        let found = unclaimed_terminals(&[claim("herdr", "t7"), claim("default", "t5")]);
+        let orphan = |session: &str, address: &str, pane: &str| UnclaimedCoreTerminal {
+            session: session.into(),
+            address: address.into(),
+            pane_id: Some(pane.into()),
+        };
+        assert_eq!(
+            found,
+            [
+                orphan("herdr", "t8", "w1-p8"),
+                orphan("default", "t7", "w1-p2")
+            ],
+            "herdr's t7 does not claim default's"
+        );
+        assert_eq!(
+            unclaimed_terminals(&[
+                claim("herdr", "t7"),
+                claim("herdr", "t8"),
+                claim("default", "t7"),
+                claim("default", "t5"),
+            ]),
+            []
+        );
+        assert!(kill_free(&herdr) && kill_free(&default) && kill_free(&empty));
+        assert_eq!(
+            known_sessions(std::iter::empty()),
+            [core_session_name(), "default".into(), "herdr".into()],
+            "herdr-x had nothing and was released"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn the_sweep_guard_refuses_a_session_shared_with_core() {

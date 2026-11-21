@@ -50,15 +50,25 @@ pub struct CoreTerminalLink {
     pub program: Option<crate::platform::ProgramIdentity>,
 }
 
-/// Live herdr-core terminals labelled for this session that no pane claimed
-/// (D10 "Orphans"): `(address, pane id label)`. Empty without a core.
-pub(crate) fn unclaimed_core_terminals(claimed: &[String]) -> Vec<(String, Option<String>)> {
+/// A live herdr-core terminal labelled for this herdr session that no pane
+/// shows (D10 "Orphans").
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))] // only the Unix-only core backend finds one
+pub(crate) struct UnclaimedCoreTerminal {
+    /// The core session it lives in (core-phase3 D6).
+    pub session: String,
+    pub address: String,
+    /// The pane it was started for (`herdr.pane_id`), when labelled.
+    pub pane_id: Option<String>,
+}
+
+/// Live herdr-core terminals labelled for this session that no pane claimed,
+/// in every core session herdr knows. `claimed` holds `(session, address)`
+/// pairs (core-phase3 D5, D6). Empty without a core.
+pub(crate) fn unclaimed_core_terminals(claimed: &[(String, String)]) -> Vec<UnclaimedCoreTerminal> {
     #[cfg(unix)]
     {
         core_backend::unclaimed_terminals(claimed)
-            .into_iter()
-            .map(|terminal| (terminal.address, terminal.pane_id))
-            .collect()
     }
     #[cfg(not(unix))]
     {
@@ -88,16 +98,23 @@ pub(crate) fn core_call_for_test(
     core_backend::spaces_doc::call_for_test(method, params).map_err(|err| err.to_string())
 }
 
-/// The herdr-core session this herdr session's panes run in (D2).
-pub(crate) fn core_session_name() -> String {
+/// The `herdr.session` label of this herdr session's core terminals
+/// (core-phase3 D5).
+pub(crate) fn herdr_session_label() -> String {
     #[cfg(unix)]
     {
-        core_backend::core_session_name()
+        core_backend::herdr_session_label()
     }
     #[cfg(not(unix))]
     {
         String::new()
     }
+}
+
+/// The herdr-core session this herdr session's new panes run in (D2).
+#[cfg(all(test, unix))]
+pub(crate) fn core_session_name() -> String {
+    core_backend::core_session_name()
 }
 
 /// What restoring a pane's saved core terminal found, when it did not attach

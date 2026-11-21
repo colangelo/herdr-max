@@ -3924,7 +3924,7 @@ mod core_restore_tests {
 
     fn labelled(address: &str, pane: &str) -> serde_json::Value {
         serde_json::json!({"address": address, "pid": 4242, "state": "live",
-            "labels": {"herdr.session": crate::pane::core_session_name(), "herdr.pane_id": pane}})
+            "labels": {"herdr.session": crate::pane::herdr_session_label(), "herdr.pane_id": pane}})
     }
 
     fn restore(link: &crate::pane::CoreTerminalLink, pane: &str) -> CoreRestore {

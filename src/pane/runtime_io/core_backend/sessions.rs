@@ -36,16 +36,23 @@ struct Primary {
     rule: primary::StartRule,
 }
 
-/// The core session for this herdr session (D2): `herdr` (`herdrdev` for a
-/// debug build), and `-<name>` for a named session, so a throwaway or test
-/// herdr never shares a core with ac's sessions or touches the default core.
-/// No release name can equal a debug one: release names never start with
-/// `herdrdev`.
-pub(crate) fn core_session_name() -> String {
+/// The `herdr.session` label that marks a core terminal as this herdr
+/// session's pane (D5): `herdr` (`herdrdev` for a debug build), and
+/// `-<name>` for a named session, so a throwaway or test herdr never claims
+/// ac's terminals. No release name can equal a debug one: release names
+/// never start with `herdrdev`.
+pub(crate) fn herdr_session_label() -> String {
     session_name_for(
         crate::session::active_name().as_deref(),
         cfg!(debug_assertions),
     )
+}
+
+/// The primary core session, where new panes go (D5, core-backend D2). It is
+/// still the label's name: placement moves only with core-phase3 PR C
+/// (D14), after a build that reads both sessions has shipped.
+pub(crate) fn core_session_name() -> String {
+    herdr_session_label()
 }
 
 fn session_name_for(herdr_session: Option<&str>, debug_build: bool) -> String {
@@ -94,6 +101,12 @@ pub(crate) fn existing_session_connector(session: &str) -> Connector {
         *slot = Some(client.clone());
         Ok(client)
     })
+}
+
+/// Drops the registry's connection to the secondary `session`; a pane that
+/// still holds it keeps it.
+pub(crate) fn release_secondary(session: &str) {
+    lock(&SESSIONS.secondaries).remove(session);
 }
 
 /// The core sessions herdr looks in, none of which this starts: the primary
@@ -226,8 +239,8 @@ mod tests {
     }
 
     // D6: one connection per secondary session, shared by every connector
-    // to it, made again once it closes; `HC_SOCKET` does not reach a
-    // secondary (V42).
+    // to it, made again once it closes; released, a session is no longer
+    // known; `HC_SOCKET` does not reach a secondary (V42).
     #[test]
     fn each_secondary_session_has_one_connection_of_its_own() {
         let dir = std::env::temp_dir().join(format!("hcs2-{}", std::process::id()));
@@ -258,6 +271,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        release_secondary("herdr");
+        release_secondary("default");
+        assert_eq!(known_sessions(std::iter::empty()), [core_session_name()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
