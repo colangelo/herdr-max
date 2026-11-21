@@ -139,7 +139,7 @@ pub(crate) fn find_pane_core_terminals(
     if public_pane_id.is_none() {
         return Vec::new();
     }
-    let sessions: Vec<_> = core_backend::known_sessions(link_session)
+    let sessions: Vec<_> = core_backend::known_sessions([link_session])
         .into_iter()
         .map(|session| {
             let connector = core_backend::existing_session_connector(&session);

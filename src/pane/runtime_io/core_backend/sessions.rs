@@ -1,6 +1,7 @@
 //! The herdr-core sessions herdr reaches, and its connections to them
 //! (openspec/changes/core-phase3, D5 and D6).
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use tracing::warn;
@@ -8,13 +9,28 @@ use tracing::warn;
 use super::client::{self, CoreClient};
 use super::{gave_up, lock, note_core_loss, primary, Connector};
 
-/// The server's one connection to its primary core (D3), replaced when it
-/// closes, and when the primary may be started again (core-phase3 D3).
-static PRIMARY: Mutex<Primary> = Mutex::new(Primary {
-    client: None,
-    rule: primary::StartRule::new(),
-});
+/// One connection per core session (D6). The primary, where new panes go,
+/// is the only session herdr ever starts (D3). A secondary is a session a
+/// pane's link names, or `herdr` and `default` for the release default herdr
+/// session: reached at its own socket, never started, and dropped once no
+/// pane uses it and its orphan scan finds nothing.
+struct CoreSessions {
+    primary: Mutex<Primary>,
+    /// A slot per secondary, each with its own lock, so a core that hangs on
+    /// hello holds up only its own session.
+    secondaries: Mutex<BTreeMap<String, Arc<Mutex<Option<CoreClient>>>>>,
+}
 
+static SESSIONS: CoreSessions = CoreSessions {
+    primary: Mutex::new(Primary {
+        client: None,
+        rule: primary::StartRule::new(),
+    }),
+    secondaries: Mutex::new(BTreeMap::new()),
+};
+
+/// The primary's connection, replaced when it closes, and when the primary
+/// may be started again (D3).
 struct Primary {
     client: Option<CoreClient>,
     rule: primary::StartRule,
@@ -56,54 +72,73 @@ pub(crate) fn existing_core_connector() -> Connector {
     connector(false)
 }
 
-/// A connector to `session` that never starts a core: the primary's shared
-/// connection, or for any other session a connection of its own at that
-/// session's own socket (core-phase3 D1b, D6).
+/// A connector to `session` that never starts a core: the primary's
+/// connection, or the session's own secondary connection, shared by every
+/// pane in that session (D6).
 pub(crate) fn existing_session_connector(session: &str) -> Connector {
     if session == core_session_name() {
         return existing_core_connector();
     }
     let session = session.to_string();
-    Arc::new(move || client::connect_secondary(&session))
+    Arc::new(move || {
+        let slot = Arc::clone(
+            lock(&SESSIONS.secondaries)
+                .entry(session.clone())
+                .or_default(),
+        );
+        let mut slot = lock(&slot);
+        if let Some(client) = slot.as_ref().filter(|client| !client.is_closed()) {
+            return Ok(client.clone());
+        }
+        let client = client::connect_secondary(&session)?;
+        *slot = Some(client.clone());
+        Ok(client)
+    })
 }
 
-/// The core sessions a restore looks in for a pane's terminal before it
-/// starts the pane fresh, none of which it starts (core-phase3 D1b): the
-/// primary, the link's own, `herdr`, and `default` for the release default
-/// herdr session only.
-pub(crate) fn known_sessions(link_session: &str) -> Vec<String> {
+/// The core sessions herdr looks in, none of which this starts: the primary
+/// first, then each of `linked` (sessions that panes' links name) and every
+/// secondary herdr is connected to, then `herdr` and `default` for the
+/// release default herdr session only (D1b's known-session search, D6).
+pub(crate) fn known_sessions<'a>(linked: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut linked: Vec<String> = linked.into_iter().map(str::to_string).collect();
+    linked.extend(lock(&SESSIONS.secondaries).keys().cloned());
     known_sessions_for(
         &core_session_name(),
-        link_session,
+        linked.iter().map(String::as_str),
         crate::session::active_name().is_none() && !cfg!(debug_assertions),
     )
 }
 
-fn known_sessions_for(primary: &str, link_session: &str, release_default: bool) -> Vec<String> {
+fn known_sessions_for<'a>(
+    primary: &str,
+    linked: impl IntoIterator<Item = &'a str>,
+    release_default: bool,
+) -> Vec<String> {
     let mut sessions = vec![primary.to_string()];
-    let mut add = |session: &str| {
+    let defaults = if release_default {
+        ["herdr", "default"].as_slice()
+    } else {
+        &[]
+    };
+    for session in linked.into_iter().chain(defaults.iter().copied()) {
         if !sessions.iter().any(|known| known == session) {
             sessions.push(session.to_string());
         }
-    };
-    add(link_session);
-    if release_default {
-        add("herdr");
-        add("default");
     }
     sessions
 }
 
 fn connector(first_start: bool) -> Connector {
     Arc::new(move || {
-        let mut primary = lock(&PRIMARY);
+        let mut primary = lock(&SESSIONS.primary);
         if let Some(client) = primary.client.as_ref() {
             if !client.is_closed() {
                 return Ok(client.clone());
             }
         }
         let session = core_session_name();
-        let socket = client::socket_path(&session);
+        let socket = client::primary_socket_path(&session);
         // No events subscription: core's status comes only from bytes a
         // program prints, which any printed file can forge, so herdr does not
         // use it (security review M3; design D9). Detection and hooks decide.
@@ -143,7 +178,7 @@ impl Primary {
 /// D3b). Only the primary is ever started, so only its stop is recorded.
 pub(crate) fn note_stopped_by_person(session: &str) {
     if session == core_session_name() {
-        lock(&PRIMARY).rule.stopped_by_person();
+        lock(&SESSIONS.primary).rule.stopped_by_person();
     }
 }
 
@@ -166,6 +201,64 @@ mod tests {
             session_name_for(Some("dev"), false),
             session_name_for(None, true)
         );
+    }
+
+    // D1b, D6: `herdr` and `default` are known only to the release default
+    // herdr session; the primary comes first and no session twice.
+    #[test]
+    fn the_known_sessions_are_the_primary_the_linked_and_the_defaults() {
+        assert_eq!(
+            known_sessions_for("herdr", ["herdr-old", "herdr", "herdr-old"], true),
+            ["herdr", "herdr-old", "default"]
+        );
+        assert_eq!(
+            known_sessions_for("herdr-trial", ["herdr-old"], false),
+            ["herdr-trial", "herdr-old"]
+        );
+        assert_eq!(known_sessions_for("herdrdev", [], false), ["herdrdev"]);
+    }
+
+    fn connections(core: &fake::FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "server.status")
+            .count()
+    }
+
+    // D6: one connection per secondary session, shared by every connector
+    // to it, made again once it closes; `HC_SOCKET` does not reach a
+    // secondary (V42).
+    #[test]
+    fn each_secondary_session_has_one_connection_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("hcs2-{}", std::process::id()));
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        let primary = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &primary.socket);
+        let old = fake::FakeCore::start_in(dir.join("herdr-core"), "herdr.sock", |_| {});
+        let other = fake::FakeCore::start_in(dir.join("herdr-core"), "default.sock", |_| {});
+
+        let first = existing_session_connector("herdr");
+        let second = existing_session_connector("herdr");
+        first().expect("herdr answers");
+        second().expect("herdr answers");
+        existing_session_connector("default")().expect("default answers");
+        assert_eq!(connections(&old), 1, "{:?}", old.methods());
+        assert_eq!(connections(&other), 1, "{:?}", other.methods());
+        assert_eq!(connections(&primary), 0, "{:?}", primary.methods());
+        assert_eq!(
+            known_sessions(std::iter::empty()),
+            [core_session_name(), "default".into(), "herdr".into()]
+        );
+
+        old.hang_up();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while connections(&old) < 2 {
+            assert!(std::time::Instant::now() < deadline, "no new connection");
+            let _ = second();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     static STARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -213,7 +306,7 @@ mod tests {
         std::env::set_var("HC_SOCKET", &socket);
         first.hang_up();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while lock(&PRIMARY)
+        while lock(&SESSIONS.primary)
             .client
             .as_ref()
             .is_some_and(|c| !c.is_closed())
@@ -260,7 +353,7 @@ mod tests {
         std::env::set_var("HC_SOCKET", &missing);
         first.hang_up();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while lock(&PRIMARY)
+        while lock(&SESSIONS.primary)
             .client
             .as_ref()
             .is_some_and(|c| !c.is_closed())

@@ -711,7 +711,9 @@ pub(crate) fn connect_secondary(session: &str) -> Result<CoreClient, CoreError> 
     connect_at(&secondary_socket_path(session)).map(|(client, _)| client)
 }
 
-fn secondary_socket_path(session: &str) -> PathBuf {
+/// A secondary session's socket, by core's own rules: `HC_SOCKET` names the
+/// primary's only (core-phase3 D6).
+pub(crate) fn secondary_socket_path(session: &str) -> PathBuf {
     socket_path_from(
         session,
         None,
@@ -741,9 +743,9 @@ fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
     }
 }
 
-/// The client socket for a core session, by core's endpoint rules
-/// (`docs/security.md` § State and endpoints).
-pub(crate) fn socket_path(session: &str) -> PathBuf {
+/// The primary session's client socket, by core's endpoint rules
+/// (`docs/security.md` § State and endpoints), where `HC_SOCKET` wins.
+pub(crate) fn primary_socket_path(session: &str) -> PathBuf {
     let hc_socket = std::env::var_os("HC_SOCKET").map(PathBuf::from);
     if let Some(path) = &hc_socket {
         static LOGGED: std::sync::Once = std::sync::Once::new();
@@ -837,6 +839,24 @@ mod tests {
             socket_path_from("herdr", None, None, Some("/st".into()), home, false),
             PathBuf::from("/st/herdr-core/herdr/herdr.sock")
         );
+    }
+
+    // V42 (core-phase3 D6): with `HC_SOCKET` set, the primary is reached
+    // there and every other session at its own socket.
+    #[test]
+    fn hc_socket_names_the_primarys_socket_only() {
+        std::env::set_var("HC_SOCKET", "/x/primary.sock");
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/rt");
+        assert_eq!(
+            primary_socket_path("herdr"),
+            PathBuf::from("/x/primary.sock")
+        );
+        for session in ["herdr", "default"] {
+            assert_eq!(
+                secondary_socket_path(session),
+                PathBuf::from(format!("/run/rt/herdr-core/{session}.sock"))
+            );
+        }
     }
 
     #[test]
