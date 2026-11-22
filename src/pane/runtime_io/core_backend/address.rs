@@ -8,9 +8,7 @@
 
 use serde_json::Value;
 
-/// A core machine's name, the first part of its terminals' addresses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MachineName(String);
+use crate::core_machine::MachineName;
 
 /// Where a terminal lives and what this core calls it there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +38,7 @@ impl CoreAddress {
                 terminal: (*terminal).to_string(),
             }),
             [machine, terminal] if part_ok(machine) && part_ok(terminal) => Ok(Self {
-                machine: Some(MachineName((*machine).to_string())),
+                machine: Some(MachineName::parse(machine).map_err(|err| refuse(&err.0))?),
                 terminal: (*terminal).to_string(),
             }),
             [_, _, _, ..] => Err(refuse("has more than one machine part")),
@@ -81,14 +79,14 @@ mod tests {
         assert_eq!(local.terminal, "t7");
         let far = CoreAddress::parse("loop/t7").expect("machine");
         assert!(!far.is_local());
-        assert_eq!(far.machine, Some(MachineName("loop".to_string())));
+        assert_eq!(far.machine, Some(MachineName::parse("loop").expect("name")));
         assert_eq!(far.terminal, "t7");
     }
 
     #[test]
     fn malformed_addresses_are_refused() {
         for raw in [
-            "", "m/", "/t7", "/", "m/n/t7", "m//t7", "m/n/", "a b", "m/t 7",
+            "", "m/", "/t7", "/", "m/n/t7", "m//t7", "m/n/", "a b", "m/t 7", "-m/t7", "m;x/t7",
         ] {
             assert!(CoreAddress::parse(raw).is_err(), "{raw:?} was accepted");
         }

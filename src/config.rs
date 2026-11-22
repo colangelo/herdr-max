@@ -105,7 +105,9 @@ pub const DEFAULT_HEADLESS_ROWS: u16 = 40;
 #[cfg(test)]
 pub(crate) use self::io::is_unit_test_scratch;
 
-#[cfg(test)]
+/// `herdr`, or `herdr-dev` for a debug build. Unix builds name core
+/// machines' state folders with it (core-phase5).
+#[cfg(any(test, unix))]
 pub(crate) fn app_dir_name() -> &'static str {
     io::app_dir_name()
 }

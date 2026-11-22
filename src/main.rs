@@ -23,6 +23,8 @@ mod client;
 mod codex_app_server;
 mod config;
 mod copy_mode;
+#[cfg(unix)]
+mod core_machine;
 mod detect;
 mod events;
 use ghostty_vt as ghostty;
@@ -772,6 +774,12 @@ fn main() -> io::Result<()> {
     }
     if let Some(result) = platform::maybe_run_pane_helper(&raw_args) {
         return result;
+    }
+    // core-phase5 D2: core runs this for every dial. It forks and execs ssh,
+    // so it runs first, while the process has a single thread.
+    #[cfg(unix)]
+    if raw_args.get(1).map(String::as_str) == Some("core-link") {
+        std::process::exit(core_machine::link::run(&raw_args[2..]));
     }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
