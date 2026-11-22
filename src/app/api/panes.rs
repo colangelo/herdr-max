@@ -171,7 +171,11 @@ impl App {
             },
             None => None,
         };
+        #[cfg(unix)]
+        let unread = self.unread_panes(scope);
         let changed = self.state.mark_panes_seen(scope);
+        #[cfg(unix)]
+        self.core_labels_marked_seen(&unread);
         encode_success(
             id,
             ResponseResult::PaneMarkSeen {

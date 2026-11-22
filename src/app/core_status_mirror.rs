@@ -49,10 +49,14 @@ impl App {
     /// in herdr turns `idle` in core without an agent state change
     /// (openspec/changes/core-phase4, D6). Repeats of the record a pane last
     /// wrote cost one comparison.
-    pub(crate) fn sync_core_view(&mut self) {
-        if std::mem::take(&mut self.state.core_view_dirty) && self.core_status_mirror {
+    /// Returns whether the view was dirty, for the label sync's look
+    /// (core-phase4 D7).
+    pub(crate) fn sync_core_view(&mut self) -> bool {
+        let dirty = std::mem::take(&mut self.state.core_view_dirty);
+        if dirty && self.core_status_mirror {
             self.sync_core_status_mirror();
         }
+        dirty
     }
 
     /// After a pane's agent state changed.

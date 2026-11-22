@@ -1918,6 +1918,11 @@ pub struct ExperimentalConfig {
     /// spaces with the core panes as terminals. herdr's layout is the source:
     /// an edit made in an app is overwritten. Unix only. Default: false.
     pub core_spaces_doc: bool,
+    /// Share which agents a person has seen with the Herdr apps through the
+    /// `herdr.seen` label on herdr-core terminals: herdr writes it when a
+    /// focused client shows a core pane, and on a mark read. herdr still takes
+    /// no status from core. Unix only. Default: false.
+    pub core_label_sync: bool,
     /// Panes that always start on the PTY, even with `runtime = "core"`: glob
     /// patterns (`*` any run, `?` one character, case-sensitive) matched
     /// against a pane's stable name, the `--name` its agent was launched with,
@@ -3432,6 +3437,13 @@ core_spaces_doc = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.core_spaces_doc);
+    }
+
+    #[test]
+    fn core_label_sync_is_opt_in() {
+        assert!(!Config::default().experimental.core_label_sync);
+        let config: Config = toml::from_str("[experimental]\ncore_label_sync = true\n").unwrap();
+        assert!(config.experimental.core_label_sync);
     }
 
     #[test]

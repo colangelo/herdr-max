@@ -240,6 +240,10 @@ pub enum AppEvent {
     /// core starts, panes resume on the PTY (core-phase3 D3a).
     #[cfg(unix)]
     CoreGaveUp,
+    /// A fact from the core label subscription (openspec/changes/core-phase4,
+    /// D11).
+    #[cfg(unix)]
+    CoreLabels(crate::pane::CoreFact),
     /// The core of `session` herdr connected to was started over SSH
     /// (core-phase3 D7). Sent once per core process.
     #[cfg(unix)]
