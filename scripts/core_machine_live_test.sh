@@ -9,6 +9,11 @@
 # far side's line against the far scratch core; real OpenSSH dials only a
 # loopback server started here (paramiko, through uv) on 127.0.0.1.
 #
+# PR B (leases, D3, D3a, D2 steps 7 and 9): V1 and M2 in the core-link part;
+# then V2, V7, V3 and V38 (beside V3, on a second far core), a TUI client's
+# lease and wake (B.2, B.5) and V33's wake part (core_lease_live_test.sh).
+# V3 and V38 wait 5 and 10 min (V3_SECS, V38_SECS).
+#
 # V26 (PR A0, F1): a far terminal that carries the same labels as one of our
 # panes, and a pid that is a live process here, is never adopted, listed as an
 # orphan, killed or signalled by the local server, across a live handoff, a
@@ -16,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HERDR_BIN="${HERDR_BIN:-$ROOT/target/debug/herdr}"
+HERDR_BIN="${HERDR_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/herdr}"
 BASE="$(mktemp -d /tmp/hcm.XXXXXX)"
 CONFIG_HOME="$BASE/c"
 RUNTIME_DIR="$BASE/r"
@@ -190,4 +195,5 @@ wait_until "the local terminal ended" gone_local
 alive "$FAR_PID" || fail "closing pane A ended the far program (pid $FAR_PID)"
 echo "ok: closing pane A ended $LOCAL only; the far program (pid $FAR_PID) still runs"
 source "$ROOT/scripts/core_link_live_test.sh"
+source "$ROOT/scripts/core_lease_live_test.sh"
 echo "core machine live test: all checks passed"

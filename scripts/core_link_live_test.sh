@@ -4,7 +4,9 @@
 # `herdr core-link` against the far scratch core: a fake `ssh` first on PATH
 # for V8, V27, V28, V31 (core-link part), V33 (add and login) and V35, and
 # real OpenSSH to a loopback-only server for V34 and V36. Nothing dials
-# another host. Leases are PR B: until then every machine counts as leased.
+# another host. With PR B's leases a dial needs one in force: add and login
+# write theirs, and the dials made by hand here write the test's own
+# (`cli-<pid>`) first, as a person's act. V1 is the dial without one.
 #
 # core-link keeps its state under the passwd home, never HOME (F6), so the
 # machines here get names unique to this run and their folders are removed
@@ -125,6 +127,17 @@ wait_for() {
   fail "timed out after ${limit}s waiting for: $what"
 }
 now() { python3 -I -c 'import time; print(time.time())'; }
+# Seconds from now, as a lease's expiry.
+plus() { python3 -I -c 'import sys,time; print(f"{time.time() + float(sys.argv[1]):.3f}")' "$1"; }
+# write_lease <machine> <holder> <expires_at> <input_at>: the lease file
+# interface (D3), written then renamed as herdr writes it.
+write_lease() {
+  local leases="$LINK_ROOT/$1/leases"
+  printf '%s %s\n' "$3" "$4" > "$leases/$2.new" && mv "$leases/$2.new" "$leases/$2"
+}
+# Waits until the link log of $1 has more than $3 lines matching $2.
+log_count() { grep -c " $2" "$(link_log "$1")" 2>/dev/null || true; }
+more_in_log() { [[ "$(log_count "$1" "$2")" -gt "$3" ]]; }
 since() { python3 -I -c 'import sys,time; print(f"{time.time() - float(sys.argv[1]):.2f}")' "$1"; }
 gate_is() { [[ "$(gate_class "$1")" == "$2" ]]; }
 state_is() { [[ "$(machine_state "$1")" == "$2" ]]; }
@@ -230,12 +243,28 @@ echo "ok: V31 ssh env is allowlisted names only, with the recorded SSH_AUTH_SOCK
 mkdir -p "$LINK_ROOT/$D/leases" && chmod 700 "$LINK_ROOT/$D"
 printf '{"target":"direct-target","session":"%s","ssh":"%s","ssh_auth_sock":"%s"}\n' \
   "$FAR_SESSION" "$BASE/bin/ssh" "$AGENT_SOCK" > "$LINK_ROOT/$D/target.json"
-link() {
+link_bare() {
   env -i HOME="$BASE/elsewhere" XDG_STATE_HOME="$BASE/elsewhere/state" SSH_AUTH_SOCK=/nonexistent/other \
     PATH="/usr/bin:/bin" HERDR_PANE_ID=w9:p9 HC_SESSION=elsewhere LANG=C \
     "$HERDR_BIN" core-link "$D" "$1"
 }
+# A dial by hand is a person's act: a fresh lease first.
+link() {
+  write_lease "$D" "cli-$$" "$(plus 120)" "$(now)"
+  link_bare "$1"
+}
 ok_line="sh -c 'exit 0'"
+
+# --- V1: no lease, no dial
+before="$(ssh_starts direct-target)"
+code=0; link_bare "$ok_line" 2>/dev/null || code=$?
+[[ "$code" == 75 && "$(ssh_starts direct-target)" == "$before" ]] || fail "a dial with no lease was not refused without ssh ($code)"
+grep -q "REFUSE Dormant" "$(link_log "$D")" || fail "the refusal without a lease was not Dormant"
+write_lease "$D" "cli-$$" "$(plus -1)" "$(now)"
+code=0; link_bare "$ok_line" 2>/dev/null || code=$?
+[[ "$code" == 75 && "$(ssh_starts direct-target)" == "$before" ]] || fail "a dial with an expired lease was not refused ($code)"
+[[ "$(log_count "$D" "REFUSE Dormant")" == 2 ]] || fail "the expired lease was not refused as Dormant"
+echo "ok: V1 no lease, or an expired one, exits 75 as Dormant and starts no ssh"
 before="$(ssh_starts direct-target)"
 link "$ok_line" 2>"$BASE/link.err" || fail "a dial through core-link failed: $(cat "$BASE/link.err")"
 [[ "$(ssh_starts direct-target)" == $((before + 1)) ]] || fail "core-link did not run ssh once"
@@ -404,6 +433,13 @@ Host loopback
   IdentityAgent none
   UserKnownHostsFile $BASE/sshd/known_hosts
   GlobalKnownHostsFile /dev/null
+  # M2: what a user config may ask for, and the link must not do.
+  ForwardAgent yes
+  ForwardX11 yes
+  SendEnv LANG LC_* FOO
+  SetEnv FOO=1
+  PermitLocalCommand yes
+  LocalCommand touch $BASE/sshd/local_command_ran
 CFG
 cat > "$BASE/sshd/server.py" <<SERVER
 import os, socket, subprocess, sys, threading, time
@@ -419,6 +455,14 @@ class Server(paramiko.ServerInterface):
         if ok: LOG.write(f"{time.time():.3f} AUTH ok\n")
         return paramiko.AUTH_SUCCESSFUL if ok else paramiko.AUTH_FAILED
     def get_allowed_auths(self, username): return "publickey"
+    def check_channel_forward_agent_request(self, channel):
+        LOG.write(f"{time.time():.3f} FORWARD agent\n"); return False
+    def check_channel_x11_request(self, channel, *args):
+        LOG.write(f"{time.time():.3f} FORWARD x11\n"); return False
+    def check_port_forward_request(self, address, port):
+        LOG.write(f"{time.time():.3f} FORWARD port\n"); return False
+    def check_channel_env_request(self, channel, name, value):
+        LOG.write(f"{time.time():.3f} ENV {name.decode() if isinstance(name, bytes) else name}\n"); return False
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     def check_channel_exec_request(self, channel, command):
@@ -459,6 +503,8 @@ herdr_tty SSH_AUTH_SOCK= PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$HERDR_BIN" --ses
   machine add --core loopback --name "$R" --remote-session "$FAR_SESSION" --ssh-config "$BASE/sshd/config" \
   >"$BASE/add.out" 2>&1 || fail "machine add --core over OpenSSH failed: $(tail -n 5 "$BASE/add.out")"
 wait_for "$R connected" 20 state_is "$R" connected
+# A link that drops before it settles spends the retry (D2 step 9).
+wait_for "$R's link settles" 15 more_in_log "$R" "SETTLED" 0
 ssh_pid="$(last_pid "$R" START)"
 [[ "$(ps -o comm= -p "$ssh_pid")" == */ssh || "$(ps -o comm= -p "$ssh_pid")" == ssh ]] || fail "the via pid $ssh_pid is not ssh"
 ps -o command= -p "$ssh_pid" | grep -q "ControlMaster=no -o ControlPath=none -o ServerAliveInterval=5 -o ServerAliveCountMax=2" \
@@ -471,6 +517,13 @@ wait_for "core redials $R" 20 more_auths "$before"
 wait_for "$R connected again" 20 state_is "$R" connected
 ours_alive "$ssh_pid" && fail "the ended ssh $ssh_pid is alive"
 echo "ok: V34 no control master or socket; after the link ended the redial authenticated again ($before -> $(auths))"
+# M2: the config forwards the agent and X11, sends LANG, LC_* and FOO, sets
+# FOO and runs a local command; the link asked for none of it.
+if grep -q " FORWARD " "$BASE/sshd/auth.log"; then fail "the link asked to forward: $(grep ' FORWARD ' "$BASE/sshd/auth.log" | head -n 3)"; fi
+env_names="$(awk '$2 == "ENV" {print $3}' "$BASE/sshd/auth.log" | sort -u | tr '\n' ' ')"
+[[ "$env_names" == "HERDR_LINK " ]] || fail "the link sent variables other than the pinned HERDR_LINK: $env_names"
+[[ ! -e "$BASE/sshd/local_command_ran" ]] || fail "the config's LocalCommand ran"
+echo "ok: M2 a config with ForwardAgent, ForwardX11, SendEnv, SetEnv and LocalCommand: no forward asked, no variable but HERDR_LINK sent, no local command"
 
 kill -STOP "$SSHD_PID"
 froze="$(now)"

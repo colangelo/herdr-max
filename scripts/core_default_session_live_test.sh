@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HERDR_BIN="${HERDR_BIN:-$ROOT/target/release/herdr}"
+HERDR_BIN="${HERDR_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/release/herdr}"
 BASE="$(mktemp -d /tmp/hcd.XXXXXX)"
 CONFIG_HOME="$BASE/c"
 RUNTIME_DIR="$BASE/r"
