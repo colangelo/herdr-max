@@ -369,14 +369,11 @@ impl HeadlessServer {
         // A restart's clients wait for the next server and attach to it, the way
         // they follow a live handoff; every app client since fork issue 94 does
         // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/227).
-        if matches!(reason, ShutdownReason::ApiRestart { .. }) {
+        let restart = matches!(reason, ShutdownReason::ApiRestart { .. });
+        if restart {
             self.client_shutdown_reason = crate::protocol::LIVE_HANDOFF_SHUTDOWN_REASON;
-            // The next server attaches to herdr-core panes' programs, so they
-            // outlive this one; every other stop ends them (core-backend D10).
-            for runtime in self.app.terminal_runtimes.values() {
-                runtime.set_keep_core_terminal(true);
-            }
         }
+        self.app.keep_core_programs_for_stop(restart);
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.
         let shutdown_msg = ServerMessage::ServerShutdown {

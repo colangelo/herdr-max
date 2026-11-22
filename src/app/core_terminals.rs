@@ -128,6 +128,22 @@ impl App {
         link.machine()
     }
 
+    /// Which herdr-core programs outlive this server's stop. A restart's
+    /// next server attaches to all of them (core-backend D10); every other
+    /// stop, a logout included, ends this Mac's and leaves those on a core
+    /// machine running, which only a person's close of the pane ends; the
+    /// saved link attaches them again (core-phase5 D5).
+    pub(crate) fn keep_core_programs_for_stop(&self, restart: bool) {
+        for runtime in self.terminal_runtimes.values() {
+            let on_machine = runtime
+                .core_terminal()
+                .is_some_and(|link| link.machine().is_some());
+            if restart || on_machine {
+                runtime.set_keep_core_terminal(true);
+            }
+        }
+    }
+
     /// A create request with `on` just ran: arms the machine poll, which
     /// otherwise arms only at start and from its own answers, so a pane
     /// started on a machine at runtime is watched too (core-phase5 D5).

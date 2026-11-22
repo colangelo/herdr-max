@@ -533,6 +533,22 @@ mod tests {
         }
     }
 
+    // D5: a stop of this server that is not a restart ends this Mac's core
+    // programs, never a program on a machine: only a person's close does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_stop_leaves_a_machine_pane_running_there() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _) = app_with_one_pane();
+        let split = split_on(&mut app, "loop");
+        assert_eq!(split["result"]["pane"]["machine"], "loop", "{split}");
+        app.keep_core_programs_for_stop(false);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
+    }
+
     // C5 (D5, P5): a poll said connected, but core has not linked the
     // machine yet when the pane asks: its `not_found` is not final, and the
     // pane keeps waiting.
