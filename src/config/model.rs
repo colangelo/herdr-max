@@ -1925,6 +1925,12 @@ pub struct ExperimentalConfig {
     /// mark unreads and pins, and writes its own pins. herdr still takes no
     /// status from core. Unix only. Default: false.
     pub core_label_sync: bool,
+    /// Publish herdr-max's extras (space pins, custom names, metadata tokens,
+    /// pane labels, agent names and open todo references) into herdr-core as
+    /// the `herdr-max` document, keyed by the ids of the `herdr-app`
+    /// document, for readers on other machines. herdr never reads it back.
+    /// Unix only. Default: false.
+    pub core_extras_doc: bool,
     /// Panes that always start on the PTY, even with `runtime = "core"`: glob
     /// patterns (`*` any run, `?` one character, case-sensitive) matched
     /// against a pane's stable name, the `--name` its agent was launched with,
@@ -3439,6 +3445,13 @@ core_spaces_doc = true
         let config: Config = toml::from_str(toml).unwrap();
 
         assert!(config.experimental.core_spaces_doc);
+    }
+
+    #[test]
+    fn core_extras_doc_is_opt_in() {
+        assert!(!Config::default().experimental.core_extras_doc);
+        let config: Config = toml::from_str("[experimental]\ncore_extras_doc = true\n").unwrap();
+        assert!(config.experimental.core_extras_doc);
     }
 
     #[test]

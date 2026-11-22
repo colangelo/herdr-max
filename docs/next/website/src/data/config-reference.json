@@ -1957,6 +1957,12 @@
           "description": "Publish herdr's workspaces, tabs and splits into herdr-core as the `herdr-app` document, so the Herdr apps such as Herdr Mobile show them as spaces, with each herdr-core pane as a terminal. PTY panes are left out. herdr's layout is the source: a change made to the spaces in an app is replaced at herdr's next layout change. Applies on reload: turning it on publishes the layout, turning it off removes the document. Unix only. Default: false."
         },
         {
+          "key": "experimental.core_extras_doc",
+          "type": "boolean",
+          "default": "false",
+          "description": "Publish what herdr keeps beyond the herdr-app document into herdr-core as the herdr-max document: space pins, custom space and tab names, workspace metadata tokens with their expiry, pane labels, agent names, and references to open todos (id and priority, not the text). It uses the same space, tab and pane ids as the herdr-app document, so a reader on another machine can join the two. herdr never reads it back: session.json stays the source. Applies on reload: turning it on publishes, turning it off removes the document. Unix only. Default: false."
+        },
+        {
           "key": "experimental.core_label_sync",
           "type": "boolean",
           "default": "false",

@@ -19,6 +19,7 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod core_extras_doc;
 #[cfg(unix)]
 mod core_label_sync;
 #[cfg(unix)]
@@ -228,6 +229,11 @@ pub struct App {
     core_spaces_deadline: Option<Instant>,
     /// Where herdr-max's spaces go: the core writer, a recorder in tests (D7).
     core_spaces_publish: fn(Vec<serde_json::Value>),
+    /// `[experimental] core_extras_doc` (openspec/changes/core-phase4, D4).
+    core_extras_doc: bool,
+    /// Where the `herdr-max` document goes: the core writer, a recorder in
+    /// tests.
+    core_extras_publish: fn(serde_json::Value),
     /// `[experimental] core_label_sync`: the label state while it is on
     /// (openspec/changes/core-phase4, D11).
     #[cfg(unix)]
@@ -924,7 +930,14 @@ impl App {
             persist_pane_history: config.experimental.pane_history,
             core_status_mirror: config.experimental.core_status_mirror,
             core_spaces_doc: config.experimental.core_spaces_doc,
-            core_spaces_deadline: config.experimental.core_spaces_doc.then(Instant::now),
+            core_spaces_deadline: (config.experimental.core_spaces_doc
+                || config.experimental.core_extras_doc)
+                .then(Instant::now),
+            core_extras_doc: config.experimental.core_extras_doc,
+            #[cfg(not(test))]
+            core_extras_publish: crate::pane::publish_core_extras,
+            #[cfg(test)]
+            core_extras_publish: |_| {},
             #[cfg(not(test))]
             core_spaces_publish: crate::pane::publish_core_spaces,
             #[cfg(test)]
@@ -1318,6 +1331,7 @@ impl App {
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
             self.set_core_status_mirror(config.experimental.core_status_mirror);
             self.set_core_spaces_doc(config.experimental.core_spaces_doc);
+            self.set_core_extras_doc(config.experimental.core_extras_doc);
             #[cfg(unix)]
             self.set_core_label_sync(config.experimental.core_label_sync);
             self.persist_pane_history = config.experimental.pane_history;
