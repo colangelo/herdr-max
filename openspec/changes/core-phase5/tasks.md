@@ -56,6 +56,8 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 - [ ] B.2 The client writes `client-<pid>` from `InputClock`, at most once a minute; V24
 - [ ] B.3 `core-link`'s watcher re-reads leases every 5 s and ends ssh; `herdr machine wake` (lease, then connect,
   reopens `far_core_down`); V2, V3, V7 (answer keys per R3)
+- [ ] B.3a Retry budget (D2 step 9): failures and drops recorded in `gate.json`; one retry on core's own
+  initiative, then `retry_spent` until a lease newer than the failure (input, wake, login, `--dial`); V38
 - [ ] B.4 The dialer (D3a): one thread per machine per process, `try_send` wake requests, `connect.lock`, 20 s
   timeout, `machine.list` polling when another process dials; V29
 - [ ] B.5 Wake: the first input that reaches a server for a machine's pane, or a view server's first client with a
