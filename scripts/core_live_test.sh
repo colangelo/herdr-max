@@ -660,8 +660,14 @@ set_v33_config() {
 cat > "$BASE/claude.c" <<STUB
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
+  /* As Claude did in fork issue 301: it outlives the hangup and a SIGTERM. */
+  if (getenv("STUB_STUBBORN")) {
+    signal(SIGHUP, SIG_IGN);
+    signal(SIGTERM, SIG_IGN);
+  }
   const char *path = getenv("STUB_ARGS");
   FILE *out = fopen(path ? path : "$BASE/h.args", "w");
   if (!out) return 1;
@@ -811,7 +817,8 @@ hc_scratch server stop >/dev/null 2>&1 || true
 #    `sleep 30` and a pane typed into just before are refused with their
 #    reasons; an idle agent stand-in moves and is resumed with its plan's
 #    arguments, and so does one behind the atuin stand-in, with two children
-#    (fork issue 295). The windows are shortened (debug build only): input 3 s,
+#    (fork issue 295), and one there that ignores SIGHUP and SIGTERM (fork
+#    issue 301). The windows are shortened (debug build only): input 3 s,
 #    agent idle 3 s, shell quiet 6 s.
 SESSION="v20"
 CORE_SESSION="herdrdev-$SESSION"
@@ -836,14 +843,22 @@ AG_PID="$(stub_pid)"
 # command, so it has a plan.
 run_herdr pane report-agent "$AG" --source v20:test --agent claude --state idle \
   --agent-session-id sess-v20 -- claude --resume sess-v20 >/dev/null
+AS="$(split_down "$S2")"
 send_line "$AW" "exec atuin"
-aw_wrapped() {
-  run_herdr pane process-info --pane "$AW" | python3 -I -c '
+send_line "$AS" "exec atuin"
+wrapped() {
+  run_herdr pane process-info --pane "$1" | python3 -I -c '
 import json, sys
 info = json.load(sys.stdin)["result"]["process_info"]
 sys.exit(0 if info.get("nested_foreground_processes") else 1)'
 }
-wait_until "the atuin stand-in's shell in AW" aw_wrapped
+wait_until "the atuin stand-in's shell in AW" wrapped "$AW"
+wait_until "the atuin stand-in's shell in AS" wrapped "$AS"
+send_line "$AS" "STUB_ARGS=\"$BASE/s.args\" STUB_STUBBORN=1 claude --name v20-stubborn"
+wait_until "the stubborn stand-in started in AS" file_has_line "$BASE/s.args"
+AS_PID="$(cut -d' ' -f1 "$BASE/s.args")"
+run_herdr pane report-agent "$AS" --source v20:test --agent claude --state idle \
+  --agent-session-id sess-v20s -- claude --resume sess-v20s >/dev/null
 send_line "$AW" "STUB_ARGS=\"$BASE/w.args\" STUB_CHILDREN=1 claude --name v20-wrapped"
 wait_until "the wrapped stand-in started in AW" file_has_line "$BASE/w.args"
 AW_PID="$(cut -d' ' -f1 "$BASE/w.args")"
@@ -884,6 +899,16 @@ wait_long "AW's agent resumed" file_has_line "$BASE/h.args"
 wait_until "AW on core" on_core "$AW"
 [[ "$(stub_args)" == "--resume sess-v20w --name v20-wrapped" ]] || fail "AW resumed with '$(stub_args)'"
 echo "ok: V20: the idle agent behind atuin moved onto core, its children ended, and it resumed with its plan"
+# Fork issue 301: an agent that outlives the hangup and a SIGTERM is killed,
+# its pane stays, and it resumes on core with its session.
+: > "$BASE/h.args"
+[[ "$(refusals_of "$AS" --if-idle --check)" == "" ]] || fail "AS check said $(refusals_of "$AS" --if-idle --check)"
+[[ "$(refusals_of "$AS" --if-idle)" == "moved " ]] || fail "the stubborn idle agent did not move"
+wait_until "the old stubborn agent $AS_PID ended" gone "$AS_PID"
+wait_long "AS's agent resumed" file_has_line "$BASE/h.args"
+wait_until "AS on core" on_core "$AS"
+[[ "$(stub_args)" == "--resume sess-v20s --name v20-stubborn" ]] || fail "AS resumed with '$(stub_args)'"
+echo "ok: V20: an agent that outlived the hangup and SIGTERM was killed, kept its pane, and resumed on core with its session"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
 echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37; V20)"
