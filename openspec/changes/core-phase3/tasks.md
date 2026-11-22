@@ -302,10 +302,53 @@ core is the reader-to-parser hop (2377 Mach calls in 20 s, against about 4 on th
 
 ## PR F. Restored panes start on core (D8)
 
-- [ ] F.1 Restored panes consult `runtime` and `RuntimeChoice`; fd-adopted panes `Pty(FdAdopted)`; V10 replaces
+- [x] F.1 Restored panes consult `runtime` and `RuntimeChoice`; fd-adopted panes `Pty(FdAdopted)`; V10 replaces
   `core_v1_a_restored_pane_stays_on_the_pty`; V18
-- [ ] F.2 `docs/next` config reference: what `runtime = "core"` now covers
-- [ ] F.3 Check: `just check` 0, `just core-live-test` 0, CI green
+- [x] F.2 `docs/next` config reference: what `runtime = "core"` now covers
+- [ ] F.3 Check: `just check` 0, `just core-live-test` 0, CI green (`just check` 0 and the steps of
+  `just core-live-test` 0 on m4m, 2026-11-22: the live nextest, `core_live_test.sh` and `core_machine_live_test.sh`
+  on a debug copy, `core_default_session_live_test.sh` on a release copy; CI waits for the push)
+
+F as built:
+
+- `PtyReason::Restored` and `RuntimeChoice::restored` are gone (`src/pane/runtime_io/choice.rs`). Restore's one
+  caller (`restore_tab` in `src/persist/restore.rs`) passes `RuntimeChoice::for_pane(stable_name(..))` as a new pane
+  does, so a restored pane's fresh program starts on the primary core with `runtime = "core"`, its saved history
+  seeded into herdr's parser first, unless `core_pty_panes` names it. That covers the D1b fresh-start rows: no saved
+  link, a gone terminal, and a waiting pane whose program is proven gone (that one goes through the resume path,
+  which already asked `RuntimeChoice`). A restored agent pane was on that path already: its deferred resume runs
+  through `runtime_spawn`, so only restored shells and programs changed.
+- Core's first paint starts with `ESC[H ESC[2J`, which erased the seeded history still on the screen (found by
+  the live V10: the pane showed only the new prompt). `GhosttyPaneTerminal::push_screen_into_history`
+  (`src/pane/terminal.rs`) scrolls the rows down to the cursor's into the scrollback, and `spawn_command_builder`
+  (`src/pane.rs`) calls it after seeding when the spawn will try core (`starts_on_core`). That also keeps the
+  history of the idle move's seeded shell (D9), which had the same loss. When core then cannot be used and the
+  spawn falls back to the PTY, the history sits in the scrollback above an empty screen.
+- `FdAdopted` stays a non-variant, as PR S found: `TerminalRuntime::from_handoff_fd` never reaches
+  `spawn_preferred`, so an fd adopted in a live handoff keeps its PTY by construction. V10 asserts it.
+- V10, unit (fake core, `persist::restore::core_restore_tests`): `a_restored_pane_starts_where_runtime_says_with_its_history`
+  (core: one `terminal.run`, a core link, and the history above a first paint that clears the screen; pty: none of
+  those but the history),
+  `a_program_adopted_in_a_live_handoff_stays_on_the_pty` (same pid, no core link, core called with nothing) and, for
+  V32's restore call site, `an_excluded_pane_restores_on_the_pty` (by launch `--name` and by agent name; an
+  unmatched name goes to core). Live (`core_backend_live_tests`): `core_v10_a_restored_pane_starts_on_core_with_its_history`
+  replaces `core_v1_a_restored_pane_stays_on_the_pty`: the restored program is core's terminal pid, shows the
+  saved history before and after its own output, takes input, ends on close; with `runtime = "pty"` the same restore
+  runs on the PTY. `persist::one_pane_snapshot_for_test` builds the one-pane session both use.
+- `scripts/core_live_test.sh`: the first restart now restores the PTY pane A on core (V10 server half); a PTY pane P,
+  made under `runtime = "pty"`, is the pane the holder loss must not touch, and is closed before V29a, because a
+  fresh restore on core starts the killed core at once and V29a needs every program kept in it. V37's second run
+  checks that the four panes come back on core. V18 is the new section 5b, session `v18` with `pane_history`: a
+  shell and the compiled `claude` stand-in on core, `herdr server stop`, a new server: both on core, the shell with
+  its saved screen, the stand-in resumed with `--resume sess-v18 --name v18-agent`, the resume command on screen once
+  and one stand-in process after a settle. V37's second run now waits for the old server's pid to go before it
+  polls, as V29a does. `scripts/core_default_session_live_test.sh`: the PTY pane A, whose program the kill ended,
+  now restores into `default`, and is checked there; V19's PTY pane is a new pane P made under
+  `runtime = "pty"`, which the restart starts fresh in `default`.
+- Limits: a restored pane's history lives only in herdr's parser (D8, open question 4): the apps see core's screen
+  from the restart on. A restore at server start connects to the primary core per fresh pane on the server's
+  thread, as new panes do; a core that cannot be used falls back to the PTY with the one notice, and a `terminal.run`
+  whose answer was lost leaves the pane with its restore error (no PTY copy, security review M3).
 
 ## PR G. Move idle panes onto the primary core (D9)
 
