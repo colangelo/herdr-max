@@ -447,8 +447,10 @@ with a real Claude Code (no-connector settings) running a background agent.
 the kill is confirmed:
 
 0. Agent pane: the agent's identity gets a SIGTERM, so it saves its session, and up to 3 s to exit; if it
-   outlives that, a SIGKILL of it and every process below it, and up to 2 s more. An agent behind a wrapper's
-   nested PTY leads a session of its own, which the pane's sweep does not reach (fork issue 301).
+   outlives that, a SIGKILL of it and every process below it, and up to 2 s more. What an agent that ended on
+   its SIGTERM leaves running below it is ended too (SIGTERM, then SIGKILL after 0.5 s): no longer in its
+   terminal's foreground, it would miss the PTY's hangup. An agent behind a wrapper's nested PTY leads a session
+   of its own, which the pane's sweep does not reach (fork issue 301).
 1. PTY pane: the existing terminate and sweep; confirmed when the child pid's identity no longer runs.
    Core pane (legacy session): `CorePaneIo::kill` returns `KillOutcome` from `terminal.kill`'s observed result.
    Confirmed only for `finished` or `not_found` **and** the pid's identity gone.
