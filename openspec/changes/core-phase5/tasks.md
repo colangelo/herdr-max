@@ -175,16 +175,74 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR C. A herdr-max pane on a machine
 
-- [ ] C.1 `Host` on `CorePaneIo`; pid facts, sweep and close by host (D5); V12
-- [ ] C.2 Spawn with `on`; label `<label>@<core id>`; integration variables stripped and the `env -u` wrapper on
+- [x] C.1 `Host` on `CorePaneIo`; pid facts, sweep and close by host (D5); V12
+  Built: `pane_io.rs` `Host { Local, Machine(MachineName) }`, taken from the parsed address at attach. For a
+  machine the pid is not published (child pid 0, no `ProgramIdentity`, no pinned terminal), so pid facts,
+  process detection and the OSC 7501 status write give nothing for it; `end_program` is `terminal.kill` only (no
+  `server.status`, no sweep). A machine's program that core says is gone ends the pane (`Interrupted`), and a
+  suspend cause from the far side ends it too, since resuming would start it on this Mac. Tests: fake-core units
+  (owner label and no pid at start, kill-only close, reattach by address); loop V12: closing the pane ended its
+  far terminal only; the far core, another far terminal and a `nohup` job the program left run on. Limit: close
+  while the machine is away gets `unavailable` from core and leaves the far program running; it then shows in
+  the orphan scan once the machine is back.
+- [x] C.2 Spawn with `on`; label `<label>@<core id>`; integration variables stripped and the `env -u` wrapper on
   argv, line and default shell (D5); V9, V10, V31 (pane part)
-- [ ] C.3 `CoreWaiting` causes `machine_dormant` and `machine_unreachable`; `machine.list` poll while a lease holds;
+  Built: `core_backend/machine_spawn.rs` (`MachineSpawn`, `MachineProgram { Shell, Line, Argv }`,
+  `/usr/bin/env -u ... --` on every form, the shell as `/bin/sh -c 'exec "${SHELL:-/bin/sh}" -l'`);
+  `PaneLaunchEnv`/`LaunchExtra` carry the `MachineTarget` through the workspace and tab constructors;
+  `PaneIo::spawn_on_machine` never falls back to the PTY. Only `TERM`, `COLORTERM`, `TERM_PROGRAM(_VERSION)` and
+  the request's own `env` (less the six names) go; no folder of this Mac goes, only a `--cwd` the request names.
+  The core id comes from `hello.core.id`. Loop V9 (far core started with the six fake variables): label
+  `herdrdev-v26@<id>`, argv wrapped, the far shell listed no `HERDR_*`, started in `--cwd`, no process facts or
+  `foreground_cwd`; V31 a far `herdr pane report-agent` failed and reached no pane; V10 a far herdr server with
+  the same session label and core session name left the pane's terminal alone. Limits: `agent.start` takes no
+  `on` (it types into an existing pane, and a machine pane has no local shell facts, so it is refused there);
+  the far program's `PATH` is the far core's.
+- [x] C.3 `CoreWaiting` causes `machine_dormant` and `machine_unreachable`; `machine.list` poll while a lease holds;
   input held and wake on first key; V6, V11
-- [ ] C.4 API `on` and capability `spawn_on_machine`; CLI `--on`; pane JSON `machine`, `core_address`; V13
+  Built: `CoreWaitReason::MachineAway { machine, dormant }`; restore and live handoff never search this Mac's
+  terminals or start fresh for a machine link (`CoreRestore::Ended` when core says it is gone); the saved
+  folder check is skipped for them. `app/core_machine_panes.rs` polls every 5 s while a pane runs on or waits for
+  a machine, on its own thread, reading `machine.list` only when a lease is in force or herdr does not gate the
+  machine; it marks `core_machine::panes::MachineLink` and attaches waiting panes. Input to a live pane whose
+  machine is not connected is refused and posts a wake (at most one per 5 s) to the server's dialer
+  (`connect.lock`, only for a machine with a herdr `target.json`). The orphan scan lists the owner label's
+  machine terminals. Loop: V6 unreachable (restart and live handoff wait, no far program started, same far pid
+  after); V6 dormant (gated folder, no lease: waits as `machine_dormant`, the poll reads nothing for 7 s with the
+  machine connected, a lease lets it attach); V4 server part (core's retries at their cap, a key was not sent and
+  the server's wake connected the machine within 1 s); V11 (see C.7 for the 15 min run). Limits: V4's repaint
+  within 2 s through a TUI client and the view part of V33 need PR D; a key to a pane that waits (no runtime)
+  wakes through the client's own lease and dialer (B.2), then the poll attaches it within 5 s; the first key
+  after a reconnect can still find the machine marked away until the next poll.
+- [x] C.4 API `on` and capability `spawn_on_machine`; CLI `--on`; pane JSON `machine`, `core_address`; V13
+  Built: optional `on` on `pane.split`, `tab.create`, `workspace.create`; `ServerCapabilities.spawn_on_machine`
+  (absent when false, true on Unix servers); the CLI refuses `--on` before sending when the server does not
+  advertise it (exit 1, no pane). Pane JSON: optional `machine`, `core_address` (every core pane) and
+  `core_waiting_cause`. The three new request shapes are frozen in the endpoint shape test beside `pane.close`'s
+  `force`; `tests/fixtures/endpoint-method-shapes-v1.json` is unchanged. V13 unit: refused without the
+  capability (and for an old server's capabilities), sent with it. Limit: the client shell sends no `on` (C.5).
 - [ ] C.5 New pane dialog: a machine choice, listing core machines with their gate (UI style per `docs/ui-style.md`,
   help entry if a key is bound)
-- [ ] C.6 `docs/next`: running a pane on a machine, what a remote pane lacks (hooks, detached-job sweep)
+  Not built. The client shell has no new-pane dialog (a split is a key or a context-menu item), and a safe machine
+  choice there needs two things the client-shell endpoint does not carry: whether the server takes `on` (the
+  endpoint advertises method names, not `spawn_on_machine`; an older server would start the pane locally), and the
+  core machines with their gates (a server-side listing). Both are endpoint additions to make with PR D's
+  `ClientEndpointId::Core` work; until then panes go on a machine through the CLI and API.
+- [x] C.6 `docs/next`: running a pane on a machine, what a remote pane lacks (hooks, detached-job sweep)
+  Done: `connecting-machines.mdx` § Panes on a Herdr Core machine (`--on`, the JSON fields, waiting and wake, no
+  hooks or integration variables, no process facts or `agent start`, close ends the program only);
+  `cli-reference.mdx` gains `--on` on the three create commands.
 - [ ] C.7 Check: `just check` 0, `just core-live-test` 0, `just bench-render-scale` 1 and 15 panes reported, CI green
+  Local, m4m, 2026-11-22, under the shared lock, binaries copied out of the shared target dir before each live
+  step: `just check` 0 on the head (5778 + 158 tests). `just core-live-test`'s steps 0: steps 1-3 (16 core
+  backend live tests, `core_live_test.sh`) in one run; step 4 failed twice on races in PR A/B's loop cases, each
+  fixed in its own commit (`machine rm --core` removing the folder while the link winds down; V35 against core's
+  own retry), then steps 4-6 passed on the same code: PR C's V9, V10, V12, V6 (unreachable and dormant), V4's
+  server part (the wake connected the machine within 1 s), V11 with the full 900 s drop (same far pid after),
+  and A/B's cases (V3 300 s, 0 link bytes; V38 600 s, 2 dials). `just bench-render-scale`: active panes server
+  surface median 254 us at 1 pane, 303 us at 15 (1.19x); background workspaces 254 us at 1 and 15 (1.00x);
+  nothing was added to a render, layout, PTY or detection loop (the input path reads one atomic for a machine
+  pane). CI not run (not pushed).
 
 ## PR D. The view server
 
