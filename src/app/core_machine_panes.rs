@@ -625,6 +625,68 @@ mod tests {
         );
     }
 
+    // N4 (D5): the idle move refuses a pane on a machine by name: its kill
+    // would end the program there and start the replacement here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_idle_move_refuses_a_machine_pane() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _) = app_with_one_pane();
+        let split = split_on(&mut app, "loop");
+        let pane = app
+            .parse_pane_id(split["result"]["pane"]["pane_id"].as_str().expect("id"))
+            .map(|(_, pane)| pane)
+            .expect("the new pane");
+        for check_only in [true, false] {
+            assert_eq!(
+                app.respawn_pane_if_idle(pane, check_only),
+                [crate::api::schema::PaneMoveRefusal::OnMachine]
+            );
+        }
+        assert!(has_runtime(&app, pane), "left running");
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    // N4 (D5): a suspended pane on a machine is never resumed here, by its
+    // agent's resume plan or its launch command: it waits for its machine
+    // with the link its suspension kept.
+    #[test]
+    fn a_suspended_machine_pane_is_never_resumed_here() {
+        for agent in [true, false] {
+            let (mut app, pane) = app_with_one_pane();
+            let terminal = app.state.pane_terminal_mut(pane).expect("terminal");
+            if agent {
+                terminal.set_agent_name("codex".into());
+                terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
+                        .expect("id"),
+                });
+            }
+            let mut suspension =
+                crate::terminal::state::Suspension::new(crate::platform::SuspendCause::HolderLost);
+            suspension.core_link = Some(link_on("loop/t3"));
+            app.state.suspend_pane(pane, Instant::now(), suspension);
+            assert!(!app.queue_resume(pane, Default::default()), "agent {agent}");
+            assert!(!app.resume_queue.busy(), "nothing queued");
+            assert!(!has_runtime(&app, pane));
+            let terminal = app.state.pane_terminal(pane).expect("terminal");
+            assert_eq!(
+                terminal.held_core_link().map(|link| link.address),
+                Some("loop/t3".into()),
+                "the link is kept"
+            );
+            assert!(matches!(
+                why(&app, pane),
+                Some(CoreWaitReason::MachineAway { .. })
+            ));
+        }
+    }
+
     // C5 (D5, P5): a poll said connected, but core has not linked the
     // machine yet when the pane asks: its `not_found` is not final, and the
     // pane keeps waiting.

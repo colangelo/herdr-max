@@ -64,6 +64,9 @@ impl MoveWindows {
 /// What the server knows about one pane, gathered in one loop turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MoveFacts {
+    /// Its program runs on a core machine (live, waiting or ended there):
+    /// never moved, whatever else holds (core-phase5 D5).
+    pub on_machine: bool,
     pub on_primary: bool,
     pub excluded: bool,
     /// A replacement would not start on core (`runtime` is not `core`, or
@@ -105,8 +108,12 @@ pub(crate) struct AgentFacts {
 }
 
 /// Every reason the pane may not move, in D9's table order; empty means it
-/// may. A pane already on the primary core gives only that.
+/// may. A pane on a core machine gives only that, and one already on the
+/// primary core only that.
 pub(crate) fn move_refusals(facts: &MoveFacts, windows: MoveWindows) -> Vec<Refusal> {
+    if facts.on_machine {
+        return vec![Refusal::OnMachine];
+    }
     if facts.on_primary {
         return vec![Refusal::AlreadyOnPrimary];
     }
@@ -288,6 +295,7 @@ impl App {
             }
         };
         Some(MoveFacts {
+            on_machine: self.pane_machine(pane_id).is_some(),
             on_primary,
             excluded,
             core_off: !crate::pane::starts_on_core(choice),
@@ -308,6 +316,11 @@ impl App {
     /// answer is `Ok`. Only a kill core refused before anything was signalled
     /// answers `Err`, with the pane as it was.
     fn move_pane(&mut self, pane_id: PaneId, agent: bool) -> Result<(), Refusal> {
+        // The kill below would end the program on its machine, and the
+        // replacement start here (core-phase5 D5).
+        if self.pane_machine(pane_id).is_some() {
+            return Err(Refusal::OnMachine);
+        }
         let (ws_idx, pane_state) = self.find_pane(pane_id).ok_or(Refusal::NotMovable)?;
         let terminal_id = pane_state.attached_terminal_id.clone();
         let runtime = self
@@ -602,6 +615,7 @@ mod tests {
 
     fn idle_claude() -> MoveFacts {
         MoveFacts {
+            on_machine: false,
             on_primary: false,
             excluded: false,
             core_off: false,
@@ -637,7 +651,8 @@ mod tests {
     fn each_fact_gives_its_refusal_and_an_idle_agent_moves() {
         assert_eq!(refusals(&idle_claude()), []);
         type Change = fn(&mut MoveFacts);
-        let rows: [(Change, Refusal); 12] = [
+        let rows: [(Change, Refusal); 13] = [
+            (|f| f.on_machine = true, Refusal::OnMachine),
             (|f| f.on_primary = true, Refusal::AlreadyOnPrimary),
             (|f| f.excluded = true, Refusal::Excluded),
             (|f| f.core_off = true, Refusal::CoreOff),

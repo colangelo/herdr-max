@@ -123,6 +123,9 @@ pub enum PaneMoveRefusal {
     /// The directory the replacement would start in no longer exists. The
     /// check runs before any signal, so the program keeps running.
     CwdMissing,
+    /// The pane's program runs on a herdr-core machine: a move would end
+    /// it there and start its replacement on this host (core-phase5 D5).
+    OnMachine,
 }
 
 /// `tab.close`, with the same `force` as `pane.close`.

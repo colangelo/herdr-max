@@ -228,6 +228,9 @@ enum Prepare {
     /// The pane cannot start and now says why.
     Settled,
     Failed,
+    /// Its program runs on a core machine: nothing starts here, and the
+    /// pane keeps its link (core-phase5 D5).
+    OnMachine,
 }
 
 impl App {
@@ -318,10 +321,52 @@ impl App {
                 self.pane_could_not_resume(pane_id);
                 false
             }
+            Prepare::OnMachine => {
+                self.wait_for_machine_instead_of_resume(pane_id);
+                false
+            }
         }
     }
 
+    /// A suspended pane on a core machine waits for its machine with the
+    /// link its suspension kept, as after a stream end (core-phase5 D5):
+    /// never `pane_could_not_resume`, which would drop the link.
+    fn wait_for_machine_instead_of_resume(&mut self, pane_id: PaneId) {
+        let public_pane_id = self
+            .find_pane(pane_id)
+            .and_then(|(ws_idx, _)| self.public_pane_id(ws_idx, pane_id));
+        let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
+            return;
+        };
+        let Some(PaneHold::Suspended(suspension)) = terminal.hold.as_ref() else {
+            return;
+        };
+        let Some(link) = suspension.core_link.clone() else {
+            return;
+        };
+        let Some(machine) = link.machine() else {
+            return;
+        };
+        tracing::info!(pane = pane_id.raw(), %machine, address = %link.address, "a suspended pane on a core machine waits for its machine; nothing starts here");
+        terminal.hold = Some(PaneHold::CoreWaiting(crate::terminal::state::CoreWaiting {
+            link,
+            public_pane_id,
+            why: crate::terminal::state::CoreWaitReason::MachineAway {
+                machine,
+                dormant: false,
+            },
+        }));
+        terminal.revision = terminal.revision.saturating_add(1);
+        self.state.mark_session_dirty();
+        #[cfg(unix)]
+        self.schedule_core_machine_poll(std::time::Instant::now());
+    }
+
     fn prepare_resume(&mut self, pane_id: PaneId, ready: ResumeReady) -> Prepare {
+        // Every start below runs on this Mac (core-phase5 D5).
+        if self.pane_machine(pane_id).is_some() {
+            return Prepare::OnMachine;
+        }
         let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
             return Prepare::Failed;
         };

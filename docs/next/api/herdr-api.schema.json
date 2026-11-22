@@ -11605,6 +11605,11 @@
               "const": "cwd_missing",
               "description": "The directory the replacement would start in no longer exists. The\ncheck runs before any signal, so the program keeps running.",
               "type": "string"
+            },
+            {
+              "const": "on_machine",
+              "description": "The pane's program runs on a herdr-core machine: a move would end\nit there and start its replacement on this host (core-phase5 D5).",
+              "type": "string"
             }
           ]
         },
