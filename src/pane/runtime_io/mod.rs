@@ -69,9 +69,18 @@ pub struct CoreTerminalLink {
 
 impl CoreTerminalLink {
     /// The core machine the program runs on (`ac-mbm5` in `ac-mbm5/t7`),
-    /// `None` on this Mac's own core (core-phase5 D5).
-    pub fn machine(&self) -> Option<&str> {
-        self.address.split_once('/').map(|(machine, _)| machine)
+    /// `None` on this Mac's own core and for an address that does not parse
+    /// (core-phase5 D5). Parsed as every other core address is, by
+    /// `CoreAddress`; without the core backend there are no machines.
+    pub fn machine(&self) -> Option<String> {
+        #[cfg(unix)]
+        {
+            core_machines::machine_of_address(&self.address).map(|machine| machine.to_string())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 
@@ -859,6 +868,26 @@ fn no_master_fd() -> std::io::Error {
 #[cfg(all(unix, test))]
 mod tests {
     use super::*;
+
+    // core-phase5 D4: a link names its machine by the one address parser,
+    // so a malformed address is no machine rather than its first part.
+    #[test]
+    fn a_link_names_its_machine_only_for_an_address_that_parses() {
+        let machine = |address: &str| {
+            CoreTerminalLink {
+                agent: None,
+                session: "herdr".into(),
+                address: address.into(),
+                program: None,
+            }
+            .machine()
+        };
+        assert_eq!(machine("loop/t7").as_deref(), Some("loop"));
+        assert_eq!(machine("t7"), None);
+        assert_eq!(machine("loop/n/t7"), None);
+        assert_eq!(machine("/t7"), None);
+        assert_eq!(machine("loop/"), None);
+    }
 
     #[test]
     fn a_backend_without_a_master_fd_refuses_a_handoff_by_fd_as_unsupported() {

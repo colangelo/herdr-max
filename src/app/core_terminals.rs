@@ -125,7 +125,7 @@ impl App {
                     .get(terminal_id)
                     .and_then(crate::terminal::state::TerminalState::held_core_link)
             })?;
-        link.machine().map(str::to_string)
+        link.machine()
     }
 
     /// A create request with `on` just ran: arms the machine poll, which

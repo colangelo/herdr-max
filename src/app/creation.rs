@@ -354,10 +354,7 @@ impl App {
             core_waiting_cause: terminal
                 .core_waiting()
                 .map(|waiting| waiting.why.as_str().to_string()),
-            machine: core_link
-                .as_ref()
-                .and_then(|link| link.machine())
-                .map(str::to_string),
+            machine: core_link.as_ref().and_then(|link| link.machine()),
             core_address: core_link.map(|link| link.address),
             suspend_cause: terminal
                 .suspension()
