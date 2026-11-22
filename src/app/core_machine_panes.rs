@@ -196,12 +196,58 @@ impl App {
         terminal.revision = terminal.revision.saturating_add(1);
         true
     }
+
+    /// The program of `pane_id`, on a core machine, lost its stream with a
+    /// suspend cause (a stop of this Mac's core, a far core's restart): the
+    /// pane waits for its machine with its link, as after a restart, and
+    /// attaches once core has the machine connected again. A suspension
+    /// would start it again here (D5). False for a pane on this Mac.
+    pub(super) fn wait_for_machine_after_exit(&mut self, pane_id: PaneId) -> bool {
+        let Some((ws_idx, pane)) = self.find_pane(pane_id) else {
+            return false;
+        };
+        let terminal_id = pane.attached_terminal_id.clone();
+        let Some(link) = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(crate::terminal::TerminalRuntime::core_terminal)
+        else {
+            return false;
+        };
+        let Some(machine) = machine_of(&link.address) else {
+            return false;
+        };
+        let public_pane_id = self.public_pane_id(ws_idx, pane_id);
+        if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            runtime.shutdown();
+        }
+        panes::link(&machine).set_connected(false);
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return false;
+        };
+        info!(pane = pane_id.raw(), %machine, address = %link.address, "the pane's stream ended; it waits for its machine");
+        terminal.hold = Some(PaneHold::CoreWaiting(CoreWaiting {
+            link,
+            public_pane_id,
+            why: CoreWaitReason::MachineAway {
+                machine: machine.to_string(),
+                dormant: false,
+            },
+        }));
+        terminal.revision = terminal.revision.saturating_add(1);
+        self.state.mark_session_dirty();
+        self.schedule_core_machine_poll(Instant::now());
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane::CoreTerminalLink;
+    use crate::api::schema::{Method, Request};
+    use crate::pane::{CoreTerminalLink, FakeCore};
 
     fn name(raw: &str) -> MachineName {
         MachineName::parse(raw).expect("name")
@@ -252,6 +298,60 @@ mod tests {
             .map(|waiting| waiting.why.clone())
     }
 
+    fn has_runtime(app: &App, pane_id: PaneId) -> bool {
+        app.find_pane(pane_id).is_some_and(|(_, pane)| {
+            app.terminal_runtimes
+                .get(&pane.attached_terminal_id)
+                .is_some()
+        })
+    }
+
+    fn split_on(app: &mut App, machine: &str) -> serde_json::Value {
+        let target = app.public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane);
+        let response = app.handle_api_request(Request {
+            id: "split".into(),
+            method: Method::PaneSplit(crate::api::schema::PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: target,
+                direction: crate::api::schema::SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                right_click: Default::default(),
+                env: Default::default(),
+                on: Some(machine.into()),
+            }),
+        });
+        serde_json::from_str(&response).expect("json")
+    }
+
+    fn connected(machine: &str) -> Probe {
+        Probe {
+            machine: name(machine),
+            state: Some("connected".into()),
+            leased: true,
+            read: true,
+        }
+    }
+
+    // C5 (D5, P5): a poll said connected, but core has not linked the
+    // machine yet when the pane asks: its `not_found` is not final, and the
+    // pane keeps waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_waiting_pane_whose_terminal_core_left_out_keeps_waiting() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t3");
+        core.set_machine("loop", "connecting");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        app.handle_core_machines(&[connected("loop")], Instant::now());
+        assert!(matches!(
+            why(&app, pane),
+            Some(CoreWaitReason::MachineAway { .. })
+        ));
+    }
+
     // C4 (D5): a `machine.list` that failed reads nothing: the machine keeps
     // its mark and its panes their reason.
     #[test]
@@ -275,5 +375,45 @@ mod tests {
                 dormant: true
             })
         );
+    }
+
+    // C6 (D5): a stop of this Mac's core ends a machine pane's stream with
+    // a suspend cause; the pane waits for its machine with its link, and is
+    // neither suspended (which starts it again here) nor closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_suspend_cause_makes_a_machine_pane_wait_for_its_machine() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _) = app_with_one_pane();
+        let split = split_on(&mut app, "loop");
+        let pane = app
+            .parse_pane_id(split["result"]["pane"]["pane_id"].as_str().expect("id"))
+            .map(|(_, pane)| pane)
+            .expect("the new pane");
+        app.handle_internal_event(crate::events::AppEvent::PaneDied {
+            pane_id: pane,
+            exit_reason: crate::platform::ChildExitReason::Suspended(
+                crate::platform::SuspendCause::CoreStopped,
+            ),
+        });
+        assert!(app.find_pane(pane).is_some(), "the pane stays");
+        let terminal = app.state.pane_terminal(pane).expect("terminal");
+        assert!(!terminal.is_suspended());
+        assert_eq!(
+            terminal
+                .core_waiting()
+                .map(|waiting| waiting.link.address.as_str()),
+            Some("loop/t1")
+        );
+        assert!(matches!(
+            why(&app, pane),
+            Some(CoreWaitReason::MachineAway { .. })
+        ));
+        assert!(!has_runtime(&app, pane));
+        assert!(!panes::link(&name("loop")).connected());
+        assert!(app.state.suspended_panes().is_empty());
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 }

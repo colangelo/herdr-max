@@ -4064,6 +4064,46 @@ mod core_restore_tests {
         assert!(!started_anything(&core), "{:?}", core.methods());
     }
 
+    // C5 (core-phase5 D5, P5): core leaves out the terminals of a machine it
+    // has not linked (yet): a restore of a pane there waits for the machine
+    // and asks nothing of this Mac's terminals.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_pane_whose_terminal_core_left_out_waits_for_its_machine() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t7");
+        core.set_machine("loop", "connecting");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let link = crate::pane::CoreTerminalLink {
+            agent: None,
+            session: crate::pane::core_session_name(),
+            address: "loop/t7".into(),
+            program: None,
+        };
+        match restore(&link, "w1-p2") {
+            CoreRestore::Waiting(waiting) => {
+                assert_eq!(waiting.link, link);
+                assert!(
+                    matches!(
+                        waiting.why,
+                        crate::terminal::state::CoreWaitReason::MachineAway { .. }
+                    ),
+                    "{:?}",
+                    waiting.why
+                );
+            }
+            _ => panic!("expected the pane to wait for its machine"),
+        }
+        assert!(!started_anything(&core), "{:?}", core.methods());
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.list"),
+            "no search: {:?}",
+            core.methods()
+        );
+    }
+
     // V30, spec "A link from phase 2": no pid, and the core does not answer.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_phase_2_link_with_an_unreachable_core_waits() {

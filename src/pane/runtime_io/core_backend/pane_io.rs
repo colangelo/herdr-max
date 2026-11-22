@@ -103,6 +103,23 @@ fn address_on<'a>(record: &'a Value, on: Option<&MachineName>) -> Option<&'a str
     (address.machine.as_ref() == on).then_some(raw)
 }
 
+/// Whether core lists `machine` as connected now. Only then is its answer
+/// about one of that machine's terminals final: core leaves the terminals of
+/// a machine that is not connected, or not linked yet after a core restart,
+/// out of its answers (P5), so `not_found` says nothing about the program
+/// there. A failed `machine.list` is not connected.
+fn machine_connected(client: &CoreClient, machine: &MachineName) -> bool {
+    client
+        .call("machine.list", json!({}), CALL_TIMEOUT)
+        .is_ok_and(|listed| {
+            listed["machines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|record| record["name"] == machine.as_str() && record["state"] == "connected")
+        })
+}
+
 /// What `terminal.run` needs for one pane.
 pub(crate) struct CoreSpawn {
     pub pane_id: PaneId,
@@ -491,25 +508,49 @@ impl StartedCore {
             })?;
             machine_owner_label(&mut labels, core_id);
         }
-        let record = match client.call(
+        let connected_before = address
+            .machine
+            .as_ref()
+            .is_some_and(|machine| machine_connected(&client, machine));
+        let answered = match client.call(
             "terminal.get",
             json!({"terminal": target.address}),
             CALL_TIMEOUT,
         ) {
-            Ok(record) => record,
+            Ok(record) => match reattach_refusal(&record, &labels) {
+                None => Ok(record),
+                Some(refusal) => {
+                    let message = format!("terminal {} {refusal}", target.address);
+                    Err(if record["state"] == "live" {
+                        ReattachError::NotOurs(message)
+                    } else {
+                        ReattachError::Gone(message)
+                    })
+                }
+            },
             Err(CoreError::Rpc { kind, message }) if kind == "not_found" => {
-                return Err(ReattachError::Gone(message));
+                Err(ReattachError::Gone(message))
             }
-            Err(err) => return Err(ReattachError::Unreachable(err)),
+            Err(err) => Err(ReattachError::Unreachable(err)),
         };
-        if let Some(refusal) = reattach_refusal(&record, &labels) {
-            let message = format!("terminal {} {refusal}", target.address);
-            return Err(if record["state"] == "live" {
-                ReattachError::NotOurs(message)
-            } else {
-                ReattachError::Gone(message)
-            });
-        }
+        let record = match answered {
+            Ok(record) => record,
+            Err(refused @ (ReattachError::Gone(_) | ReattachError::NotOurs(_))) => {
+                // A machine's answer is final only while core had it
+                // connected before and after the question: core leaves the
+                // terminals of a machine it has not linked (yet) out of its
+                // answers (P5), so the program may still run there.
+                if let Some(machine) = &address.machine {
+                    if !(connected_before && machine_connected(&client, machine)) {
+                        return Err(ReattachError::Unreachable(CoreError::Unavailable(format!(
+                            "{machine} is not connected; {refused}"
+                        ))));
+                    }
+                }
+                return Err(refused);
+            }
+            Err(err) => return Err(err),
+        };
         let pid = core_pid(&record["pid"]);
         Self::attach(
             client,
@@ -565,11 +606,7 @@ impl StartedCore {
         };
         let machine = match &host {
             Host::Local => None,
-            Host::Machine(name) => {
-                let link = crate::core_machine::panes::link(name);
-                link.set_connected(true);
-                Some(link)
-            }
+            Host::Machine(name) => Some(crate::core_machine::panes::link(name)),
         };
         let (events_tx, events_rx) = stream_channel();
         let (channel, automatic_input) = match client.attach(
@@ -602,6 +639,11 @@ impl StartedCore {
                 return Err(StartFailure::NotStarted(err));
             }
         };
+        // Core attached it (or answered that it finished): the machine is
+        // connected now. A failed attach leaves the mark as it was.
+        if let Some(link) = &machine {
+            link.set_connected(true);
+        }
         if pid > 0 {
             child_pid.store(pid, Ordering::Release);
             crate::logging::pane_spawned(pane_id.raw(), pid);
@@ -968,15 +1010,11 @@ fn spawn_parser(
         .name(name)
         .spawn(move || {
             let mut on_exit = Some(on_exit);
-            let on_machine = matches!(shared.host, Host::Machine(_));
+            // A suspend cause for a pane on a machine goes up as it is: the
+            // server makes that pane wait for its machine, never starts it
+            // again here (core-phase5 D5). A stop of this Mac's core says
+            // nothing about the program there.
             let mut finish = |reason: ChildExitReason| {
-                // A suspended pane starts again in place, which for a pane
-                // on a machine would be on this Mac: it ends instead
-                // (core-phase5 D5, never started fresh).
-                let reason = match reason {
-                    ChildExitReason::Suspended(_) if on_machine => ChildExitReason::Interrupted,
-                    reason => reason,
-                };
                 if reason == ChildExitReason::Suspended(SuspendCause::CoreStopped) {
                     super::note_stopped_by_person(&shared.session);
                 }
@@ -1203,6 +1241,11 @@ fn try_reattach(shared: &Shared) -> ReattachOutcome {
             current
         }
     };
+    let machine = match &shared.host {
+        Host::Local => None,
+        Host::Machine(machine) => Some(machine),
+    };
+    let connected_before = machine.is_some_and(|machine| machine_connected(&client, machine));
     let answered = match client.call(
         "terminal.get",
         json!({"terminal": shared.address}),
@@ -1221,10 +1264,24 @@ fn try_reattach(shared: &Shared) -> ReattachOutcome {
         }
     };
     if let Some(exit) = answered {
-        // Core answered for the machine, which only a connected one does:
-        // its program is gone. No local process table can say otherwise.
-        if matches!(shared.host, Host::Machine(_)) {
-            return ReattachOutcome::Gone(exit);
+        // A machine's answer is final only while core had it connected
+        // before and after the question (P5); then its program is gone, and
+        // no local process table can say otherwise. It ends: a suspend
+        // cause would start it again, on this Mac (core-phase5 D5).
+        if let Some(machine) = machine {
+            if !(connected_before && machine_connected(&client, machine)) {
+                debug!(
+                    pane = shared.pane_id.raw(),
+                    %machine,
+                    terminal = %shared.address,
+                    "the pane's machine is not connected; waiting for it"
+                );
+                return ReattachOutcome::Unreachable;
+            }
+            return ReattachOutcome::Gone(match exit {
+                ChildExitReason::Suspended(_) => ChildExitReason::Interrupted,
+                exit => exit,
+            });
         }
         return match ProgramIdentity::liveness(shared.program, shared.policy.start_token) {
             ProgramLiveness::Gone => ReattachOutcome::Gone(exit),
@@ -1562,13 +1619,14 @@ mod tests {
         let core = FakeCore::start();
         core.add_terminal(json!({"address": "loop/t1", "pid": 777, "state": "live",
                                   "labels": labels("w1-p2")}));
+        core.set_machine("loop", "connected");
         let pid = AtomicU32::new(0);
         let refused = StartedCore::reattach(target("loop/t1", "w1-p2"), &pid, connector_to(&core));
         assert!(matches!(refused, Err(ReattachError::NotOurs(_))));
         assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
         assert_eq!(
             core.methods(),
-            ["terminal.get"],
+            ["machine.list", "terminal.get", "machine.list"],
             "never attached, never killed"
         );
     }
@@ -1658,8 +1716,126 @@ mod tests {
         );
         assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
         assert_eq!(pane.machine().map(MachineName::as_str), Some("loop"));
-        assert_eq!(core.methods(), ["terminal.get", "terminal.attach"]);
+        assert_eq!(
+            core.methods(),
+            ["machine.list", "terminal.get", "terminal.attach"]
+        );
         pane.shutdown();
+    }
+
+    // C5 (D5, P5): core leaves out the terminals of a machine it has not
+    // linked (yet), so `not_found` for one is final only while the machine
+    // is connected; until then the pane waits.
+    #[test]
+    fn a_machine_terminal_core_leaves_out_waits_until_the_machine_is_connected() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t3");
+        let pid = AtomicU32::new(0);
+        for state in [None, Some("connecting"), Some("unreachable")] {
+            if let Some(state) = state {
+                core.set_machine("loop", state);
+            }
+            let answer =
+                StartedCore::reattach(target("loop/t3", "w1-p2"), &pid, connector_to(&core));
+            let answer = answer.err().map(|err| format!("{err:?}"));
+            assert!(
+                answer
+                    .as_deref()
+                    .is_some_and(|err| err.starts_with("Unreachable")),
+                "{state:?}: {answer:?}"
+            );
+        }
+        core.set_machine("loop", "connected");
+        let answer = StartedCore::reattach(target("loop/t3", "w1-p2"), &pid, connector_to(&core));
+        assert!(matches!(answer, Err(ReattachError::Gone(_))));
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.attach" || method == "terminal.run"),
+            "{:?}",
+            core.methods()
+        );
+    }
+
+    /// A pane on machine `on`, started on `core`, with its exits.
+    fn machine_pane_on(
+        core: &FakeCore,
+        on: &str,
+    ) -> (CorePaneIo, std_mpsc::Receiver<ChildExitReason>) {
+        let (exit_tx, exit_rx) = std_mpsc::channel();
+        let mut spawn = machine_spawn("w1-p6");
+        spawn.on = Some(MachineName::parse(on).expect("name"));
+        let pid = AtomicU32::new(0);
+        let pane = StartedCore::start_with(
+            spawn,
+            &pid,
+            connector_to(core),
+            short_policy(|_| crate::platform::ProcessStart::table(None)),
+        )
+        .expect("start")
+        .into_pane(
+            Box::new(|_: &[u8]| PtyReadResult {
+                terminal_responses: Vec::new(),
+            }),
+            Box::new(move |reason| {
+                let _ = exit_tx.send(reason);
+            }),
+            Box::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("pane");
+        (pane, exit_rx)
+    }
+
+    // C6 (D5): a stop of this Mac's core ends the pane's stream with a
+    // suspend cause; for a pane on a machine it goes up as it is, so the
+    // server makes the pane wait for its machine instead of ending it.
+    #[test]
+    fn a_suspend_cause_on_a_machine_pane_stream_goes_up_as_it_is() {
+        let core = FakeCore::start();
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        core.close_stream(1, br#"{"reason": "server_stop"}"#);
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::CoreStopped))
+        );
+        pane.shutdown();
+    }
+
+    // C5 (D5, P5): a live pane on a machine whose stream dropped and whose
+    // terminal core leaves out keeps retrying while the machine is away;
+    // once core has it connected and still not the terminal, the pane ends.
+    #[test]
+    fn a_dropped_machine_pane_ends_only_once_its_machine_is_connected() {
+        let core = FakeCore::start();
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        core.forget_terminal("loop/t1");
+        core.set_machine("loop", "connecting");
+        drop_stream(&core);
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "waits for loop");
+        core.set_machine("loop", "connected");
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Interrupted),
+            "gone while connected: it ends, and is never started again"
+        );
+        pane.shutdown();
+    }
+
+    // C10 (D5): the machine is marked connected only once core attached the
+    // pane; a failed attach leaves the mark as it was.
+    #[test]
+    fn a_failed_machine_attach_leaves_the_machine_marked_away() {
+        let core = FakeCore::start_with(|config| config.failing = vec!["terminal.attach"]);
+        let machine = MachineName::parse("attach-fails").expect("name");
+        let link = crate::core_machine::panes::link(&machine);
+        link.set_connected(false);
+        let mut spawn = machine_spawn("w1-p6");
+        spawn.on = Some(machine);
+        let pid = AtomicU32::new(0);
+        assert!(StartedCore::start(spawn, &pid, connector_to(&core)).is_err());
+        assert!(!link.connected());
     }
 
     // C.3 (D5): input to a pane whose machine is away is not sent.

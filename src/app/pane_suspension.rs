@@ -226,6 +226,12 @@ impl App {
         {
             return false;
         }
+        // A pane on a core machine waits for its machine instead: a
+        // suspended pane starts again here (core-phase5 D5).
+        #[cfg(unix)]
+        if self.wait_for_machine_after_exit(pane_id) {
+            return true;
+        }
         let Some(terminal_id) = self
             .find_pane(pane_id)
             .map(|(_, pane)| pane.attached_terminal_id.clone())
