@@ -16,7 +16,8 @@
 # through a handoff and a restart, and a stop ends both sessions' panes; V33,
 # a pane named by `core_pty_panes` stays on the PTY when respawned, resumed
 # and restored (macOS: it uses pane jobs), and the idle move refuses it; V20,
-# the idle move takes idle panes onto core and refuses busy ones.
+# the idle move takes idle panes onto core, an agent behind atuin too, and
+# refuses busy ones.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -658,10 +659,16 @@ set_v33_config() {
 # A compiled stand-in, so detection sees a process named claude.
 cat > "$BASE/claude.c" <<STUB
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
-  FILE *out = fopen("$BASE/h.args", "w");
+  const char *path = getenv("STUB_ARGS");
+  FILE *out = fopen(path ? path : "$BASE/h.args", "w");
   if (!out) return 1;
+  /* Two children in its process group, as Claude's MCP servers. */
+  if (getenv("STUB_CHILDREN"))
+    for (int i = 0; i < 2; i++)
+      if (fork() == 0) for (;;) pause();
   fprintf(out, "%d", (int)getpid());
   for (int i = 1; i < argc; i++) fprintf(out, " %s", argv[i]);
   fprintf(out, "\n");
@@ -674,6 +681,46 @@ int main(int argc, char **argv) {
 }
 STUB
 cc -o "$BASE/bin/claude" "$BASE/claude.c" || fail "could not compile the claude stand-in"
+# A stand-in for `atuin pty-proxy`: it runs an interactive shell in a PTY of
+# its own, so an agent started there is one PTY below the pane's.
+cat > "$BASE/atuin.c" <<'STUB'
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <termios.h>
+#include <unistd.h>
+#include <util.h>
+int main(void) {
+  struct winsize size;
+  struct termios raw;
+  char buf[4096];
+  int master;
+  ioctl(0, TIOCGWINSZ, &size);
+  pid_t child = forkpty(&master, NULL, NULL, &size);
+  if (child < 0) return 1;
+  if (child == 0) {
+    execl("/bin/sh", "sh", "-i", (char *)0);
+    _exit(127);
+  }
+  tcgetattr(0, &raw);
+  cfmakeraw(&raw);
+  tcsetattr(0, TCSANOW, &raw);
+  for (;;) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    FD_SET(master, &fds);
+    if (select(master + 1, &fds, NULL, NULL, NULL) < 0) continue;
+    int ends[2][2] = {{0, master}, {master, 1}};
+    for (int i = 0; i < 2; i++) {
+      if (!FD_ISSET(ends[i][0], &fds)) continue;
+      ssize_t n = read(ends[i][0], buf, sizeof buf);
+      if (n <= 0) return 0;
+      write(ends[i][1], buf, n);
+    }
+  }
+}
+STUB
+cc -o "$BASE/bin/atuin" "$BASE/atuin.c" || fail "could not compile the atuin stand-in"
 stub_pid() { cut -d' ' -f1 "$BASE/h.args"; }
 stub_args() { cut -d' ' -f2- "$BASE/h.args"; }
 stub_restarted() { file_has_line "$BASE/h.args" && [[ "$(stub_pid)" != "$1" ]] && alive "$(stub_pid)"; }
@@ -763,7 +810,8 @@ hc_scratch server stop >/dev/null 2>&1 || true
 #    runtime = "core": an idle shell moves with its directory; a shell running
 #    `sleep 30` and a pane typed into just before are refused with their
 #    reasons; an idle agent stand-in moves and is resumed with its plan's
-#    arguments. The windows are shortened (debug build only): input 3 s,
+#    arguments, and so does one behind the atuin stand-in, with two children
+#    (fork issue 295). The windows are shortened (debug build only): input 3 s,
 #    agent idle 3 s, shell quiet 6 s.
 SESSION="v20"
 CORE_SESSION="herdrdev-$SESSION"
@@ -776,6 +824,7 @@ S1="$(api "{\"id\":\"v20\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\
 S2="$(split_down "$S1")"
 S3="$(split_down "$S2")"
 AG="$(split_down "$S3")"
+AW="$(split_down "$S1")"
 mkdir -p "$BASE/v20 dir"
 send_line "$S1" "cd \"$BASE/v20 dir\""
 send_line "$S2" "sleep 30"
@@ -787,6 +836,19 @@ AG_PID="$(stub_pid)"
 # command, so it has a plan.
 run_herdr pane report-agent "$AG" --source v20:test --agent claude --state idle \
   --agent-session-id sess-v20 -- claude --resume sess-v20 >/dev/null
+send_line "$AW" "exec atuin"
+aw_wrapped() {
+  run_herdr pane process-info --pane "$AW" | python3 -I -c '
+import json, sys
+info = json.load(sys.stdin)["result"]["process_info"]
+sys.exit(0 if info.get("nested_foreground_processes") else 1)'
+}
+wait_until "the atuin stand-in's shell in AW" aw_wrapped
+send_line "$AW" "STUB_ARGS=\"$BASE/w.args\" STUB_CHILDREN=1 claude --name v20-wrapped"
+wait_until "the wrapped stand-in started in AW" file_has_line "$BASE/w.args"
+AW_PID="$(cut -d' ' -f1 "$BASE/w.args")"
+run_herdr pane report-agent "$AW" --source v20:test --agent claude --state idle \
+  --agent-session-id sess-v20w -- claude --resume sess-v20w >/dev/null
 set_v33_config core ''
 run_herdr server reload-config >/dev/null
 # Past every window: the setup lines above were input.
@@ -810,6 +872,18 @@ wait_long "AG's agent resumed" stub_restarted "$AG_PID"
 wait_until "AG on core" on_core "$AG"
 [[ "$(stub_args)" == "$PLAN" ]] || fail "AG resumed with '$(stub_args)', its plan was '$PLAN'"
 echo "ok: V20: the idle agent moved onto core and resumed with its plan ($PLAN)"
+AW_CHILDREN="$(pgrep -P "$AW_PID" | tr '\n' ' ')"
+[[ -n "$AW_CHILDREN" ]] || fail "the wrapped stand-in has no children"
+: > "$BASE/h.args"
+[[ "$(refusals_of "$AW" --if-idle --check)" == "" ]] || fail "AW check said $(refusals_of "$AW" --if-idle --check)"
+[[ "$(refusals_of "$AW" --if-idle)" == "moved " ]] || fail "the wrapped idle agent did not move"
+for pid in $AW_PID $AW_CHILDREN; do
+  wait_until "the old wrapped agent's process $pid ended" gone "$pid"
+done
+wait_long "AW's agent resumed" file_has_line "$BASE/h.args"
+wait_until "AW on core" on_core "$AW"
+[[ "$(stub_args)" == "--resume sess-v20w --name v20-wrapped" ]] || fail "AW resumed with '$(stub_args)'"
+echo "ok: V20: the idle agent behind atuin moved onto core, its children ended, and it resumed with its plan"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
 echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37; V20)"
