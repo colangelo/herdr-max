@@ -3,9 +3,13 @@
 //! command, `herdr core-link`, which is the dial gate (D2, D10). Unix only,
 //! as the core backend is.
 
+pub(crate) mod command;
 pub(crate) mod link;
 mod name;
 mod ssh;
 mod state;
 
 pub(crate) use name::MachineName;
+
+#[cfg(test)]
+mod tests;

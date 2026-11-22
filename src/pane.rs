@@ -23,6 +23,8 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
 pub(crate) use input_activity::InputActivity;
+#[cfg(unix)]
+pub(crate) use runtime_io::core_machines;
 pub(crate) use runtime_io::core_session_name;
 pub(crate) use runtime_io::set_preferred_runtime;
 pub(crate) use runtime_io::CoreTerminalLink;

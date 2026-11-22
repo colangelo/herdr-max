@@ -561,7 +561,7 @@ fn core_start_keeps(key: &str) -> bool {
 /// planted earlier on `PATH` is not run while the installed one exists
 /// (security review M5). Chosen once, then run by that absolute path; its
 /// path, target and version are logged then.
-fn hc_binary() -> Result<&'static Path, CoreError> {
+pub(crate) fn hc_binary() -> Result<&'static Path, CoreError> {
     static HC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     if let Some(path) = HC.get() {
         return Ok(path);
