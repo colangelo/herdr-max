@@ -211,9 +211,15 @@ pub(crate) struct LaunchExtra {
 
 impl From<Vec<(String, String)>> for LaunchExtra {
     fn from(env: Vec<(String, String)>) -> Self {
-        Self {
-            env,
-            ..Self::default()
+        // A literal per target: Windows has no `on`, and a rest pattern
+        // there is a needless update under `-D warnings`.
+        #[cfg(unix)]
+        {
+            Self { env, on: None }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { env }
         }
     }
 }
