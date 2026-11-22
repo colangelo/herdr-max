@@ -608,6 +608,98 @@ async fn core_turn_counts_a_coalesced_herdr_turn_once() {
     runtime.shutdown();
 }
 
+async fn next_fact(facts: &mut mpsc::Receiver<AppEvent>) -> CoreFact {
+    match tokio::time::timeout(WAIT, facts.recv()).await {
+        Ok(Some(AppEvent::CoreLabels(fact))) => fact,
+        other => panic!("no label fact: {other:?}"),
+    }
+}
+
+// core-phase4 verifier 10, 13 and 15 (the label thread): with the sync on, a
+// new core pane starts at `herdr.seen=0`, the subscription's snapshot carries
+// it, a write lands as the label, and core's own `labels` event comes back as
+// a fact; a mirrored status never becomes one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_label_sync_follows_turns_and_writes_seen() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let (events, mut facts) = mpsc::channel(64);
+    crate::pane::set_core_label_sync(true, events);
+    let scratch = Scratch::new("core-labels");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "printf 'LABELS-READY\\n'; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    assert!(wait_for_text(&runtime, "LABELS-READY").await);
+    let address = runtime
+        .core_terminal()
+        .expect("a core pane has a link")
+        .address;
+    assert_eq!(
+        core.record(&address)["labels"]["herdr.seen"],
+        "0",
+        "a new terminal starts seen up to turn 0"
+    );
+
+    let ours = loop {
+        match next_fact(&mut facts).await {
+            CoreFact::Snapshot(terminals) => {
+                if let Some((_, observed)) = terminals.into_iter().find(|(a, _)| *a == address) {
+                    break observed;
+                }
+            }
+            CoreFact::Upsert {
+                address: upserted,
+                observed,
+            } if upserted == address => break observed,
+            _ => {}
+        }
+    };
+    assert_eq!(ours.seen, Some(0));
+
+    runtime.mirror_core_status(CoreStatusRecord::Report {
+        word: CoreStatusWord::Working,
+        app: CoreStatusApp::parse("claude"),
+    });
+    core.wait_for_status(&address, |status| status["state"] == "working")
+        .await;
+    runtime.mirror_core_status(CoreStatusRecord::Report {
+        word: CoreStatusWord::Done,
+        app: CoreStatusApp::parse("claude"),
+    });
+    let turn = loop {
+        if let CoreFact::Turn { address: a, turn } = next_fact(&mut facts).await {
+            if a == address {
+                break turn;
+            }
+        }
+    };
+    assert_eq!(turn, 1);
+
+    crate::pane::write_core_label(LabelWrite::Seen {
+        address: address.clone(),
+        turn,
+    });
+    loop {
+        if let CoreFact::Labels { address: a, seen } = next_fact(&mut facts).await {
+            if a == address && seen == Some(turn) {
+                break;
+            }
+        }
+    }
+    assert_eq!(core.record(&address)["labels"]["herdr.seen"], "1");
+    crate::pane::set_core_label_sync(false, mpsc::channel(1).0);
+    runtime.shutdown();
+}
+
 async fn wait_for_text(runtime: &PaneRuntime, needle: &str) -> bool {
     tokio::time::timeout(WAIT, async {
         while !runtime.visible_text().contains(needle) {

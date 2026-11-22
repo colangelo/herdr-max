@@ -142,7 +142,7 @@ core_terminals() {
 }
 
 set_runtime() {
-  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_spaces_doc = %s\n' \
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_label_sync = true\ncore_spaces_doc = %s\n' \
     "$1" "${2:-true}" > "$CONFIG_HOME/herdr-dev/config.toml"
 }
 
@@ -266,6 +266,30 @@ wait_until "B's status mirrored into core" mirrored
 echo "ok: core_status_mirror put B's status in core: $(core_status)"
 wait_until "the layout in core's herdr-app document" published
 echo "ok: core_spaces_doc published B as $(doc_summary); PTY pane A is left out"
+
+# core-phase4 verifier 10 and 15: with core_label_sync on, a core pane starts
+# seen up to turn 0, and `herdr pane mark-seen` raises herdr.seen to the
+# pane's core turn. B finishes while another workspace is focused, so it is
+# unread (no client is attached, so nothing is on screen).
+core_label() {
+  hc_scratch get "$ADDR" --json \
+    | python3 -I -c 'import json,sys; t=json.load(sys.stdin); print(t.get("turn",0), (t.get("labels") or {}).get("herdr.seen","-"))'
+}
+[[ "$(core_label)" == "0 0" ]] || fail "B did not start with herdr.seen=0: $(core_label)"
+W2="$(api "{\"id\":\"v10\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["workspace"]["workspace_id"])')"
+send_line "$B" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state idle; sleep 3"
+b_done() { [[ "$(pane_get "$B" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print(r.get("pane", r).get("agent_status"))')" == done ]]; }
+wait_until "B done while unread" b_done
+turned() { [[ "$(core_label | cut -d' ' -f1)" -ge 1 ]]; }
+wait_until "B's finished turn in core" turned
+run_herdr pane mark-seen >/dev/null || fail "herdr pane mark-seen failed"
+raised() { read -r turn seen <<<"$(core_label)"; [[ "$seen" == "$turn" ]]; }
+wait_until "herdr.seen raised to B's turn" raised
+echo "ok: core_label_sync started B at herdr.seen=0 and mark-seen raised it to its turn: $(core_label)"
+api "{\"id\":\"v10\",\"method\":\"workspace.close\",\"params\":{\"workspace_id\":\"$W2\",\"force\":true}}" >/dev/null
+only_b() { [[ "$(core_terminals | wc -l | tr -d ' ')" == 1 ]]; }
+wait_until "the second workspace's core pane closed" only_b
 
 # 2. Live handoff: both programs keep running; B stays the same core terminal.
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
