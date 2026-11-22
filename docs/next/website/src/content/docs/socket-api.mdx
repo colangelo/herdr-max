@@ -430,7 +430,10 @@ on any client, and repeating the request gets the same answer. With
 the process it stopped (`null` when none was running) and the open todos the
 pane keeps. Unknown pane ids fail with `pane_not_found`. A suspended pane
 whose program Herdr is starting again fails with `pane_resuming` and changes
-nothing; respawn it once it has started.
+nothing; respawn it once it has started. A pane whose program runs on a core
+machine (live, waiting for the machine, or ended there) fails with
+`pane_on_machine` and changes nothing, because a respawn starts its program on
+this host.
 
 `pane.respawn_agent` takes the same parameters and answers the same way, but
 the pane comes back running its agent: a fresh shell in the pane's current

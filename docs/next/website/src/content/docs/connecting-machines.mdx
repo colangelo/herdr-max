@@ -131,7 +131,11 @@ herdr workspace create --on ac-mbm5 --label mbm5
 
 `herdr pane list --json` gives such a pane `machine` (`"ac-mbm5"`) and `core_address` (`"ac-mbm5/t7"`, the terminal as your Herdr Core names it). Panes on this Mac have no `machine` field. Every other field keeps its meaning.
 
-When the machine is not connected, typed input is not sent and the first key starts a reconnect. After a restart, a live handoff, or a link loss, the pane keeps its place and waits: `core_waiting` is `true`, with `core_waiting_cause` set to `machine_dormant` (no one used the machine for 10 minutes; press a key in the pane) or `machine_unreachable` (its link is down). It attaches to the same program on the machine once the machine is connected again. It is never started again on this Mac. A restart or handoff does not wake a dormant machine.
+When the machine is not connected, typed input is not sent and the first key starts a reconnect. After a restart, a live handoff, or a link loss, the pane keeps its place and waits: `core_waiting` is `true`, with `core_waiting_cause` set to `machine_dormant` (no one used the machine for 10 minutes; press a key in the pane) or `machine_unreachable` (its link is down). It attaches to the same program on the machine once the machine is connected again. It is never started again on this Mac. A restart or handoff does not wake a dormant machine. A stop or restart of this Mac's Herdr Core makes the pane wait the same way.
+
+Herdr Core leaves the terminals of a machine that is not connected out of its answers, so the pane ends only when Herdr Core has the machine connected and says the program there is gone. A pane whose program ended that way, or whose terminal there is now labelled for another pane, keeps its place with `core_waiting_cause` set to `machine_ended` and says so. It keeps that state through restarts and is never started again, here or on the machine; close it, or open a new pane with `--on`.
+
+`herdr pane respawn` (and `--resume`) refuses a pane on a machine with `pane_on_machine`, whether it runs, waits or ended there, because a respawn starts its program on this Mac.
 
 A pane on a machine lacks what Herdr learns from this Mac's processes:
 
