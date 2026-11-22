@@ -545,6 +545,10 @@ fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow
                 "Waiting for {machine}: its link is down. This pane's program keeps running there and the pane attaches when {machine} is connected again; nothing starts here."
             )
             .into(),
+            CoreWaitReason::MachineMissing { machine } => format!(
+                "{machine} is connected, but Herdr Core does not list this pane's program there yet. It may still run: the pane asks again every 5 seconds and starts nothing, here or on {machine}. Closing the pane stops the wait and sends nothing to {machine}."
+            )
+            .into(),
             CoreWaitReason::MachineEnded { machine, notice } => format!(
                 "{notice} Nothing starts again, here or on {machine}; close this pane, or open a new one with `--on {machine}`."
             )

@@ -1180,10 +1180,12 @@ pub(crate) fn after_failed_attach(
     failure: crate::pane::CoreAttachFailure,
     program: crate::platform::ProgramLiveness,
 ) -> AfterFailedAttach {
-    use crate::pane::CoreAttachFailure::{Gone, NotOurs, Unreachable};
+    use crate::pane::CoreAttachFailure::{Gone, Missing, NotOurs, Unreachable};
     use crate::platform::ProgramLiveness::{Runs, Unknown};
     match (failure, program) {
-        (_, Runs) | (Unreachable, Unknown) => AfterFailedAttach::Wait,
+        // Only a pane on a machine is told `Missing`, and it never searches
+        // or starts here (core-phase5 D5): it waits.
+        (_, Runs) | (Unreachable, Unknown) | (Missing, _) => AfterFailedAttach::Wait,
         (Gone | NotOurs, _) | (Unreachable, _) => AfterFailedAttach::Search,
     }
 }
@@ -1245,16 +1247,16 @@ fn restore_core_pane(
     // A pane on a machine waits for the machine, and is never started fresh
     // nor searched for in this Mac's terminals (core-phase5 D5, F1).
     if let Some(machine) = crate::pane::core_machines::machine_of_address(&link.address) {
-        // Ended, with the link held: the next save keeps it, so no later
-        // restore starts this pane here either.
-        if let Some(why) =
-            crate::core_machine::panes::machine_ended(&machine, &link.address, failure)
-        {
+        // Ended (a finished record), or missing from a connected machine,
+        // with the link held: the next save keeps it, so no later restore
+        // starts this pane here either.
+        if let Some(why) = crate::core_machine::panes::machine_wait_reason(&machine, failure) {
             tracing::info!(
                 pane_id = pane_id.raw(),
                 %machine,
                 address = %link.address,
-                "the pane's program on its core machine has ended; nothing starts"
+                cause = why.as_str(),
+                "core answered for the pane's program on its core machine; nothing starts"
             );
             return waiting(link, why);
         }
@@ -4101,8 +4103,9 @@ mod core_restore_tests {
         );
     }
 
-    // C2 (core-phase5 D5): a machine pane whose program core says is gone,
-    // with the machine connected, ends with its link held, so every later
+    // C2, N2 (core-phase5 D5): a machine pane that core has connected but
+    // does not list waits with its terminal missing, never final; one whose
+    // record core reports finished ends with its link held, so every later
     // save keeps it and no restore starts the pane, here or there.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_ended_machine_pane_holds_its_link() {
@@ -4116,6 +4119,21 @@ mod core_restore_tests {
             address: "loop/t7".into(),
             program: None,
         };
+        let CoreRestore::Waiting(missing) = restore(&link, "w1-p2") else {
+            panic!("expected the pane to wait");
+        };
+        assert_eq!(
+            missing.why,
+            crate::terminal::state::CoreWaitReason::MachineMissing {
+                machine: "loop".into()
+            }
+        );
+        core.add_terminal(
+            serde_json::json!({"address": "loop/t7", "state": "finished",
+            "reason": "exited", "labels": {
+                "herdr.session": format!("{}@fake", crate::pane::herdr_session_label()),
+                "herdr.pane_id": "w1-p2"}}),
+        );
         let CoreRestore::Waiting(waiting) = restore(&link, "w1-p2") else {
             panic!("expected the pane to hold its link");
         };

@@ -649,10 +649,12 @@ pub struct PaneInfo {
     pub core_unreachable_since: Option<u64>,
     /// Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,
     /// `directory_unavailable`, `machine_dormant` (its core machine sleeps:
-    /// a key in the pane wakes it), `machine_unreachable`, or
-    /// `machine_ended` (its program on the machine has ended; nothing starts
-    /// it again, and a person closes the pane); a newer server may add
-    /// others.
+    /// a key in the pane wakes it), `machine_unreachable`,
+    /// `machine_terminal_missing` (the machine is connected but core does
+    /// not list the pane's program there yet; asked again every 5 s), or
+    /// `machine_ended` (core reports its program on the machine finished;
+    /// nothing starts it again, and a person closes the pane); a newer
+    /// server may add others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_waiting_cause: Option<String>,
     /// The core machine the pane's program runs on (`herdr machine add

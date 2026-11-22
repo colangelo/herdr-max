@@ -266,26 +266,31 @@ pub(crate) fn probe(machines: &[MachineName]) -> Vec<Probe> {
     probes
 }
 
-/// What a failed attach to a machine's terminal makes of the pane: ended,
-/// with what core found, or `None` to keep waiting (core did not answer, or
-/// had the machine away, which the attach reports as unreachable).
-pub(crate) fn machine_ended(
+/// What a failed attach to a machine's terminal makes of the pane
+/// (core-phase5 D5, positive evidence): ended only on a finished record
+/// with the pane's labels; waiting, with its terminal missing, when core
+/// has the machine connected but not the pane's terminal; `None` keeps the
+/// pane's reason (core did not answer, or has the machine away).
+pub(crate) fn machine_wait_reason(
     machine: &MachineName,
-    address: &str,
     failure: crate::pane::CoreAttachFailure,
 ) -> Option<crate::terminal::state::CoreWaitReason> {
     use crate::pane::CoreAttachFailure;
-    let notice = match failure {
-        CoreAttachFailure::Unreachable => return None,
-        CoreAttachFailure::Gone => format!("Its program on {machine} has ended."),
-        CoreAttachFailure::NotOurs => {
-            format!("Its terminal on {machine} ({address}) is labelled for another pane; nothing was attached.")
+    use crate::terminal::state::CoreWaitReason;
+    match failure {
+        CoreAttachFailure::Unreachable => None,
+        CoreAttachFailure::Gone => Some(CoreWaitReason::MachineEnded {
+            machine: machine.to_string(),
+            notice: format!("Its program on {machine} has ended."),
+        }),
+        // `NotOurs` is this Mac's answer for a live terminal of another
+        // pane; on a machine that is `Missing`, and neither is final.
+        CoreAttachFailure::Missing | CoreAttachFailure::NotOurs => {
+            Some(CoreWaitReason::MachineMissing {
+                machine: machine.to_string(),
+            })
         }
-    };
-    Some(crate::terminal::state::CoreWaitReason::MachineEnded {
-        machine: machine.to_string(),
-        notice,
-    })
+    }
 }
 
 #[cfg(test)]

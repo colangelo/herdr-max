@@ -173,8 +173,10 @@ impl App {
     }
 
     /// A waiting pane's machine is connected: attach to its program there.
-    /// A program core says is gone is never started again, here or there:
-    /// the pane keeps its link, ended, and a person closes it (D5).
+    /// Only a finished record ends it, and a program that ended is never
+    /// started again, here or there: the pane keeps its link, ended, and a
+    /// person closes it. A terminal core does not list yet keeps the pane
+    /// waiting, asked about again on the next poll (D5).
     fn attach_machine_pane(
         &mut self,
         pane_id: PaneId,
@@ -185,10 +187,13 @@ impl App {
             Ok(()) => return true,
             Err(failure) => failure,
         };
-        let Some(why) = panes::machine_ended(machine, &waiting.link.address, failure) else {
+        let Some(why) = panes::machine_wait_reason(machine, failure) else {
             return false;
         };
-        info!(pane = pane_id.raw(), %machine, address = %waiting.link.address, ?why, "the pane's program on its machine has ended");
+        if waiting.why == why {
+            return false;
+        }
+        info!(pane = pane_id.raw(), %machine, address = %waiting.link.address, cause = why.as_str(), "core answered for the pane's program on its machine");
         let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
             return false;
         };
@@ -347,6 +352,34 @@ mod tests {
         serde_json::from_str(&response).expect("json")
     }
 
+    /// The record core gives for `pane_id`'s terminal at `address`: its
+    /// owner labels (D5), in `state`, with `extra` fields.
+    fn owned_record(
+        app: &App,
+        pane_id: PaneId,
+        address: &str,
+        extra: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut record = serde_json::json!({
+            "address": address,
+            "labels": {
+                "herdr.session": format!("{}@fake", crate::pane::herdr_session_label()),
+                "herdr.pane_id": app.public_pane_id(0, pane_id).expect("public id"),
+            },
+        });
+        for (key, value) in extra.as_object().expect("fields") {
+            record[key] = value.clone();
+        }
+        record
+    }
+
+    fn kills(core: &FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "terminal.kill")
+            .count()
+    }
+
     fn connected(machine: &str) -> Probe {
         Probe {
             machine: name(machine),
@@ -406,16 +439,21 @@ mod tests {
         }
     }
 
-    // C2 (D5): a waiting pane whose program core says is gone, with the
-    // machine connected, ends with its link held, so the next save keeps the
-    // link and the next restore never starts the pane here.
+    // C2, N2 (D5): a waiting pane whose program core reports finished
+    // ends with its link held, so the next save keeps the link and the next
+    // restore never starts the pane here. Nothing is killed.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_ended_machine_pane_keeps_its_link_in_the_save() {
         let core = FakeCore::start();
-        core.forget_terminal("loop/t3");
         core.set_machine("loop", "connected");
         std::env::set_var("HC_SOCKET", &core.socket);
         let (mut app, pane) = app_with_one_pane();
+        core.add_terminal(owned_record(
+            &app,
+            pane,
+            "loop/t3",
+            serde_json::json!({"state": "finished", "reason": "exited", "exit_code": 0}),
+        ));
         wait_for_machine(&mut app, pane, "loop/t3", false);
         app.handle_core_machines(&[connected("loop")], Instant::now());
         assert!(
@@ -447,6 +485,52 @@ mod tests {
             "{:?}",
             core.methods()
         );
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
+    }
+
+    // N2 (D5, P5): core has the machine connected but lists no terminal of
+    // the pane there, or one labelled for another pane: never final. The
+    // pane waits with its terminal missing, is asked about again on the
+    // next poll, and attaches once core lists its live terminal. Nothing is
+    // started or killed, here or there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_pane_core_does_not_list_waits_and_is_asked_again() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t3");
+        core.set_machine("loop", "connected");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        let missing = Some(CoreWaitReason::MachineMissing {
+            machine: "loop".into(),
+        });
+        app.handle_core_machines(&[connected("loop")], Instant::now());
+        assert_eq!(why(&app, pane), missing, "not listed");
+        assert_eq!(app.machine_waiting_panes().len(), 1, "still polled for");
+        // Listed, but labelled for another pane (the far herdr's own).
+        core.add_terminal(serde_json::json!({"address": "loop/t3", "state": "live",
+            "labels": {"herdr.session": crate::pane::herdr_session_label(), "herdr.pane_id": "w9-p9"}}));
+        app.handle_core_machines(&[connected("loop")], Instant::now());
+        assert_eq!(why(&app, pane), missing, "labelled for another pane");
+        assert!(!has_runtime(&app, pane));
+        core.add_terminal(owned_record(
+            &app,
+            pane,
+            "loop/t3",
+            serde_json::json!({"state": "live"}),
+        ));
+        app.handle_core_machines(&[connected("loop")], Instant::now());
+        assert!(has_runtime(&app, pane), "attached once core lists it");
+        assert_eq!(why(&app, pane), None);
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
+        assert!(
+            !core.methods().iter().any(|method| method == "terminal.run"),
+            "{:?}",
+            core.methods()
+        );
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     // C5 (D5, P5): a poll said connected, but core has not linked the

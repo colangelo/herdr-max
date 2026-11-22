@@ -349,11 +349,18 @@ pub enum CoreWaitReason {
     /// the pane wakes it), else the link is down. It attaches when the
     /// machine is connected again, and is never started fresh.
     MachineAway { machine: String, dormant: bool },
-    /// Its program on a core machine has ended, or that terminal is now
-    /// another pane's, as core answered while the machine was connected
-    /// (core-phase5 D5). The hold keeps the link so every save keeps it and
-    /// the next restore asks core about that terminal again, never starting
-    /// the pane anywhere; a person closes it. `notice` says what core found.
+    /// Its core machine is connected, but core does not list its terminal
+    /// there as this pane's (not listed, labelled for another pane, or in
+    /// no known state): core may not have all of the machine's terminals
+    /// yet (P5), so this is never final (core-phase5 D5). It is asked about
+    /// again on every machine poll; nothing starts, here or there.
+    MachineMissing { machine: String },
+    /// Its program on a core machine has ended: core gave its record as
+    /// finished (core-phase5 D5, the only end taken as final). The hold
+    /// keeps the link so every save keeps it and the next restore asks core
+    /// about that terminal again, never starting the pane anywhere; a
+    /// person closes it, which sends nothing to core. `notice` says what
+    /// core found.
     MachineEnded { machine: String, notice: String },
 }
 
@@ -366,6 +373,7 @@ impl CoreWaitReason {
             Self::DirectoryUnavailable => "directory_unavailable",
             Self::MachineAway { dormant: true, .. } => "machine_dormant",
             Self::MachineAway { dormant: false, .. } => "machine_unreachable",
+            Self::MachineMissing { .. } => "machine_terminal_missing",
             Self::MachineEnded { .. } => "machine_ended",
         }
     }

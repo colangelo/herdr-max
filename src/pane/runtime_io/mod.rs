@@ -182,6 +182,10 @@ pub(crate) enum CoreAttachFailure {
     Gone,
     /// The address is live but labelled for another pane.
     NotOurs,
+    /// A machine's terminal core does not show as the pane's live or
+    /// finished program while it has the machine connected (core-phase5
+    /// D5). Never final: the pane waits and asks again.
+    Missing,
     /// Core did not answer.
     Unreachable,
 }
@@ -196,6 +200,7 @@ pub(crate) fn core_attach_failure(err: &std::io::Error) -> CoreAttachFailure {
     {
         Some(core_backend::ReattachError::Gone(_)) => CoreAttachFailure::Gone,
         Some(core_backend::ReattachError::NotOurs(_)) => CoreAttachFailure::NotOurs,
+        Some(core_backend::ReattachError::Missing(_)) => CoreAttachFailure::Missing,
         Some(core_backend::ReattachError::Unreachable(_)) | None => CoreAttachFailure::Unreachable,
     }
 }
