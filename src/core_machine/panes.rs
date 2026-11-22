@@ -65,8 +65,9 @@ fn wake_thread() -> Option<&'static SyncSender<Arc<MachineLink>>> {
         .as_ref()
 }
 
-/// The process's record of `name`, made on first use. A machine a pane
-/// just started on or attached to is connected: core answered for it.
+/// The process's record of `name`, made on first use, not connected: a
+/// pane's attach marks it connected once core answers it, and the poll as
+/// core lists it (D5).
 pub(crate) fn link(name: &MachineName) -> Arc<MachineLink> {
     // Before the first link exists, so no key ever starts the thread.
     let _ = wake_thread();
@@ -76,7 +77,7 @@ pub(crate) fn link(name: &MachineName) -> Arc<MachineLink> {
     }
     let made = Arc::new(MachineLink {
         name: name.clone(),
-        connected: AtomicBool::new(true),
+        connected: AtomicBool::new(false),
         last_wake: Mutex::new(None),
         dialer: Mutex::new(None),
     });
@@ -381,13 +382,14 @@ mod tests {
         assert!(!link.wake(), "within the interval: nothing posted");
     }
 
+    // C10 (D5): a machine is connected only once core answered for it.
     #[test]
-    fn a_link_starts_connected_and_says_when_it_changes() {
+    fn a_link_starts_not_connected_and_says_when_it_changes() {
         let link = link(&name("panes-test-link"));
+        assert!(!link.connected(), "nothing answered for it yet");
+        assert!(!link.set_connected(false));
+        assert!(link.set_connected(true));
         assert!(link.connected());
-        assert!(!link.set_connected(true));
-        assert!(link.set_connected(false));
-        assert!(!link.connected());
-        assert!(super::link(&name("panes-test-link")).set_connected(true));
+        assert!(super::link(&name("panes-test-link")).set_connected(false));
     }
 }

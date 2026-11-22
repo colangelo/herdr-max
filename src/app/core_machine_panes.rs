@@ -558,7 +558,7 @@ mod tests {
         let (mut app, pane) = app_with_one_pane();
         wait_for_machine(&mut app, pane, "unread/t3", true);
         let link = panes::link(&name("unread"));
-        assert!(link.connected());
+        link.set_connected(true);
         let unread = Probe {
             machine: name("unread"),
             state: None,

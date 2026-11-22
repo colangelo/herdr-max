@@ -1986,13 +1986,13 @@ mod tests {
     }
 
     // C10 (D5): the machine is marked connected only once core attached the
-    // pane; a failed attach leaves the mark as it was.
+    // pane; a machine's first link starts away, and a failed attach leaves
+    // it so.
     #[test]
     fn a_failed_machine_attach_leaves_the_machine_marked_away() {
         let core = FakeCore::start_with(|config| config.failing = vec!["terminal.attach"]);
         let machine = MachineName::parse("attach-fails").expect("name");
         let link = crate::core_machine::panes::link(&machine);
-        link.set_connected(false);
         let mut spawn = machine_spawn("w1-p6");
         spawn.on = Some(machine);
         let pid = AtomicU32::new(0);
