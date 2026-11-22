@@ -19,6 +19,7 @@ const HELP: &str = "Usage:
   herdr machine add --core <ssh-target> [--name <name>] [--remote-session <core-session>] [--ssh-config <file>]
   herdr machine rm --core <name>
   herdr machine login <name>
+  herdr machine wake <name> [--for <30m|2h|90s>]
   herdr machine status --core [<name>] [--json]
 
 Add prepares the remote Herdr installation and starts its server before saving.
@@ -32,7 +33,10 @@ SSH credentials and key material remain owned by OpenSSH.
 in a terminal, never --install). Core reaches it through `herdr core-link`,
 which runs each dial as a fresh ssh login with no master and closes the gate
 after a Tailscale check, a stalled or failed login, or a far core that is not
-running; `herdr machine login` reopens it. status --core reports each gate.";
+running; `herdr machine login` reopens it. A link is allowed only while a lease
+is in force: 10 min after input in a herdr client, or `herdr machine wake` (30 min
+by default). Core's own reconnects get one retry, then wait for a person to act.
+status --core reports each gate.";
 
 #[derive(Serialize)]
 struct MachineListRow<'a> {
@@ -51,6 +55,7 @@ pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
         Some("rm" | "remove") if core => core_command(CoreVerb::Remove, &args[1..]),
         Some("status") if core => core_command(CoreVerb::Status, &args[1..]),
         Some("login") => core_command(CoreVerb::Login, &args[1..]),
+        Some("wake") => core_command(CoreVerb::Wake, &args[1..]),
         Some("list") => list(&args[1..]),
         Some("status") => status(&args[1..]),
         Some("reconnect") => reconnect(&args[1..]),
@@ -75,6 +80,7 @@ enum CoreVerb {
     Remove,
     Status,
     Login,
+    Wake,
 }
 
 /// The core machine verbs (openspec/changes/core-phase5); herdr-core and so
@@ -88,6 +94,7 @@ fn core_command(verb: CoreVerb, args: &[String]) -> std::io::Result<i32> {
             CoreVerb::Remove => command::remove(args),
             CoreVerb::Status => command::status(args),
             CoreVerb::Login => command::login(args),
+            CoreVerb::Wake => command::wake(args),
         }
     }
     #[cfg(not(unix))]

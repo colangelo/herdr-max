@@ -10,22 +10,20 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::dialer::{self, Outcome, PrimaryCore};
 use super::name::MachineName;
 use super::ssh;
 use super::state::{
-    is_ssh_destination, now_unix, passwd_machines_root, Gate, LeaseHolder, MachineDir, Target,
-    MANUAL_LEASE_SECS,
+    is_ssh_destination, newest_act, now_unix, passwd_machines_root, Gate, GateClass, LeaseHolder,
+    MachineDir, Target, MANUAL_LEASE_SECS, MAX_WAKE_SECS,
 };
 use crate::pane::core_machines as core;
 
 const HELP: &str = "  herdr machine add --core <ssh-target> [--name <name>] [--remote-session <core-session>] [--ssh-config <file>]
   herdr machine rm --core <name>
   herdr machine login <name>
+  herdr machine wake <name> [--for <30m|2h|90s>]
   herdr machine status --core [<name>] [--json]";
-
-/// How long `machine login` waits for `machine.connect`: core-link's own
-/// deadline is 15 s (D2 step 6, D3a).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
     let parsed = match parse_add(args) {
@@ -74,7 +72,8 @@ pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
     dir.write_target(&target)?;
     dir.clear_gate()?;
     // D3, F8: the lease comes before hc dials (twice, P1).
-    dir.write_lease(&LeaseHolder::manual(), now_unix() + MANUAL_LEASE_SECS)?;
+    let now = now_unix();
+    dir.write_lease(&LeaseHolder::manual(), now + MANUAL_LEASE_SECS, now)?;
 
     let via = format!(
         "{} core-link {}",
@@ -301,11 +300,12 @@ pub(crate) fn login(args: &[String]) -> std::io::Result<i32> {
         }
     };
     // D3, F8: the lease comes before the connect it leads to.
-    dir.write_lease(&LeaseHolder::manual(), now_unix() + MANUAL_LEASE_SECS)?;
-    let managed = ssh::write_managed_config(&dir, &account.home)?;
+    let now = now_unix();
+    dir.write_lease(&LeaseHolder::manual(), now + MANUAL_LEASE_SECS, now)?;
+    let config = ssh::write_link_config(&dir, &target, &account.home)?;
     let status = std::process::Command::new(&target.ssh)
         .arg0("ssh")
-        .args(ssh::login_ssh_args(&target, &managed))
+        .args(ssh::login_ssh_args(&target, &config))
         .env_clear()
         .envs(ssh::ssh_env(
             &account.home,
@@ -320,31 +320,136 @@ pub(crate) fn login(args: &[String]) -> std::io::Result<i32> {
     }
     dir.clear_gate()?;
     dir.log("LOGIN cleared the gate");
-    match core::call_running_primary(
-        "machine.connect",
-        json!({"machine": name.as_str()}),
-        CONNECT_TIMEOUT,
-    ) {
-        Ok(Some(reply)) => {
-            let state = reply["state"].as_str().unwrap_or("unknown");
-            println!("{name}: {state}");
-            Ok(i32::from(state != "connected"))
-        }
-        Ok(None) => {
-            println!("{name}: the gate is open; herdr-core is not running, so nothing dialled");
-            Ok(0)
-        }
+    Ok(report_wake(&name, &dir))
+}
+
+/// `herdr machine wake <name> [--for D]` (D3, S4b): a `manual` lease for
+/// the given time (30 min by default, at most 12 h), then one connect
+/// through the dialer. It reopens `far_core_down` at once and, by its newer
+/// lease, `retry_spent`; the login classes stay for `herdr machine login`.
+/// A wake is an announced dial: an agent says so on the desk first.
+pub(crate) fn wake(args: &[String]) -> std::io::Result<i32> {
+    let (name, secs) = match parse_wake(args) {
+        Ok(parsed) => parsed,
         Err(err) => {
-            eprintln!("{name}: the gate is open, but machine.connect failed: {err}");
-            Ok(1)
+            eprintln!("{err}");
+            return Ok(2);
+        }
+    };
+    let dir = MachineDir::at(&passwd_machines_root()?, &name);
+    if let Err(err) = dir.check().and_then(|()| dir.read_target().map(|_| ())) {
+        eprintln!("{name} is not a herdr core machine here: {err}");
+        return Ok(1);
+    }
+    let gate = match dir.read_gate() {
+        Ok(gate) => gate,
+        Err(err) => {
+            eprintln!("{name}: unreadable gate.json ({err}); run herdr machine login {name}");
+            return Ok(1);
+        }
+    };
+    if let Some(gate) = gate.as_ref().filter(|gate| {
+        matches!(
+            gate.class,
+            GateClass::NeedsCheck | GateClass::AuthStalled | GateClass::AuthFailed
+        )
+    }) {
+        eprintln!(
+            "{name}: the gate is closed ({}); a wake cannot reopen it. A person runs: herdr machine login {name}",
+            gate.class.as_str()
+        );
+        return Ok(1);
+    }
+    let now = now_unix();
+    // D3: the lease before the connect it leads to.
+    dir.write_lease(&LeaseHolder::manual(), now + secs, now)?;
+    if gate.is_some_and(|gate| gate.class == GateClass::FarCoreDown) {
+        dir.clear_gate()?;
+        dir.log("WAKE cleared far_core_down");
+    }
+    dir.log(&format!("WAKE lease for {secs:.0}s"));
+    Ok(report_wake(&name, &dir))
+}
+
+/// One connect through the dialer's rules (D3a), and its result printed.
+fn report_wake(name: &MachineName, dir: &MachineDir) -> i32 {
+    let outcome = dialer::dial_once(
+        &PrimaryCore,
+        name,
+        &dir.connect_lock_path(),
+        dialer::Timing::default(),
+    );
+    match &outcome {
+        Outcome::NotListed => {
+            println!("{name}: herdr-core does not list it (or is not running), so nothing dialled");
+            0
+        }
+        Outcome::Failed(err) => {
+            eprintln!("{name}: machine.connect failed: {err}");
+            1
+        }
+        _ => {
+            let state = outcome.state().unwrap_or("unknown");
+            println!("{name}: {state}");
+            i32::from(state != "connected")
         }
     }
+}
+
+fn parse_wake(args: &[String]) -> Result<(MachineName, f64), String> {
+    let usage = "usage: herdr machine wake <name> [--for <30m|2h|90s>]";
+    let mut name = None;
+    let mut secs = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--core" => {}
+            "--for" if secs.is_none() => {
+                let raw = rest.next().ok_or(usage)?;
+                secs = Some(parse_duration(raw)?);
+            }
+            raw if !raw.starts_with('-') && name.is_none() => {
+                name = Some(MachineName::parse(raw).map_err(|err| err.to_string())?);
+            }
+            _ => return Err(usage.into()),
+        }
+    }
+    let name = name.ok_or(usage)?;
+    let secs = secs.unwrap_or(MANUAL_LEASE_SECS);
+    if secs > MAX_WAKE_SECS {
+        return Err(format!("--for is at most 12h ({} s)", MAX_WAKE_SECS as u64));
+    }
+    Ok((name, secs))
+}
+
+/// `90`, `90s`, `30m` or `2h`, more than zero.
+fn parse_duration(raw: &str) -> Result<f64, String> {
+    let bad = || format!("{raw:?} is not a duration like 90s, 30m or 2h");
+    let (number, unit) = match raw.find(|c: char| !c.is_ascii_digit()) {
+        Some(at) => raw.split_at(at),
+        None => (raw, "s"),
+    };
+    let number: u64 = number.parse().map_err(|_| bad())?;
+    let scale = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return Err(bad()),
+    };
+    let secs = number.checked_mul(scale).ok_or_else(bad)?;
+    if secs == 0 {
+        return Err(bad());
+    }
+    Ok(secs as f64)
 }
 
 #[derive(Debug, Serialize)]
 struct LeaseRow {
     holder: String,
     expires_at: f64,
+    /// The human act that wrote it; only an act newer than a
+    /// `retry_spent` failure reopens the gate (D2 step 9).
+    input_at: f64,
     in_force: bool,
 }
 
@@ -354,9 +459,12 @@ struct StatusRow {
     /// Core's state for it (`connected`, `connecting`, `unreachable`, ...),
     /// `absent` when core does not list it, `unknown` when core is down.
     state: String,
-    /// `open` or the class that closes it; `null` for a machine herdr did
-    /// not add.
+    /// `open`, `dormant` (no lease in force) or the class that closes it;
+    /// `null` for a machine herdr did not add.
     gate: Option<String>,
+    /// The class recorded in `gate.json`, closing or not (`dial_failed`
+    /// closes nothing; an expired `far_core_down` neither).
+    gate_record: Option<String>,
     gate_at: Option<f64>,
     leases: Vec<LeaseRow>,
     last_dial: Option<f64>,
@@ -465,6 +573,7 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
             let ours = dir.check().is_ok() && dir.target_path().exists();
             let target = ours.then(|| dir.read_target().ok()).flatten();
             let gate: Option<Option<Gate>> = ours.then(|| dir.read_gate().ok().flatten());
+            let leases = if ours { dir.leases() } else { Vec::new() };
             let state = match (listed, core_record) {
                 (None, _) => "unknown".to_string(),
                 (Some(_), None) => "absent".to_string(),
@@ -479,23 +588,28 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
                         .is_some_and(|via| via.ends_with(&format!(" core-link {name}")))
             });
             StatusRow {
-                gate: gate.as_ref().map(|gate| match gate {
-                    Some(gate) if gate.closes_at(now) => gate.class.as_str().to_string(),
-                    _ => "open".to_string(),
+                gate: gate.as_ref().map(|gate| {
+                    let act = newest_act(&leases, now);
+                    match gate {
+                        Some(gate) if gate.closes_at(now, act) => gate.class.as_str().to_string(),
+                        _ if act.is_none() => "dormant".to_string(),
+                        _ => "open".to_string(),
+                    }
                 }),
+                gate_record: gate
+                    .as_ref()
+                    .and_then(|gate| gate.as_ref())
+                    .map(|gate| gate.class.as_str().to_string()),
                 gate_at: gate.flatten().map(|gate| gate.at),
-                leases: if ours {
-                    dir.leases()
-                        .into_iter()
-                        .map(|lease| LeaseRow {
-                            holder: lease.holder.as_str().to_string(),
-                            expires_at: lease.expires_at,
-                            in_force: lease.expires_at > now,
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                },
+                leases: leases
+                    .iter()
+                    .map(|lease| LeaseRow {
+                        holder: lease.holder.as_str().to_string(),
+                        expires_at: lease.expires_at,
+                        input_at: lease.input_at,
+                        in_force: lease.in_force(now),
+                    })
+                    .collect(),
                 last_dial: ours
                     .then(|| dir.read_dial_record())
                     .flatten()
@@ -597,7 +711,7 @@ mod tests {
             detail: None,
         })
         .expect("gate");
-        ours.write_lease(&LeaseHolder::manual(), 2_000.0)
+        ours.write_lease(&LeaseHolder::manual(), 2_000.0, 5.0)
             .expect("lease");
         let listed = json!({"machines": [
             {"name": "loop", "state": "unreachable", "via": true, "target": "/bin/herdr core-link loop"},
@@ -618,6 +732,80 @@ mod tests {
         let down = status_rows(&root, None, 1_000.0);
         assert_eq!(down.len(), 1);
         assert_eq!(down[0].state, "unknown");
+
+        // No lease in force is `dormant`; a first failure closes nothing;
+        // `retry_spent` stands until a newer act.
+        ours.clear_gate().expect("clear");
+        assert_eq!(
+            status_rows(&root, None, 2_000.0)[0].gate.as_deref(),
+            Some("dormant")
+        );
+        assert_eq!(
+            status_rows(&root, None, 1_000.0)[0].gate.as_deref(),
+            Some("open")
+        );
+        ours.write_gate(&Gate {
+            class: GateClass::DialFailed,
+            at: 10.0,
+            detail: None,
+        })
+        .expect("gate");
+        let row = &status_rows(&root, None, 1_000.0)[0];
+        assert_eq!(
+            (row.gate.as_deref(), row.gate_record.as_deref()),
+            (Some("open"), Some("dial_failed"))
+        );
+        ours.write_gate(&Gate {
+            class: GateClass::RetrySpent,
+            at: 10.0,
+            detail: None,
+        })
+        .expect("gate");
+        assert_eq!(
+            status_rows(&root, None, 1_000.0)[0].gate.as_deref(),
+            Some("retry_spent")
+        );
+        ours.write_lease(&LeaseHolder::client(1), 2_000.0, 11.0)
+            .expect("act");
+        assert_eq!(
+            status_rows(&root, None, 1_000.0)[0].gate.as_deref(),
+            Some("open")
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wake_takes_a_name_and_a_bounded_time() {
+        assert_eq!(
+            parse_wake(&args(&["ac-mbm5"])).expect("parse"),
+            (
+                MachineName::parse("ac-mbm5").expect("name"),
+                MANUAL_LEASE_SECS
+            )
+        );
+        assert_eq!(
+            parse_wake(&args(&["m", "--for", "90"])).expect("secs").1,
+            90.0
+        );
+        assert_eq!(
+            parse_wake(&args(&["m", "--for", "2h"])).expect("hours").1,
+            7_200.0
+        );
+        assert_eq!(
+            parse_wake(&args(&["--for", "12h", "m"])).expect("max").1,
+            MAX_WAKE_SECS
+        );
+        for bad in [
+            &[][..],
+            &["m", "--for", "13h"],
+            &["m", "--for", "0"],
+            &["m", "--for", "5d"],
+            &["m", "--for"],
+            &["m", "n"],
+            &["a/b"],
+            &["m", "--dial"],
+        ] {
+            assert!(parse_wake(&args(bad)).is_err(), "{bad:?} was accepted");
+        }
     }
 }
