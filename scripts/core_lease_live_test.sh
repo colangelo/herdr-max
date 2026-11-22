@@ -54,7 +54,8 @@ link_cleanup() {
 }
 
 # The STARTs of $1's link log at or after time $2, as JSON: POSIX and
-# Windows line times, how many were not refused, the EXECs (ssh started),
+# Windows line times, how many were decided otherwise than refused, the
+# EXECs (ssh started),
 # the Windows line's lag behind its POSIX line, the gaps between POSIX
 # STARTs after time $3 (default $2).
 starts_report() {
@@ -77,7 +78,9 @@ for at, pid, kind, rest in rows:
         continue
     out["windows" if 'line="cmd' in rest else "posix"].append(at)
     after = next((r for r in rows if r[1] == pid and r[0] >= at and r[2] != "START"), None)
-    if after is None or after[2] != "REFUSE":
+    # A START with nothing after it yet is still being decided as this
+    # reads; an EXEC would show in "exec".
+    if after is not None and after[2] != "REFUSE":
         out["unrefused"] += 1
 out["exec"] = sum(1 for r in rows if r[0] >= since and r[2] == "EXEC")
 lags = [w - max(p for p in out["posix"] if p <= w) for w in out["windows"] if any(p <= w for p in out["posix"])]
