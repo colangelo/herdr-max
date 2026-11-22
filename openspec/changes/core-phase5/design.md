@@ -303,6 +303,12 @@ host-dependent call matches on it.
 - **Close** is `terminal.kill`. Detached jobs of the program survive on the far side, as core's own kill leaves
   them. A remote sweep through `machine.exec` was rejected for phase 5: it needs the far side's session and holder
   pids for core-backend D8's guard, which `server.status` does not give for another machine.
+- **Only a person's close ends a far program (decision, PR C, 2026-11-22).** A `herdr server stop`, a logout or a
+  restart on this Mac leaves programs on core machines running, and the saved link attaches them again when a
+  server starts; local core panes keep core-backend D10's stop behaviour. A pane on a machine ends only when core
+  reports its terminal `finished`; `not_found`, a label mismatch or a drop make it wait. Reason: a stop or logout
+  on one Mac must not kill agents running on the other, and an answer that may only mean "not listed yet" must
+  not end one either (herdr, lead, OK on 671bd81d).
 - **Restore and live handoff** reattach by (session, address) as today. When the machine is not `connected`, the
   pane is `CoreWaiting` (core-phase3 A1.3) with the cause `machine_dormant` or `machine_unreachable`, never started
   fresh, and the reattach is tried again when `machine.list` says `connected`. The server reads `machine.list`
