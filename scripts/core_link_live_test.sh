@@ -373,18 +373,30 @@ wait "$connecting" || true
 echo "ok: V27 kill -9 of the via (ssh $via) left no watcher ($watcher)"
 
 # --- V35: a dial never starts the far core
+# Core's own retry can dial in the moment between opening the gate and the
+# test's connect; two far_core_down dials in the budget then close it as
+# retry_spent (D2 step 9). Either way the guard refused the far side, which
+# the log's GATE far_core_down line after the open shows.
+far_down_since() {
+  local class
+  class="$(gate_class "$1")"
+  [[ "$class" == far_core_down || "$class" == retry_spent ]] || return 1
+  tail -n +"$(( $2 + 1 ))" "$(link_log "$1")" | grep -q " GATE far_core_down"
+}
+log_lines() { wc -l < "$(link_log "$1")" | tr -d ' '; }
 wait_for "core's retries settle on the closed gate" 25 gate_is "$M" auth_stalled
 echo relay > "$SSH_MODE"
 hc_far server stop >/dev/null || fail "could not stop the far core"
 wait_until "far socket gone" test ! -S "$FAR_SOCK"
+lines="$(log_lines "$M")"
 open_gate "$M"
 read -r took state < <(connect_now "$M")
-[[ "$(gate_class "$M")" == far_core_down ]] || fail "a stopped far core gave gate $(gate_class "$M")"
+far_down_since "$M" "$lines" || fail "a stopped far core gave gate $(gate_class "$M")"
 [[ ! -e "$FAR_SOCK" ]] || fail "the dial started the far core"
 before="$(ssh_starts fake-target)"
 read -r took state < <(connect_now "$M")
 [[ "$(ssh_starts fake-target)" == "$before" ]] || fail "a dial ran while far_core_down held the gate"
-grep -q "REFUSE Gate(FarCoreDown)" "$(link_log "$M")" || fail "far_core_down did not refuse the next dial"
+grep -Eq "REFUSE Gate\((FarCoreDown|RetrySpent)\)" "$(link_log "$M")" || fail "far_core_down did not refuse the next dial"
 # A stale socket, as a SIGKILLed core leaves.
 hc_far server start >/dev/null 2>&1 || fail "could not start the far core"
 far_core="$(hc_far server status --json | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["pid"])')"
@@ -392,9 +404,10 @@ kill -9 "$far_core"
 wait_until "the far core gone" sh -c "! kill -0 $far_core 2>/dev/null"
 [[ -S "$FAR_SOCK" ]] || fail "the killed far core left no socket file to test"
 stale_inode="$(stat -f %i "$FAR_SOCK")"
+lines="$(log_lines "$M")"
 open_gate "$M"
 connect_now "$M" >/dev/null
-[[ "$(gate_class "$M")" == far_core_down ]] || fail "a stale far socket gave gate $(gate_class "$M")"
+far_down_since "$M" "$lines" || fail "a stale far socket gave gate $(gate_class "$M")"
 [[ "$(stat -f %i "$FAR_SOCK")" == "$stale_inode" ]] && ! python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$FAR_SOCK" 2>/dev/null \
   || fail "the dial started a far core over the stale socket"
 echo "ok: V35 stopped and stale far cores give far_core_down, no far core starts, the next dial is refused"
