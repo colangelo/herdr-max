@@ -287,6 +287,30 @@ run_herdr pane mark-seen >/dev/null || fail "herdr pane mark-seen failed"
 raised() { read -r turn seen <<<"$(core_label)"; [[ "$seen" == "$turn" ]]; }
 wait_until "herdr.seen raised to B's turn" raised
 echo "ok: core_label_sync started B at herdr.seen=0 and mark-seen raised it to its turn: $(core_label)"
+
+# core-phase4 verifier 15, read side: another client's labels reach herdr.
+# B finishes a second unread turn; a raise to that turn makes it idle in herdr,
+# a mark unread makes it done again, and herdr.pinned pins and unpins it.
+b_status() { pane_get "$B" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); p=r.get("pane", r); print(p.get("agent_status"), p.get("pinned"))'; }
+TURN1="$(core_label | cut -d' ' -f1)"
+send_line "$B" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state working; sleep 1; \"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v11:test --agent pi --state idle; sleep 3"
+wait_until "B done again while unread" b_done
+turned_again() { [[ "$(core_label | cut -d' ' -f1)" -gt "$TURN1" ]]; }
+wait_until "B's second turn in core" turned_again
+TURN2="$(core_label | cut -d' ' -f1)"
+hc_scratch label "$ADDR" "herdr.seen=$TURN2" >/dev/null
+b_idle() { [[ "$(b_status | cut -d' ' -f1)" == idle ]]; }
+wait_until "a raise from another client marked B read" b_idle
+hc_scratch label "$ADDR" "herdr.seen=$((TURN2 - 1))" >/dev/null
+wait_until "a mark unread from another client made B done" b_done
+hc_scratch label "$ADDR" "herdr.pinned=1" >/dev/null
+b_pinned() { [[ "$(b_status | cut -d' ' -f2)" == True ]]; }
+wait_until "herdr.pinned pinned B" b_pinned
+run_herdr agent unpin "$B" >/dev/null || fail "herdr agent unpin failed"
+label_pinned() { hc_scratch get "$ADDR" --json | python3 -I -c 'import json,sys; print((json.load(sys.stdin).get("labels") or {}).get("herdr.pinned","-"))'; }
+unpinned() { [[ "$(label_pinned)" == - ]]; }
+wait_until "herdr's unpin removed herdr.pinned" unpinned
+echo "ok: another client's herdr.seen raise and mark unread, and herdr.pinned, reached B; herdr's unpin reached the label"
 api "{\"id\":\"v10\",\"method\":\"workspace.close\",\"params\":{\"workspace_id\":\"$W2\",\"force\":true}}" >/dev/null
 only_b() { [[ "$(core_terminals | wc -l | tr -d ' ')" == 1 ]]; }
 wait_until "the second workspace's core pane closed" only_b
