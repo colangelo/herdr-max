@@ -230,6 +230,7 @@ The server refuses a move, and changes nothing, for each of these reasons:
 
 | Refusal | Meaning |
 |---|---|
+| `on_machine` | The pane's program runs on a Herdr Core machine. A move would end it there and start its replacement on this host, so such a pane never moves. |
 | `already_on_primary` | The pane already runs where new panes start. |
 | `excluded` | The pane matches `core_pty_panes`. |
 | `core_off` | `runtime` is not `core`, or Herdr gave up on Herdr Core. |
