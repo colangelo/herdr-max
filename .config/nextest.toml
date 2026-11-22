@@ -1,0 +1,9 @@
+# Windows CI runners fail to start git with 0xc0000142 (a DLL init failure,
+# out of desktop heap) when many git-spawning tests run at once. Give those
+# tests more of the runner and one retry there; other platforms are unchanged.
+# https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/298
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'test(/worktree|git/)'
+threads-required = 4
+retries = 1
