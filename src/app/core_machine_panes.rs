@@ -118,7 +118,7 @@ impl App {
     /// What a poll or a dialer found: marks each machine for its panes'
     /// input, and attaches or relabels the panes that wait for one.
     pub(crate) fn handle_core_machines(&mut self, probes: &[Probe], now: Instant) {
-        for probe in probes {
+        for probe in probes.iter().filter(|probe| probe.read) {
             if panes::link(&probe.machine).set_connected(probe.connected()) {
                 info!(
                     machine = %probe.machine,
@@ -129,7 +129,10 @@ impl App {
         }
         let mut changed = false;
         for (pane_id, machine, waiting) in self.machine_waiting_panes() {
-            let Some(probe) = probes.iter().find(|probe| probe.machine == machine) else {
+            let Some(probe) = probes
+                .iter()
+                .find(|probe| probe.machine == machine && probe.read)
+            else {
                 continue;
             };
             changed |= if probe.connected() {
@@ -192,5 +195,85 @@ impl App {
         terminal.restore_error = Some(message);
         terminal.revision = terminal.revision.saturating_add(1);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane::CoreTerminalLink;
+
+    fn name(raw: &str) -> MachineName {
+        MachineName::parse(raw).expect("name")
+    }
+
+    fn app_with_one_pane() -> (App, PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("machine-panes")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.state.default_shell = "/bin/cat".into();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        (app, pane)
+    }
+
+    fn link_on(address: &str) -> CoreTerminalLink {
+        CoreTerminalLink {
+            agent: None,
+            session: crate::pane::core_session_name(),
+            address: address.into(),
+            program: None,
+        }
+    }
+
+    /// `pane_id` waits for its machine with a link to `address`.
+    fn wait_for_machine(app: &mut App, pane_id: PaneId, address: &str, dormant: bool) {
+        let public_pane_id = app.public_pane_id(0, pane_id);
+        let machine = machine_of(address).expect("a machine address").to_string();
+        app.state.pane_terminal_mut(pane_id).expect("terminal").hold =
+            Some(PaneHold::CoreWaiting(CoreWaiting {
+                link: link_on(address),
+                public_pane_id,
+                why: CoreWaitReason::MachineAway { machine, dormant },
+            }));
+    }
+
+    fn why(app: &App, pane_id: PaneId) -> Option<CoreWaitReason> {
+        app.state
+            .pane_terminal(pane_id)
+            .and_then(|terminal| terminal.core_waiting())
+            .map(|waiting| waiting.why.clone())
+    }
+
+    // C4 (D5): a `machine.list` that failed reads nothing: the machine keeps
+    // its mark and its panes their reason.
+    #[test]
+    fn an_unread_probe_changes_neither_the_machine_nor_its_panes() {
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "unread/t3", true);
+        let link = panes::link(&name("unread"));
+        assert!(link.connected());
+        let unread = Probe {
+            machine: name("unread"),
+            state: None,
+            leased: true,
+            read: false,
+        };
+        app.handle_core_machines(&[unread], Instant::now());
+        assert!(link.connected(), "not marked away by a failed read");
+        assert_eq!(
+            why(&app, pane),
+            Some(CoreWaitReason::MachineAway {
+                machine: "unread".into(),
+                dormant: true
+            })
+        );
     }
 }

@@ -68,6 +68,8 @@ struct Shared {
     terminals: std::collections::HashMap<String, Value>,
     /// Addresses core no longer knows: `terminal.get` answers `not_found`.
     gone: std::collections::HashSet<String>,
+    /// Machines by name and the state `machine.list` gives them.
+    machines: std::collections::BTreeMap<String, String>,
     /// The client closed its connection.
     client_gone: bool,
     /// `terminal.run` calls not answered yet, and the most there were.
@@ -199,6 +201,14 @@ impl FakeCore {
     /// The most `terminal.run` calls that waited for an answer at once.
     pub(crate) fn most_runs_at_once(&self) -> usize {
         lock(&self.shared).runs_pending_max
+    }
+
+    /// Lists `name` in `machine.list` with `state` (`connected`,
+    /// `connecting`, `unreachable`, ...).
+    pub(crate) fn set_machine(&self, name: &str, state: &str) {
+        lock(&self.shared)
+            .machines
+            .insert(name.to_string(), state.to_string());
     }
 
     /// Core forgets the terminal, as after its holder was lost and swept.
@@ -385,6 +395,14 @@ fn answer(
                 .collect();
             terminals.sort_by_key(|record| record["address"].to_string());
             (Ok(json!({"terminals": terminals})), None)
+        }
+        "machine.list" => {
+            let machines: Vec<Value> = lock(shared)
+                .machines
+                .iter()
+                .map(|(name, state)| json!({"name": name, "state": state}))
+                .collect();
+            (Ok(json!({"machines": machines})), None)
         }
         "terminal.kill" => {
             let address = params["terminal"].as_str().unwrap_or_default();

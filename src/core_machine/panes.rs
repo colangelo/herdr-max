@@ -5,11 +5,13 @@
 //! sends no input and posts a wake to this process's dialer instead.
 //!
 //! The input path reads one atomic per batch and, at most once per
-//! `WAKE_EVERY`, does a `try_send`; every core call and file read happens on
-//! the dialer's thread or the server's probe thread.
+//! `WAKE_EVERY`, does a `try_send` to the wake thread; the passwd lookup,
+//! the folder checks, the dialer's own thread and every core call happen on
+//! that thread, the dialer's or the server's probe thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -22,20 +24,52 @@ use crate::pane::core_machines as core;
 /// The most wakes one machine's panes post, so a person typing into a pane
 /// whose machine is away starts one dial, not one per key.
 const WAKE_EVERY: Duration = Duration::from_secs(5);
+/// Wakes waiting for the wake thread; a full queue drops one, as a wake
+/// for that machine is already on its way within `WAKE_EVERY`.
+const WAKE_QUEUE: usize = 16;
 
 /// One machine as this process sees it.
 pub(crate) struct MachineLink {
     name: MachineName,
     connected: AtomicBool,
     last_wake: Mutex<Option<Instant>>,
+    /// Made and used on the wake thread only.
     dialer: Mutex<Option<Dialer>>,
 }
 
 static LINKS: Mutex<Vec<Arc<MachineLink>>> = Mutex::new(Vec::new());
 
+/// The thread that turns a posted wake into a dial: started with the
+/// first link, never on the input path. `None` when it could not start.
+static WAKES: OnceLock<Option<SyncSender<Arc<MachineLink>>>> = OnceLock::new();
+
+fn wake_thread() -> Option<&'static SyncSender<Arc<MachineLink>>> {
+    WAKES
+        .get_or_init(|| {
+            let (wakes, requests) = mpsc::sync_channel::<Arc<MachineLink>>(WAKE_QUEUE);
+            let started = std::thread::Builder::new()
+                .name("herdr-machine-wake".into())
+                .spawn(move || {
+                    while let Ok(link) = requests.recv() {
+                        link.dial();
+                    }
+                });
+            match started {
+                Ok(_) => Some(wakes),
+                Err(err) => {
+                    tracing::warn!(%err, "no wake thread for core machine panes");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
 /// The process's record of `name`, made on first use. A machine a pane
 /// just started on or attached to is connected: core answered for it.
 pub(crate) fn link(name: &MachineName) -> Arc<MachineLink> {
+    // Before the first link exists, so no key ever starts the thread.
+    let _ = wake_thread();
     let mut links = LINKS.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(found) = links.iter().find(|link| &link.name == name) {
         return Arc::clone(found);
@@ -61,11 +95,9 @@ impl MachineLink {
     }
 
     /// Input reached a pane on this machine while it is away (D3, D5):
-    /// posts a wake to the dialer and returns at once. Only a machine herdr
-    /// links is dialled (its folder holds `target.json`); `core-link` still
-    /// refuses unless a lease is in force, which the person's client writes
-    /// for its own input.
-    pub(crate) fn wake(self: &Arc<Self>) {
+    /// posts a wake to the wake thread and returns at once, at most once
+    /// per `WAKE_EVERY`. True when one was posted.
+    pub(crate) fn wake(self: &Arc<Self>) -> bool {
         let now = Instant::now();
         {
             let mut last = self
@@ -73,10 +105,24 @@ impl MachineLink {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if last.is_some_and(|at| now.saturating_duration_since(at) < WAKE_EVERY) {
-                return;
+                return false;
             }
             *last = Some(now);
         }
+        let Some(wakes) = wake_thread() else {
+            return false;
+        };
+        match wakes.try_send(Arc::clone(self)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// On the wake thread: the machine's dialer, made on first use, gets
+    /// the wake. Only a machine herdr links is dialled (its folder holds
+    /// `target.json`); `core-link` still refuses unless a lease is in force,
+    /// which the person's client writes for its own input.
+    fn dial(&self) {
         let mut dialer = self.dialer.lock().unwrap_or_else(PoisonError::into_inner);
         if dialer.is_none() {
             *dialer = self.spawn_dialer();
@@ -86,7 +132,7 @@ impl MachineLink {
         }
     }
 
-    fn spawn_dialer(self: &Arc<Self>) -> Option<Dialer> {
+    fn spawn_dialer(&self) -> Option<Dialer> {
         let root = passwd_machines_root().ok()?;
         let dir = MachineDir::at(&root, &self.name);
         if dir.check().is_err() || !dir.target_path().is_file() {
@@ -100,14 +146,9 @@ impl MachineLink {
             dialer::Timing::default(),
             |machine, outcome| {
                 tracing::info!(%machine, ?outcome, "core machine wake for a pane");
-                let state = outcome.state().map(str::to_string);
-                link(machine).set_connected(state.as_deref() == Some("connected"));
+                let probe = wake_probe(machine, &outcome, !dormant(machine));
                 core::tell_server(crate::events::AppEvent::CoreMachines {
-                    probes: vec![Probe {
-                        machine: machine.clone(),
-                        state,
-                        leased: true,
-                    }],
+                    probes: vec![probe],
                 });
             },
         );
@@ -121,16 +162,35 @@ impl MachineLink {
     }
 }
 
+/// What a wake found, as a probe: the state the dial ended in and whether
+/// a lease allows the link now, read after the dial (a wake refused for no
+/// lease leaves the machine dormant, not unreachable). A failed wake, or
+/// one with no core to ask, read nothing.
+fn wake_probe(machine: &MachineName, outcome: &dialer::Outcome, leased: bool) -> Probe {
+    let state = outcome.state().map(str::to_string);
+    Probe {
+        machine: machine.clone(),
+        read: state.is_some(),
+        state,
+        leased,
+    }
+}
+
 /// What the server read of one machine (D5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Probe {
     pub machine: MachineName,
-    /// Its state in `machine.list`; `None` when it was not read (dormant)
-    /// or core does not list it.
+    /// Its state in `machine.list`; `None` when it was not read or core
+    /// does not list it.
     pub state: Option<String>,
     /// A lease allows its link now, or herdr does not gate it (a machine
     /// added by hand, whose link core keeps by itself).
     pub leased: bool,
+    /// Whether this says anything about the machine: core answered
+    /// `machine.list` for it, or it is dormant (no lease, so no link). A
+    /// probe that was not read leaves the machine and its panes as they
+    /// are: a failed `machine.list` is not a link down.
+    pub read: bool,
 }
 
 impl Probe {
@@ -171,10 +231,14 @@ pub(crate) fn probe(machines: &[MachineName]) -> Vec<Probe> {
     let root = passwd_machines_root().ok();
     let mut probes: Vec<Probe> = machines
         .iter()
-        .map(|machine| Probe {
-            machine: machine.clone(),
-            state: None,
-            leased: leased(root.as_deref(), machine),
+        .map(|machine| {
+            let leased = leased(root.as_deref(), machine);
+            Probe {
+                machine: machine.clone(),
+                state: None,
+                leased,
+                read: !leased,
+            }
         })
         .collect();
     if !probes.iter().any(|probe| probe.leased) {
@@ -190,6 +254,7 @@ pub(crate) fn probe(machines: &[MachineName]) -> Vec<Probe> {
         }
     };
     for probe in probes.iter_mut().filter(|probe| probe.leased) {
+        probe.read = true;
         probe.state = listed["machines"]
             .as_array()
             .into_iter()
@@ -234,6 +299,59 @@ mod tests {
             .expect("in force");
         assert!(leased(Some(&root), &machine));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // C4 (D5): a `machine.list` that failed reads nothing for the machines
+    // that may be up; a dormant one is known without asking.
+    #[test]
+    fn a_failed_machine_list_reads_nothing() {
+        let core =
+            crate::pane::FakeCore::start_with(|config| config.failing = vec!["machine.list"]);
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let probes = probe(&[name("byhand-unread")]);
+        assert_eq!(
+            probes,
+            [Probe {
+                machine: name("byhand-unread"),
+                state: None,
+                leased: true,
+                read: false,
+            }]
+        );
+        let answered = crate::pane::FakeCore::start();
+        answered.set_machine("byhand-unread", "unreachable");
+        std::env::set_var("HC_SOCKET", &answered.socket);
+        let probes = probe(&[name("byhand-unread")]);
+        assert!(probes[0].read);
+        assert_eq!(probes[0].state.as_deref(), Some("unreachable"));
+    }
+
+    // C9 (D5): a wake reports what it found: a dial `core-link` refused for
+    // want of a lease leaves the machine dormant, and a failed one reads
+    // nothing.
+    #[test]
+    fn a_wake_reports_its_real_outcome() {
+        let machine = name("wake-outcome");
+        let refused = wake_probe(
+            &machine,
+            &dialer::Outcome::Connected("unreachable".into()),
+            false,
+        );
+        assert!(refused.read && !refused.leased && !refused.connected());
+        let up = wake_probe(&machine, &dialer::Outcome::AlreadyConnected, true);
+        assert!(up.read && up.leased && up.connected());
+        let failed = wake_probe(&machine, &dialer::Outcome::Failed("no core".into()), true);
+        assert!(!failed.read);
+        assert!(!wake_probe(&machine, &dialer::Outcome::NotListed, true).read);
+    }
+
+    // C8 (D5): a key posts at most one wake per `WAKE_EVERY`; the dial
+    // itself runs on the wake thread.
+    #[test]
+    fn a_wake_is_posted_once_per_interval() {
+        let link = link(&name("wake-once"));
+        assert!(link.wake(), "posted");
+        assert!(!link.wake(), "within the interval: nothing posted");
     }
 
     #[test]
