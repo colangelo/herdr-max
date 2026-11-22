@@ -179,8 +179,9 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   Built: `pane_io.rs` `Host { Local, Machine(MachineName) }`, taken from the parsed address at attach. For a
   machine the pid is not published (child pid 0, no `ProgramIdentity`, no pinned terminal), so pid facts,
   process detection and the OSC 7501 status write give nothing for it; `end_program` is `terminal.kill` only (no
-  `server.status`, no sweep). A machine's program that core says is gone ends the pane (`Interrupted`), and a
-  suspend cause from the far side ends it too, since resuming would start it on this Mac. Tests: fake-core units
+  `server.status`, no sweep). A machine's program that core says is gone, with the machine connected, ends the pane
+  (`Interrupted`); a suspend cause makes it wait for its machine (C.8), since resuming would start it on this
+  Mac. Tests: fake-core units
   (owner label and no pid at start, kill-only close, reattach by address); loop V12: closing the pane ended its
   far terminal only; the far core, another far terminal and a `nohup` job the program left run on. Limit: close
   while the machine is away gets `unavailable` from core and leaves the far program running; it then shows in
@@ -201,7 +202,7 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 - [x] C.3 `CoreWaiting` causes `machine_dormant` and `machine_unreachable`; `machine.list` poll while a lease holds;
   input held and wake on first key; V6, V11
   Built: `CoreWaitReason::MachineAway { machine, dormant }`; restore and live handoff never search this Mac's
-  terminals or start fresh for a machine link (`CoreRestore::Ended` when core says it is gone); the saved
+  terminals or start fresh for a machine link (`machine_ended`, link held, when core says it is gone with the machine connected; C.8); the saved
   folder check is skipped for them. `app/core_machine_panes.rs` polls every 5 s while a pane runs on or waits for
   a machine, on its own thread, reading `machine.list` only when a lease is in force or herdr does not gate the
   machine; it marks `core_machine::panes::MachineLink` and attaches waiting panes. Input to a live pane whose
@@ -243,6 +244,40 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   surface median 254 us at 1 pane, 303 us at 15 (1.19x); background workspaces 254 us at 1 and 15 (1.00x);
   nothing was added to a render, layout, PTY or detection loop (the input path reads one atomic for a machine
   pane). CI not run (not pushed).
+- [x] C.8 Review findings on PR C (independent read-only review, 2026-11-22): W1, C1-C6, C8-C10 fixed, C7 left as
+  a limit
+  W1: `LaunchExtra::from` builds a literal per target (Windows has no `on`, so the rest pattern was a needless
+  update under `-D warnings`). C1: a respawn starts on this Mac, so `pane.respawn` and `pane.respawn_agent`
+  refuse a pane on a machine (live, waiting or ended) with `pane_on_machine`, and `prepare_respawn` and
+  `respawn_pane_agent` refuse it for every other path (the exit-action shell, the resume queue, the move);
+  carrying the `MachineTarget` through a respawn was not taken: it needs the far program's own end first, which
+  pid 0 cannot confirm. C2: an ended pane keeps its link as `CoreWaitReason::MachineEnded` (`machine_ended`), so
+  every save writes `core_terminal` and a restore asks core about that terminal again and starts nothing. C3:
+  `pane.split`, `tab.create` and `workspace.create` with `on` arm the machine poll. C4: a probe carries `read`;
+  one whose `machine.list` failed changes neither the machine's mark nor its panes. C5: a `not_found`, a
+  non-live record or a label mismatch for a machine's terminal is final only while core lists the machine
+  `connected` before and after the question (restore, the waiting attach and a live pane's reattach loop);
+  otherwise the pane waits. C6: a suspend cause on a machine pane's stream goes up as it is, and the server
+  makes the pane wait for its machine (`MachineAway`) with its link instead of suspending it. C8: a key posts
+  the machine to one wake thread (`try_send`); the passwd lookup, folder checks and the dialer's thread start
+  there. C9: a wake reports the state it found and the lease read after the dial, so a dial refused for no
+  lease stays `machine_dormant`. C10: the machine is marked connected after `terminal.attach` answers.
+  Herdr Core facts behind C5 (hc 0.1.21 `hc schema` from a throwaway session, its strings, and P5): `CoreInfo.id`
+  is a "permanent random id, reset only when state is wiped" (kept in `core.json`; a disk copied from another
+  machine gets a new identity); `terminal.get` errors are `not_found` and `machine_unknown` only, and core drops
+  a machine's terminals from its lists while the machine is not connected (P5), so a known machine that is not
+  linked yet answers `not_found`; `machine.list` states are `connecting`, `connected`, `needs_login` and
+  `unreachable`. A wiped primary (new id) makes every far label a mismatch: with the machine connected those
+  panes end (`machine_ended`, never started) and their programs show as orphans there.
+  Limits: C7, far calls on the server loop: attaching a waiting machine pane runs `machine.list`,
+  `terminal.get`, `machine.list` and `terminal.attach` on the loop, each up to 5 s, per waiting pane per poll;
+  moving them off the loop joins https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/302. The core
+  label follower (`herdr.session` for seen and turn tracking) does not see machine panes, whose label carries
+  `@<core id>`. The orphan notice's `hc ls --label herdr.session=<label>` command does not find machine orphans
+  (their label is `<label>@<core id>`). A live pane whose machine stays away keeps its reattach loop and shows
+  the "Herdr Core is not answering" line after the limit, not the machine wait notice. Between core listing the
+  machine `connected` and its terminals arriving, an attach can still see `not_found`; the before-and-after
+  check covers a link that changes during the question, not a lag inside one `connected` state.
 
 ## PR D. The view server
 
