@@ -224,6 +224,19 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
 /// lost can be found again (security review M3, Sol H7).
 const LAUNCH_LABEL: &str = "herdr.launch";
 
+/// The terminals of `listed` this Mac's core started for `launch`. A machine's
+/// record is left out even with the same label: its pid is a far process
+/// (core-phase5 F1).
+fn launched_here<'a>(listed: &'a Value, launch: &str) -> Vec<&'a Value> {
+    listed["terminals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|terminal| terminal["labels"][LAUNCH_LABEL] == launch)
+        .filter(|terminal| super::address::local_address(terminal).is_some())
+        .collect()
+}
+
 /// Why a core start failed, and whether core may run the program anyway
 /// (security review M3, Sol H7).
 #[derive(Debug)]
@@ -351,8 +364,7 @@ impl StartedCore {
             CALL_TIMEOUT,
         );
         let started = match reply {
-            Ok(record) => record["address"]
-                .as_str()
+            Ok(record) => super::address::local_address(&record)
                 .map(|address| (address.to_string(), core_pid(&record["pid"])))
                 .ok_or_else(|| CoreError::Rpc {
                     kind: "protocol".into(),
@@ -389,12 +401,7 @@ impl StartedCore {
                     Ok((client, listed))
                 });
                 let (client, listed) = found.map_err(|_| StartFailure::Unknown(err.clone()))?;
-                let ours: Vec<&Value> = listed["terminals"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|terminal| terminal["labels"][LAUNCH_LABEL] == launch.as_str())
-                    .collect();
+                let ours = launched_here(&listed, &launch);
                 match ours.as_slice() {
                     [one] => {
                         let address = one["address"]
@@ -422,6 +429,14 @@ impl StartedCore {
         child_pid: &AtomicU32,
         connector: Connector,
     ) -> Result<Self, ReattachError> {
+        // A machine's terminal has a far pid; this pane's facts are local
+        // (core-phase5 F1). Nothing is asked of core for it.
+        if !super::address::CoreAddress::parse(&target.address).is_ok_and(|a| a.is_local()) {
+            return Err(ReattachError::NotOurs(format!(
+                "terminal {} is not on this Mac's core",
+                target.address
+            )));
+        }
         let client = connector().map_err(ReattachError::Unreachable)?;
         let record = match client.call(
             "terminal.get",
@@ -1390,6 +1405,38 @@ mod tests {
             rows: 24,
             cols: 80,
         }
+    }
+
+    // V26 (core-phase5 F1): a machine's terminal with our launch label is not
+    // our launch, and its pid is never taken for the pane's.
+    #[test]
+    fn the_launch_recovery_ignores_a_machines_terminal() {
+        let listed = json!({"terminals": [
+            {"address": "loop/t1", "pid": 4321, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
+            {"address": "t1", "pid": 11, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
+            {"address": "t2", "pid": 12, "state": "live", "labels": {LAUNCH_LABEL: "other"}},
+        ]});
+        let ours = launched_here(&listed, "abc");
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0]["address"], "t1");
+        let only_far = json!({"terminals": [
+            {"address": "loop/t1", "pid": 4321, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
+        ]});
+        assert!(launched_here(&only_far, "abc").is_empty());
+    }
+
+    // V26: a link to a machine's terminal is never attached, and core is not
+    // asked about it.
+    #[test]
+    fn a_reattach_never_attaches_to_a_machines_terminal() {
+        let core = FakeCore::start();
+        core.add_terminal(json!({"address": "loop/t1", "pid": 777, "state": "live",
+                                  "labels": labels("w1-p2")}));
+        let pid = AtomicU32::new(0);
+        let refused = StartedCore::reattach(target("loop/t1", "w1-p2"), &pid, connector_to(&core));
+        assert!(matches!(refused, Err(ReattachError::NotOurs(_))));
+        assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
+        assert!(core.methods().is_empty(), "{:?}", core.methods());
     }
 
     /// A connector that connects anew each time, as the server's does after

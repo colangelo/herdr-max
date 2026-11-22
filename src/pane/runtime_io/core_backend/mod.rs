@@ -1,6 +1,7 @@
 //! The herdr-core backend behind `PaneIo` (openspec/changes/core-backend).
 //! Unix only: core is reached over a Unix socket.
 
+mod address;
 pub(crate) mod client;
 #[cfg(test)]
 pub(crate) mod fake;
@@ -68,7 +69,8 @@ pub(crate) struct LabelledTerminals {
 }
 
 /// Live terminals carrying every one of `labels`, in each session that
-/// answers (core-phase3 D1b). None is started. A session with no socket
+/// answers (core-phase3 D1b). None is started. Only this Mac's own terminals
+/// count: a linked machine's carry the same labels (core-phase5 F1). A session with no socket
 /// has no core and so no terminal; any other failure leaves it unanswered.
 pub(crate) fn find_labelled_terminals(
     sessions: &[(String, Connector)],
@@ -103,7 +105,7 @@ pub(crate) fn find_labelled_terminals(
                         .iter()
                         .all(|(key, want)| &terminal["labels"][key] == want)
                 })
-                .filter_map(|terminal| terminal["address"].as_str())
+                .filter_map(address::local_address)
                 .map(|address| (session.clone(), address.to_string())),
         );
     }
@@ -326,7 +328,8 @@ fn unclaimed_in(session: &str, listed: &Value, claimed: &[&str]) -> Vec<Unclaime
         .flatten()
         .filter(|terminal| terminal["state"] == "live")
         .filter_map(|terminal| {
-            let address = terminal["address"].as_str()?;
+            // A machine's terminal is not an orphan of ours (F1).
+            let address = address::local_address(terminal)?;
             (!claimed.contains(&address)).then(|| UnclaimedCoreTerminal {
                 session: session.to_string(),
                 address: address.to_string(),
@@ -702,6 +705,76 @@ mod tests {
             "{:?}",
             core.methods()
         );
+    }
+
+    /// A fake core that lists `t1` and, as a linked machine's terminal,
+    /// `loop/t1`: the same labels, and a pid that is a live process here.
+    /// The child must stay alive: it shows nothing signalled its pid.
+    fn core_with_a_machine_twin() -> (fake::FakeCore, std::process::Child) {
+        let core = fake::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        set_preferred(true);
+        let far_pid = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("a live local process");
+        let record = |address: &str, pid: u32| {
+            serde_json::json!({"address": address, "pid": pid, "state": "live",
+                "labels": {"herdr.session": herdr_session_label(), "herdr.pane_id": "w1:p1"}})
+        };
+        core.add_terminal(record("t1", 7));
+        core.add_terminal(record("loop/t1", far_pid.id()));
+        (core, far_pid)
+    }
+
+    /// Nothing asked core about, attached to, killed or signalled the far one.
+    fn assert_far_terminal_untouched(core: &fake::FakeCore, far: &mut std::process::Child) {
+        let methods = core.methods();
+        assert!(
+            !methods.iter().any(|m| matches!(
+                m.as_str(),
+                "terminal.kill" | "terminal.attach" | "terminal.get"
+            )),
+            "{methods:?}"
+        );
+        assert!(
+            core.requests()
+                .iter()
+                .all(|request| !request["params"].to_string().contains("loop/")),
+            "{:?}",
+            core.requests()
+        );
+        assert!(
+            far.try_wait().expect("wait").is_none(),
+            "the far pid's process was ended"
+        );
+    }
+
+    // V26 part 2 (core-phase5 F1): the restore search and the waiting-pane
+    // search see only `t1` although `loop/t1` has the same labels.
+    #[test]
+    fn the_pane_search_finds_only_the_local_terminal() {
+        let (core, mut far) = core_with_a_machine_twin();
+        let found = crate::pane::find_pane_core_terminals(&core_session_name(), Some("w1:p1"));
+        assert!(found.complete);
+        let addresses: Vec<&str> = found.found.iter().map(|l| l.address.as_str()).collect();
+        assert_eq!(addresses, ["t1"]);
+        assert_far_terminal_untouched(&core, &mut far);
+        let _ = far.kill();
+        let _ = far.wait();
+    }
+
+    // V26 part 2: the orphan scan lists no machine terminal, claimed or not.
+    #[test]
+    fn the_orphan_scan_never_lists_a_machines_terminal() {
+        let (core, mut far) = core_with_a_machine_twin();
+        assert!(unclaimed_terminals(&[(core_session_name(), "t1".to_string())]).is_empty());
+        let orphans = unclaimed_terminals(&[(core_session_name(), "t9".to_string())]);
+        let addresses: Vec<&str> = orphans.iter().map(|o| o.address.as_str()).collect();
+        assert_eq!(addresses, ["t1"]);
+        assert_far_terminal_untouched(&core, &mut far);
+        let _ = far.kill();
+        let _ = far.wait();
     }
 
     fn kill_free(core: &fake::FakeCore) -> bool {
