@@ -1,4 +1,4 @@
-//! The facts and writes of `herdr.seen` label sharing between herdr and
+//! The facts and writes of `herdr.seen` and `herdr.pinned` label sharing between herdr and
 //! herdr-core (openspec/changes/core-phase4, D11): what the label thread
 //! reads from core's events and what the server's reducer asks it to write.
 //! Pure data.
@@ -12,6 +12,8 @@ pub(crate) struct Observed {
     pub(crate) turn: u64,
     /// `herdr.seen`; a missing or unreadable label is `None`, never `0`.
     pub(crate) seen: Option<u64>,
+    /// `herdr.pinned` present and non-empty.
+    pub(crate) pinned: bool,
 }
 
 /// One fact from core's event stream, in order.
@@ -31,6 +33,7 @@ pub(crate) enum CoreFact {
     Labels {
         address: CoreAddress,
         seen: Option<u64>,
+        pinned: bool,
     },
     Gone {
         address: CoreAddress,
@@ -42,5 +45,13 @@ pub(crate) enum CoreFact {
 /// A label herdr writes on one terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LabelWrite {
-    Seen { address: CoreAddress, turn: u64 },
+    Seen {
+        address: CoreAddress,
+        turn: u64,
+    },
+    /// `herdr.pinned=1`, or `herdr.pinned=` (removes it).
+    Pinned {
+        address: CoreAddress,
+        pinned: bool,
+    },
 }
