@@ -295,15 +295,75 @@ Decisions and limits:
 
 ## PR G. Move idle panes onto the primary core (D9)
 
-- [ ] G.1 `MoveEligibility` pure function with the full D9 table; input stamps on the queued Submit and
+- [x] G.1 `MoveEligibility` pure function with the full D9 table; input stamps on the queued Submit and
   `agent.message` note sends; manifest move facts; V8, V40 (unit part), V41
-- [ ] G.2 `KillOutcome` from `CorePaneIo::kill`, the confirmed-kill move; `pane.respawn_if_idle` method, CLI
+- [x] G.2 `KillOutcome` from `CorePaneIo::kill`, the confirmed-kill move; `pane.respawn_if_idle` method, CLI
   `herdr pane respawn --if-idle [--check]`, API schema entry; V9, V12, V39
-- [ ] G.3 `scripts/core_move_idle_panes.sh` with `--exclude` adding to the server's list, the agent-bell queue
+- [x] G.3 `scripts/core_move_idle_panes.sh` with `--exclude` adding to the server's list, the agent-bell queue
   check, canary, per-pane verification, stop on first failure; maintenance script test for its argument parsing
-- [ ] G.4 V20 and the move part of V33 in `scripts/core_live_test.sh`
-- [ ] G.5 `docs/next`: what a move keeps and loses (a shell's process state)
+- [x] G.4 V20 and the move part of V33 in `scripts/core_live_test.sh`
+- [x] G.5 `docs/next`: what a move keeps and loses (a shell's process state)
 - [ ] G.6 Check: `just check` 0, `just core-live-test` 0, CI green; security read of the new method
+
+G as built (branch `issue/295-g-idle-move`, over the #297 fix branch):
+
+- `MoveEligibility` is `move_refusals(&MoveFacts, MoveWindows)` in `src/app/idle_move.rs`, a table in D9's order
+  that returns every refusal, or only `already_on_primary`. The facts are read in one loop turn by
+  `App::move_facts`; the move itself (`move_pane`) runs in the same `pane.respawn_if_idle` call. The refusal
+  names are `PaneMoveRefusal` in the API schema.
+- One refusal beyond D9's table: `core_off`, when the replacement would not start on core (`runtime` is not
+  `core`, or the loss guard gave up). Without it a move with core off would restart an idle agent on the PTY
+  for nothing. An excluded pane gives `excluded`, never also `core_off`.
+- `not_movable` also covers a pane with no runtime and a pane whose agent resume is still being typed.
+- Input (`src/pane/input_activity.rs`): `InputActivity` holds the last-input stamp and the count of queued
+  Submits. `queue_user_input_submission` stamps when it queues, counts the Submit as input now until the writer
+  answers (a forwarder thread waits for that answer), and stamps again on delivery. A note that the note
+  command took (`queued`, `held` or `injected`) stamps the agent's pane (`deliver_note`). The stamp a restore
+  carries over (`restored_last_input_at_ms`) still counts.
+- Agent idle time is `TerminalState::state_since`, set whenever the effective state or agent changes and when
+  a handoff restores the state, so a pane is idle for 60 s only after 60 s of this server seeing it idle.
+- Move facts per agent: `has_move_facts` in `detect/manifest.rs` asks the loaded manifest for a rule on the
+  `prompt_box_body` region and a `background_*` rule. Only `claude.toml` has both. The empty-box check reads
+  `claude_input_box_text`, so a box that is not visible, or any other agent's box, counts as a draft: a second
+  agent that gains the manifest facts also needs its box reader.
+- `foreign_process` (`has_foreign_process`) reads the sessions of the pane's child and of the agent detection
+  saw (`platform::session_members`, pid and parent): every member must be the agent, an ancestor (the shell,
+  an `atuin` wrapper) or a descendant, and the foreground job (behind a wrapper, the nested one) must hold the
+  agent. An agent detection never identified gives `foreign_process`. A shell pane is `shell_busy` unless it is
+  at its prompt and its sessions hold only the shell and a wrapper's nested shell (measured on m4m: an
+  `atuin`-wrapped shell's outer session holds only `atuin`, the nested shell leads its own).
+- The confirmed kill: `KillOutcome` (`Finished`, `NotFound`, `Live`, `Failed`) from `terminal.kill`'s record
+  (`state`) or its error kind, also replacing the start path's `kill_confirmed`, which took any answer as
+  confirmed. `end_program_confirmed` kills with the pane's stream still attached and runs the local session
+  sweep only once core confirmed; on refusal nothing was swept or detached. Then the old program's identities
+  (program and detected agent) must be gone within 2 s by the injectable process lookup; else
+  `core_unreachable` too. Only then is the runtime shut down and the replacement started:
+  `respawn_pane_agent` for an agent, a shell seeded with the pane's scrollback (`RuntimeSpawn::seed_history`)
+  for a shell. A replacement that does not start suspends the pane (`TerminalGone`).
+- The move blocks the server loop for its core round trips (`server.status`, `terminal.kill`, `terminal.run`
+  and the attach, 5 s timeouts each) and up to 2 s for the pid check, as `pane respawn` does today. The
+  driver moves one pane at a time.
+- Windows for the live test only: a debug build reads `HERDR_TEST_MOVE_WINDOWS_MS=<input>,<agent>,<shell>`;
+  a release build never does.
+- V9: the CLI test `pane_respawn_if_idle_sends_respawn_if_idle` shows `--if-idle` is its own method;
+  `unrelated_unknown_method_retains_standard_invalid_request_response` is what a server without it answers.
+  V12: the method is not advertised to the client shell, so no endpoint fixture changed; the JSON API schema
+  gains the method, its params and the result.
+- V39 is `only_a_finished_or_unknown_terminal_confirms_the_kill` (core backend) and the three move tests in
+  `idle_move.rs` against a fake legacy core session (`live`, an error, `finished` with the pid running, and
+  `finished` with it gone, which leaves the pane on the primary).
+- V20 is section 6 of `scripts/core_live_test.sh`; V33's move part is in section 5. The agent stand-in now
+  draws an empty Claude-like input box. Its session comes from a `report-agent` resume command, as V33's
+  does, so its plan is `--resume sess-v20 --name v20-agent`.
+- The driver (`scripts/core_move_idle_panes.sh`) lists by default and moves only with `--move`; it decides
+  nothing itself beyond `--exclude`. Its checks after an agent move: the pane answers `already_on_primary`, its
+  agent reports a status, the same session id and name, a process whose argv carries the session id and the
+  plan's `--model`, `--effort`, `--permission-mode` and `--settings`, and a resume plan (which reads the live
+  footer) with the same `--model`. A shell must be on the primary in the same directory. Each check waits up to
+  `--settle` seconds (120). Tested against a fake `herdr` and `agent-bell` in
+  `scripts/test_core_move_idle_panes.py`.
+- Not done here: V40's live part (real Claude Code with a background and a foreground subagent) is R.3; the
+  security read is requested by the lead.
 
 ## R. Rollout on both Macs (no code)
 
