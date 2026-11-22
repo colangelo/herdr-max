@@ -14,8 +14,9 @@ rollout R.
 ## 0. Before code
 
 - [x] 0.1 Roundtable on the first draft; findings folded into design.md § Roundtable 2026-11-21
-- [ ] 0.2 Verifier review by herdr (the lead); changes folded into design.md
-- [ ] 0.3 Gitea sub-issues for PR A1, A2, S, C and G (`[fork]` titles), each linking #295
+- [x] 0.2 Verifier review by herdr (the lead); changes folded into design.md (plan 653dfbb7)
+- [ ] 0.3 Gitea sub-issues for PR A1, A2, S, C and G (`[fork]` titles), each linking #295 (not filed: tracked on
+  #295 and the PRs; carried to fork issue 307)
 
 ## PR A1. Loss outcomes, identity in the link, no fresh start on a guess (#287, herdr-max side)
 
@@ -26,8 +27,8 @@ rollout R.
 - [x] A1.4 Known-session search before any fresh start; V45; live V29 in `scripts/core_live_test.sh`
 - [x] A1.5 Dead-program check before every resume (all causes, pid 0 may run, agent pid); V35
 - [x] A1.6 V13 invariants with suspended and waiting core panes; V2, V14 in `just core-live-test`
-- [ ] A1.7 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows (both checks 0 on
-  m4m, 2026-11-21; CI waits for the push)
+- [x] A1.7 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows (both checks 0 on
+  m4m, 2026-11-21; landed green as PR 62, 9fb49300)
 
 A1 as built (47219db8, 6dd307f6):
 
@@ -62,8 +63,8 @@ A1 as built (47219db8, 6dd307f6):
 - [x] A2.6 `docs/next`: core loss behaviour, the waiting state, the guard reset on handoff, the "Running in
   Background" rule; the same line relayed to the owner of CONTEXT `SKILLS/herdr` (this repo's
   `skills/herdr/SKILL.md` changes only at a stable release)
-- [ ] A2.7 Check: `just check` 0, `just core-live-test` 0, CI green (both checks 0 on m4m, 2026-11-21; CI waits for
-  the push)
+- [x] A2.7 Check: `just check` 0, `just core-live-test` 0, CI green (both checks 0 on m4m, 2026-11-21; landed green
+  as PR 63, fc1ed653, with the Windows build fix PR 64, 9e9e7b04)
 
 A2 as built:
 
@@ -93,7 +94,7 @@ A2 as built:
   resume, respawn); V32 naming `manager-lab-hlp` and `manager-aruba-hlp`
 - [x] S.3 V33 live in `scripts/core_live_test.sh` (restore and resume parts; the move part lands with G)
 - [x] S.4 `docs/next` config reference for the key
-- [ ] S.5 Check: `just check` 0, `just core-live-test` 0, CI green
+- [x] S.5 Check: `just check` 0, `just core-live-test` 0, CI green (PR 65, d98cdeb7)
 
 S as built:
 
@@ -128,8 +129,8 @@ S as built:
 - [x] B.3 Every call site of D5's table moved to label or session; `CorePaneIo` stores its session;
   `CoreTerminalLink` reads it; claims as `(session, address)`; V7
 - [x] B.4 Orphan scan per session with the label/session notice; V6 against a two-session fake core
-- [ ] B.5 Check: `just check` 0, `just core-live-test` 0 (core-backend V10 unchanged), V19 with sessions `herdr` and
-  `herdr-<name>`, CI green (both checks 0 on m4m, 2026-11-21; CI waits for the push)
+- [x] B.5 Check: `just check` 0, `just core-live-test` 0 (core-backend V10 unchanged), V19 with sessions `herdr` and
+  `herdr-<name>`, CI green (both checks 0 on m4m, 2026-11-21; landed green as PR 67, 785e60a0)
 
 B as built:
 
@@ -156,8 +157,10 @@ B as built:
 
 ## R0. The PR B beta on both Macs (no code)
 
-- [ ] R0.1 Beta with A1, A2, S, B, installed on m4m and ac-mbm5 in the same step by live handoff, panes kept;
-  `core_pty_panes = ["*-hlp"]` added to both configs; V44 recorded on #295 with the beta number
+- [x] R0.1 Beta with A1, A2, S, B, installed on m4m and ac-mbm5 in the same step by live handoff, panes kept;
+  `core_pty_panes = ["*-hlp"]` added to both configs; V44 recorded on #295 with the beta number (beta 204,
+  `0.9.5-ac-beta.204-lichtsteiner`, at 785e60a0; ac-mbm5 names `manager-aruba-hlp`, m4m's helper moved to core
+  once it no longer needed computer use)
 
 ## PR C. The default herdr session moves to core session `default` (#293 1b)
 
@@ -166,8 +169,9 @@ B as built:
   session leader and a ppid-1 desktop start
 - [x] C.3 V17 live; V19 with `herdr`, `default` and a PTY pane; V21 rollback to the R0 beta and to beta 202
 - [x] C.4 `docs/next`: the default session, the rollback rule (D10)
-- [ ] C.5 Check: `just check` 0, `just core-live-test` 0, CI green; two-vendor security review of A1, A2 and C
-  together (core restart after loss, the shared default core, forged labels: open question 3)
+- [x] C.5 Check: `just check` 0, `just core-live-test` 0, CI green; two-vendor security review of A1, A2 and C
+  together (core restart after loss, the shared default core, forged labels: open question 3) (PR 68, de03b6cd;
+  the review's findings are fork issue 297, fixed in PR 70)
 
 C as built:
 
@@ -253,8 +257,8 @@ From security's two-vendor review of A1, A2 and C (ac/security 1571d47,
 - [x] M7 A stopped secondary counts in readiness: `ResumeReady { primary, stopped }` per job; the worker asks
   each stopped session once per batch with `core_session_answers`, never starting it. Test:
   `a_stopped_secondary_holds_its_panes_with_the_primary_up`.
-- [ ] Check: `just check` 0, `just core-live-test` 0, CI green; one security read of the fix
-  (RULES/security-fix-recheck-single-reader)
+- [x] Check: `just check` 0, `just core-live-test` 0, CI green; one security read of the fix
+  (RULES/security-fix-recheck-single-reader) (PR 70, d5c1088e; security re-read MET, ac/security e255447)
 
 Decisions and limits:
 
@@ -296,6 +300,8 @@ core is the reader-to-parser hop (2377 Mach calls in 20 s, against about 4 on th
 
 ## PR E. Batch-handing reader (only if M fails)
 
+Not built: M met both gates (PR 86, 513fcc11), so E is not needed. Batching stays a later item, fork issue 306.
+
 - [ ] E.1 The reader hands whole batches to each pane's parser; no pane's parse on the shared reader; proof that no
   caller waits on a core reply under a terminal lock (test or architecture check)
 - [ ] E.2 Check: V22 again within the gates; V23 with 1 and 15 panes; `just check` 0, CI green
@@ -305,9 +311,9 @@ core is the reader-to-parser hop (2377 Mach calls in 20 s, against about 4 on th
 - [x] F.1 Restored panes consult `runtime` and `RuntimeChoice`; fd-adopted panes `Pty(FdAdopted)`; V10 replaces
   `core_v1_a_restored_pane_stays_on_the_pty`; V18
 - [x] F.2 `docs/next` config reference: what `runtime = "core"` now covers
-- [ ] F.3 Check: `just check` 0, `just core-live-test` 0, CI green (`just check` 0 and the steps of
+- [x] F.3 Check: `just check` 0, `just core-live-test` 0, CI green (`just check` 0 and the steps of
   `just core-live-test` 0 on m4m, 2026-11-22: the live nextest, `core_live_test.sh` and `core_machine_live_test.sh`
-  on a debug copy, `core_default_session_live_test.sh` on a release copy; CI waits for the push)
+  on a debug copy, `core_default_session_live_test.sh` on a release copy; landed green as PR 87, 1087d68d)
 
 F as built:
 
@@ -360,7 +366,9 @@ F as built:
   check, canary, per-pane verification, stop on first failure; maintenance script test for its argument parsing
 - [x] G.4 V20 and the move part of V33 in `scripts/core_live_test.sh`
 - [x] G.5 `docs/next`: what a move keeps and loses (a shell's process state)
-- [ ] G.6 Check: `just check` 0, `just core-live-test` 0, CI green; security read of the new method
+- [x] G.6 Check: `just check` 0, `just core-live-test` 0, CI green; security read of the new method (PR 71,
+  f94f44b6, security OK d196367; follow-up fixes PR 74 ac390662, PR 76 54f175ad for fork issue 301, PR 84 415448a2
+  for fork issue 305)
 
 G as built (branch `issue/295-g-idle-move`, over the #297 fix branch):
 
@@ -424,17 +432,23 @@ G as built (branch `issue/295-g-idle-move`, over the #297 fix branch):
 
 ## R. Rollout on both Macs (no code)
 
-- [ ] R.1 Beta with C, D, F, G (and E when merged), installed on m4m and ac-mbm5 in the same step by live handoff;
-  panes kept; `runtime = "core"` and `core_pty_panes` confirmed in both configs
-- [ ] R.2 V26 quit drill in a named throwaway session on m4m
-- [ ] R.3 V40 live part (real Claude Code, no-connector settings) in a throwaway session
-- [ ] R.4 V25 canary move on m4m by mac-m4, announced first, then the batch; then on ac-mbm5 by mac-m5, announced
-  first (no fresh go from ac: he asked for step 3 on 2026-11-21, decide-from-acs-principles-v2)
-- [ ] R.5 D12: per-host bridge removal relayed to the dotfiles owner; V24 phone check by ac; V27 legacy core stopped
-  by mac-m4 on m4m and mac-m5 on ac-mbm5, each announced first
-- [ ] R.6 V28 upstream evidence (any time after PR A1); a reproduced case drafted in bug-template form and sent as an
-  `ASK:` to manager-lab's desk; ac submits it
-- [ ] R.7 V46 when ac next updates hc
-- [ ] R.8 SHAs, beta number and notes on #295, #287 and #293; close #287's herdr-max half and #293 1b after the
-  checks; tick phase 3 in `openspec/changes/herdr-core-client/design.md` § 6.4
-- [ ] R.9 Archive this change
+- [x] R.1 Beta with C, D, F, G (and E when merged), installed on m4m and ac-mbm5 in the same step by live handoff;
+  panes kept; `runtime = "core"` and `core_pty_panes` confirmed in both configs (beta 212,
+  `0.9.5-ac-beta.212-mandzukic` at 1087d68d, 2026-11-22: m4m 52 to 52 panes, 33 agents, every pane on core
+  `default`; ac-mbm5 44 to 44, 28 agents, only `manager-aruba-hlp` on the PTY)
+- [ ] R.2 V26 quit drill in a named throwaway session on m4m (carried to fork issue 307)
+- [ ] R.3 V40 live part (real Claude Code, no-connector settings) in a throwaway session (carried to fork issue 307)
+- [x] R.4 V25 canary move on m4m by mac-m4, announced first, then the batch; then on ac-mbm5 by mac-m5, announced
+  first (no fresh go from ac: he asked for step 3 on 2026-11-21, decide-from-acs-principles-v2) (done 2026-11-22;
+  the first batch closed 13 panes, fork issue 301, fixed in PR 76; then every move kept its pane and session id)
+- [x] R.5 D12: per-host bridge removal relayed to the dotfiles owner; V24 phone check by ac; V27 legacy core stopped
+  by mac-m4 on m4m and mac-m5 on ac-mbm5, each announced first (2026-11-22: m4m dotfiles 49cbe18 and legacy core
+  stopped 17:52Z; ac-mbm5 dotfiles 0b1e322 and legacy core stopped about 20:05Z; V24 on m4m in, "the spaces look
+  right on the iphone"; the both-Macs phone check is carried to fork issue 307)
+- [x] R.6 V28 upstream evidence (any time after PR A1); a reproduced case drafted in bug-template form and sent as an
+  `ASK:` to manager-lab's desk; ac submits it (2026-11-22 on hc 0.1.21: a serve kill or term leaves terminals live;
+  upstream issue 101 fixed it in 0.1.18 and 83 is the TCC case, so no new report)
+- [ ] R.7 V46 when ac next updates hc (carried to fork issue 307)
+- [x] R.8 SHAs, beta number and notes on #295, #287 and #293; close #287's herdr-max half and #293 1b after the
+  checks; tick phase 3 in `openspec/changes/herdr-core-client/design.md` § 6.4 (2026-11-22)
+- [x] R.9 Archive this change
