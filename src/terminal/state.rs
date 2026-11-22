@@ -261,7 +261,7 @@ pub struct TerminalState {
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
     pub restore_error: Option<String>,
     /// Why the pane has no runtime but keeps its place and its resume plan
-    /// (fork issue 288; openspec/changes/core-phase3, D1 and D1b).
+    /// (fork issue 288; openspec/changes/archive/2026-11-22-core-phase3, D1 and D1b).
     pub hold: Option<PaneHold>,
     /// When herdr-core stopped answering this core pane (unix ms), while it
     /// keeps retrying; the program keeps running (core-phase3 D1a).

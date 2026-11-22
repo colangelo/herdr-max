@@ -216,7 +216,7 @@ pub enum ChildExitReason {
     Handoff,
     /// The program ended without its own exit: the session ended its pane
     /// job (fork issue 288), or herdr-core's runtime ended it
-    /// (openspec/changes/core-phase3, D1). The pane is kept and started
+    /// (openspec/changes/archive/2026-11-22-core-phase3, D1). The pane is kept and started
     /// again later.
     #[cfg(unix)]
     Suspended(SuspendCause),
@@ -224,7 +224,7 @@ pub enum ChildExitReason {
 }
 
 /// What ended a suspended pane's program, when the program did not end
-/// itself (openspec/changes/core-phase3, D1).
+/// itself (openspec/changes/archive/2026-11-22-core-phase3, D1).
 // Windows has neither pane jobs nor the core backend, so nothing suspends there.
 #[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

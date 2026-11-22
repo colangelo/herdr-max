@@ -1,4 +1,4 @@
-//! When the server starts its primary core again (openspec/changes/core-phase3,
+//! When the server starts its primary core again (openspec/changes/archive/2026-11-22-core-phase3,
 //! D3, D3a, D3b). Pure: the clock is passed in.
 
 use std::time::{Duration, Instant};

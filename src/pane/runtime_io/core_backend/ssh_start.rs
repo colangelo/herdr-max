@@ -1,5 +1,5 @@
 //! Whether a core herdr connects to was started over SSH
-//! (openspec/changes/core-phase3, D7).
+//! (openspec/changes/archive/2026-11-22-core-phase3, D7).
 //!
 //! The release default herdr session shares core session `default` with the
 //! Herdr apps and the phone, so its core may have been started by any of

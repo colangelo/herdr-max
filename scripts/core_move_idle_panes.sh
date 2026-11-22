@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Moves idle panes onto the primary herdr-core session, one at a time
-# (openspec/changes/core-phase3 D9, V25). The server decides each move
+# (openspec/changes/archive/2026-11-22-core-phase3 D9, V25). The server decides each move
 # (`herdr pane respawn --if-idle`); this script picks the order and checks
 # each moved pane.
 #

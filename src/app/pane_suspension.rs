@@ -1,7 +1,7 @@
 //! Panes whose program the session ended, not the program itself: a macOS
 //! pane job that was stopped, or a logout (fork issue 288, design D3 of
 //! openspec/changes/pane-launchd-jobs), or herdr-core's runtime
-//! (openspec/changes/core-phase3, D1). Such a pane keeps its place, its
+//! (openspec/changes/archive/2026-11-22-core-phase3, D1). Such a pane keeps its place, its
 //! workspace and its resume plan, and starts again in place once launchd
 //! accepts pane jobs again and its old program is gone (core-phase3 D2).
 

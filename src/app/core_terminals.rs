@@ -1,6 +1,6 @@
 //! herdr-core terminals after a restore (openspec/changes/core-backend, D10),
 //! and panes that wait for a core that did not answer
-//! (openspec/changes/core-phase3, D1b).
+//! (openspec/changes/archive/2026-11-22-core-phase3, D1b).
 
 use std::time::{Duration, Instant};
 

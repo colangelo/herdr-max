@@ -1,4 +1,4 @@
-//! The idle move (openspec/changes/core-phase3 D9): a pane whose program runs
+//! The idle move (openspec/changes/archive/2026-11-22-core-phase3 D9): a pane whose program runs
 //! off the primary herdr-core session starts again there, only while nothing
 //! is happening in it. The server decides in one loop turn from facts it
 //! already holds (`MoveFacts`, read by `move_refusals`), then kills the old

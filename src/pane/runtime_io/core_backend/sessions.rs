@@ -1,5 +1,5 @@
 //! The herdr-core sessions herdr reaches, and its connections to them
-//! (openspec/changes/core-phase3, D5 and D6).
+//! (openspec/changes/archive/2026-11-22-core-phase3, D5 and D6).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

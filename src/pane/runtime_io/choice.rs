@@ -1,4 +1,4 @@
-//! Which backend a pane's program starts on (openspec/changes/core-phase3
+//! Which backend a pane's program starts on (openspec/changes/archive/2026-11-22-core-phase3
 //! D13, D3a, D8). Every path into `PaneIo::spawn_preferred` passes a
 //! `RuntimeChoice`, so a pane that skips core says why. A restored pane's
 //! fresh program asks like any other (D8); a program adopted by fd in a live

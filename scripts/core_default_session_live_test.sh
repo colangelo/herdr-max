@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Release-build herdr-core checks for the default herdr session
-# (openspec/changes/core-phase3, PR C). A release build's default herdr
+# (openspec/changes/archive/2026-11-22-core-phase3, PR C). A release build's default herdr
 # session puts new panes in core session `default` and keeps the label
 # `herdr`, so only a release build can show it. V17: a new pane goes to
 # `default`, a pane whose saved link names the legacy `herdr` core is
