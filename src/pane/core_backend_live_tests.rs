@@ -974,3 +974,39 @@ async fn core_spaces_doc_keeps_foreign_spaces_and_withdraws_its_own() {
     core_doc(|value| value == &serde_json::json!({"spaces": [phone, second_phone]})).await;
     runtime.shutdown();
 }
+
+// core-phase4 verifier 20 (the writer): the herdr-max document lands whole in
+// core, replaces a value written by hand, and is removed when herdr withdraws
+// it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_extras_doc_is_written_whole_and_removed() {
+    let Some(_core) = ScratchCore::start() else {
+        return;
+    };
+    let read = || {
+        runtime_io::core_call_for_test("doc.get", serde_json::json!({"name": "herdr-max"}))
+            .expect("doc.get")
+    };
+    let wait_for = |expect: serde_json::Value| async move {
+        tokio::time::timeout(WAIT, async {
+            while read()["value"] != expect {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("herdr-max document: last {}", read()));
+    };
+    let version = read()["version"].as_u64().expect("version");
+    runtime_io::core_call_for_test(
+        "doc.set",
+        serde_json::json!({"name": "herdr-max", "value": {"by": "hand"}, "version": version}),
+    )
+    .expect("a hand-written value");
+    let ours = serde_json::json!({"format": 1, "writer": {"session": "herdrdev", "version": "t"},
+        "spaces": [{"id": "w1", "pin": 1, "custom_name": null, "tokens": {}, "tabs": [], "panes": []}]});
+    runtime_io::publish_core_extras(ours.clone());
+    wait_for(ours).await;
+    runtime_io::publish_core_extras(serde_json::Value::Null);
+    wait_for(serde_json::Value::Null).await;
+}
