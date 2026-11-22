@@ -249,7 +249,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schema::{Method, Request};
+    use crate::api::schema::{Method, PaneRespawnParams, Request};
     use crate::pane::{CoreTerminalLink, FakeCore};
 
     fn name(raw: &str) -> MachineName {
@@ -309,6 +309,22 @@ mod tests {
         })
     }
 
+    fn respawn(app: &mut App, pane_id: PaneId, agent: bool) -> serde_json::Value {
+        let params = PaneRespawnParams {
+            pane_id: app.public_pane_id(0, pane_id).expect("public id"),
+            force: true,
+        };
+        let response = app.handle_api_request(Request {
+            id: "respawn".into(),
+            method: if agent {
+                Method::PaneRespawnAgent(params)
+            } else {
+                Method::PaneRespawn(params)
+            },
+        });
+        serde_json::from_str(&response).expect("json")
+    }
+
     fn split_on(app: &mut App, machine: &str) -> serde_json::Value {
         let target = app.public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane);
         let response = app.handle_api_request(Request {
@@ -334,6 +350,56 @@ mod tests {
             state: Some("connected".into()),
             leased: true,
             read: true,
+        }
+    }
+
+    // C1 (D5): a respawn starts on this Mac, so a pane that waits for its
+    // machine is refused, by every respawn path, and keeps its link.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pane_waiting_for_its_machine_is_never_respawned_here() {
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        for agent in [false, true] {
+            let answer = respawn(&mut app, pane, agent);
+            assert_eq!(answer["error"]["code"], "pane_on_machine", "{answer}");
+        }
+        assert!(!app.respawn_pane_runtime(pane, crate::app::api::RespawnTarget::Shell));
+        assert!(!has_runtime(&app, pane), "nothing started here");
+        assert!(matches!(
+            why(&app, pane),
+            Some(CoreWaitReason::MachineAway { .. })
+        ));
+    }
+
+    // C1, C3 (D5): a pane split onto a machine at runtime is watched by the
+    // machine poll, and a respawn of it is refused: it runs on there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_machine_pane_is_polled_and_never_respawned_here() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _) = app_with_one_pane();
+        assert_eq!(app.core_machine_poll_deadline(), None);
+        let split = split_on(&mut app, "loop");
+        assert_eq!(split["result"]["pane"]["machine"], "loop", "{split}");
+        assert!(
+            app.core_machine_poll_deadline().is_some(),
+            "the poll is armed"
+        );
+        let pane = app
+            .parse_pane_id(split["result"]["pane"]["pane_id"].as_str().expect("id"))
+            .map(|(_, pane)| pane)
+            .expect("the new pane");
+        let answer = respawn(&mut app, pane, false);
+        assert_eq!(answer["error"]["code"], "pane_on_machine", "{answer}");
+        let runs = core
+            .methods()
+            .iter()
+            .filter(|method| *method == "terminal.run")
+            .count();
+        assert_eq!(runs, 1, "{:?}", core.methods());
+        assert_eq!(app.pane_machine(pane).as_deref(), Some("loop"));
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
         }
     }
 

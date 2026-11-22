@@ -2346,6 +2346,19 @@ impl App {
                 ),
             );
         }
+        // A respawn starts on this Mac, whatever the pane ran on: a pane on
+        // a core machine is never started here (core-phase5 D5), whether it
+        // runs, waits for its machine or ended there.
+        if let Some(machine) = self.pane_machine(pane_id) {
+            return encode_error(
+                id,
+                "pane_on_machine",
+                format!(
+                    "pane {} runs on {machine}; a respawn would start it on this Mac. Close it and open a new pane with `--on {machine}`",
+                    params.pane_id
+                ),
+            );
+        }
         if resume_agent && self.pane_agent_resume_plan(pane_id).is_none() {
             return encode_error(
                 id,

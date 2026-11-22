@@ -109,6 +109,38 @@ impl App {
         }
     }
 
+    /// The core machine `pane_id`'s program runs on, from its runtime or
+    /// the link it holds without one. Such a pane is never started on this
+    /// Mac: nothing here may respawn it (core-phase5 D5).
+    pub(crate) fn pane_machine(&self, pane_id: PaneId) -> Option<String> {
+        let (_, pane) = self.find_pane(pane_id)?;
+        let terminal_id = &pane.attached_terminal_id;
+        let link = self
+            .terminal_runtimes
+            .get(terminal_id)
+            .and_then(crate::terminal::TerminalRuntime::core_terminal)
+            .or_else(|| {
+                self.state
+                    .terminals
+                    .get(terminal_id)
+                    .and_then(crate::terminal::state::TerminalState::held_core_link)
+            })?;
+        link.machine().map(str::to_string)
+    }
+
+    /// A create request with `on` just ran: arms the machine poll, which
+    /// otherwise arms only at start and from its own answers, so a pane
+    /// started on a machine at runtime is watched too (core-phase5 D5).
+    pub(crate) fn after_machine_spawn(&mut self, on_machine: bool, response: String) -> String {
+        #[cfg(unix)]
+        if on_machine {
+            self.schedule_core_machine_poll(Instant::now());
+        }
+        #[cfg(not(unix))]
+        let _ = on_machine;
+        response
+    }
+
     /// Panes waiting for a core session itself: a pane on a core machine
     /// waits for its machine instead (`core_machine_panes`).
     fn core_session_waiting_panes(&self) -> Vec<(PaneId, crate::terminal::state::CoreWaiting)> {

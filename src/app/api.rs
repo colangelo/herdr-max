@@ -748,6 +748,16 @@ impl App {
         usize,
         super::pane_resume::Prepared<super::pane_resume::RespawnFinish>,
     )> {
+        // A respawn starts on this Mac: never for a pane whose program runs
+        // on a core machine (core-phase5 D5).
+        if let Some(machine) = self.pane_machine(pane_id) {
+            tracing::warn!(
+                pane = pane_id.raw(),
+                %machine,
+                "pane not respawned: its program runs on a core machine"
+            );
+            return None;
+        }
         let (ws_idx, pane_state) = self.find_pane(pane_id)?;
         let terminal_id = pane_state.attached_terminal_id.clone();
         let terminal = self.state.terminals.get(&terminal_id)?;
@@ -904,6 +914,10 @@ impl App {
     /// (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
     pub(crate) fn respawn_pane_agent(&mut self, pane_id: crate::layout::PaneId) -> Option<String> {
         if self.pane_resume_launching(pane_id) {
+            return None;
+        }
+        // Its shell would type the resume command on this Mac (core-phase5 D5).
+        if self.pane_machine(pane_id).is_some() {
             return None;
         }
         let plan = self.pane_agent_resume_plan(pane_id)?;
@@ -1563,7 +1577,9 @@ impl App {
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
-                return self.handle_workspace_create(request.id, params);
+                let on_machine = params.on.is_some();
+                let response = self.handle_workspace_create(request.id, params);
+                return self.after_machine_spawn(on_machine, response);
             }
             Method::WorkspaceFocus(target) => {
                 return self.handle_workspace_focus(request.id, target);
@@ -1614,7 +1630,11 @@ impl App {
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
-            Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
+            Method::TabCreate(params) => {
+                let on_machine = params.on.is_some();
+                let response = self.handle_tab_create(request.id, params);
+                return self.after_machine_spawn(on_machine, response);
+            }
             Method::TabFocus(target) => return self.handle_tab_focus(request.id, target),
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabSync(params) => return self.handle_tab_sync(request.id, params),
@@ -1659,7 +1679,11 @@ impl App {
             Method::AgentSendKeys(params) => {
                 return self.handle_agent_send_keys(request.id, params);
             }
-            Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
+            Method::PaneSplit(params) => {
+                let on_machine = params.on.is_some();
+                let response = self.handle_pane_split(request.id, params);
+                return self.after_machine_spawn(on_machine, response);
+            }
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),

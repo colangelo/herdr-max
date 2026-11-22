@@ -67,6 +67,14 @@ pub struct CoreTerminalLink {
     pub agent: Option<crate::platform::ProgramIdentity>,
 }
 
+impl CoreTerminalLink {
+    /// The core machine the program runs on (`ac-mbm5` in `ac-mbm5/t7`),
+    /// `None` on this Mac's own core (core-phase5 D5).
+    pub fn machine(&self) -> Option<&str> {
+        self.address.split_once('/').map(|(machine, _)| machine)
+    }
+}
+
 /// A live herdr-core terminal labelled for this herdr session that no pane
 /// shows (D10 "Orphans").
 #[derive(Debug, Clone, PartialEq, Eq)]

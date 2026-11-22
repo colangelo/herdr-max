@@ -356,8 +356,8 @@ impl App {
                 .map(|waiting| waiting.why.as_str().to_string()),
             machine: core_link
                 .as_ref()
-                .and_then(|link| link.address.split_once('/'))
-                .map(|(machine, _)| machine.to_string()),
+                .and_then(|link| link.machine())
+                .map(str::to_string),
             core_address: core_link.map(|link| link.address),
             suspend_cause: terminal
                 .suspension()
