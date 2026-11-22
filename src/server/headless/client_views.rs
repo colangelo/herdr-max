@@ -417,6 +417,34 @@ impl HeadlessServer {
         })
     }
 
+    /// Hands the label sync the core panes a person is looking at now
+    /// (openspec/changes/core-phase4, D7). One walk over the attached shell
+    /// clients' shown tabs, after a view change or client event.
+    #[cfg(unix)]
+    pub(super) fn look_core_labels(&mut self) {
+        if !self.app.core_label_sync() {
+            return;
+        }
+        let views: Vec<_> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| client.is_active_shell_client())
+            .filter_map(|(&client_id, client)| {
+                let target = self.shell_target_for_client(client_id)?;
+                Some(crate::app::core_labels::ClientView {
+                    focused: client.outer_terminal_focus,
+                    workspace_index: target.workspace_index,
+                    tab_index: target.tab_index,
+                })
+            })
+            .collect();
+        let on_screen =
+            crate::app::core_labels::panes_on_screen(views, &self.app.state.workspaces, |id| {
+                self.app.primary_core_address(id)
+            });
+        self.app.look_core_labels(on_screen);
+    }
+
     pub(super) fn shell_focus_target(&self, client_id: u64) -> Option<ShellFocusTarget> {
         self.focus_target_for_surface(self.shell_target_for_client(client_id)?)
     }

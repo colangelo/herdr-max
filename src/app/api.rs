@@ -164,6 +164,12 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::CoreLabels(fact) = ev {
+            self.handle_core_labels(fact);
+            return Vec::new();
+        }
+
+        #[cfg(unix)]
         if matches!(ev, AppEvent::CoreGaveUp) {
             self.core_gave_up();
             return Vec::new();

@@ -521,17 +521,24 @@ impl HeadlessServer {
             self.app.sync_focus_events();
             self.app.sync_session_save_schedule();
             self.app.sync_core_spaces_schedule();
-            self.app.sync_core_view();
+            let view_changed = self.app.sync_core_view();
 
             // 4. Accept new client connections.
             self.accept_client_connections()?;
 
             // 5. Drain server events from client threads.
-            if self.drain_server_events() {
+            let client_events = self.drain_server_events();
+            if client_events {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.server_events");
             }
+            #[cfg(unix)]
+            if view_changed || client_events {
+                self.look_core_labels();
+            }
+            #[cfg(not(unix))]
+            let _ = view_changed;
             if self.should_quit.load(Ordering::Acquire) {
                 continue;
             }

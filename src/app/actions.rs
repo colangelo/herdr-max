@@ -1481,6 +1481,8 @@ impl AppState {
             #[cfg(unix)]
             AppEvent::CoreGaveUp => Vec::new(),
             #[cfg(unix)]
+            AppEvent::CoreLabels(_) => Vec::new(),
+            #[cfg(unix)]
             AppEvent::CoreStartedOverSsh { session } => {
                 self.post_notification(ToastNotification {
                     kind: ToastKind::NeedsAttention,

@@ -19,6 +19,10 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+#[cfg(unix)]
+mod core_label_sync;
+#[cfg(unix)]
+pub(crate) mod core_labels;
 mod core_spaces_doc;
 mod core_status_mirror;
 mod core_terminals;
@@ -224,6 +228,13 @@ pub struct App {
     core_spaces_deadline: Option<Instant>,
     /// Where herdr-max's spaces go: the core writer, a recorder in tests (D7).
     core_spaces_publish: fn(Vec<serde_json::Value>),
+    /// `[experimental] core_label_sync`: the label state while it is on
+    /// (openspec/changes/core-phase4, D11).
+    #[cfg(unix)]
+    core_labels: Option<core_labels::CoreLabels>,
+    /// Where label writes go: the core label thread, a recorder in tests.
+    #[cfg(unix)]
+    core_label_write: fn(crate::pane::LabelWrite),
     /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
     /// Last attempt that could update a connected presentation surface.
@@ -918,6 +929,12 @@ impl App {
             core_spaces_publish: crate::pane::publish_core_spaces,
             #[cfg(test)]
             core_spaces_publish: |_| {},
+            #[cfg(unix)]
+            core_labels: None,
+            #[cfg(all(unix, not(test)))]
+            core_label_write: crate::pane::write_core_label,
+            #[cfg(all(unix, test))]
+            core_label_write: |_| {},
             last_render_at: None,
             last_presentation_at: None,
             api_rx,
@@ -945,6 +962,8 @@ impl App {
         if app.core_status_mirror {
             app.sync_core_status_mirror();
         }
+        #[cfg(unix)]
+        app.set_core_label_sync(config.experimental.core_label_sync);
         Ok(app)
     }
 
@@ -1015,6 +1034,8 @@ impl App {
         if app.core_status_mirror {
             app.sync_core_status_mirror();
         }
+        #[cfg(unix)]
+        app.set_core_label_sync(config.experimental.core_label_sync);
         Ok(app)
     }
 
@@ -1297,6 +1318,8 @@ impl App {
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
             self.set_core_status_mirror(config.experimental.core_status_mirror);
             self.set_core_spaces_doc(config.experimental.core_spaces_doc);
+            #[cfg(unix)]
+            self.set_core_label_sync(config.experimental.core_label_sync);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();
