@@ -689,7 +689,10 @@ async fn core_label_sync_follows_turns_and_writes_seen() {
         turn,
     });
     loop {
-        if let CoreFact::Labels { address: a, seen } = next_fact(&mut facts).await {
+        if let CoreFact::Labels {
+            address: a, seen, ..
+        } = next_fact(&mut facts).await
+        {
             if a == address && seen == Some(turn) {
                 break;
             }

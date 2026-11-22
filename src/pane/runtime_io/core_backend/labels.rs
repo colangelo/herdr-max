@@ -165,6 +165,10 @@ fn label_call(label: &LabelWrite) -> (&str, Value) {
         LabelWrite::Seen { address, turn } => {
             (address.as_str(), json!({"herdr.seen": turn.to_string()}))
         }
+        LabelWrite::Pinned { address, pinned } => (
+            address.as_str(),
+            json!({"herdr.pinned": if *pinned { "1" } else { "" }}),
+        ),
     }
 }
 
@@ -173,7 +177,15 @@ fn observed(record: &Value) -> Observed {
     Observed {
         turn: record["turn"].as_u64().unwrap_or(0),
         seen: seen_label(&record["labels"]),
+        pinned: pinned_label(&record["labels"]),
     }
+}
+
+/// `herdr.pinned` from a labels map: present and non-empty.
+fn pinned_label(labels: &Value) -> bool {
+    labels["herdr.pinned"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty())
 }
 
 /// `herdr.seen` from a labels map: a decimal `u64`, anything else missing.
@@ -219,6 +231,7 @@ fn parse_event(line: &[u8]) -> Option<CoreFact> {
                 "labels" => Some(CoreFact::Labels {
                     address,
                     seen: seen_label(&data["labels"]),
+                    pinned: pinned_label(&data["labels"]),
                 }),
                 "removed" | "finished" => Some(CoreFact::Gone { address }),
                 _ => None,
@@ -292,7 +305,19 @@ mod tests {
             )),
             Some(CoreFact::Labels {
                 address: "t7".into(),
-                seen: Some(3)
+                seen: Some(3),
+                pinned: false,
+            })
+        );
+        assert_eq!(
+            parse_event(&event(
+                "labels",
+                json!({"labels": {"herdr.seen": "3", "herdr.pinned": "1"}})
+            )),
+            Some(CoreFact::Labels {
+                address: "t7".into(),
+                seen: Some(3),
+                pinned: true,
             })
         );
         assert_eq!(
@@ -304,7 +329,8 @@ mod tests {
                 address: "t7".into(),
                 observed: Observed {
                     turn: 2,
-                    seen: None
+                    seen: None,
+                    pinned: false,
                 }
             })
         );
@@ -323,7 +349,8 @@ mod tests {
                 "t1".into(),
                 Observed {
                     turn: 1,
-                    seen: Some(1)
+                    seen: Some(1),
+                    pinned: false,
                 }
             )]))
         );
@@ -341,7 +368,8 @@ mod tests {
             observed(&record),
             Observed {
                 turn: 5,
-                seen: Some(4)
+                seen: Some(4),
+                pinned: false,
             }
         );
         for bad in ["", "-1", "four", "4.0"] {
@@ -375,5 +403,12 @@ mod tests {
         let (terminal, labels) = label_call(&write);
         assert_eq!(terminal, "t7");
         assert_eq!(labels, json!({"herdr.seen": "12"}));
+        for (pinned, value) in [(true, "1"), (false, "")] {
+            let write = LabelWrite::Pinned {
+                address: "t7".into(),
+                pinned,
+            };
+            assert_eq!(label_call(&write).1, json!({"herdr.pinned": value}));
+        }
     }
 }
