@@ -20,6 +20,9 @@ pub(crate) use self::restore::{
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::restore::{restore, restored_former_public_ids};
+// The core live tests restore a session too (core-phase3 V10); they are Unix only.
+#[cfg(all(test, unix))]
+pub(crate) use self::restore::one_pane_snapshot_for_test;
 pub use self::snapshot::{
     capture, capture_history, record_former_public_ids, DirectionSnapshot, LayoutSnapshot,
     SessionHistorySnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot,

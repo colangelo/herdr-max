@@ -825,6 +825,93 @@ async fn core_v10_a_kept_pane_is_reattached_by_the_next_server() {
     assert!(wait_until_gone(pid), "closing the reattached pane ends it");
 }
 
+/// Restores `snapshot` as a herdr restart does and returns its one runtime.
+fn restore_one(
+    snapshot: &crate::persist::SessionSnapshot,
+    history: &crate::persist::SessionHistorySnapshot,
+) -> (crate::terminal::TerminalRuntime, mpsc::Receiver<AppEvent>) {
+    let (events, event_rx) = mpsc::channel(64);
+    let (_, _, runtimes) = crate::persist::restore(
+        snapshot,
+        Some(history),
+        24,
+        80,
+        4096,
+        "/bin/sh",
+        crate::config::ShellModeConfig::NonLogin,
+        false,
+        events,
+        Arc::new(Notify::new()),
+        Arc::new(RenderSignal::new()),
+    );
+    let runtime = runtimes.into_values().next().expect("a restored runtime");
+    (runtime, event_rx)
+}
+
+async fn wait_for_restored_text(runtime: &crate::terminal::TerminalRuntime, needle: &str) -> bool {
+    tokio::time::timeout(WAIT, async {
+        while !runtime.recent_unwrapped_text(40).contains(needle) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+// V10 (core-phase3 D8, replaces `core_v1_a_restored_pane_stays_on_the_pty`):
+// with `runtime = "core"`, a pane restored with no live saved terminal runs
+// its fresh program in core, its saved history still in herdr's parser, and
+// takes input; with `runtime = "pty"` the same restore runs on the PTY.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_v10_a_restored_pane_starts_on_core_with_its_history() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-v10r");
+    let (snapshot, history) =
+        crate::persist::one_pane_snapshot_for_test(scratch.0.clone(), "V10-SAVED-HISTORY\r\n");
+
+    let (restored, _events) = restore_one(&snapshot, &history);
+    let link = restored
+        .core_terminal()
+        .expect("runtime = core: the restored pane runs in core");
+    let pid = restored.child_pid().expect("pid");
+    assert_eq!(
+        core.record(&link.address)["pid"].as_u64(),
+        Some(u64::from(pid)),
+        "core runs the restored pane's program"
+    );
+    assert!(
+        wait_for_restored_text(&restored, "V10-SAVED-HISTORY").await,
+        "the saved history is in the pane: {:?}",
+        restored.recent_unwrapped_text(40)
+    );
+    restored
+        .try_send_bytes(Bytes::from_static(b"echo V10-AFTER > after.txt\r"))
+        .expect("input");
+    let after = wait_for_file(&scratch.path("after.txt"), |text| text.ends_with('\n')).await;
+    assert_eq!(after, "V10-AFTER\n");
+    assert!(
+        wait_for_restored_text(&restored, "V10-SAVED-HISTORY").await,
+        "the history survives the program's first output"
+    );
+    restored.shutdown();
+    assert!(wait_until_gone(pid), "closing the restored pane ends it");
+
+    crate::pane::set_preferred_runtime(false);
+    let (on_pty, _events) = restore_one(&snapshot, &history);
+    assert!(
+        on_pty.core_terminal().is_none(),
+        "runtime = pty: the restored pane runs on the PTY"
+    );
+    assert!(
+        wait_for_restored_text(&on_pty, "V10-SAVED-HISTORY").await,
+        "the saved history is in the PTY pane"
+    );
+    on_pty.shutdown();
+}
+
 // V3 (flow, D3): output far beyond core's 256 KiB credit window arrives whole
 // with credit sent back in batches; a stall would leave the marker unseen.
 #[tokio::test(flavor = "multi_thread")]

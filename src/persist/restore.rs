@@ -1574,6 +1574,83 @@ fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
     }
 }
 
+/// One workspace with one shell pane in `cwd` whose saved screen history is
+/// `history_ansi`, for restore tests here and in the core live tests.
+#[cfg(test)]
+pub(crate) fn one_pane_snapshot_for_test(
+    cwd: PathBuf,
+    history_ansi: &str,
+) -> (SessionSnapshot, SessionHistorySnapshot) {
+    let mut panes = HashMap::new();
+    panes.insert(
+        0,
+        super::snapshot::PaneSnapshot {
+            cwd: cwd.clone(),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            agent_resume: None,
+            agent_launch: None,
+            launch_argv: None,
+            todos: Vec::new(),
+            next_todo_id: 1,
+            last_input_at_ms: None,
+            pin_order: None,
+            former_public_ids: Vec::new(),
+            pane_key: None,
+            run_id: None,
+            core_terminal: None,
+        },
+    );
+    let mut history = SessionHistorySnapshot {
+        version: super::snapshot::SNAPSHOT_VERSION,
+        layout_fingerprint: None,
+        workspaces: vec![WorkspaceHistorySnapshot {
+            tabs: vec![super::snapshot::TabHistorySnapshot {
+                panes: HashMap::from([(
+                    0,
+                    super::snapshot::PaneHistorySnapshot {
+                        ansi: history_ansi.to_string(),
+                        lines: 1,
+                    },
+                )]),
+            }],
+        }],
+    };
+    let snapshot = SessionSnapshot {
+        version: super::snapshot::SNAPSHOT_VERSION,
+        workspaces: vec![WorkspaceSnapshot {
+            id: Some("workspace".into()),
+            custom_name: None,
+            identity_cwd: cwd,
+            worktree_space: None,
+            pin_order: None,
+            public_pane_numbers: HashMap::new(),
+            next_public_pane_number: 0,
+            public_tab_numbers: Vec::new(),
+            next_public_tab_number: 0,
+            tabs: vec![TabSnapshot {
+                custom_name: None,
+                layout: LayoutSnapshot::Pane(0),
+                panes,
+                zoomed: false,
+                focused: Some(0),
+                root_pane: Some(0),
+            }],
+            active_tab: 0,
+        }],
+        active: Some(0),
+        selected: 0,
+        sidebar_width: Some(26),
+        sidebar_section_split: Some(0.5),
+        collapsed_space_keys: Default::default(),
+        last_client_size: None,
+    };
+    history.layout_fingerprint = super::snapshot::layout_fingerprint(&snapshot);
+    (snapshot, history)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3821,78 +3898,13 @@ mod tests {
 
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        let mut panes = HashMap::new();
-        panes.insert(
-            0,
-            super::super::snapshot::PaneSnapshot {
-                cwd: cwd.clone(),
-                label: None,
-                agent_name: None,
-                managed_agent_kind: None,
-                agent_session: None,
-                agent_resume: None,
-                agent_launch: None,
-                launch_argv: None,
-                todos: Vec::new(),
-                next_todo_id: 1,
-                last_input_at_ms: None,
-                pin_order: None,
-                former_public_ids: Vec::new(),
-                pane_key: None,
-                run_id: None,
-                core_terminal: None,
-            },
-        );
-        let mut history = SessionHistorySnapshot {
-            version: super::super::snapshot::SNAPSHOT_VERSION,
-            layout_fingerprint: None,
-            workspaces: vec![WorkspaceHistorySnapshot {
-                tabs: vec![super::super::snapshot::TabHistorySnapshot {
-                    panes: HashMap::from([(
-                        0,
-                        super::super::snapshot::PaneHistorySnapshot {
-                            ansi: concat!(
-                                "\x1b[31mRESTORED_HISTORY 👨‍👩‍👧\x1b[0m ",
-                                "\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\\r\n"
-                            )
-                            .to_string(),
-                            lines: 1,
-                        },
-                    )]),
-                }],
-            }],
-        };
-        let snapshot = SessionSnapshot {
-            version: super::super::snapshot::SNAPSHOT_VERSION,
-            workspaces: vec![WorkspaceSnapshot {
-                id: Some("workspace".into()),
-                custom_name: None,
-                identity_cwd: cwd,
-                worktree_space: None,
-                pin_order: None,
-                public_pane_numbers: HashMap::new(),
-                next_public_pane_number: 0,
-                public_tab_numbers: Vec::new(),
-                next_public_tab_number: 0,
-                tabs: vec![TabSnapshot {
-                    custom_name: None,
-                    layout: LayoutSnapshot::Pane(0),
-                    panes,
-                    zoomed: false,
-                    focused: Some(0),
-                    root_pane: Some(0),
-                }],
-                active_tab: 0,
-            }],
-            active: Some(0),
-            selected: 0,
-            sidebar_width: Some(26),
-            sidebar_section_split: Some(0.5),
-            collapsed_space_keys: Default::default(),
-            last_client_size: None,
-        };
-        history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
-        (snapshot, history)
+        super::one_pane_snapshot_for_test(
+            cwd,
+            concat!(
+                "\x1b[31mRESTORED_HISTORY 👨‍👩‍👧\x1b[0m ",
+                "\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\\r\n"
+            ),
+        )
     }
 }
 
@@ -4276,5 +4288,205 @@ mod core_restore_tests {
         assert!(!started_anything(&primary), "{:?}", primary.methods());
 
         assert!(matches!(restore(&link, "w1-p8"), CoreRestore::Fresh));
+    }
+
+    const SAVED_HISTORY: &str = "V10_SAVED_HISTORY\r\n";
+
+    fn runs(core: &FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "terminal.run")
+            .count()
+    }
+
+    /// Restores `snapshot` from a saved session (a herdr restart) and
+    /// returns its one runtime.
+    fn restored_runtime(
+        snapshot: &SessionSnapshot,
+        history: &SessionHistorySnapshot,
+    ) -> (TerminalRuntime, mpsc::Receiver<AppEvent>) {
+        let (events, event_rx) = mpsc::channel(64);
+        let (_, _, runtimes) = super::restore(
+            snapshot,
+            Some(history),
+            24,
+            80,
+            4096,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtime = runtimes.into_values().next().expect("a restored runtime");
+        (runtime, event_rx)
+    }
+
+    fn one_pane(
+        edit: impl FnOnce(&mut super::super::snapshot::PaneSnapshot),
+    ) -> (SessionSnapshot, SessionHistorySnapshot) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let (mut snapshot, history) = super::one_pane_snapshot_for_test(cwd, SAVED_HISTORY);
+        let pane = snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&0)
+            .expect("the saved pane");
+        edit(pane);
+        (snapshot, history)
+    }
+
+    // V10 (core-phase3 D8): a pane restored with no live saved terminal
+    // starts its fresh program on core when `runtime = "core"`, with its
+    // saved history in herdr's parser, and on the PTY when `runtime = "pty"`.
+    // Core's first paint clears the screen, as the real one does; the history
+    // stays above it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restored_pane_starts_where_runtime_says_with_its_history() {
+        let core = FakeCore::start_with(|config| {
+            config.first_paint = b"\x1b[H\x1b[2JV10_CORE_SCREEN\r\n".to_vec();
+        });
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (snapshot, history) = one_pane(|_| {});
+        for on_core in [true, false] {
+            crate::pane::set_preferred_runtime(on_core);
+            let before = runs(&core);
+            let (runtime, _events) = restored_runtime(&snapshot, &history);
+            assert_eq!(
+                runtime.core_terminal().is_some(),
+                on_core,
+                "runtime = core: {on_core}"
+            );
+            assert_eq!(
+                runs(&core) - before,
+                usize::from(on_core),
+                "{:?}",
+                core.methods()
+            );
+            if on_core {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !runtime
+                    .recent_unwrapped_text(60)
+                    .contains("V10_CORE_SCREEN")
+                {
+                    assert!(std::time::Instant::now() < deadline, "no first paint");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            assert!(
+                runtime
+                    .recent_unwrapped_text(60)
+                    .contains("V10_SAVED_HISTORY"),
+                "the saved history is in the pane (core: {on_core}): {:?}",
+                runtime.recent_unwrapped_text(60)
+            );
+            runtime.shutdown();
+        }
+    }
+
+    // V32 at the restore call site (D13): with `runtime = "core"`, a pane
+    // named by its agent's launch `--name`, or by an explicit agent name,
+    // restores on the PTY; a pane with neither restores on core.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_excluded_pane_restores_on_the_pty() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        crate::pane::set_preferred_runtime(true);
+        crate::pane::set_core_pty_panes(vec!["*-hlp".into()]);
+        let by_launch = one_pane(|pane| {
+            pane.agent_launch = Some(super::super::snapshot::PaneAgentLaunchSnapshot {
+                agent: "claude".into(),
+                flags: vec!["--name".into(), "manager-lab-hlp".into()],
+                started_at_ms: None,
+                env: Vec::new(),
+            });
+        });
+        let by_agent_name = one_pane(|pane| pane.agent_name = Some("manager-aruba-hlp".into()));
+        for (case, (snapshot, history)) in [("--name", by_launch), ("agent name", by_agent_name)] {
+            let (runtime, _events) = restored_runtime(&snapshot, &history);
+            assert!(
+                runtime.core_terminal().is_none(),
+                "{case}: restored on core"
+            );
+            runtime.shutdown();
+        }
+        assert_eq!(runs(&core), 0, "{:?}", core.methods());
+        let (snapshot, history) = one_pane(|pane| pane.agent_name = Some("reviewer".into()));
+        let (runtime, _events) = restored_runtime(&snapshot, &history);
+        assert!(
+            runtime.core_terminal().is_some(),
+            "an unmatched name uses core"
+        );
+        runtime.shutdown();
+        crate::pane::set_core_pty_panes(Vec::new());
+    }
+
+    // V10 (D8): a PTY program adopted by fd in a live handoff stays on the
+    // PTY with `runtime = "core"`: the same process, and core starts nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_program_adopted_in_a_live_handoff_stays_on_the_pty() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        crate::pane::set_preferred_runtime(false);
+        let (snapshot, history) = one_pane(|_| {});
+        let (events, _event_rx) = mpsc::channel(64);
+        let (workspaces, terminals, runtimes) = super::restore(
+            &snapshot,
+            Some(&history),
+            24,
+            80,
+            4096,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events.clone(),
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+        let saved = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
+        let pane_id = workspaces[0].tabs[0]
+            .panes
+            .keys()
+            .next()
+            .copied()
+            .expect("a pane");
+        let old = runtimes.values().next().expect("the PTY runtime");
+        let pid = old.child_pid().expect("the shell's pid");
+        old.pause_handoff_reader(std::time::Duration::from_secs(2))
+            .expect("pause the reader");
+        let mut imports = HashMap::from([(
+            pane_id.raw(),
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: old.duplicate_handoff_fd().expect("the master fd"),
+                state: old.handoff_runtime_state(pane_id.raw()),
+            },
+        )]);
+
+        crate::pane::set_preferred_runtime(true);
+        let (_, _, adopted) = restore_handoff(
+            &saved,
+            4096,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("handoff restore");
+        let adopted = adopted.into_values().next().expect("the adopted runtime");
+        assert!(
+            adopted.core_terminal().is_none(),
+            "an adopted fd stays on the PTY"
+        );
+        assert_eq!(adopted.child_pid(), Some(pid), "the same program");
+        assert!(
+            !started_anything(&core),
+            "core started nothing: {:?}",
+            core.methods()
+        );
+        drop(runtimes);
+        adopted.shutdown();
     }
 }
