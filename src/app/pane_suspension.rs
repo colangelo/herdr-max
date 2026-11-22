@@ -377,6 +377,15 @@ impl App {
                         queued += 1;
                     } else {
                         failed += 1;
+                        let reason = self
+                            .state
+                            .pane_terminal(*pane_id)
+                            .and_then(|terminal| terminal.restore_error.clone());
+                        warn!(
+                            pane = pane_id.raw(),
+                            reason = reason.as_deref().unwrap_or("no reason recorded"),
+                            "suspended pane could not resume; it is left without a program"
+                        );
                     }
                 }
             }
@@ -968,6 +977,63 @@ mod tests {
             "gone: resumed"
         );
         assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+        shutdown_runtimes(&mut app);
+    }
+
+    /// Collects what a `tracing` subscriber writes.
+    #[cfg(unix)]
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(unix)]
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut buffer) = self.0.lock() {
+                buffer.extend_from_slice(bytes);
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    // Fork issue 305: a suspended pane whose saved directory is gone cannot
+    // resume; the round says which pane and why at WARN, not only a count.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_resume_logs_the_pane_and_the_reason() {
+        let (mut app, pane_id, terminal_id) = app_with_one_pane(true);
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: ChildExitReason::Suspended(SuspendCause::HolderLost),
+        });
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = "/nonexistent-herdr-305".into();
+        app.program_start_token = |_| crate::platform::ProcessStart::table(None);
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        let now = Instant::now() + SETTLE;
+        tracing::subscriber::with_default(subscriber, || {
+            app.resume_suspended_panes_if_due(now);
+        });
+        let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("WARN"), "{log}");
+        assert!(log.contains("suspended pane could not resume"), "{log}");
+        assert!(log.contains(&format!("pane={}", pane_id.raw())), "{log}");
+        assert!(log.contains("Saved directory is unavailable"), "{log}");
         shutdown_runtimes(&mut app);
     }
 
