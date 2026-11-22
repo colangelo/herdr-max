@@ -90,11 +90,28 @@ connected comes back at connect (D10).
 
 ## 5. PR D: the `herdr-max` document
 
-- [ ] 5.1 `DocSpec` in `spaces_doc.rs`: name and merge as parameters, one thread per document, the 1 MiB refusal (verifier 18)
-- [ ] 5.2 `src/app/core_extras_doc.rs`: format 1 types and the pure build from `AppState`, wall-clock token expiry (verifier 16, 17)
-- [ ] 5.3 `[experimental] core_extras_doc` config, shared schedule, `report_metadata` sets the dirty flag, off writes `null`, `config-reference.json` entry (verifier 19)
-- [ ] 5.4 Live: `doc.get herdr-max` matches `doc.get herdr-app` by id (verifier 20)
-- [ ] 5.5 Check: `just check`, `just core-live-test`, CI green
+- [x] 5.1 `DocSpec` in `spaces_doc.rs`: name and merge as parameters, one thread per document, the 1 MiB refusal (verifier 18)
+- [x] 5.2 `src/app/core_extras_doc.rs`: format 1 types and the pure build from `AppState`, wall-clock token expiry (verifier 16, 17)
+- [x] 5.3 `[experimental] core_extras_doc` config, shared schedule, `report_metadata` sets the dirty flag, off writes `null`, `config-reference.json` entry (verifier 19)
+- [x] 5.4 Live: `doc.get herdr-max` matches `doc.get herdr-app` by id (verifier 20)
+- [x] 5.5 Check: `just check`, `just core-live-test`, CI green
+
+As built (PR D). `DocSpec` (`name`, `merge`) has two statics: `HERDR_APP` (marked-spaces merge, the
+marking moved to `marked_spaces`) and `HERDR_MAX` (`replace_whole`: no write when core already holds the
+value, a warning when another writer's value is replaced). `publish_doc` keeps one writer thread per
+document name (`herdr-core-doc-<name>`). A merged value over 1 MiB is not written, with one warning, and
+the last written value stays. `src/app/core_extras_doc.rs` builds format 1 from `AppState` with a
+`Clock` (one `Instant` and one `SystemTime`) that turns a token's monotonic expiry into `expires_ms`;
+panes are listed in layout order, so the value is stable and a repeat is skipped.
+`MetadataTokens::entries` exposes key, value and expiry. `publish_core_spaces_if_due` publishes both
+documents on the one 500 ms schedule, which `core_extras_doc` alone also arms;
+`workspace.report_metadata` sets `core_spaces_dirty`. Live: `core_extras_doc_is_written_whole_and_removed`
+(a hand-written value is replaced, `null` removes it) and the server script's join of `herdr-max` with
+`herdr-app` (writer session, space id, `pane=address`).
+
+Limits: a token that expires is dropped from the document only at the next publish (readers drop it by
+`expires_ms`). Turning `core_spaces_doc` off also clears a pending extras publish until the next change.
+Nothing reads the document yet: phase 5 is its first reader.
 
 ## 6. Roll-out
 
