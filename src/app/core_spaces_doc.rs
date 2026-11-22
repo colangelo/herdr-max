@@ -230,7 +230,7 @@ impl App {
     /// After a change the session would save: publish within the debounce.
     pub(crate) fn sync_core_spaces_schedule(&mut self) {
         if std::mem::take(&mut self.state.core_spaces_dirty)
-            && self.core_spaces_doc
+            && (self.core_spaces_doc || self.core_extras_doc)
             && self.core_spaces_deadline.is_none()
         {
             self.core_spaces_deadline = Some(Instant::now() + CORE_SPACES_DEBOUNCE);
@@ -242,6 +242,7 @@ impl App {
             return;
         }
         self.core_spaces_deadline = None;
+        self.publish_core_extras();
         if !self.core_spaces_doc {
             return;
         }

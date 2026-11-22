@@ -112,6 +112,16 @@ pub(crate) fn write_core_label(label: LabelWrite) {
     core_backend::labels::write(label);
 }
 
+/// Hands the `herdr-max` document (`null` removes it) to its background
+/// writer (openspec/changes/core-phase4, D4). Without a core backend, nothing.
+#[cfg(any(unix, not(test)))]
+pub(crate) fn publish_core_extras(document: serde_json::Value) {
+    #[cfg(unix)]
+    core_backend::spaces_doc::publish_extras(document);
+    #[cfg(not(unix))]
+    let _ = document;
+}
+
 /// A raw call on the server's core connection, for live tests of documents.
 #[cfg(all(test, unix))]
 pub(crate) fn core_call_for_test(

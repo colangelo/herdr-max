@@ -330,6 +330,9 @@ impl App {
         if changed {
             self.sync_agent_metadata_deadline();
             self.emit_workspace_token_updated(index);
+            // Tokens are not saved, but the herdr-max document carries them
+            // (core-phase4 D4).
+            self.state.core_spaces_dirty = true;
         }
         encode_success(id, ResponseResult::Ok {})
     }
