@@ -726,6 +726,33 @@ pub(super) fn accept_fake_cli_operation(listener: &UnixListener) -> (UnixStream,
 mod harness_env_tests {
     use super::*;
 
+    /// A blocked writer makes no progress; a slow one on a loaded machine
+    /// still does. Fails only when the tail stops changing for `STALL`, so the
+    /// tests measure blocking, not throughput (fork issue 303).
+    struct Progress {
+        last: String,
+        since: Instant,
+    }
+
+    impl Progress {
+        const STALL: Duration = Duration::from_secs(5);
+
+        fn new() -> Self {
+            Self {
+                last: String::new(),
+                since: Instant::now(),
+            }
+        }
+
+        fn moving(&mut self, text: &str) -> bool {
+            if text != self.last {
+                text.clone_into(&mut self.last);
+                self.since = Instant::now();
+            }
+            self.since.elapsed() < Self::STALL
+        }
+    }
+
     /// A process whose terminal is never read blocks once the pty buffer is
     /// full, which froze whole test runs when a server printed a lot at
     /// start-up. This one prints about 590 KB and must still exit.
@@ -735,14 +762,14 @@ mod harness_env_tests {
         cmd.args(["-c", "seq 1 100000"]);
         let mut spawned = spawn_in_pty(cmd);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut progress = Progress::new();
         loop {
             if let Some(status) = spawned.child.try_wait().unwrap() {
                 assert!(status.success(), "{status:?}");
                 break;
             }
             assert!(
-                Instant::now() < deadline,
+                progress.moving(&spawned.tail.text()),
                 "the process is still blocked writing to its terminal"
             );
             thread::sleep(Duration::from_millis(20));
@@ -755,9 +782,10 @@ mod harness_env_tests {
         cmd.args(["-c", "seq 1 100000"]);
         let spawned = spawn_in_pty(cmd);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut progress = Progress::new();
         while !spawned.tail.text().trim_end().ends_with("100000") {
-            assert!(Instant::now() < deadline, "{:?}", spawned.tail.text());
+            let text = spawned.tail.text();
+            assert!(progress.moving(&text), "{text:?}");
             thread::sleep(Duration::from_millis(20));
         }
         let text = spawned.tail.text();
