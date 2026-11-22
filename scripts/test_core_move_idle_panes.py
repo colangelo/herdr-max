@@ -136,6 +136,17 @@ class CoreMoveIdlePanesTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn("--model 'sonnet', the plan says 'opus'", done.stdout)
 
+    def test_a_helper_carrying_the_session_id_is_not_read_as_the_agent(self):
+        # m4m, beta 209: the agent-bell listener runs first in the pane with
+        # --session <id> and no --model; the check must read claude's argv.
+        moved = agent("a", "sess-a")
+        listener = {"pid": 5, "name": "python",
+                    "argv": ["python", "agent-bell", "listen", "--session", "sess-a"]}
+        moved["processes"].insert(0, listener)
+        done, _ = self.run_driver({"w1-p1": moved}, "--move")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("FAILED", done.stdout)
+
     def test_excluded_panes_are_never_touched(self):
         panes = {"w1-p1": agent("manager-lab-hlp", "sess-a"), "w1-p2": agent("b", "sess-b")}
         done, state = self.run_driver(panes, "--move", "--exclude", "*-hlp")

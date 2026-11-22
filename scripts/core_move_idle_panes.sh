@@ -150,8 +150,10 @@ def check_agent(herdr, pane_id, before, name):
         return f"name {herdr.names().get(pane_id)!r}, was {name!r}"
     plan = restore_of(before)
     session = session_of(before)
-    argv = next((process.get("argv") for process in herdr.processes(pane_id)
-                 if session and session in (process.get("argv") or [])), None)
+    # The agent is the process resuming the session: helpers such as the
+    # agent-bell listener also carry the session id, with other flags.
+    argvs = [process.get("argv") or [] for process in herdr.processes(pane_id)]
+    argv = next((a for a in argvs if session and flag_value(a, "--resume") == session), None)
     if argv is None:
         return "no process carries its session id"
     for flag in PLAN_FLAGS:
