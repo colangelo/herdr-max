@@ -4,6 +4,11 @@
 # with a local relay script, never ssh. A user's herdr and cores are never
 # reached; every core call carries a scratch HC_SESSION.
 #
+# PR A (core-link, D2 and D10): V8, V27, V28, V31 (core-link part), V33 (add
+# and login), V34, V35 and V36, after V26. A fake `ssh` first on PATH runs the
+# far side's line against the far scratch core; real OpenSSH dials only a
+# loopback server started here (paramiko, through uv) on 127.0.0.1.
+#
 # V26 (PR A0, F1): a far terminal that carries the same labels as one of our
 # panes, and a pid that is a live process here, is never adopted, listed as an
 # orphan, killed or signalled by the local server, across a live handoff, a
@@ -47,8 +52,12 @@ hc_far() {
     HC_SESSION="$FAR_SESSION" hc "$@"
 }
 
+# The core-link part below replaces this with its own cleanup.
+link_cleanup() { :; }
+
 cleanup() {
   set +e
+  link_cleanup
   run_herdr server stop >/dev/null 2>&1
   # Only a running one: any hc call would start the session.
   [[ -S "$RUNTIME_DIR/herdr-core/$CORE_SESSION.sock" ]] && hc_scratch server stop >/dev/null 2>&1
@@ -180,4 +189,5 @@ gone_local() { [[ "$(listed_addresses)" == "loop/t1" ]]; }
 wait_until "the local terminal ended" gone_local
 alive "$FAR_PID" || fail "closing pane A ended the far program (pid $FAR_PID)"
 echo "ok: closing pane A ended $LOCAL only; the far program (pid $FAR_PID) still runs"
+source "$ROOT/scripts/core_link_live_test.sh"
 echo "core machine live test: all checks passed"
