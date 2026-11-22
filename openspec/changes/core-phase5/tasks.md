@@ -107,16 +107,63 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR B. Leases and dormancy (#260 on core machines)
 
-- [ ] B.1 Lease files (`leases/<holder>`, write-then-rename, expiry) and the gate's lease check (D3); V1, V5
-- [ ] B.2 The client writes `client-<pid>` from `InputClock`, at most once a minute; V24
-- [ ] B.3 `core-link`'s watcher re-reads leases every 5 s and ends ssh; `herdr machine wake` (lease, then connect,
+- [x] B.1 Lease files (`leases/<holder>`, write-then-rename, expiry) and the gate's lease check (D3); V1, V5
+  Built: `state.rs` `Lease { holder, expires_at, input_at }`, a file of `<expires_at> <input_at>` (a one-field
+  file from PR A takes its mtime as the act); holders are `manual`, `client-<pid>`, `cli-<pid>` only;
+  `newest_act` is the newest act behind a lease in force. `link.rs` `admit` reads the line, then the gate, then
+  the leases. Tests: V1 unit (no lease, expired leases, the Windows line first) and loop (no lease and an
+  expired one exit 75 as `Dormant`, no ssh); V5 unit (two clients and a CLI writer in threads, a reader sees
+  whole files only; a dead holder's lease ends by its expiry). Limit: `cli-<pid>` is written from PR E on.
+- [x] B.2 The client writes `client-<pid>` from `InputClock`, at most once a minute; V24
+  Built: `core_machine/presence.rs`. The client loop stamps each key, text, paste or mouse input
+  (`wake_remotes_on_input`, #260's events); `LeaseClock` lets one stamp a minute through a `try_send` to a writer
+  thread, which writes the lease (input + 10 min) in every machine folder with a `target.json`, prunes expired
+  leases of dead clients, and wakes that machine's dialer. Tests: V24's count as a unit (inputs every 100 ms for
+  10 min write 10 leases, a minute apart); loop: a TUI client in a pty, keys every 0.5 s for 8 s after its start
+  write nothing more. Limits: V24's `just bench-render-scale` was not run; nothing was added to a render, layout
+  or PTY loop (one `Instant` comparison per input batch). The throttle can end a lease up to 59 s before last
+  input + 10 min, and a key after a `retry_spent` reopens the gate at the next write, at most a minute later.
+  Every herdr-dev or herdr client of the account writes into every machine folder of its build's root, as D3 says.
+- [x] B.3 `core-link`'s watcher re-reads leases every 5 s and ends ssh; `herdr machine wake` (lease, then connect,
   reopens `far_core_down`); V2, V3, V7 (answer keys per R3)
-- [ ] B.3a Retry budget (D2 step 9): failures and drops recorded in `gate.json`; one retry on core's own
+  Built: the watcher's lease re-read (`LEASE_RECHECK`), a lease end is no failure; `command.rs` `wake` (`--for`
+  90s/30m/2h, 30 min default, 12 h at most; refuses over a login class and names `machine login`; clears
+  `far_core_down`). Loop results on m4m: V2 link ended 20.0 s after a 20 s lease began, status `dormant`; V7 a
+  core restart while dormant gave only refused POSIX and Windows STARTs, no ssh; V3 (5 min) zero link bytes and
+  zero ssh starts after dormancy, refused pairs with the Windows line < 0.1 s after its POSIX line (see B.6 for
+  the gate run's numbers); wake from dormant wrote its lease before the dial and connected; a wake reopened
+  `far_core_down`. Limit: status reports an unreadable `gate.json` as open (security M8, later).
+- [x] B.3a Retry budget (D2 step 9): failures and drops recorded in `gate.json`; one retry on core's own
   initiative, then `retry_spent` until a lease newer than the failure (input, wake, login, `--dial`); V38
-- [ ] B.4 The dialer (D3a): one thread per machine per process, `try_send` wake requests, `connect.lock`, 20 s
+  Built: `GateClass::DialFailed` (closes nothing) and `RetrySpent`; `next_gate` reads the gate as recorded when
+  the dial ends; a link counts as up 5 s past `HERDR-LINK-UP` (`UP_SETTLE`), so core's add check connection and
+  a far `connect` that fails at once are failures. V38 loop: real OpenSSH to a second loopback server on a
+  second far core, which drops each connection at its auth request; a client lease renewed every 30 s with its
+  old act time; 10 min: 2 ssh starts, 2 refused auths, gate `retry_spent`; one key (its lease, then its wake):
+  exactly one more dial, then none for 40 s. Limits: a `Permission denied` refusal is `auth_failed` (D10, V8),
+  which waits for `machine login`, so V38's far side drops the connection instead; the two dials came 0.6 s
+  apart (core's own backoff), so a prompting far side still asks twice; `--dial` is PR E.
+- [x] B.4 The dialer (D3a): one thread per machine per process, `try_send` wake requests, `connect.lock`, 20 s
   timeout, `machine.list` polling when another process dials; V29
-- [ ] B.5 Wake: the first input that reaches a server for a machine's pane, or a view server's first client with a
+  Built: `core_machine/dialer.rs` (`Dialer`, `dial_once`, the `CoreLink` trait over the primary core). A
+  connected machine is not dialled; one already `connecting` is waited on, not re-dialled (R4). V29 unit: a
+  connect that blocks for the whole dial, 100 keys from two panes and a view wake each post in < 1 ms; a second
+  process's dialer (its own `connect.lock` descriptor) with two wakes polls `machine.list` and sends nothing;
+  exactly one connect. `machine wake` and `machine login` run `dial_once` on their own thread.
+- [x] B.5 Wake: the first input that reaches a server for a machine's pane, or a view server's first client with a
   lease, posts to the dialer; a client started by a person's command writes its lease at start; V4, V33
+  Built: a client started by a person (not a reconnect after a handoff, not a re-exec) writes its lease at start;
+  each lease write wakes every machine's dialer. Loop: a TUI client started while the machine was dormant (core's
+  retries 30 s apart) wrote its lease before the dial and the machine connected within 4 s; V33's wake part.
+  Limits: no pane runs on a machine before PR C and no view server exists before PR D, so the server-side wake for
+  a machine's pane, V4's repaint and V33's view part come with them; until then a client's input wakes every core
+  machine (which its lease already allows within core's next retry).
+- [x] B.5a Security review of PR A (security `docs/reviews/2026-11-22-herdr-core-link.md`), M1-M3 before R.2
+  M1: the sandbox measurement in `probe/README.md` § M1 (throwaway cores; Codex seatbelt, two `sandbox-exec`
+  profiles and nono's `claude-gpt` refuse; Claude Code sessions, nono `default` and Codex with network connect;
+  what was not measurable is named there). M2: design D10 § No forwarding; argv unit tests, an `ssh -G` unit
+  test, and the loop's loopback server logging forward and env requests under a config that asks for all of
+  them. M3: design D10 § Check-free paths only and task R.2.0. M4-M8 are later changes.
 - [ ] B.6 Check: `just check` 0, `just core-live-test` 0, CI green
 
 ## PR C. A herdr-max pane on a machine
@@ -160,6 +207,11 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 - [ ] R.1 Open question 1: ac-mbm5's herdr publishes its spaces to its `default` core (ask on the desk if a config
   change is needed there)
+- [ ] R.2.0 Precondition (security review M3, design D10): for each target, record its ssh path and whether that
+  path has a Tailscale SSH `check` rule. Only a check-free path (an `accept` rule for ac to ac between ac's own
+  devices, or OpenSSH over the tailnet) is added as a core machine; a target with a check rule gets no
+  background dials (login or an announced wake only). The M1 sandbox results (`probe/README.md` § M1) go into
+  the announcement: which sandboxes reach the primary core socket, and so the link
 - [ ] R.2 Announcement S1 through the gestore desk: "herdr-core needs ssh ac@ac-mbm5 from m4m's Herdr Core now, to
   add ac-mbm5 as a core machine; later dials happen when you use the view or a pane there after 10 min idle, each a
   fresh ssh login (1Password may ask for Touch ID), and never start Herdr Core on ac-mbm5". Wait for ac's

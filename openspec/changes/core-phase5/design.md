@@ -168,7 +168,12 @@ as the last argument. `core-link` (prototype: `probe/fix/corelink.py`, R2-R5, R9
    action gives a lease newer than the gate: input in a view or a far pane (the client lease's mtime, D3), `herdr
    machine wake`, `herdr machine login`, or a CLI call with `--dial` (D7). A lease that was only kept alive by its
    10-minute window, with no new input since the failure, does not reopen it. A link that comes up clears the
-   budget.
+   budget. As built (PR B): "comes up" is 5 s up past `HERDR-LINK-UP` (`UP_SETTLE`), so a far side that answers
+   the guard and drops at once (a failing far `connect`, core's own check connection of `machine add`) is a
+   failure, not a link; a lease file holds `<expires_at> <input_at>`, and "newer than the gate" compares
+   `input_at` (the human act), so a renewal that is no new act keeps its old `input_at`. The login classes
+   (`needs_check`, `auth_stalled`, `auth_failed`) still close until `herdr machine login`; a second
+   `far_core_down` within the budget becomes `retry_spent`.
 
 The link state lives in `<home>/.local/state/herdr/core-machines/<name>/` (mode 0700), where `<home>` is the
 account's passwd home (`getpwuid`), never `HOME` or `XDG_STATE_HOME` from the environment core passes: that is the
@@ -458,6 +463,22 @@ A machine added with `--ssh-config <file>` reads that file instead of the manage
   freeze, so herdr's own 5 s timeouts on the primary hold. A healthy link sends no keepalive: ssh sends one only
   after 5 s with no data from the server, and core's 3 s poll answers (P2) keep it from firing, so #260's idle
   count is unchanged.
+
+- **No forwarding, no sent variables (security review M2, PR B).** Both the link and `herdr machine login` pin
+  `-o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no`; ssh keeps the first
+  value it obtains and the command line comes first, so no `Host` block or included file turns them back on.
+  `SetEnv` also keeps its first value, and OpenSSH 10.5 refuses an empty one (`no argument after keyword
+  "setenv"`), so the argv pins an inert `-o SetEnv=HERDR_LINK=1` in its place (a far sshd drops it unless its
+  `AcceptEnv` names it). `SendEnv` accumulates instead, and a command-line `SendEnv=-*` is applied before the
+  config adds names, so the link's own `ssh_config` (an `Include` of the user's, the system's, or the
+  `--ssh-config` file) ends with `Host *` / `SendEnv -*`. Checked with `ssh -G` (unit) and against the loopback
+  server, which logs every forward and env request (loop).
+- **Check-free paths only (security review M3; rollout policy).** Background dials (S2: core start, retries, a
+  wake through D3a) may go only to a target whose ssh path has no Tailscale SSH `check` rule: an `accept` rule for
+  ac to ac between ac's own devices, or OpenSSH over the tailnet. A target whose path has a check rule gets no
+  background dials: it is reached only through `herdr machine login` or a wake a person announced, and is not
+  added as a core machine until it has a check-free path. The R.2 announcement names each target, its ssh path
+  and whether that path has a check rule (task R.2's precondition).
 
 Failure classes `core-link` records in `gate.json`, each closing the gate to every holder but `herdr machine login`
 until a person acts (`far_core_down` only for 5 min):

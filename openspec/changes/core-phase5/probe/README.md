@@ -69,3 +69,31 @@ terminal were stopped at the end; no default or `herdr` core was touched; nothin
 
 Not measured: the 1Password agent's prompt per dial with `ControlMaster=no` (open question 3); `nc -U` on the
 Linux VMs' images (D2 falls back to a socket-file test there).
+
+# M1: which sandboxes reach a core socket (2026-11-22, m4m, hc 0.1.21)
+
+Security review M1 (security `docs/reviews/2026-11-22-herdr-core-link.md`): while a lease holds, any process that
+can open the primary core socket can run commands on the far machine through the link. Measured against two
+throwaway cores (`HC_SESSION=m1sandbox`, socket under `/tmp`; `m1sandbox2`, socket in the home class
+`~/.local/state/.../herdr-core/<s>/<s>.sock`, where a real primary's lives on macOS when `XDG_RUNTIME_DIR` is
+unset), with a probe that connects and sends `server.status`. Where a sandbox refused, the same socket was opened
+under it with an explicit grant first, and connected, so each refusal is the sandbox's. Both cores were stopped.
+
+| Sandbox | Started as | `/tmp` socket | home-class socket | Notes |
+|---|---|---|---|---|
+| Claude Code Bash tool | probe run directly | connects | connects | not sandboxed here: no `sandbox` setting, writes to `~/Library` work |
+| nono `claude-gpt` (GPT seats) | `nono run -p <copy without credentials> --allow-cwd` | refused | refused | nono's network proxy blocks it; `--allow-unix-socket` connects |
+| nono `pi-lab` (Pi, local models) | as above, credentials and approvals removed | connects | connects | with a credential the proxy turns on and both are refused; the real profile has one, so refused (inferred) |
+| nono built-in `default` | `nono run -p default` | connects | connects | |
+| `security/harness/review-guard/review.sb` | `sandbox-exec -f ...` | refused | refused | unix sockets only under its TMPD, NOTES, WORK |
+| `direction/e2e/browser-use/sandbox.sb` | `sandbox-exec -f ...` | refused | refused | unix sockets only under its TMP |
+| Codex 0.170.0 seatbelt (default, workspace-write, read-only) | `codex sandbox ...` | refused | refused | `--allow-unix-socket <dir>` opens that folder only |
+| Codex workspace-write with network | `-c sandbox_workspace_write.network_access=true` | connects | connects | any Codex run with network on reaches the core |
+
+On macOS the network rules, not the file grants, decide `connect()` on a unix socket; no sandbox treated the two
+path classes differently. So the link reaches the far machine from: Claude Code sessions (unsandboxed), nono's
+`default` profile and any nono profile without its proxy, and Codex with network on.
+
+Not measured: Claude Code's own sandbox mode (off here, `srt` not installed, turning it on needs a `claude`
+launch); the real `claude-gpt` and `pi-lab` profiles with their credentials (that would fetch live keys); Codex
+named permission profiles (`lab-fixture`); the bmlab local-model harness, which lives on ac-mbm5 (needs ssh).
