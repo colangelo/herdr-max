@@ -554,7 +554,7 @@ fn capture_tab(
         let core_terminal = terminal_id
             .and_then(|id| terminal_runtimes.get(id))
             .and_then(|runtime| runtime.core_terminal())
-            .or_else(|| terminal.and_then(held_core_link))
+            .or_else(|| terminal.and_then(crate::terminal::state::TerminalState::held_core_link))
             .map(PaneCoreTerminalSnapshot::from_link);
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
@@ -626,15 +626,6 @@ pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
     value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
     let bytes = serde_json::to_vec(&value).ok()?;
     Some(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn held_core_link(
-    terminal: &crate::terminal::state::TerminalState,
-) -> Option<crate::pane::CoreTerminalLink> {
-    match terminal.hold.as_ref()? {
-        crate::terminal::state::PaneHold::CoreWaiting(waiting) => Some(waiting.link.clone()),
-        crate::terminal::state::PaneHold::Suspended(suspension) => suspension.core_link.clone(),
-    }
 }
 
 /// Capture a pane's todos. The link target is stored as the pane's current raw

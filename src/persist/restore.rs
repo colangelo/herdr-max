@@ -870,12 +870,6 @@ fn restore_tab(
         let core_restore = match core_restore {
             CoreRestore::Attached(runtime) => Some(*runtime),
             CoreRestore::Fresh => None,
-            CoreRestore::Ended(message) => {
-                let terminal = unavailable_restored_terminal(saved_pane, cwd, message, todo_links);
-                panes.insert(*id, PaneState::new(terminal.id.clone()));
-                terminals.push(terminal);
-                continue;
-            }
             CoreRestore::Waiting(waiting) => {
                 let mut terminal = unavailable_restored_terminal(
                     saved_pane,
@@ -1169,9 +1163,6 @@ enum CoreRestore {
     /// terminals are labelled for the pane: start nothing, and hold the
     /// link (security review M3, Sol H5).
     Waiting(crate::terminal::state::CoreWaiting),
-    /// Its program ran on a core machine and core says it is gone: nothing
-    /// starts, here or there; the pane says why (core-phase5 D5).
-    Ended(String),
 }
 
 /// After the saved terminal did not attach: wait while the program may run
@@ -1254,28 +1245,34 @@ fn restore_core_pane(
     // A pane on a machine waits for the machine, and is never started fresh
     // nor searched for in this Mac's terminals (core-phase5 D5, F1).
     if let Some(machine) = crate::pane::core_machines::machine_of_address(&link.address) {
-        return match failure {
-            crate::pane::CoreAttachFailure::Unreachable => {
-                let dormant = crate::core_machine::panes::dormant(&machine);
-                tracing::info!(
-                    pane_id = pane_id.raw(),
-                    %machine,
-                    address = %link.address,
-                    dormant,
-                    "the pane's core machine is not connected; the pane waits for it"
-                );
-                waiting(
-                    link,
-                    CoreWaitReason::MachineAway {
-                        machine: machine.to_string(),
-                        dormant,
-                    },
-                )
-            }
-            crate::pane::CoreAttachFailure::Gone | crate::pane::CoreAttachFailure::NotOurs => {
-                CoreRestore::Ended(format!("Its program on {machine} has ended."))
-            }
-        };
+        // Ended, with the link held: the next save keeps it, so no later
+        // restore starts this pane here either.
+        if let Some(why) =
+            crate::core_machine::panes::machine_ended(&machine, &link.address, failure)
+        {
+            tracing::info!(
+                pane_id = pane_id.raw(),
+                %machine,
+                address = %link.address,
+                "the pane's program on its core machine has ended; nothing starts"
+            );
+            return waiting(link, why);
+        }
+        let dormant = crate::core_machine::panes::dormant(&machine);
+        tracing::info!(
+            pane_id = pane_id.raw(),
+            %machine,
+            address = %link.address,
+            dormant,
+            "the pane's core machine is not connected; the pane waits for it"
+        );
+        return waiting(
+            link,
+            CoreWaitReason::MachineAway {
+                machine: machine.to_string(),
+                dormant,
+            },
+        );
     }
     let program = crate::platform::ProgramLiveness::of_pane(link.program, link.agent, lookup);
     if after_failed_attach(failure, program) == AfterFailedAttach::Wait {
@@ -4102,6 +4099,41 @@ mod core_restore_tests {
             "no search: {:?}",
             core.methods()
         );
+    }
+
+    // C2 (core-phase5 D5): a machine pane whose program core says is gone,
+    // with the machine connected, ends with its link held, so every later
+    // save keeps it and no restore starts the pane, here or there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ended_machine_pane_holds_its_link() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t7");
+        core.set_machine("loop", "connected");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let link = crate::pane::CoreTerminalLink {
+            agent: None,
+            session: crate::pane::core_session_name(),
+            address: "loop/t7".into(),
+            program: None,
+        };
+        let CoreRestore::Waiting(waiting) = restore(&link, "w1-p2") else {
+            panic!("expected the pane to hold its link");
+        };
+        assert!(
+            matches!(
+                waiting.why,
+                crate::terminal::state::CoreWaitReason::MachineEnded { .. }
+            ),
+            "{:?}",
+            waiting.why
+        );
+        let mut terminal = crate::terminal::state::TerminalState::new(
+            crate::terminal::TerminalId::alloc(),
+            "/".into(),
+        );
+        terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(waiting));
+        assert_eq!(terminal.held_core_link(), Some(link), "the save keeps it");
+        assert!(!started_anything(&core), "{:?}", core.methods());
     }
 
     // V30, spec "A link from phase 2": no pid, and the core does not answer.

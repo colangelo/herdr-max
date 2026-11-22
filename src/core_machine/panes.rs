@@ -266,6 +266,28 @@ pub(crate) fn probe(machines: &[MachineName]) -> Vec<Probe> {
     probes
 }
 
+/// What a failed attach to a machine's terminal makes of the pane: ended,
+/// with what core found, or `None` to keep waiting (core did not answer, or
+/// had the machine away, which the attach reports as unreachable).
+pub(crate) fn machine_ended(
+    machine: &MachineName,
+    address: &str,
+    failure: crate::pane::CoreAttachFailure,
+) -> Option<crate::terminal::state::CoreWaitReason> {
+    use crate::pane::CoreAttachFailure;
+    let notice = match failure {
+        CoreAttachFailure::Unreachable => return None,
+        CoreAttachFailure::Gone => format!("Its program on {machine} has ended."),
+        CoreAttachFailure::NotOurs => {
+            format!("Its terminal on {machine} ({address}) is labelled for another pane; nothing was attached.")
+        }
+    };
+    Some(crate::terminal::state::CoreWaitReason::MachineEnded {
+        machine: machine.to_string(),
+        notice,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

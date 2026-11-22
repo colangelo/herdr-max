@@ -349,6 +349,12 @@ pub enum CoreWaitReason {
     /// the pane wakes it), else the link is down. It attaches when the
     /// machine is connected again, and is never started fresh.
     MachineAway { machine: String, dormant: bool },
+    /// Its program on a core machine has ended, or that terminal is now
+    /// another pane's, as core answered while the machine was connected
+    /// (core-phase5 D5). The hold keeps the link so every save keeps it and
+    /// the next restore asks core about that terminal again, never starting
+    /// the pane anywhere; a person closes it. `notice` says what core found.
+    MachineEnded { machine: String, notice: String },
 }
 
 impl CoreWaitReason {
@@ -360,6 +366,7 @@ impl CoreWaitReason {
             Self::DirectoryUnavailable => "directory_unavailable",
             Self::MachineAway { dormant: true, .. } => "machine_dormant",
             Self::MachineAway { dormant: false, .. } => "machine_unreachable",
+            Self::MachineEnded { .. } => "machine_ended",
         }
     }
 }
@@ -434,6 +441,15 @@ impl TerminalState {
         match &self.hold {
             Some(PaneHold::Suspended(suspension)) => Some(suspension),
             _ => None,
+        }
+    }
+
+    /// The core link a pane without a runtime holds: a save keeps it, so
+    /// the next restore checks that terminal first (core-phase3 D1b).
+    pub fn held_core_link(&self) -> Option<crate::pane::CoreTerminalLink> {
+        match self.hold.as_ref()? {
+            PaneHold::CoreWaiting(waiting) => Some(waiting.link.clone()),
+            PaneHold::Suspended(suspension) => suspension.core_link.clone(),
         }
     }
 

@@ -545,6 +545,10 @@ fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow
                 "Waiting for {machine}: its link is down. This pane's program keeps running there and the pane attaches when {machine} is connected again; nothing starts here."
             )
             .into(),
+            CoreWaitReason::MachineEnded { machine, notice } => format!(
+                "{notice} Nothing starts again, here or on {machine}; close this pane, or open a new one with `--on {machine}`."
+            )
+            .into(),
             CoreWaitReason::DirectoryUnavailable => format!(
                 "Saved directory is unavailable. This pane's program may still run in Herdr Core (session `{}`): it attaches when found, and nothing starts here. Restore the directory and restart this session to start it fresh.",
                 waiting.link.session

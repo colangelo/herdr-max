@@ -47,6 +47,10 @@ impl App {
             .flat_map(|tab| tab.layout.pane_ids())
             .filter_map(|pane_id| {
                 let waiting = self.state.pane_terminal(pane_id)?.core_waiting()?;
+                // An ended pane holds its link only so that nothing starts it.
+                if matches!(waiting.why, CoreWaitReason::MachineEnded { .. }) {
+                    return None;
+                }
                 let machine = machine_of(&waiting.link.address)?;
                 Some((pane_id, machine, waiting.clone()))
             })
@@ -170,29 +174,28 @@ impl App {
 
     /// A waiting pane's machine is connected: attach to its program there.
     /// A program core says is gone is never started again, here or there:
-    /// the pane says so and a person closes it (D5).
+    /// the pane keeps its link, ended, and a person closes it (D5).
     fn attach_machine_pane(
         &mut self,
         pane_id: PaneId,
         machine: &MachineName,
         waiting: &CoreWaiting,
     ) -> bool {
-        use crate::pane::CoreAttachFailure;
-        let message = match self.attach_core_terminal(pane_id, waiting) {
+        let failure = match self.attach_core_terminal(pane_id, waiting) {
             Ok(()) => return true,
-            Err(CoreAttachFailure::Unreachable) => return false,
-            Err(CoreAttachFailure::Gone) => format!("Its program on {machine} has ended."),
-            Err(CoreAttachFailure::NotOurs) => format!(
-                "Its terminal on {machine} ({}) is labelled for another pane; nothing was attached.",
-                waiting.link.address
-            ),
+            Err(failure) => failure,
         };
-        info!(pane = pane_id.raw(), %machine, address = %waiting.link.address, "{message}");
+        let Some(why) = panes::machine_ended(machine, &waiting.link.address, failure) else {
+            return false;
+        };
+        info!(pane = pane_id.raw(), %machine, address = %waiting.link.address, ?why, "the pane's program on its machine has ended");
         let Some(terminal) = self.state.pane_terminal_mut(pane_id) else {
             return false;
         };
-        terminal.hold = None;
-        terminal.restore_error = Some(message);
+        let Some(PaneHold::CoreWaiting(held)) = terminal.hold.as_mut() else {
+            return false;
+        };
+        held.why = why;
         terminal.revision = terminal.revision.saturating_add(1);
         true
     }
@@ -332,6 +335,49 @@ mod tests {
             leased: true,
             read: true,
         }
+    }
+
+    // C2 (D5): a waiting pane whose program core says is gone, with the
+    // machine connected, ends with its link held, so the next save keeps the
+    // link and the next restore never starts the pane here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ended_machine_pane_keeps_its_link_in_the_save() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t3");
+        core.set_machine("loop", "connected");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        app.handle_core_machines(&[connected("loop")], Instant::now());
+        assert!(
+            matches!(why(&app, pane), Some(CoreWaitReason::MachineEnded { .. })),
+            "{:?}",
+            why(&app, pane)
+        );
+        assert!(!has_runtime(&app, pane));
+        let saved = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            None,
+        );
+        let core_terminal = saved.workspaces[0].tabs[0].panes[&pane.raw()]
+            .core_terminal
+            .as_ref()
+            .map(|link| link.address.clone());
+        assert_eq!(core_terminal.as_deref(), Some("loop/t3"));
+        assert_eq!(
+            app.machine_waiting_panes().len(),
+            0,
+            "an ended pane is no longer polled for"
+        );
+        assert!(
+            !core.methods().iter().any(|method| method == "terminal.run"),
+            "{:?}",
+            core.methods()
+        );
     }
 
     // C5 (D5, P5): a poll said connected, but core has not linked the

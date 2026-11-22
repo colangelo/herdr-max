@@ -1004,7 +1004,7 @@
               "type": "boolean"
             },
             "core_waiting_cause": {
-              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it) or `machine_unreachable`; a newer server\nmay add others.",
+              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it), `machine_unreachable`, or\n`machine_ended` (its program on the machine has ended; nothing starts\nit again, and a person closes the pane); a newer server may add\nothers.",
               "type": [
                 "string",
                 "null"
@@ -11213,7 +11213,7 @@
               "type": "boolean"
             },
             "core_waiting_cause": {
-              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it) or `machine_unreachable`; a newer server\nmay add others.",
+              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it), `machine_unreachable`, or\n`machine_ended` (its program on the machine has ended; nothing starts\nit again, and a person closes the pane); a newer server may add\nothers.",
               "type": [
                 "string",
                 "null"
