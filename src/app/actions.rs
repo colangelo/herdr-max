@@ -487,6 +487,7 @@ impl AppState {
                 changed = true;
             }
         }
+        self.core_view_dirty |= changed;
         changed
     }
 

@@ -44,6 +44,17 @@ impl App {
         }
     }
 
+    /// Once per server loop pass: when what a person sees or has read may
+    /// have changed, every pane offers its record again, so a `done` pane read
+    /// in herdr turns `idle` in core without an agent state change
+    /// (openspec/changes/core-phase4, D6). Repeats of the record a pane last
+    /// wrote cost one comparison.
+    pub(crate) fn sync_core_view(&mut self) {
+        if std::mem::take(&mut self.state.core_view_dirty) && self.core_status_mirror {
+            self.sync_core_status_mirror();
+        }
+    }
+
     /// After a pane's agent state changed.
     pub(super) fn mirror_pane_core_status(&self, ws_idx: usize, pane_id: crate::layout::PaneId) {
         if !self.core_status_mirror {
@@ -173,6 +184,44 @@ mod tests {
         app.state.workspaces.push(ws);
         app.state.active = Some(0);
         (app, pane_id)
+    }
+
+    // core-phase4 verifier 4 (unit): reading a done pane asks for a new
+    // pass, and the pass hands the pane `idle`.
+    #[test]
+    fn reading_a_done_pane_offers_idle_on_the_next_pass() {
+        let (mut app, pane_id) = app_with_agent_pane();
+        app.set_core_status_mirror(true);
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        app.state.core_view_dirty = false;
+        assert_eq!(
+            app.core_status_records(0),
+            vec![(0, pane_id, report(CoreStatusWord::Done, "claude"))]
+        );
+
+        assert!(app.state.mark_active_tab_seen());
+        assert!(app.state.core_view_dirty, "reading asks for a pass");
+        app.sync_core_view();
+        assert!(!app.state.core_view_dirty, "the pass takes the flag");
+        assert_eq!(
+            app.core_status_records(0),
+            vec![(0, pane_id, report(CoreStatusWord::Idle, "claude"))]
+        );
     }
 
     #[test]
