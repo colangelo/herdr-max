@@ -714,6 +714,11 @@ impl TerminalRuntime {
         self.0.foreground_cwd()
     }
 
+    /// Whether this runtime's program has reported its exit.
+    pub fn exit_reported(&self) -> bool {
+        self.0.exit_reported()
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         self.0.child_pid()
     }

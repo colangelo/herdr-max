@@ -4545,6 +4545,11 @@ impl PaneRuntime {
         (program, agent)
     }
 
+    /// Whether this runtime's program has reported its exit.
+    pub fn exit_reported(&self) -> bool {
+        self.cwd_process_exited.load(Ordering::Acquire)
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         let pid = self.child_pid.load(Ordering::Acquire);
         (pid > 0).then_some(pid)

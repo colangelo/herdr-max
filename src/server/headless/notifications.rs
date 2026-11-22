@@ -715,11 +715,14 @@ impl HeadlessServer {
                 });
                 // A suspended pane's agent has not left: releasing it would
                 // drop the session its resume plan names (fork issue 288).
+                // Nor has the agent of a pane whose exit is of a runtime it no
+                // longer runs (fork issue 301): it resumes, or already did.
                 if matches!(&ev, AppEvent::PaneDied { exit_reason, .. } if !exit_reason.suspends_pane())
                     && !self
                         .app
                         .pending_worktree_remove_runtime_exits
                         .contains_key(&pane_id_val)
+                    && !self.app.exit_is_of_a_replaced_runtime(pane_id_val)
                 {
                     if let Some(update) = self
                         .app

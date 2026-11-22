@@ -274,10 +274,13 @@ impl App {
             exit_reason,
         } = &ev
         {
-            // The exit of a runtime a respawn deliberately replaced. The pane is
-            // already running its replacement, so this reports nothing about the
-            // pane's current process.
-            if self.respawn_replaced_runtimes.remove(pane_id) {
+            // The exit of a runtime a respawn or a move deliberately replaced.
+            // The pane runs its replacement, or waits to start one, so this
+            // reports nothing about the pane's current process. The mark is
+            // spent either way: on this exit, or as one its runtime never sent.
+            let replaced = self.exit_is_of_a_replaced_runtime(*pane_id);
+            self.respawn_replaced_runtimes.remove(pane_id);
+            if replaced {
                 return Vec::new();
             }
             if self
@@ -786,6 +789,36 @@ impl App {
                         pane: pane_id,
                     })
             })
+    }
+
+    /// Whether a `PaneDied` for `pane_id` reports a runtime the pane no
+    /// longer runs (fork issue 301): one a respawn or a move marked as
+    /// replaced while the pane's current runtime has not exited, or any exit
+    /// while the pane has no runtime and waits to start again (suspended, or
+    /// its agent's resume pending). Closing the pane on such an exit would
+    /// lose a pane that is about to resume.
+    pub(crate) fn exit_is_of_a_replaced_runtime(&self, pane_id: crate::layout::PaneId) -> bool {
+        let Some((_, pane)) = self.find_pane(pane_id) else {
+            return self.respawn_replaced_runtimes.contains(&pane_id);
+        };
+        let current_exited = self
+            .terminal_runtimes
+            .get(&pane.attached_terminal_id)
+            .map(crate::terminal::TerminalRuntime::exit_reported);
+        if self.respawn_replaced_runtimes.contains(&pane_id) {
+            return current_exited != Some(true);
+        }
+        current_exited.is_none()
+            && !self
+                .pending_worktree_remove_runtime_exits
+                .contains_key(&pane_id)
+            && self
+                .state
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .is_some_and(|terminal| {
+                    terminal.is_suspended() || terminal.pending_agent_resume_plan.is_some()
+                })
     }
 
     /// Installs a respawn's runtime behind its terminal id, keeping the pane.
@@ -3265,6 +3298,57 @@ mod tests {
         );
 
         shutdown_test_runtimes(&mut app);
+    }
+
+    // Fork issue 301: a mark whose runtime never reported its exit (a core
+    // stream forgotten before its CLOSE) does not swallow the exit of the
+    // runtime the pane runs now.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_replaced_mark_does_not_swallow_the_current_runtimes_exit() {
+        let (mut app, pane_id, terminal_id) = app_with_single_pane_workspace();
+        app.state.default_shell = "/bin/cat".into();
+        assert!(app.respawn_pane_runtime(pane_id, RespawnTarget::Shell));
+        app.respawn_replaced_runtimes.insert(pane_id);
+        let runtime = app.terminal_runtimes.get(&terminal_id).unwrap();
+        let pid = runtime.child_pid().expect("a running shell");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.find_pane(pane_id).is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the current runtime's exit was swallowed"
+            );
+            app.drain_internal_events();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!app.respawn_replaced_runtimes.contains(&pane_id));
+        shutdown_test_runtimes(&mut app);
+    }
+
+    // Fork issue 301: a pane with no runtime that waits to start again
+    // (suspended) runs nothing an exit could be about, so an exit keeps it;
+    // a pane that waits for nothing still closes.
+    #[test]
+    fn an_exit_while_the_pane_waits_to_resume_keeps_it() {
+        let (mut app, pane_id, _) = app_with_single_pane_workspace();
+        assert!(app.state.suspend_pane(
+            pane_id,
+            std::time::Instant::now(),
+            crate::terminal::state::Suspension::new(crate::platform::SuspendCause::TerminalGone),
+        ));
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(app.find_pane(pane_id).is_some(), "the suspended pane stays");
+
+        let (mut app, pane_id, _) = app_with_single_pane_workspace();
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(app.find_pane(pane_id).is_none(), "other exits still close");
     }
 
     #[tokio::test]
