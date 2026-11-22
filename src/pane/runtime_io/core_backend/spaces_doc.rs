@@ -1,10 +1,12 @@
-//! Writes herdr's layout into herdr-core's `herdr-app` document, the one the
-//! Herdr apps read their spaces from (openspec/changes/core-spaces-doc, D5).
-//! Other clients write the same document, so herdr-max owns only the spaces it
-//! marks with `"herdr_max": 1` and merges them into what core holds (D6).
-//! One thread, one write in flight, latest value wins, compare-and-set on the
-//! document's version.
+//! Writes herdr's core documents. `herdr-app` holds herdr's layout, the one
+//! the Herdr apps read their spaces from (openspec/changes/core-spaces-doc,
+//! D5). Other clients write it too, so herdr-max owns only the spaces it marks
+//! with `"herdr_max": 1` and merges them into what core holds (D6).
+//! `herdr-max` holds herdr-max's extras and is herdr's alone
+//! (openspec/changes/core-phase4, D4). One thread per document, one write in
+//! flight, latest value wins, compare-and-set on the document's version.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
@@ -14,7 +16,8 @@ use serde_json::{json, Map, Value};
 
 use super::client::CoreError;
 
-const DOC_NAME: &str = "herdr-app";
+/// Core's limit on one document's serialized value.
+const MAX_DOC_BYTES: usize = 1024 * 1024;
 /// The space field that marks a space as herdr-max's own.
 const MARK: &str = "herdr_max";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,6 +25,27 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(10);
 /// Conflicts in a row before the writer waits for the next try.
 const CONFLICT_RETRIES: usize = 3;
+
+/// One document herdr writes: its name, and how herdr's value goes into the
+/// value core holds.
+pub(super) struct DocSpec {
+    name: &'static str,
+    /// The value to write, given core's current value and herdr's, or `None`
+    /// when writing would change nothing.
+    merge: fn(current: &Value, ours: &Value) -> Result<Option<Value>, Undecodable>,
+}
+
+/// The Herdr apps' layout document; ours are herdr's marked spaces, a list.
+pub(super) static HERDR_APP: DocSpec = DocSpec {
+    name: "herdr-app",
+    merge: merge_spaces,
+};
+
+/// herdr-max's extras document, written whole (core-phase4 D3, D4).
+pub(super) static HERDR_MAX: DocSpec = DocSpec {
+    name: "herdr-max",
+    merge: replace_whole,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum StoreError {
@@ -47,7 +71,7 @@ pub(super) trait DocStore {
 /// A document herdr cannot read as the apps' `{"spaces": [{…}]}`, which it
 /// leaves alone rather than replace someone else's data.
 #[derive(Debug, PartialEq)]
-struct Undecodable;
+pub(super) struct Undecodable;
 
 fn is_ours(space: &Value) -> bool {
     space.get(MARK).is_some()
@@ -57,7 +81,8 @@ fn is_ours(space: &Value) -> bool {
 /// changes nothing. Foreign spaces and other top-level fields stay as they
 /// are. Ours go where the first marked space was, else after the rest. A
 /// document left with no spaces and no other field becomes `null`.
-fn merge(current: &Value, ours: &[Value]) -> Result<Option<Value>, Undecodable> {
+fn merge_spaces(current: &Value, ours: &Value) -> Result<Option<Value>, Undecodable> {
+    let ours = ours.as_array().map_or(&[][..], Vec::as_slice);
     let empty = Map::new();
     let fields = match current {
         Value::Null => &empty,
@@ -88,6 +113,34 @@ fn merge(current: &Value, ours: &[Value]) -> Result<Option<Value>, Undecodable> 
     Ok(Some(Value::Object(fields)))
 }
 
+/// herdr's value replaces core's whole. A value another herdr session wrote
+/// is a stale one (one herdr session writes one core session), replaced
+/// with a warning.
+fn replace_whole(current: &Value, ours: &Value) -> Result<Option<Value>, Undecodable> {
+    if current == ours {
+        return Ok(None);
+    }
+    let writer = |value: &Value| value["writer"]["session"].as_str().map(str::to_owned);
+    if !current.is_null() && writer(current) != writer(ours) && !ours.is_null() {
+        tracing::warn!(
+            found = ?writer(current),
+            "herdr-core's herdr-max document was written by another writer; replacing it"
+        );
+    }
+    Ok(Some(ours.clone()))
+}
+
+/// herdr-max's spaces for `herdr-app`, each marked as ours; an empty list
+/// removes ours.
+pub(super) fn marked_spaces(mut spaces: Vec<Value>) -> Value {
+    for space in &mut spaces {
+        if let Value::Object(fields) = space {
+            fields.insert(MARK.into(), json!(1));
+        }
+    }
+    Value::Array(spaces)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Flush {
     /// Nothing is left to write.
@@ -98,27 +151,25 @@ pub(super) enum Flush {
 
 pub(super) struct DocPublisher<S> {
     store: S,
-    written: Option<Vec<Value>>,
-    pending: Option<Vec<Value>>,
+    spec: &'static DocSpec,
+    written: Option<Value>,
+    pending: Option<Value>,
 }
 
 impl<S: DocStore> DocPublisher<S> {
-    pub(super) fn new(store: S) -> Self {
+    pub(super) fn new(store: S, spec: &'static DocSpec) -> Self {
         Self {
             store,
+            spec,
             written: None,
             pending: None,
         }
     }
 
-    /// herdr-max's spaces, marked here; an empty list removes ours.
-    pub(super) fn offer(&mut self, mut spaces: Vec<Value>) {
-        for space in &mut spaces {
-            if let Value::Object(fields) = space {
-                fields.insert(MARK.into(), json!(1));
-            }
-        }
-        self.pending = (self.written.as_ref() != Some(&spaces)).then_some(spaces);
+    /// herdr's latest value for the document; a repeat of the last one
+    /// written needs no write.
+    pub(super) fn offer(&mut self, ours: Value) {
+        self.pending = (self.written.as_ref() != Some(&ours)).then_some(ours);
     }
 
     pub(super) fn flush(&mut self) -> Flush {
@@ -129,11 +180,11 @@ impl<S: DocStore> DocPublisher<S> {
             let doc = match self.store.get() {
                 Ok(doc) => doc,
                 Err(err) => {
-                    note_unavailable(&format!("{err:?}"));
+                    note_unavailable(self.spec.name, &format!("{err:?}"));
                     break;
                 }
             };
-            let merged = match merge(&doc.value, &ours) {
+            let merged = match (self.spec.merge)(&doc.value, &ours) {
                 Ok(Some(merged)) => merged,
                 Ok(None) => {
                     self.written = Some(ours);
@@ -144,6 +195,11 @@ impl<S: DocStore> DocPublisher<S> {
                     break;
                 }
             };
+            let size = serde_json::to_vec(&merged).map_or(usize::MAX, |bytes| bytes.len());
+            if size > MAX_DOC_BYTES {
+                note_too_large(self.spec.name, size);
+                return Flush::Idle;
+            }
             match self.store.set(&merged, doc.version) {
                 Ok(_) => {
                     self.written = Some(ours);
@@ -151,7 +207,7 @@ impl<S: DocStore> DocPublisher<S> {
                 }
                 Err(StoreError::Conflict) => {}
                 Err(StoreError::Unavailable(reason)) => {
-                    note_unavailable(&reason);
+                    note_unavailable(self.spec.name, &reason);
                     break;
                 }
             }
@@ -168,15 +224,30 @@ impl<S: DocStore> DocPublisher<S> {
 
 static WARNED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 static WARNED_UNDECODABLE: AtomicBool = AtomicBool::new(false);
+static WARNED_TOO_LARGE: AtomicBool = AtomicBool::new(false);
 
-fn note_unavailable(reason: &str) {
+fn note_unavailable(name: &str, reason: &str) {
     if !WARNED_UNAVAILABLE.swap(true, Ordering::AcqRel) {
         tracing::warn!(
+            document = name,
             reason,
-            "cannot write the herdr-app document to herdr-core yet"
+            "cannot write a herdr-core document yet"
         );
     } else {
-        tracing::debug!(reason, "herdr-app document not written");
+        tracing::debug!(document = name, reason, "herdr-core document not written");
+    }
+}
+
+/// Core refuses a value over 1 MiB; herdr keeps the last one written.
+fn note_too_large(name: &str, size: usize) {
+    if !WARNED_TOO_LARGE.swap(true, Ordering::AcqRel) {
+        tracing::warn!(
+            document = name,
+            size,
+            "herdr-core document over 1 MiB; not written"
+        );
+    } else {
+        tracing::debug!(document = name, size, "herdr-core document over 1 MiB");
     }
 }
 
@@ -197,7 +268,9 @@ fn note_undecodable(value: &Value) {
 }
 
 /// The real store: the server's one core connection (never starts a core).
-struct CoreDocStore;
+struct CoreDocStore {
+    name: &'static str,
+}
 
 fn store_error(err: CoreError) -> StoreError {
     match err {
@@ -210,7 +283,7 @@ impl DocStore for CoreDocStore {
     fn get(&mut self) -> Result<Doc, StoreError> {
         let client = super::existing_core_connector()().map_err(store_error)?;
         let reply = client
-            .call("doc.get", json!({"name": DOC_NAME}), CALL_TIMEOUT)
+            .call("doc.get", json!({"name": self.name}), CALL_TIMEOUT)
             .map_err(store_error)?;
         let version = reply["version"]
             .as_u64()
@@ -226,7 +299,7 @@ impl DocStore for CoreDocStore {
         let reply = client
             .call(
                 "doc.set",
-                json!({"name": DOC_NAME, "value": value, "version": version}),
+                json!({"name": self.name, "value": value, "version": version}),
                 CALL_TIMEOUT,
             )
             .map_err(store_error)?;
@@ -236,8 +309,8 @@ impl DocStore for CoreDocStore {
     }
 }
 
-fn run(store: impl DocStore, offers: mpsc::Receiver<Vec<Value>>) {
-    let mut publisher = DocPublisher::new(store);
+fn run(store: impl DocStore, spec: &'static DocSpec, offers: mpsc::Receiver<Value>) {
+    let mut publisher = DocPublisher::new(store, spec);
     let mut state = Flush::Idle;
     loop {
         let offer = match state {
@@ -245,42 +318,55 @@ fn run(store: impl DocStore, offers: mpsc::Receiver<Vec<Value>>) {
             Flush::Retry => offers.recv_timeout(RETRY),
         };
         match offer {
-            Ok(spaces) => publisher.offer(spaces),
+            Ok(ours) => publisher.offer(ours),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        while let Ok(spaces) = offers.try_recv() {
-            publisher.offer(spaces);
+        while let Ok(ours) = offers.try_recv() {
+            publisher.offer(ours);
         }
         state = publisher.flush();
     }
 }
 
-static OFFERS: OnceLock<Mutex<Option<mpsc::Sender<Vec<Value>>>>> = OnceLock::new();
+static OFFERS: OnceLock<Mutex<HashMap<&'static str, mpsc::Sender<Value>>>> = OnceLock::new();
 
-/// Hands the publisher thread herdr-max's latest spaces (empty removes them),
-/// starting the thread on first use. Never blocks on core.
-pub(crate) fn publish(spaces: Vec<Value>) {
-    let slot = OFFERS.get_or_init(|| Mutex::new(None));
-    let mut sender = super::lock(slot);
-    if sender.is_none() {
+/// Hands a document's thread herdr's latest value for it, starting the
+/// thread on first use. Never blocks on core.
+pub(super) fn publish_doc(spec: &'static DocSpec, ours: Value) {
+    let slot = OFFERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut senders = super::lock(slot);
+    if !senders.contains_key(spec.name) {
         let (tx, rx) = mpsc::channel();
         match std::thread::Builder::new()
-            .name("herdr-core-spaces".into())
-            .spawn(move || run(CoreDocStore, rx))
+            .name(format!("herdr-core-doc-{}", spec.name))
+            .spawn(move || run(CoreDocStore { name: spec.name }, spec, rx))
         {
-            Ok(_) => *sender = Some(tx),
+            Ok(_) => {
+                senders.insert(spec.name, tx);
+            }
             Err(err) => {
-                tracing::warn!(err = %err, "cannot start the herdr-app document writer");
+                tracing::warn!(err = %err, document = spec.name, "cannot start the herdr-core document writer");
                 return;
             }
         }
     }
-    if let Some(tx) = sender.as_ref() {
-        if tx.send(spaces).is_err() {
-            *sender = None;
-        }
+    if senders
+        .get(spec.name)
+        .is_some_and(|tx| tx.send(ours).is_err())
+    {
+        senders.remove(spec.name);
     }
+}
+
+/// herdr-max's latest spaces for `herdr-app` (empty removes them).
+pub(crate) fn publish(spaces: Vec<Value>) {
+    publish_doc(&HERDR_APP, marked_spaces(spaces));
+}
+
+/// herdr-max's extras document (`null` removes it).
+pub(crate) fn publish_extras(document: Value) {
+    publish_doc(&HERDR_MAX, document);
 }
 
 /// A raw document call on the server's core connection, for live tests.
@@ -388,8 +474,8 @@ mod tests {
     }
 
     fn publish_to(store: FakeStore, ours: &[&str]) -> DocPublisher<FakeStore> {
-        let mut p = DocPublisher::new(store);
-        p.offer(ours.iter().copied().map(space).collect());
+        let mut p = DocPublisher::new(store, &HERDR_APP);
+        p.offer(marked_spaces(ours.iter().copied().map(space).collect()));
         assert_eq!(p.flush(), Flush::Idle);
         p
     }
@@ -458,8 +544,8 @@ mod tests {
             json!({"spaces": {"id": "f1"}}),
             json!({"spaces": [foreign("f1"), 7]}),
         ] {
-            let mut p = DocPublisher::new(FakeStore::holding(current.clone()));
-            p.offer(vec![space("w1")]);
+            let mut p = DocPublisher::new(FakeStore::holding(current.clone()), &HERDR_APP);
+            p.offer(marked_spaces(vec![space("w1")]));
             assert_eq!(p.flush(), Flush::Retry, "{current}");
             assert_eq!(p.store().sets(), 0);
             p.store.doc = Some(Doc {
@@ -482,11 +568,14 @@ mod tests {
 
     #[test]
     fn conflicts_in_a_row_keep_our_spaces_for_later() {
-        let mut p = DocPublisher::new(FakeStore {
-            races: vec![json!({"spaces": [foreign("f1")]}); CONFLICT_RETRIES],
-            ..FakeStore::default()
-        });
-        p.offer(vec![space("w1")]);
+        let mut p = DocPublisher::new(
+            FakeStore {
+                races: vec![json!({"spaces": [foreign("f1")]}); CONFLICT_RETRIES],
+                ..FakeStore::default()
+            },
+            &HERDR_APP,
+        );
+        p.offer(marked_spaces(vec![space("w1")]));
         assert_eq!(p.flush(), Flush::Retry);
         assert_eq!(p.store().calls.len(), 2 * CONFLICT_RETRIES);
         assert_eq!(p.flush(), Flush::Idle, "the next try lands");
@@ -495,11 +584,14 @@ mod tests {
 
     #[test]
     fn an_unavailable_core_keeps_our_spaces_for_later() {
-        let mut p = DocPublisher::new(FakeStore {
-            fail: vec![StoreError::Unavailable("core restarting".into())],
-            ..FakeStore::default()
-        });
-        p.offer(vec![space("w1")]);
+        let mut p = DocPublisher::new(
+            FakeStore {
+                fail: vec![StoreError::Unavailable("core restarting".into())],
+                ..FakeStore::default()
+            },
+            &HERDR_APP,
+        );
+        p.offer(marked_spaces(vec![space("w1")]));
         assert_eq!(p.flush(), Flush::Retry);
         assert_eq!(p.flush(), Flush::Idle);
         assert_eq!(ids(&p.store().doc().value), ["+w1"]);
@@ -508,15 +600,64 @@ mod tests {
 
     #[test]
     fn only_the_latest_offer_is_written_and_a_repeat_is_not() {
-        let mut p = DocPublisher::new(FakeStore::default());
+        let mut p = DocPublisher::new(FakeStore::default(), &HERDR_APP);
         for id in ["w1", "w2", "w3"] {
-            p.offer(vec![space(id)]);
+            p.offer(marked_spaces(vec![space(id)]));
         }
         p.flush();
-        p.offer(vec![space("w3")]);
+        p.offer(marked_spaces(vec![space("w3")]));
         assert_eq!(p.flush(), Flush::Idle);
         assert_eq!(p.store().calls, ["get", "set @0"]);
         assert_eq!(ids(&p.store().doc().value), ["+w3"]);
+    }
+
+    fn extras(session: &str, n: u64) -> Value {
+        json!({"format": 1, "writer": {"session": session, "version": "t"}, "spaces": [{"id": "w1", "pin": n}]})
+    }
+
+    // core-phase4 verifier 18: herdr-max owns the whole value.
+    #[test]
+    fn the_extras_document_is_replaced_whole() {
+        let mut p = DocPublisher::new(FakeStore::holding(extras("herdr-other", 1)), &HERDR_MAX);
+        p.offer(extras("herdr", 1));
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(
+            p.store().doc().value,
+            extras("herdr", 1),
+            "a foreign value is replaced"
+        );
+        p.offer(extras("herdr", 1));
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(p.store().sets(), 1, "a repeat is not written");
+
+        let mut p = DocPublisher::new(FakeStore::holding(extras("herdr", 1)), &HERDR_MAX);
+        p.offer(extras("herdr", 1));
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(p.store().sets(), 0, "core already holds it");
+
+        let mut store = FakeStore::holding(Value::Null);
+        store.races = vec![extras("herdr", 7)];
+        let mut p = DocPublisher::new(store, &HERDR_MAX);
+        p.offer(extras("herdr", 2));
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(
+            p.store().doc().value,
+            extras("herdr", 2),
+            "a conflict retries"
+        );
+
+        let mut p = DocPublisher::new(FakeStore::holding(extras("herdr", 2)), &HERDR_MAX);
+        p.offer(Value::Null);
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(p.store().doc().value, Value::Null, "off removes it");
+    }
+
+    #[test]
+    fn a_document_over_a_mebibyte_is_not_written() {
+        let mut p = DocPublisher::new(FakeStore::default(), &HERDR_MAX);
+        p.offer(json!({"format": 1, "spaces": [{"id": "x".repeat(MAX_DOC_BYTES)}]}));
+        assert_eq!(p.flush(), Flush::Idle);
+        assert_eq!(p.store().sets(), 0);
     }
 
     #[test]
