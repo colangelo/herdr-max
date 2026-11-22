@@ -22,6 +22,7 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
+pub(crate) use input_activity::InputActivity;
 pub(crate) use runtime_io::core_session_name;
 #[cfg(not(test))]
 pub(crate) use runtime_io::publish_core_spaces;
@@ -48,6 +49,7 @@ mod agent_detection;
 mod background_agent;
 mod cursor;
 mod input;
+mod input_activity;
 mod kitty_keyboard;
 mod osc;
 mod runtime_io;
@@ -2077,10 +2079,10 @@ pub struct PaneRuntime {
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
-    /// When input from a user or caller last reached the PTY, in unix ms; 0
-    /// when none has. Automatic writes (terminal replies, the history harvest,
-    /// restore launches) leave it alone.
-    last_input_ms: AtomicU64,
+    /// When input from a user or caller last reached the pane, and whether a
+    /// queued Submit is still pending. Automatic writes (terminal replies,
+    /// the history harvest, restore launches) leave it alone.
+    input: Arc<InputActivity>,
     // Task handles for deterministic shutdown
     compression: TerminalCompressionTask,
     detect_handle: Option<tokio::task::AbortHandle>,
@@ -3131,7 +3133,7 @@ impl PaneRuntime {
             pending_release,
             preserve_processes_on_drop: true,
             compression,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle: Some(detect_handle),
         })
     }
@@ -3862,7 +3864,7 @@ impl PaneRuntime {
             pending_release,
             preserve_processes_on_drop: false,
             compression,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle,
         })
     }
@@ -4287,18 +4289,18 @@ impl PaneRuntime {
     }
 
     fn stamp_input(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| {
-                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-            });
-        self.last_input_ms.fetch_max(now, Ordering::Relaxed);
+        self.input.stamp();
     }
 
     /// When input from a user or caller last reached the PTY, in unix ms.
     pub fn last_input_at_ms(&self) -> Option<i64> {
-        let stamp = self.last_input_ms.load(Ordering::Relaxed);
-        (stamp > 0).then(|| i64::try_from(stamp).unwrap_or(i64::MAX))
+        self.input.last_at_ms()
+    }
+
+    /// The pane's input record, for a path that delivers input elsewhere
+    /// (an `agent.message` note).
+    pub(crate) fn input_activity(&self) -> Arc<InputActivity> {
+        Arc::clone(&self.input)
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
@@ -4323,6 +4325,8 @@ impl PaneRuntime {
         self.io.validate_input_submission(bytes)
     }
 
+    /// Queues a Submit. It counts as input from now until the writer
+    /// answers (core-phase3 D9), so a forwarder waits for that answer.
     pub fn queue_user_input_submission(
         &self,
         text: Bytes,
@@ -4330,8 +4334,33 @@ impl PaneRuntime {
         delay: std::time::Duration,
         deadline: Option<std::time::Instant>,
     ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
-        self.io
-            .queue_user_input_submission(text, enter, delay, deadline)
+        let delivered = self
+            .io
+            .queue_user_input_submission(text, enter, delay, deadline)?;
+        self.input.submit_queued();
+        let input = Arc::clone(&self.input);
+        let (forward, answer) = std::sync::mpsc::channel();
+        let spawned = crate::thread_spawn::spawn_named_with(
+            "herdr-submit-input",
+            (delivered, forward),
+            move |(delivered, forward)| {
+                let result = delivered.recv();
+                input.submit_settled();
+                if let Ok(result) = result {
+                    let _ = forward.send(result);
+                }
+            },
+        );
+        match spawned {
+            Ok(()) => Ok(answer),
+            // No forwarder: the caller waits on the writer itself, and the
+            // Submit counts only as the input it stamped.
+            Err(((delivered, _), err)) => {
+                tracing::warn!(err = %err, "could not watch a queued submit");
+                self.input.submit_settled();
+                Ok(delivered)
+            }
+        }
     }
 
     pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {
@@ -4781,7 +4810,7 @@ impl PaneRuntime {
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
                 compression,
-                last_input_ms: AtomicU64::new(0),
+                input: Arc::default(),
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
             rx,
@@ -6273,7 +6302,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -6332,7 +6361,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -6388,7 +6417,7 @@ mod tests {
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             compression,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -6435,7 +6464,7 @@ mod tests {
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
             compression,
-            last_input_ms: AtomicU64::new(0),
+            input: Arc::default(),
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 

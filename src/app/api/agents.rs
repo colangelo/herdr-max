@@ -408,13 +408,18 @@ impl App {
         };
         let interrupt = params.busy == AgentMessageBusy::Interrupt;
         let text = params.text;
+        // A delivered note is input to the pane (core-phase3 D9).
+        let input = self
+            .parse_pane_id(&agent.pane_id)
+            .and_then(|(ws_idx, pane_id)| self.lookup_runtime(ws_idx, pane_id))
+            .map(|(runtime, _)| runtime.input_activity());
         let thread_id = id.clone();
         let thread_respond_to = respond_to.clone();
         let spawned = crate::thread_spawn::spawn_named("herdr-agent-note", move || {
             let command = crate::config::load_live_config()
                 .map(|loaded| loaded.config.palette.send.note_command)
                 .unwrap_or_else(|_| "agent-bell".to_owned());
-            let response = match run_note_command(&command, &name, &text, interrupt) {
+            let response = match deliver_note(&command, &name, &text, interrupt, input.as_deref()) {
                 Ok(note) => encode_success(
                     thread_id,
                     ResponseResult::AgentMessaged {
@@ -744,6 +749,22 @@ struct ValidatedAgentPrompt {
 /// read its answer. The command is split on whitespace (a program and its
 /// leading arguments); its words become the note's `detail`, and `held` or
 /// `injected` in them its `state`, else `queued`.
+/// Runs the note command; a note it took (`queued`, `held` or `injected`)
+/// is input to the agent's pane (core-phase3 D9).
+fn deliver_note(
+    command: &str,
+    name: &str,
+    text: &str,
+    interrupt: bool,
+    input: Option<&crate::pane::InputActivity>,
+) -> Result<AgentMessageNote, (&'static str, String)> {
+    let note = run_note_command(command, name, text, interrupt)?;
+    if let Some(input) = input {
+        input.stamp();
+    }
+    Ok(note)
+}
+
 pub(crate) fn run_note_command(
     command: &str,
     name: &str,
@@ -1769,6 +1790,23 @@ mod tests {
 
         let note = run_note_command(&command, "reviewer", "now", true).unwrap();
         assert!(note.detail.contains("--interrupt now"), "{}", note.detail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_note_the_command_took_is_input_and_a_failed_one_is_not() {
+        let dir = scratch_dir("input");
+        for (body, stamped) in [
+            ("echo queued", true),
+            ("echo 'held until morning'", true),
+            ("echo injected", true),
+            ("echo refused >&2; exit 3", false),
+        ] {
+            let input = crate::pane::InputActivity::default();
+            let command = note_script(&dir, body);
+            let _ = deliver_note(&command, "reviewer", "hi", false, Some(&input));
+            assert_eq!(input.last_at_ms().is_some(), stamped, "{body}");
+        }
     }
 
     #[cfg(unix)]

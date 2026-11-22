@@ -826,4 +826,8 @@ impl TerminalRuntime {
     pub fn last_input_at_ms(&self) -> Option<i64> {
         self.0.last_input_at_ms()
     }
+
+    pub(crate) fn input_activity(&self) -> std::sync::Arc<crate::pane::InputActivity> {
+        self.0.input_activity()
+    }
 }

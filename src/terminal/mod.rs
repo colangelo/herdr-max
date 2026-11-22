@@ -58,6 +58,35 @@ mod last_input_tests {
         assert!(stamped >= before, "{stamped} < {before}");
     }
 
+    #[tokio::test]
+    async fn a_queued_submit_is_input_until_it_is_delivered() {
+        let (runtime, mut rx) = super::TerminalRuntime::test_with_channel(80, 24);
+        let delivered = runtime
+            .queue_user_input_submission(
+                bytes::Bytes::from_static(b"hello"),
+                bytes::Bytes::from_static(b"\r"),
+                std::time::Duration::from_millis(200),
+                None,
+            )
+            .expect("queued");
+        let input = runtime.input_activity();
+        assert!(input.submit_pending(), "a queued submit is input now");
+        assert!(
+            runtime.last_input_at_ms().is_some(),
+            "queueing stamps the pane"
+        );
+
+        delivered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the writer answered")
+            .expect("delivered");
+        assert!(
+            !input.submit_pending(),
+            "a delivered submit is no longer pending"
+        );
+        assert_eq!(rx.recv().await.as_deref(), Some(&b"hello"[..]));
+    }
+
     #[test]
     fn the_newer_stamp_wins_and_unknown_stays_unknown() {
         assert_eq!(newer_input_stamp(None, None), None);
