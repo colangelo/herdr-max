@@ -95,7 +95,7 @@ class Herdr:
         return self.call("pane", "respawn", pane_id, "--if-idle")
 
     def processes(self, pane_id):
-        info = self.call("pane", "process-info", pane_id)["process_info"]
+        info = self.call("pane", "process-info", "--pane", pane_id)["process_info"]
         return info.get("nested_foreground_processes") or info.get("foreground_processes") or []
 
 

@@ -31,11 +31,12 @@ FAKE_HERDR = textwrap.dedent(
         reply({"panes": [dict(p["info"], pane_id=i) for i, p in panes.items()]})
     if args == ["agent", "list"]:
         reply({"agents": [{"pane_id": i, "name": p.get("name")} for i, p in panes.items()]})
-    pane = panes[args[2]]
+    pane = panes[args[3] if args[2] == "--pane" else args[2]]
     if args[:2] == ["pane", "get"]:
         reply({"pane": dict(pane["info"], pane_id=args[2])})
     if args[:2] == ["pane", "process-info"]:
-        reply({"process_info": {"pane_id": args[2], "foreground_processes": pane.get("processes", [])}})
+        assert args[2] == "--pane", args  # herdr takes the pane as --pane <ID>
+        reply({"process_info": {"pane_id": args[3], "foreground_processes": pane.get("processes", [])}})
     if args[:2] == ["pane", "respawn"] and "--check" in args:
         reply({"moved": False, "refusals": ["already_on_primary"] if pane.get("primary") else pane.get("refusals", [])})
     if args[:2] == ["pane", "respawn"] and "--if-idle" in args:
