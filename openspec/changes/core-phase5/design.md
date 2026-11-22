@@ -306,7 +306,12 @@ host-dependent call matches on it.
 - **Restore and live handoff** reattach by (session, address) as today. When the machine is not `connected`, the
   pane is `CoreWaiting` (core-phase3 A1.3) with the cause `machine_dormant` or `machine_unreachable`, never started
   fresh, and the reattach is tried again when `machine.list` says `connected`. The server reads `machine.list`
-  every 5 s while it has a pane on a machine and some lease is in force; P5 showed no event for a loss.
+  every 5 s while it has a pane on a machine and some lease is in force; P5 showed no event for a loss. Only
+  positive evidence ends such a pane: a record with its labels that core reports `finished`. A `not_found`, or
+  a record labelled for another pane, is never final (core can list a machine `connected` before its
+  terminals); the pane waits (`machine_terminal_missing`) and is asked again. Nothing automatic sends
+  `terminal.kill` to a machine: not an end, a lost stream, a stop of either core, or a stop of this server;
+  only a person's close of the pane does (tasks C.8).
 - **In-band notices.** Core's `[line to <m> lost; reconnecting...]` and the CAN-led repaint (P8) go through the
   parser like any output. The CAN repaint resets the screen; no filtering.
 - **Input while not connected** is not sent. The first key posts a wake to the dialer (D3, D3a) and the pane shows

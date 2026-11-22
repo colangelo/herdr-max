@@ -179,9 +179,9 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   Built: `pane_io.rs` `Host { Local, Machine(MachineName) }`, taken from the parsed address at attach. For a
   machine the pid is not published (child pid 0, no `ProgramIdentity`, no pinned terminal), so pid facts,
   process detection and the OSC 7501 status write give nothing for it; `end_program` is `terminal.kill` only (no
-  `server.status`, no sweep). A machine's program that core says is gone, with the machine connected, ends the pane
-  (`Interrupted`); a suspend cause makes it wait for its machine (C.8), since resuming would start it on this
-  Mac. Tests: fake-core units
+  `server.status`, no sweep). A machine's program ends the pane only when core reports its record finished, and
+  then nothing is killed; a suspend cause makes it wait for its machine (C.8), since resuming would start it on
+  this Mac. Tests: fake-core units
   (owner label and no pid at start, kill-only close, reattach by address); loop V12: closing the pane ended its
   far terminal only; the far core, another far terminal and a `nohup` job the program left run on. Limit: close
   while the machine is away gets `unavailable` from core and leaves the far program running; it then shows in
@@ -202,7 +202,8 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 - [x] C.3 `CoreWaiting` causes `machine_dormant` and `machine_unreachable`; `machine.list` poll while a lease holds;
   input held and wake on first key; V6, V11
   Built: `CoreWaitReason::MachineAway { machine, dormant }`; restore and live handoff never search this Mac's
-  terminals or start fresh for a machine link (`machine_ended`, link held, when core says it is gone with the machine connected; C.8); the saved
+  terminals or start fresh for a machine link (`machine_ended`, link held, only when core reports it finished;
+  `machine_terminal_missing` while core has the machine connected but not its terminal; C.8); the saved
   folder check is skipped for them. `app/core_machine_panes.rs` polls every 5 s while a pane runs on or waits for
   a machine, on its own thread, reading `machine.list` only when a lease is in force or herdr does not gate the
   machine; it marks `core_machine::panes::MachineLink` and attaches waiting panes. Input to a live pane whose
@@ -244,8 +245,14 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   surface median 254 us at 1 pane, 303 us at 15 (1.19x); background workspaces 254 us at 1 and 15 (1.00x);
   nothing was added to a render, layout, PTY or detection loop (the input path reads one atomic for a machine
   pane). CI not run (not pushed).
+  After C.8's second round, head 493026a0, same lock and copied binary: `just check` 0 (5804 + 158 tests);
+  the 16 core backend live tests (`HERDR_TEST_HC=1`) passed; `core_machine_live_test.sh` through its V26 and
+  PR C parts (link and lease parts not run) passed: V26, V9, V31 (pane part), V10, V12, V6 unreachable and
+  dormant, V4's server part (wake within 1 s), V11 with a 120 s drop (same far pid after). Not run this round:
+  `core_live_test.sh`, the default-session script, the PR A/B parts, the bench (no render, layout, PTY or
+  detection work added) and CI. Still open for the tick: CI green, and a full `just core-live-test`.
 - [x] C.8 Review findings on PR C (independent read-only review, 2026-11-22): W1, C1-C6, C8-C10 fixed, C7 left as
-  a limit
+  a limit; a second read (2026-11-23) found N1-N4 and C10's rest, all fixed (below); C5's check is replaced
   W1: `LaunchExtra::from` builds a literal per target (Windows has no `on`, so the rest pattern was a needless
   update under `-D warnings`). C1: a respawn starts on this Mac, so `pane.respawn` and `pane.respawn_agent`
   refuse a pane on a machine (live, waiting or ended) with `pane_on_machine`, and `prepare_respawn` and
@@ -277,7 +284,39 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   (their label is `<label>@<core id>`). A live pane whose machine stays away keeps its reattach loop and shows
   the "Herdr Core is not answering" line after the limit, not the machine wait notice. Between core listing the
   machine `connected` and its terminals arriving, an attach can still see `not_found`; the before-and-after
-  check covers a link that changes during the question, not a lag inside one `connected` state.
+  check covers a link that changes during the question, not a lag inside one `connected` state (superseded by
+  N2 below: a `not_found` is no longer final at all).
+  Second read of the fixed head (2026-11-23): N1-N4, C10's rest and the address parser fixed, one more found
+  (a server stop). N1: `wait_for_machine_after_exit` keeps the core terminal before the runtime's shutdown,
+  so a suspend cause no longer sends `terminal.kill` to the program it then waits for. N2 (replaces C5's
+  before-and-after check): for a pane on a machine only positive evidence is final, a `terminal.get` record
+  with the pane's labels in state `finished`. A `not_found`, a record labelled for another pane or in another
+  state is `ReattachError::Missing`: the pane waits as `machine_terminal_missing`
+  (`CoreWaitReason::MachineMissing`) while core lists the machine connected, as `machine_unreachable` while it
+  does not, and every poll asks again; the live reattach loop retries on anything but a live or finished
+  record; a stream CLOSE ends a machine pane only with a finished record or a suspend cause. Whatever ends a
+  machine pane's stream sets keep-on-drop, so no automatic end sends `terminal.kill`; only a person's close of
+  a pane with a runtime does. N3: a saved machine pane has `cwd` `/dev/null/herdr-pane-on-a-core-machine` and
+  its folder in `core_terminal.machine_cwd`; the previous beta (origin/master 7c273562) then holds it as
+  `DirectoryUnavailable` and, after its search, shows "Saved directory is unavailable", never starting it
+  (characterization test of that build's decision on the new save; the save this branch wrote before started
+  the pane fresh there). N4: `move_facts` gives `on_machine` before any other refusal and `move_pane` refuses
+  before any kill; `prepare_resume` refuses a machine pane, which waits for its machine with its suspension's
+  link. C10: a machine's first link starts not connected. `CoreTerminalLink::machine()` parses through
+  `CoreAddress`. Found on the way: every stop but a restart ended all core programs, so `herdr server stop`
+  or a logout killed programs on machines; `keep_core_programs_for_stop` keeps those on a machine (the saved
+  link attaches them again).
+  Herdr Core facts behind N2 (hc 0.1.21 `hc schema` from a throwaway `HC_SESSION`, its core stopped after,
+  no machine dialled): `Terminal.state` is "`live` or `finished`"; `reason` is one of `exited`, `killed`,
+  `server_stop`, `host_shutdown`, `signaled`, `holder_lost`, `stopped_by_restart` (and `spawn_pending` while
+  its spawn may still run); a finished record carries `finished_ms`, `exit_code` or `signal`; `terminal.get`
+  and `terminal.kill` errors are `not_found` and `machine_unknown`; `terminal.attach` adds `finished`,
+  `unavailable` and `needs_framed`; a stream CLOSE carries the finished record (or nothing for a drop).
+  Limits: a machine pane that core never lists again waits forever (a person closes it, which sends nothing);
+  the live reattach loop checks state, not labels, so a far core whose state was wiped and reused the address
+  would be attached; after a downgrade to a build before PR C the old build drops the pane's link from its next
+  save (rule R.0); a far program whose pane a stop kept, and whose next server never comes, runs on as an
+  orphan there.
 
 ## PR D. The view server
 
@@ -304,6 +343,12 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 - [ ] E.5 Check: `just check` 0, `just core-live-test` 0, CI green
 
 ## R. Rollout (both Macs in one step)
+
+- [ ] R.0 Rule: before rolling a Mac back to a build without PR C (downgrade or live handoff to it), close the panes
+  on core machines or move them (start them again with `--on` after). Since C.8's second round such a build never
+  starts a saved machine pane here (its `cwd` is a folder no host has, so it holds the pane as "Saved directory is
+  unavailable"), but it drops the pane's link from its next save: back on PR C the pane cannot attach, and its
+  program on the machine runs on with no pane (never killed). Stated in `docs/next` (connecting-machines).
 
 - [ ] R.1 Open question 1: ac-mbm5's herdr publishes its spaces to its `default` core (ask on the desk if a config
   change is needed there)
