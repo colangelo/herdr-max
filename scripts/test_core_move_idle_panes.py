@@ -73,6 +73,7 @@ def agent(name, session, **extra):
     }
 
 
+@unittest.skipUnless(os.name == "posix", "the idle-move driver is a bash script")
 class CoreMoveIdlePanesTest(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
