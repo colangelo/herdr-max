@@ -415,11 +415,18 @@ impl App {
 /// it is killed (fork issue 301).
 const AGENT_STOP_GRACE: Duration = Duration::from_secs(3);
 
+/// How long what an agent left running below it may take to end on its
+/// SIGTERM before it is killed.
+const LEFT_BEHIND_GRACE: Duration = Duration::from_millis(500);
+
 /// Stops the pane's agent before its pane is killed (fork issue 301): a
 /// SIGTERM, so it saves its session, then a SIGKILL of it and of every
 /// process below it if it outlives `AGENT_STOP_GRACE`. An agent behind a
 /// wrapper's nested PTY is in a session of its own, which the pane's kill
-/// does not reach, and it outlives the hangup it gets.
+/// does not reach, and it outlives the hangup it gets. What it leaves
+/// running below it (an MCP server it did not end) is ended too: once the
+/// agent is gone those are no longer in the terminal's foreground, so the
+/// hangup of its PTY would miss them.
 fn stop_agent(
     pane_id: PaneId,
     agent: Option<ProgramIdentity>,
@@ -428,29 +435,48 @@ fn stop_agent(
     let Some(agent) = agent else {
         return;
     };
-    let runs = || ProgramIdentity::liveness(Some(agent), lookup) == ProgramLiveness::Runs;
-    if !runs() {
+    let runs = |identity: ProgramIdentity| {
+        ProgramIdentity::liveness(Some(identity), lookup) == ProgramLiveness::Runs
+    };
+    if !runs(agent) {
         return;
     }
+    // Recorded before the agent ends and they are reparented; by identity,
+    // so a pid freed and reused since is left alone.
+    let tree: Vec<ProgramIdentity> =
+        descendants(agent.pid, &crate::platform::session_members(&[agent.pid]))
+            .into_iter()
+            .filter_map(|pid| ProgramIdentity::of(pid, lookup))
+            .collect();
+    let left = || -> Vec<u32> {
+        tree.iter()
+            .filter(|process| runs(**process))
+            .map(|process| process.pid)
+            .collect()
+    };
     crate::platform::signal_processes(&[agent.pid], crate::platform::Signal::Terminate);
-    if wait_until(AGENT_STOP_GRACE, || !runs()) {
-        return;
+    if wait_until(AGENT_STOP_GRACE, || !runs(agent)) {
+        let behind = left();
+        if !behind.is_empty() {
+            crate::platform::signal_processes(&behind, crate::platform::Signal::Terminate);
+            if !wait_until(LEFT_BEHIND_GRACE, || left().is_empty()) {
+                crate::platform::signal_processes(&left(), crate::platform::Signal::Kill);
+            }
+        }
+    } else {
+        let mut targets = left();
+        if runs(agent) {
+            targets.push(agent.pid);
+        }
+        tracing::warn!(
+            pane = pane_id.raw(),
+            pid = agent.pid,
+            processes = targets.len(),
+            "the moved pane's agent outlived its SIGTERM; killing it"
+        );
+        crate::platform::signal_processes(&targets, crate::platform::Signal::Kill);
     }
-    // Rechecked: a pid freed since is no longer the agent's.
-    if !runs() {
-        return;
-    }
-    let members = crate::platform::session_members(&[agent.pid]);
-    let mut tree = descendants(agent.pid, &members);
-    tree.push(agent.pid);
-    tracing::warn!(
-        pane = pane_id.raw(),
-        pid = agent.pid,
-        processes = tree.len(),
-        "the moved pane's agent outlived its SIGTERM; killing it"
-    );
-    crate::platform::signal_processes(&tree, crate::platform::Signal::Kill);
-    let _ = wait_until(KILL_SETTLE, || !runs());
+    let _ = wait_until(KILL_SETTLE, || !runs(agent) && left().is_empty());
 }
 
 /// Polls `done` until it holds or `limit` passes; whether it held.
@@ -1340,6 +1366,46 @@ mod tests {
             handle_events_for(&mut app, Duration::from_millis(100)).await;
         }
         assert!(app.find_pane(pane).is_some());
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_file(record);
+    }
+
+    // Fork issue 301: what the agent leaves running below it when it ends
+    // on its SIGTERM is ended too, as the hangup of its PTY did before.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moved_agent_leaves_nothing_running_below_it() {
+        let record = std::env::temp_dir().join(format!(
+            "herdr-move-301-child-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent =
+            StandInAgent::start(&format!("sleep 30 & echo $! > {}; wait", record.display()));
+        let child: u32 = std::fs::read_to_string(&record)
+            .expect("the child's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        assert!(alive(child));
+        let (mut app, pane) = pty_pane();
+        give_agent(&mut app, pane, &agent);
+
+        assert_eq!(app.move_pane(pane, true), Ok(()));
+        assert!(agent.exited(), "the agent ended on its SIGTERM");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(child) {
+            assert!(
+                Instant::now() < deadline,
+                "the agent's child {child} still runs"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
