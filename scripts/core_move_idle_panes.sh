@@ -236,7 +236,10 @@ def main():
         if refusals == ["already_on_primary"]:
             continue
         if refusals:
-            summary.append((pane_id, name, "refused: " + ", ".join(refusals)))
+            note = ("refused: " + ", ".join(refusals)
+                    + (" (its directory is gone: restore it, or restart the agent from another one)"
+                       if "cwd_missing" in refusals else ""))
+            summary.append((pane_id, name, note))
             continue
         candidates.append(pane)
 

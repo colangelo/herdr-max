@@ -11537,6 +11537,11 @@
               "const": "core_unreachable",
               "description": "herdr-core did not confirm the old program ended; nothing changed.",
               "type": "string"
+            },
+            {
+              "const": "cwd_missing",
+              "description": "The directory the replacement would start in no longer exists. The\ncheck runs before any signal, so the program keeps running.",
+              "type": "string"
             }
           ]
         },

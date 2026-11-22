@@ -168,6 +168,14 @@ class CoreMoveIdlePanesTest(unittest.TestCase):
         self.assertIn("skipped: 1 bell(s) queued", done.stdout)
         self.assertNotIn("w1-p3", done.stdout)
 
+    def test_a_pane_whose_directory_is_gone_is_reported_and_not_moved(self):
+        # Fork issue 305: the server refuses before any signal.
+        panes = {"w1-p1": agent("x", "sess-a", refusals=["cwd_missing"])}
+        done, state = self.run_driver(panes, "--move")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.moves(state), [])
+        self.assertIn("refused: cwd_missing (its directory is gone", done.stdout)
+
     def test_allow_queued_moves_a_pane_whose_only_wait_is_a_queued_bell(self):
         # The bell waits in agent-bell's durable inbox, keyed by session id,
         # and the moved agent resumes the same session.

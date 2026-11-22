@@ -72,6 +72,8 @@ pub(crate) struct MoveFacts {
     /// Suspended, waiting for core, an overlay, starting again, without a
     /// runtime, or being stopped by a worktree removal.
     pub not_movable: bool,
+    /// The directory a replacement would start in no longer exists.
+    pub cwd_missing: bool,
     /// Since the last input on any path; zero while a Submit is queued;
     /// `None` when the pane never had input.
     pub since_input: Option<Duration>,
@@ -117,6 +119,7 @@ pub(crate) fn move_refusals(facts: &MoveFacts, windows: MoveWindows) -> Vec<Refu
     refuse(facts.excluded, Refusal::Excluded);
     refuse(!facts.excluded && facts.core_off, Refusal::CoreOff);
     refuse(facts.not_movable, Refusal::NotMovable);
+    refuse(facts.cwd_missing, Refusal::CwdMissing);
     let input_within = |window: Duration| facts.since_input.is_some_and(|since| since < window);
     refuse(input_within(windows.recent_input), Refusal::RecentInput);
     match &facts.program {
@@ -186,6 +189,17 @@ pub(crate) fn has_foreign_process(
 /// are all its sessions hold.
 pub(crate) fn shell_runs_more(shells: &[u32], members: &[SessionMember]) -> bool {
     members.iter().any(|member| !shells.contains(&member.pid))
+}
+
+/// The directory a moved pane's replacement starts in: where the program
+/// runs now, else what the terminal recorded.
+fn move_cwd(
+    runtime: Option<&crate::terminal::TerminalRuntime>,
+    terminal: &crate::terminal::state::TerminalState,
+) -> std::path::PathBuf {
+    runtime
+        .and_then(|runtime| runtime.cwd_for_persistence().or_else(|| runtime.cwd()))
+        .unwrap_or_else(|| terminal.cwd.clone())
 }
 
 /// How long a killed program may take to leave the process table.
@@ -278,6 +292,7 @@ impl App {
             excluded,
             core_off: !crate::pane::starts_on_core(choice),
             not_movable,
+            cwd_missing: !move_cwd(runtime, terminal).is_dir(),
             since_input,
             program,
         })
@@ -299,6 +314,17 @@ impl App {
             .terminal_runtimes
             .get(&terminal_id)
             .ok_or(Refusal::NotMovable)?;
+        // Fork issue 305: a replacement that cannot start where the program
+        // ran leaves a killed agent and a ghost pane, so refuse before any
+        // signal.
+        if self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_none_or(|terminal| !move_cwd(Some(runtime), terminal).is_dir())
+        {
+            return Err(Refusal::CwdMissing);
+        }
         let (program, agent_program) = runtime.program_identities();
         let cwd = runtime.cwd_for_persistence().or_else(|| runtime.cwd());
         let history = (!agent).then(|| runtime.snapshot_history()).flatten();
@@ -580,6 +606,7 @@ mod tests {
             excluded: false,
             core_off: false,
             not_movable: false,
+            cwd_missing: false,
             since_input: Some(Duration::from_secs(3600)),
             program: ProgramFacts::Agent(AgentFacts {
                 supported: true,
@@ -610,11 +637,12 @@ mod tests {
     fn each_fact_gives_its_refusal_and_an_idle_agent_moves() {
         assert_eq!(refusals(&idle_claude()), []);
         type Change = fn(&mut MoveFacts);
-        let rows: [(Change, Refusal); 11] = [
+        let rows: [(Change, Refusal); 12] = [
             (|f| f.on_primary = true, Refusal::AlreadyOnPrimary),
             (|f| f.excluded = true, Refusal::Excluded),
             (|f| f.core_off = true, Refusal::CoreOff),
             (|f| f.not_movable = true, Refusal::NotMovable),
+            (|f| f.cwd_missing = true, Refusal::CwdMissing),
             (
                 |f| f.since_input = Some(Duration::from_secs(59)),
                 Refusal::RecentInput,
@@ -1138,6 +1166,67 @@ mod tests {
             assert!(Instant::now() < deadline, "the agent never resumed");
             handle_events_for(&mut app, Duration::from_millis(100)).await;
         }
+        app.state.assert_invariants_for_test();
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    // Fork issue 305: a pane whose directory was deleted (a `wt remove`
+    // under a live session) is refused by the check and by the move before
+    // any signal: the stand-in agent keeps running, the pane keeps its
+    // runtime, and nothing waits for an exit.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pane_whose_directory_is_gone_is_refused_before_any_signal() {
+        // Silent, so its `sleep` does not hold the test's output open.
+        let agent = StandInAgent::start("exec >/dev/null 2>&1; trap '' HUP TERM; sleep 6");
+        let dir = std::path::PathBuf::from(format!("/tmp/hcg-305-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the pane's directory");
+        let (mut app, pane) = {
+            let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut app = App::new(
+                &crate::config::Config::default(),
+                crate::app::AppPolicy::TEST,
+                None,
+                api_rx,
+                crate::api::EventHub::default(),
+            );
+            app.state.workspaces = vec![crate::workspace::Workspace::test_new("move")];
+            app.state.active = Some(0);
+            app.state.ensure_test_terminals();
+            app.state.default_shell = "/bin/cat".into();
+            crate::pane::set_preferred_runtime(false);
+            let pane = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.find_pane(pane).unwrap().1.attached_terminal_id.clone();
+            app.state.terminals.get_mut(&terminal_id).unwrap().cwd = dir.clone();
+            assert!(app.respawn_pane_runtime(pane, super::super::api::RespawnTarget::Shell));
+            (app, pane)
+        };
+        give_agent(&mut app, pane, &agent);
+        let terminal_id = app.find_pane(pane).unwrap().1.attached_terminal_id.clone();
+        let facts = app.move_facts(pane, Instant::now()).expect("facts");
+        assert!(!facts.cwd_missing, "the directory exists");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let facts = app.move_facts(pane, Instant::now()).expect("facts");
+        assert!(facts.cwd_missing);
+        assert!(app
+            .respawn_pane_if_idle(pane, true)
+            .contains(&Refusal::CwdMissing));
+        assert_eq!(app.move_pane(pane, true), Err(Refusal::CwdMissing));
+
+        handle_events_for(&mut app, Duration::from_millis(500)).await;
+        assert!(!agent.exited(), "no signal reached the agent");
+        assert!(
+            app.terminal_runtimes.get(&terminal_id).is_some(),
+            "the pane keeps its runtime"
+        );
+        assert!(
+            !app.respawn_replaced_runtimes.contains(&pane),
+            "no exit is expected"
+        );
+        assert!(suspension_of(&app, pane).is_none(), "not suspended");
         app.state.assert_invariants_for_test();
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

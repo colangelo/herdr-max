@@ -120,6 +120,9 @@ pub enum PaneMoveRefusal {
     ShellRecent,
     /// herdr-core did not confirm the old program ended; nothing changed.
     CoreUnreachable,
+    /// The directory the replacement would start in no longer exists. The
+    /// check runs before any signal, so the program keeps running.
+    CwdMissing,
 }
 
 /// `tab.close`, with the same `force` as `pane.close`.

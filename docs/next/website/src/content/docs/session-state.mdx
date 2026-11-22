@@ -242,6 +242,7 @@ The server refuses a move, and changes nothing, for each of these reasons:
 | `shell_busy` | The shell is not at its prompt, or runs a job. |
 | `shell_recent` | Input reached the shell pane in the last 10 minutes. |
 | `core_unreachable` | Herdr Core answered that the old program still runs after the kill. The pane keeps its program. |
+| `cwd_missing` | The directory the pane started in no longer exists, for example after `wt remove`. Herdr checks this before it signals anything, so the pane keeps its program. Restore the directory, or restart the agent from another one. |
 
 Before a moved agent's pane is killed, Herdr sends the agent SIGTERM, so it saves its conversation, and kills it if it has not exited after 3 seconds. Once Herdr has sent a signal, the move does not close the pane or leave it as it was. If the old program still runs, or Herdr Core does not answer, the move still answers `moved`, and the pane waits, suspended, until the old program is gone. Then it starts again in place, as after a lost session.
 
