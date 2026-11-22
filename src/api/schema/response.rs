@@ -309,6 +309,12 @@ pub enum ResponseResult {
     Closed {
         closed_todos: Vec<super::todos::ClosedPaneTodos>,
     },
+    /// `pane.respawn_if_idle`: whether the pane moved, else every reason it
+    /// did not (core-phase3 D9).
+    PaneRespawnIfIdle {
+        moved: bool,
+        refusals: Vec<super::common::PaneMoveRefusal>,
+    },
     /// A forced respawn: the process it stopped, if one was running, and the
     /// open todos the pane still carries.
     Respawned {

@@ -19,7 +19,6 @@ mod core_backend;
 mod core_status;
 mod pty;
 
-#[cfg(all(test, unix))]
 pub(crate) use choice::PtyReason;
 pub(crate) use choice::{set_core_pty_panes, stable_name, RuntimeChoice};
 

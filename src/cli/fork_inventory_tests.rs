@@ -112,6 +112,7 @@ fn fork_methods_are_in_the_operations_table() {
         "pane.report_hint",
         "pane.respawn",
         "pane.respawn_agent",
+        "pane.respawn_if_idle",
         "pane.scroll_application",
         "pane.sync",
         "pane.sync_pair",

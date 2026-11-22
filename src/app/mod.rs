@@ -26,6 +26,7 @@ mod creation;
 mod custom_commands;
 mod default_workspace;
 mod git_refresh;
+mod idle_move;
 mod ids;
 mod pane_resume;
 mod pane_suspension;

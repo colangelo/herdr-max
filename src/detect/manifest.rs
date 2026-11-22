@@ -459,6 +459,33 @@ fn is_background_work_rule(rule_id: &str) -> bool {
     rule_id.starts_with("background_")
 }
 
+/// Whether `agent`'s loaded manifest declares the idle move's facts
+/// (core-phase3 D9): a rule on the `prompt_box_body` region, which shows
+/// whether the input box is empty, and a background rule, which shows
+/// background work. A manifest that gains both becomes movable without code.
+pub(crate) fn has_move_facts(agent: Agent) -> bool {
+    let cache = manifest_cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .manifests
+        .iter()
+        .find(|(cached, _)| *cached == agent)
+        .and_then(|(_, loaded)| loaded.as_ref())
+        .is_some_and(|loaded| manifest_has_move_facts(&loaded.manifest))
+}
+
+fn manifest_has_move_facts(manifest: &AgentManifest) -> bool {
+    manifest
+        .rules
+        .iter()
+        .any(|rule| rule.region == "prompt_box_body")
+        && manifest
+            .rules
+            .iter()
+            .any(|rule| is_background_work_rule(&rule.id))
+}
+
 fn evaluate_loaded_manifest(
     agent: Agent,
     input: DetectionInput<'_>,

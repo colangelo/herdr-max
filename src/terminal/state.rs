@@ -215,6 +215,10 @@ pub struct TerminalState {
     metadata_report_agents: HashMap<String, Agent>,
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
+    /// Since when `state` and the effective agent have held: the idle move
+    /// asks for an agent idle 60 s (core-phase3 D9). Runtime only; a restore
+    /// or handoff starts it again.
+    pub(crate) state_since: Instant,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
     pub revision: u64,
@@ -378,6 +382,7 @@ impl TerminalState {
             metadata_report_agents: HashMap::new(),
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
+            state_since: Instant::now(),
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
             revision: 0,
@@ -469,6 +474,7 @@ impl TerminalState {
         }
         self.detected_agent = crate::detect::parse_agent_label(&snapshot.authority.agent_label);
         self.state = snapshot.authority.state;
+        self.state_since = Instant::now();
         self.hook_authority = Some(snapshot.authority);
         self.agent_process_acquisition_pending = snapshot.acquisition_pending;
     }
@@ -3030,6 +3036,7 @@ impl TerminalState {
         self.suppressed_full_lifecycle_hook_reports.clear();
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
+        self.state_since = Instant::now();
         self.blocked_spell = None;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
@@ -3146,6 +3153,9 @@ impl TerminalState {
             return None;
         }
 
+        if self.state != state || previous_agent_label != agent_label {
+            self.state_since = now;
+        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,

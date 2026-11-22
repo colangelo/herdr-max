@@ -186,6 +186,10 @@ operations::define_operations! {
     // an older server answers "unknown method" instead of a plain respawn that
     // stops the agent (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/238).
     PaneRespawnAgent(PaneRespawnParams) => "pane.respawn_agent", true, false;
+    // Fork: the idle move onto the primary herdr-core session. Its own method
+    // so an older server answers "unknown method" instead of a respawn of a
+    // busy agent (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/295, D9).
+    PaneRespawnIfIdle(PaneRespawnIfIdleParams) => "pane.respawn_if_idle", true, false;
     // Fork: the task store (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/241).
     // New names beside `todo.*`, which keep their meaning until they retire.
     TaskList(TaskListParams) => "task.list", false, true;

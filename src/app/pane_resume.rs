@@ -50,31 +50,41 @@ pub(crate) struct RuntimeSpawn {
     launch_env: crate::pane::PaneLaunchEnv,
     program: SpawnProgram,
     runtime: crate::pane::RuntimeChoice,
+    /// Scrollback a shell starts with (the idle move's shell, core-phase3 D9).
+    history: Option<String>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<tokio::sync::Notify>,
     render_dirty: Arc<crate::render_signal::RenderSignal>,
 }
 
 impl RuntimeSpawn {
+    /// Starts a shell with `history` already in herdr's parser.
+    pub(super) fn seed_history(&mut self, history: Option<String>) {
+        self.history = history;
+    }
+
     /// Starts the program. Needs a tokio runtime entered: the pane's tasks
     /// run there.
     pub(crate) fn run(self) -> std::io::Result<crate::terminal::TerminalRuntime> {
         match &self.program {
-            SpawnProgram::Shell { shell, mode } => crate::terminal::TerminalRuntime::spawn(
-                self.pane_id,
-                self.rows,
-                self.cols,
-                self.cwd,
-                self.scrollback_limit_bytes,
-                self.theme,
-                self.appearance,
-                crate::pane::PaneShellConfig::new(shell, *mode),
-                &self.launch_env,
-                self.runtime,
-                self.events,
-                self.render_notify,
-                self.render_dirty,
-            ),
+            SpawnProgram::Shell { shell, mode } => {
+                crate::terminal::TerminalRuntime::spawn_with_initial_history(
+                    self.pane_id,
+                    self.rows,
+                    self.cols,
+                    self.cwd,
+                    self.scrollback_limit_bytes,
+                    self.theme,
+                    self.appearance,
+                    crate::pane::PaneShellConfig::new(shell, *mode),
+                    &self.launch_env,
+                    self.history.as_deref(),
+                    self.runtime,
+                    self.events,
+                    self.render_notify,
+                    self.render_dirty,
+                )
+            }
             SpawnProgram::Argv(argv) => crate::terminal::TerminalRuntime::spawn_argv_command(
                 self.pane_id,
                 self.rows,
@@ -253,6 +263,7 @@ impl App {
             launch_env,
             program,
             runtime,
+            history: None,
             events: self.event_tx.clone(),
             render_notify: self.render_notify.clone(),
             render_dirty: self.render_dirty.clone(),

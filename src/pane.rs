@@ -32,7 +32,6 @@ pub(crate) use runtime_io::CoreTerminalLink;
 pub(crate) use runtime_io::FakeCore;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
-#[cfg(all(test, unix))]
 pub(crate) use runtime_io::PtyReason;
 #[cfg(unix)]
 pub(crate) use runtime_io::{

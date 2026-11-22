@@ -1705,6 +1705,9 @@ impl App {
             Method::PaneRespawnAgent(target) => {
                 return self.handle_pane_respawn(request.id, target, true)
             }
+            Method::PaneRespawnIfIdle(params) => {
+                return self.handle_pane_respawn_if_idle(request.id, params)
+            }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {
                     responses::encode_success(request.id, ResponseResult::Ok {})

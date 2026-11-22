@@ -999,3 +999,15 @@ fn claude_blocker_with_background_shell_remains_blocked() {
         Some("bash_permission_prompt")
     );
 }
+
+#[test]
+fn move_facts_need_a_prompt_box_region_and_a_background_rule() {
+    let manifest = |rules: &str| parse_manifest(&format!("id = \"x\"\n{rules}")).unwrap();
+    let box_rule = "[[rules]]\nid = \"box\"\nstate = \"idle\"\nregion = \"prompt_box_body\"\ncontains = [\"> \"]\n";
+    let background = "[[rules]]\nid = \"background_agents_working\"\nstate = \"working\"\ncontains = [\"Waiting\"]\n";
+    assert!(manifest_has_move_facts(&manifest(&format!(
+        "{box_rule}{background}"
+    ))));
+    assert!(!manifest_has_move_facts(&manifest(box_rule)));
+    assert!(!manifest_has_move_facts(&manifest(background)));
+}

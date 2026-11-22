@@ -4259,6 +4259,21 @@
           ],
           "type": "object"
         },
+        "PaneRespawnIfIdleParams": {
+          "description": "`pane.respawn_if_idle`: moves a pane's program onto the primary\nherdr-core session only while the pane is idle (core-phase3 D9), deciding\nfrom what the server sees in one turn. With `check_only`, it only says\nwhether the pane would move.",
+          "properties": {
+            "check_only": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneRespawnParams": {
           "description": "`pane.respawn` and `pane.respawn_agent`. Without `force`, a respawn that\nwould stop a running process or that leaves open todos behind is refused\nwith `confirmation_required`; with it, the pane respawns and the result says\nwhat it went ahead over. `pane.respawn_agent` starts the pane's agent again\nfrom its saved session, as a restore does, and is refused with\n`no_agent_session` when the pane has none.",
           "properties": {
@@ -8597,6 +8612,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.respawn_if_idle",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneRespawnIfIdleParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "task.list",
               "type": "string"
             },
@@ -11434,6 +11465,81 @@
           ],
           "type": "string"
         },
+        "PaneMoveRefusal": {
+          "description": "Why `pane.respawn_if_idle` did not move a pane (core-phase3 D9).",
+          "oneOf": [
+            {
+              "const": "already_on_primary",
+              "description": "The pane already runs on the primary herdr-core session.",
+              "type": "string"
+            },
+            {
+              "const": "core_off",
+              "description": "A replacement would not start on herdr-core: `runtime` is not\n`core`, or herdr gave up on core.",
+              "type": "string"
+            },
+            {
+              "const": "excluded",
+              "description": "The pane matches `[experimental] core_pty_panes`.",
+              "type": "string"
+            },
+            {
+              "const": "not_movable",
+              "description": "Suspended, waiting for herdr-core, an overlay, starting again, or\nbeing stopped by a worktree removal.",
+              "type": "string"
+            },
+            {
+              "const": "recent_input",
+              "description": "Input reached the pane in the last 60 s, or a Submit is still queued.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported_agent",
+              "description": "The pane's agent has no manifest move facts.",
+              "type": "string"
+            },
+            {
+              "const": "agent_busy",
+              "description": "The agent has not been idle for 60 s.",
+              "type": "string"
+            },
+            {
+              "const": "background_work",
+              "description": "The agent shows background work.",
+              "type": "string"
+            },
+            {
+              "const": "draft_in_box",
+              "description": "The agent's input box is not empty, or not visible.",
+              "type": "string"
+            },
+            {
+              "const": "no_resume_plan",
+              "description": "herdr has no resume plan for the agent.",
+              "type": "string"
+            },
+            {
+              "const": "foreign_process",
+              "description": "The terminal's foreground process is not the agent, or a process in\nthe pane's session is outside the agent's process tree.",
+              "type": "string"
+            },
+            {
+              "const": "shell_busy",
+              "description": "The shell is not at its prompt, or runs more than itself.",
+              "type": "string"
+            },
+            {
+              "const": "shell_recent",
+              "description": "Input reached the shell pane in the last 10 minutes.",
+              "type": "string"
+            },
+            {
+              "const": "core_unreachable",
+              "description": "herdr-core did not confirm the old program ended; nothing changed.",
+              "type": "string"
+            }
+          ]
+        },
         "PaneMoveResult": {
           "properties": {
             "changed": {
@@ -13767,6 +13873,30 @@
               "required": [
                 "type",
                 "closed_todos"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "`pane.respawn_if_idle`: whether the pane moved, else every reason it\ndid not (core-phase3 D9).",
+              "properties": {
+                "moved": {
+                  "type": "boolean"
+                },
+                "refusals": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/PaneMoveRefusal"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "pane_respawn_if_idle",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "moved",
+                "refusals"
               ],
               "type": "object"
             },

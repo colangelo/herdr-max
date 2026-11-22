@@ -2381,6 +2381,27 @@ impl App {
         }
     }
 
+    /// `pane.respawn_if_idle` (core-phase3 D9): moves the pane onto the
+    /// primary herdr-core session when nothing happens in it, else names
+    /// every reason it did not.
+    pub(super) fn handle_pane_respawn_if_idle(
+        &mut self,
+        id: String,
+        params: crate::api::schema::PaneRespawnIfIdleParams,
+    ) -> String {
+        let Some((_, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let refusals = self.respawn_pane_if_idle(pane_id, params.check_only);
+        encode_success(
+            id,
+            ResponseResult::PaneRespawnIfIdle {
+                moved: refusals.is_empty() && !params.check_only,
+                refusals,
+            },
+        )
+    }
+
     /// The pane's running process as a refusal or a forced respawn names it:
     /// the shell's pid, and the foreground process's name when known. Only
     /// asked on a respawn from outside the TUI, never per frame.

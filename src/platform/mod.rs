@@ -973,6 +973,43 @@ pub(crate) use unix_common::{
     RemoteBridgeWake,
 };
 
+/// A process in one of a pane's sessions and its parent (0 when unknown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionMember {
+    pub pid: u32,
+    pub parent: u32,
+}
+
+/// Every process in the sessions of `pids`, with its parent: what the idle
+/// move reads to tell a pane's own processes from foreign ones
+/// (core-phase3 D9). Where parents cannot be read, every parent is 0.
+pub(crate) fn session_members(pids: &[u32]) -> Vec<SessionMember> {
+    let mut members: Vec<u32> = pids
+        .iter()
+        .filter(|pid| **pid > 0)
+        .flat_map(|pid| session_processes(*pid))
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    members
+        .into_iter()
+        .map(|pid| SessionMember {
+            pid,
+            parent: member_parent(pid),
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn member_parent(pid: u32) -> u32 {
+    parent_pid(pid).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn member_parent(_pid: u32) -> u32 {
+    0
+}
+
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
 

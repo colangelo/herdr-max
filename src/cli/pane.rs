@@ -479,6 +479,30 @@ mod tests {
         }
     }
 
+    // core-phase3 D9: `--if-idle` is its own method, so a server without it
+    // answers unknown method and respawns nothing.
+    #[test]
+    fn pane_respawn_if_idle_sends_respawn_if_idle() {
+        for (values, params) in [
+            (
+                vec!["pane", "--if-idle"],
+                serde_json::json!({"pane_id": "pane"}),
+            ),
+            (
+                vec!["pane", "--if-idle", "--check"],
+                serde_json::json!({"pane_id": "pane", "check_only": true}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(request("respawn", &values[..]).unwrap()).unwrap(),
+                serde_json::json!({"id": "cli:pane:respawn", "method": "pane.respawn_if_idle", "params": params}),
+            );
+        }
+        assert!(request("respawn", &["pane", "--check"]).is_err());
+        assert!(request("respawn", &["pane", "--if-idle", "--force"]).is_err());
+        assert!(request("respawn", &["pane", "--if-idle", "--resume"]).is_err());
+    }
+
     #[test]
     fn pane_projection_dash_leading_targets_and_empty_values() {
         let params = parse_pane_split_args(&["-literal", "--direction", "right"], None);

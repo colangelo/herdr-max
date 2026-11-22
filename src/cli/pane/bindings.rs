@@ -492,11 +492,33 @@ pub(super) const LEAVES: &[Leaf] = &[
                     .action(clap::ArgAction::SetTrue)
                     .help("Start the pane's agent again from its saved session, as a restore does"),
             );
+            // Fork: `--if-idle` sends `pane.respawn_if_idle`, the idle move
+            // onto the primary herdr-core session
+            // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/295, D9).
+            arguments.push(
+                clap::Arg::new("if_idle")
+                    .long("if-idle")
+                    .action(clap::ArgAction::SetTrue)
+                    .conflicts_with_all(["resume", "force"])
+                    .help("Move the pane onto the primary herdr-core session, only if it is idle"),
+            );
+            arguments.push(
+                clap::Arg::new("check")
+                    .long("check")
+                    .action(clap::ArgAction::SetTrue)
+                    .requires("if_idle")
+                    .help("With --if-idle: only say whether the pane would move"),
+            );
             arguments
         },
         method: |matches| {
             let params = PaneRespawnProjection::from_matches(matches)?;
-            Ok(if matches.get_flag("resume") {
+            Ok(if matches.get_flag("if_idle") {
+                Method::PaneRespawnIfIdle(crate::api::schema::PaneRespawnIfIdleParams {
+                    pane_id: params.pane_id,
+                    check_only: matches.get_flag("check"),
+                })
+            } else if matches.get_flag("resume") {
                 Method::PaneRespawnAgent(params)
             } else {
                 Method::PaneRespawn(params)

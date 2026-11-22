@@ -74,6 +74,54 @@ pub struct PaneRespawnParams {
     pub force: bool,
 }
 
+/// `pane.respawn_if_idle`: moves a pane's program onto the primary
+/// herdr-core session only while the pane is idle (core-phase3 D9), deciding
+/// from what the server sees in one turn. With `check_only`, it only says
+/// whether the pane would move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneRespawnIfIdleParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub check_only: bool,
+}
+
+/// Why `pane.respawn_if_idle` did not move a pane (core-phase3 D9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneMoveRefusal {
+    /// The pane already runs on the primary herdr-core session.
+    AlreadyOnPrimary,
+    /// A replacement would not start on herdr-core: `runtime` is not
+    /// `core`, or herdr gave up on core.
+    CoreOff,
+    /// The pane matches `[experimental] core_pty_panes`.
+    Excluded,
+    /// Suspended, waiting for herdr-core, an overlay, starting again, or
+    /// being stopped by a worktree removal.
+    NotMovable,
+    /// Input reached the pane in the last 60 s, or a Submit is still queued.
+    RecentInput,
+    /// The pane's agent has no manifest move facts.
+    UnsupportedAgent,
+    /// The agent has not been idle for 60 s.
+    AgentBusy,
+    /// The agent shows background work.
+    BackgroundWork,
+    /// The agent's input box is not empty, or not visible.
+    DraftInBox,
+    /// herdr has no resume plan for the agent.
+    NoResumePlan,
+    /// The terminal's foreground process is not the agent, or a process in
+    /// the pane's session is outside the agent's process tree.
+    ForeignProcess,
+    /// The shell is not at its prompt, or runs more than itself.
+    ShellBusy,
+    /// Input reached the shell pane in the last 10 minutes.
+    ShellRecent,
+    /// herdr-core did not confirm the old program ended; nothing changed.
+    CoreUnreachable,
+}
+
 /// `tab.close`, with the same `force` as `pane.close`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TabCloseParams {
