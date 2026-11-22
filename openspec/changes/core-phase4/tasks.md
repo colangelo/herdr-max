@@ -64,12 +64,29 @@ refuses is logged at debug and not retried; the next look or turn decides again.
 
 ## 4. PR C: herdr reads `herdr.seen` and syncs `herdr.pinned`
 
-- [ ] 4.1 Read rules of D9 in `CoreLabels::apply`: raise marks seen, lowering marks an idle agent unseen, snapshot raises only (verifier 11, 12)
-- [ ] 4.2 Pin rules of D10: `herdr_pinned` writes from `pins.rs`, label changes pin or unpin, connect union (verifier 14)
-- [ ] 4.3 Server-path live steps: a raised label makes a done pane idle; `herdr.pinned=1` pins; `herdr agent unpin` removes the label (verifier 15)
-- [ ] 4.4 Docs: `docs/next/website/src/content/docs/session-state.mdx`, what is shared with the Herdr apps and the two flags
+- [x] 4.1 Read rules of D9 in `CoreLabels::apply`: raise marks seen, lowering marks an idle agent unseen, snapshot raises only (verifier 11, 12)
+- [x] 4.2 Pin rules of D10: `herdr_pinned` writes from `pins.rs`, label changes pin or unpin, connect union (verifier 14)
+- [x] 4.3 Server-path live steps: a raised label makes a done pane idle; `herdr.pinned=1` pins; `herdr agent unpin` removes the label (verifier 15)
+- [x] 4.4 Docs: `docs/next/website/src/content/docs/session-state.mdx`, what is shared with the Herdr apps and the two flags
 - [ ] 4.5 Security: ask the security desk for a review of the label reader (D13) before merge
 - [ ] 4.6 Check: `just check`, `just core-live-test`, CI green, review answered
+
+As built (PR C). `CoreLabels::apply` takes a `HerdrView` (seen, idle agent, pinned per core address) and
+returns an `Outcome` of label writes and `PaneEffect`s (`MarkSeen`, `MarkUnseen`, `Pin`, `Unpin`);
+`src/app/core_label_sync.rs` builds the view in one walk over the panes and applies the effects
+(`pane.seen`, `pin_agent`, `unpin_agent`). Pins follow D10 through `pin_agreed`, the pin both sides
+last agreed on, rather than hooks in `pins.rs`: `CoreLabels::sync_pins` runs after every view change
+(`sync_core_view`), so a pin made anywhere in herdr (API, key, menu) reaches the label, and a pane herdr
+learns after connect gets the connect rule then. A mark unread needs the label to fall from at least
+the turn to below it; a removed label is not a mark unread. Server live steps, after B's mark-seen step:
+a second unread turn, `hc label herdr.seen=<turn>` (idle in herdr), `herdr.seen=<turn-1>` (done again),
+`herdr.pinned=1` (pinned), `herdr agent unpin` (label removed).
+
+4.5 is open: herdr's review decided the security read happens at ship. 4.6: `just check` and
+`just core-live-test` are green locally; CI and the security read are the coordinator's.
+
+Limits: D9's raise race in the mirror gate's window; an unpin made in an app while herdr was not
+connected comes back at connect (D10).
 
 ## 5. PR D: the `herdr-max` document
 
