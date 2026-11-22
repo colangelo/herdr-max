@@ -16,6 +16,8 @@ pub(in crate::pane) use crate::pty::actor::ReadCallback;
 mod choice;
 #[cfg(unix)]
 mod core_backend;
+#[cfg(unix)]
+mod core_labels;
 mod core_status;
 mod pty;
 
@@ -24,6 +26,8 @@ pub(crate) use choice::{set_core_pty_panes, stable_name, RuntimeChoice};
 
 #[cfg(all(test, unix))]
 pub(crate) use core_backend::fake::FakeCore;
+#[cfg(unix)]
+pub(crate) use core_labels::{CoreAddress, CoreFact, LabelWrite, Observed};
 pub(crate) use core_status::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 /// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
@@ -92,6 +96,20 @@ pub(crate) fn publish_core_spaces(spaces: Vec<serde_json::Value>) {
     core_backend::spaces_doc::publish(spaces);
     #[cfg(not(unix))]
     let _ = spaces;
+}
+
+/// `[experimental] core_label_sync`: follow this session's core terminals for
+/// `turn` and `herdr.seen`, as `AppEvent::CoreLabels` (openspec/changes/core-phase4,
+/// D11). Turning it off stops the thread.
+#[cfg(unix)]
+pub(crate) fn set_core_label_sync(on: bool, events: mpsc::Sender<crate::events::AppEvent>) {
+    core_backend::labels::set_enabled(on, events);
+}
+
+/// Hands one label write to the label thread; never blocks on core.
+#[cfg(unix)]
+pub(crate) fn write_core_label(label: LabelWrite) {
+    core_backend::labels::write(label);
 }
 
 /// A raw call on the server's core connection, for live tests of documents.

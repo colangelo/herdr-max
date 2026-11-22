@@ -43,6 +43,10 @@ pub(crate) use runtime_io::{
     reset_core_loss_guard, set_core_events, set_core_pty_panes, stable_name, starts_on_core,
     unclaimed_core_terminals, RuntimeChoice, UnclaimedCoreTerminal,
 };
+#[cfg(unix)]
+pub(crate) use runtime_io::{set_core_label_sync, write_core_label};
+#[cfg(unix)]
+pub(crate) use runtime_io::{CoreAddress, CoreFact, LabelWrite, Observed};
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 mod agent_detection;

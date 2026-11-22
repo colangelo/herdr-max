@@ -301,6 +301,12 @@ impl CoreClient {
         self.call_inner("terminal.attach", params, timeout, Some(sink))
     }
 
+    /// `events.subscribe`: returns the snapshot and routes the subscription's
+    /// event lines to `sink`.
+    pub(crate) fn subscribe(&self, params: Value, sink: StreamSink, timeout: Duration) -> Reply {
+        self.call_inner("events.subscribe", params, timeout, Some(sink))
+    }
+
     fn call_inner(
         &self,
         method: &str,

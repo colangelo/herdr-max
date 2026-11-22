@@ -5,6 +5,7 @@ pub(crate) mod client;
 #[cfg(test)]
 pub(crate) mod fake;
 pub(crate) mod frame;
+pub(crate) mod labels;
 mod pane_io;
 mod primary;
 mod sessions;
@@ -336,6 +337,11 @@ fn unclaimed_in(session: &str, listed: &Value, claimed: &[&str]) -> Vec<Unclaime
 pub(crate) fn pane_labels(public_pane_id: Option<&str>) -> Map<String, Value> {
     let mut labels = Map::new();
     labels.insert("herdr.session".into(), Value::String(herdr_session_label()));
+    // A terminal a client starts has been seen up to turn 0 (herdr-app
+    // docs/labels.md; core-phase4 D8).
+    if labels::enabled() {
+        labels.insert("herdr.seen".into(), Value::String("0".into()));
+    }
     if let Some(public) = public_pane_id {
         labels.insert("herdr.pane_id".into(), Value::String(public.to_string()));
     }
