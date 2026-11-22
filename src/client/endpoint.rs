@@ -19,7 +19,7 @@ pub(crate) use activation::*;
 pub(crate) use catalog::*;
 pub(crate) use control::*;
 #[cfg(unix)]
-pub(crate) use dormancy::{Dormancy, InputClock};
+pub(crate) use dormancy::{Dormancy, InputClock, REMOTE_DORMANT_AFTER};
 pub(crate) use message_policy::*;
 pub(crate) use registry::*;
 pub(crate) use ssh_metadata::{SshMachineMetadata, SshMetadataCache};

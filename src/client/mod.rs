@@ -96,14 +96,18 @@ fn events_are_user_input(events: &[crate::raw_input::RawInputEvent]) -> bool {
 }
 
 /// User input restarts the dormancy wait; the first input after dormancy probes
-/// live remotes and retries waiting reconnects at once (fork issue 260).
+/// live remotes and retries waiting reconnects at once (fork issue 260). The
+/// same input renews this client's core machine lease, at most once a minute
+/// and off this thread (core-phase5 D3).
 #[cfg(unix)]
 fn wake_remotes_on_input(
     input_clock: &mut endpoint::InputClock,
+    presence: &mut crate::core_machine::presence::ClientPresence,
     supervisors: &mut endpoint::EndpointSupervisors,
     write_stream: &mut endpoint::EndpointRegistry,
     now: std::time::Instant,
 ) {
+    presence.input(now);
     if input_clock.input(now) == endpoint::Dormancy::Woke {
         info!("input after dormancy: probing remote endpoints and retrying reconnects");
         supervisors.set_remotes_dormant(false, now);
@@ -267,6 +271,7 @@ fn run_client_with_mode(
         endpoint_keybindings,
         remote_image_paste_key,
         shell_config,
+        person_started: !reconnecting && std::env::var_os(reexec::REEXEC_ENV_VAR).is_none(),
     };
 
     crate::logging::startup("client");
@@ -705,6 +710,8 @@ async fn run_client_loop(
     supervisors.set_local_is_remote(is_remote_client);
     #[cfg(unix)]
     let mut input_clock = endpoint::InputClock::new(std::time::Instant::now());
+    #[cfg(unix)]
+    let mut presence = crate::core_machine::presence::ClientPresence::start(config.person_started);
     // Local shut down for a live handoff and has not come back online since.
     let mut local_handed_off = false;
     if federated {
@@ -968,6 +975,7 @@ async fn run_client_loop(
                         supervisors.user_activity(now);
                         wake_remotes_on_input(
                             &mut input_clock,
+                            &mut presence,
                             &mut supervisors,
                             &mut write_stream,
                             now,
@@ -1056,6 +1064,7 @@ async fn run_client_loop(
                     if events_are_user_input(&events) {
                         wake_remotes_on_input(
                             &mut input_clock,
+                            &mut presence,
                             &mut supervisors,
                             &mut write_stream,
                             now,
@@ -1187,6 +1196,7 @@ async fn run_client_loop(
                     supervisors.user_activity(now);
                     wake_remotes_on_input(
                         &mut input_clock,
+                        &mut presence,
                         &mut supervisors,
                         &mut write_stream,
                         now,

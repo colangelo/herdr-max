@@ -16,4 +16,8 @@ pub(super) struct ClientLoopConfig {
     pub(super) remote_image_paste_key:
         Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     pub(super) shell_config: Option<shell::ClientShellConfig>,
+    /// A person's command started this client, not a reconnect after a
+    /// live handoff or a re-exec onto the server's build: it writes its
+    /// core machine lease at start (core-phase5 D3).
+    pub(super) person_started: bool,
 }
