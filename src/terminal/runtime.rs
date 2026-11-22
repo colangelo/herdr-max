@@ -133,6 +133,12 @@ impl TerminalRuntime {
         self.0.core_terminal()
     }
 
+    /// The core machine this runtime's program runs on (core-phase5 D5).
+    #[cfg(unix)]
+    pub(crate) fn core_machine(&self) -> Option<&crate::core_machine::MachineName> {
+        self.0.core_machine()
+    }
+
     /// Whether a core program outlives this runtime (D10).
     pub fn set_keep_core_terminal(&self, keep: bool) {
         self.0.set_keep_core_terminal(keep);

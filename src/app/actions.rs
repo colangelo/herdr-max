@@ -1476,6 +1476,9 @@ impl AppState {
             // The app attaches the waiting panes; the state has nothing to do.
             #[cfg(unix)]
             AppEvent::CoreSessionsAnswered { .. } => Vec::new(),
+            // The app marks machines and attaches the panes waiting on them.
+            #[cfg(unix)]
+            AppEvent::CoreMachines { .. } => Vec::new(),
             // The app installs resumed panes and raises the guard's notice.
             AppEvent::PaneResumed { .. } => Vec::new(),
             #[cfg(unix)]

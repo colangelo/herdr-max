@@ -7,6 +7,7 @@ pub(crate) mod command;
 mod dialer;
 pub(crate) mod link;
 mod name;
+pub(crate) mod panes;
 pub(crate) mod presence;
 mod ssh;
 mod state;

@@ -258,6 +258,12 @@ pub enum AppEvent {
     /// (core-phase3 D1b).
     #[cfg(unix)]
     CoreSessionsAnswered { sessions: Vec<String> },
+    /// What the server's poll, or a dialer of its own, found of the core
+    /// machines its panes run on (core-phase5 D5).
+    #[cfg(unix)]
+    CoreMachines {
+        probes: Vec<crate::core_machine::panes::Probe>,
+    },
     /// `[experimental] pane_jobs` is on but a pane started without its own
     /// launchd job (fork issue 288). Sent once per server.
     PaneJobsUnavailable { reason: String },

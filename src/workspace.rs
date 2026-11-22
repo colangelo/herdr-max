@@ -330,8 +330,9 @@ impl Workspace {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        let extra_env = extra_env.into();
         if extra_env.is_empty() {
             return Self::new(
                 initial_cwd,
@@ -375,7 +376,7 @@ impl Workspace {
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
         argv: Option<&[String]>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let id = generate_workspace_id();
         let launch_env = PaneLaunchEnv::from_extra(extra_env).with_identity(
@@ -488,7 +489,7 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         self.create_tab_with_runtime(
             rows,
@@ -509,7 +510,7 @@ impl Workspace {
         cols: u16,
         cwd: PathBuf,
         argv: &[String],
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -537,7 +538,7 @@ impl Workspace {
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
         argv: Option<&[String]>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
         let number = self.next_public_tab_number;
         self.next_public_tab_number += 1;
@@ -646,7 +647,7 @@ impl Workspace {
         cols: u16,
         cwd: Option<PathBuf>,
         command: &str,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -688,7 +689,7 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
@@ -721,7 +722,7 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
@@ -750,7 +751,7 @@ impl Workspace {
         cols: u16,
         cwd: Option<PathBuf>,
         argv: &[String],
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -783,7 +784,7 @@ impl Workspace {
         cols: u16,
         cwd: Option<PathBuf>,
         argv: &[String],
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
@@ -819,7 +820,7 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
         focus_new_pane: bool,
         argv: Option<&[String]>,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
@@ -1000,7 +1001,7 @@ impl Workspace {
         &self,
         tab_number: usize,
         pane_number: usize,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> PaneLaunchEnv {
         PaneLaunchEnv::from_extra(extra_env).with_identity(
             self.id.clone(),

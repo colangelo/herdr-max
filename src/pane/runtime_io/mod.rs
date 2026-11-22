@@ -29,6 +29,8 @@ pub(crate) use core_backend::fake::FakeCore;
 #[cfg(unix)]
 pub(crate) use core_backend::machines as core_machines;
 #[cfg(unix)]
+pub(crate) use core_backend::{MachineProgram, MachineSpawn};
+#[cfg(unix)]
 pub(crate) use core_labels::{CoreAddress, CoreFact, LabelWrite, Observed};
 pub(crate) use core_status::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
@@ -40,6 +42,10 @@ pub(in crate::pane) struct SpawnSpec {
     pub command: portable_pty::CommandBuilder,
     /// Logged when the program cannot be started.
     pub spawn_error_message: &'static str,
+    /// The core machine the program runs on instead of this Mac
+    /// (core-phase5 D5); `command` then gives only the pane's identity.
+    #[cfg(unix)]
+    pub machine: Option<MachineSpawn>,
 }
 
 /// A pane's program in herdr-core, saved with the pane so the next server
@@ -361,6 +367,17 @@ impl PaneIo {
         child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
         on_unavailable: impl FnOnce(String),
     ) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        if let Some(machine) = spec.machine.as_ref() {
+            return Self::spawn_on_machine(
+                pane_id,
+                &spec,
+                machine,
+                sink,
+                child_pid,
+                child_wait_completed,
+            );
+        }
         if let RuntimeChoice::Pty(reason) = runtime {
             tracing::debug!(pane = pane_id.raw(), ?reason, "pane starts on the PTY");
         }
@@ -415,6 +432,54 @@ impl PaneIo {
         #[cfg(not(unix))]
         let _ = on_unavailable;
         Self::spawn(pane_id, spec, sink, child_pid, child_wait_completed)
+    }
+
+    /// Starts the program on a core machine (core-phase5 D5). Never falls
+    /// back to the PTY: that would run it on this Mac while the caller asked
+    /// for another. Whatever core says goes back as the error.
+    #[cfg(unix)]
+    fn spawn_on_machine(
+        pane_id: crate::layout::PaneId,
+        spec: &SpawnSpec,
+        machine: &MachineSpawn,
+        sink: PaneIoSink,
+        child_pid: &std::sync::atomic::AtomicU32,
+        child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let spawn =
+            core_backend::machine_spawn_from(pane_id, &spec.command, machine, spec.rows, spec.cols)
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "argv must not be empty")
+                })?;
+        let started =
+            core_backend::StartedCore::start(spawn, child_pid, core_backend::server_connector())
+                .map_err(|failure| {
+                    let err = match failure {
+                        core_backend::StartFailure::NotStarted(err)
+                        | core_backend::StartFailure::Unknown(err) => err,
+                    };
+                    std::io::Error::other(format!(
+                        "could not start the pane on {}: {err}",
+                        machine.machine
+                    ))
+                })?;
+        let PaneIoSink {
+            on_read,
+            on_exit,
+            on_core_unreachable,
+        } = sink;
+        started
+            .into_pane(on_read, on_exit, on_core_unreachable, child_wait_completed)
+            .map(PaneIo::Core)
+    }
+
+    /// The machine a core pane runs on, `None` on this Mac.
+    #[cfg(unix)]
+    pub(super) fn core_machine(&self) -> Option<&crate::core_machine::MachineName> {
+        match self {
+            PaneIo::Core(core) => core.machine(),
+            _ => None,
+        }
     }
 
     /// Attaches to a program an earlier server left in herdr-core (D10

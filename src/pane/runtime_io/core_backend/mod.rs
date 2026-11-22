@@ -7,6 +7,7 @@ pub(crate) mod client;
 pub(crate) mod fake;
 pub(crate) mod frame;
 pub(crate) mod labels;
+mod machine_spawn;
 pub(crate) mod machines;
 mod pane_io;
 mod primary;
@@ -22,10 +23,12 @@ use serde_json::{Map, Value};
 use tracing::warn;
 
 use client::CoreError;
+pub(crate) use machine_spawn::{machine_spawn_from, MachineProgram, MachineSpawn};
 pub(crate) use pane_io::{
     Connector, CorePaneIo, CoreReattach, CoreSpawn, KillOutcome, ReattachError, StartFailure,
     StartedCore,
 };
+
 pub(crate) use sessions::{
     core_session_name, existing_core_connector, existing_session_connector, herdr_session_label,
     known_sessions, note_stopped_by_person, release_secondary, server_connector,
@@ -257,6 +260,7 @@ pub(crate) fn core_spawn_from(
     Some(CoreSpawn {
         pane_id,
         session: core_session_name(),
+        on: None,
         argv,
         cwd,
         env,
@@ -319,7 +323,51 @@ fn unclaimed_in_session(
             return Vec::new();
         }
     };
-    unclaimed_in(session, &listed, claimed)
+    let mut unclaimed = unclaimed_in(session, &listed, claimed);
+    // Panes this herdr runs on the core's machines carry the owner value
+    // (core-phase5 D5): the orphan scan of each machine uses it.
+    if let Some(core_id) = client.core_id() {
+        let mut owner = Map::new();
+        owner.insert("herdr.session".into(), Value::String(label.to_string()));
+        pane_io::machine_owner_label(&mut owner, core_id);
+        match client.call(
+            "terminal.list",
+            serde_json::json!({"labels": owner}),
+            std::time::Duration::from_secs(5),
+        ) {
+            Ok(listed) => unclaimed.extend(unclaimed_on_machines(session, &listed, claimed)),
+            Err(err) => {
+                tracing::debug!(%session, err = %err, "could not list this herdr's panes on core machines");
+            }
+        }
+    }
+    unclaimed
+}
+
+/// The live machine terminals of `listed` no pane claims. A machine that is
+/// not connected lists none (P5), so its panes are never taken for orphans.
+fn unclaimed_on_machines(
+    session: &str,
+    listed: &Value,
+    claimed: &[&str],
+) -> Vec<UnclaimedCoreTerminal> {
+    listed["terminals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|terminal| terminal["state"] == "live")
+        .filter_map(|terminal| {
+            let raw = terminal["address"].as_str()?;
+            address::CoreAddress::parse(raw).ok()?.machine?;
+            (!claimed.contains(&raw)).then(|| UnclaimedCoreTerminal {
+                session: session.to_string(),
+                address: raw.to_string(),
+                pane_id: terminal["labels"]["herdr.pane_id"]
+                    .as_str()
+                    .map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 fn unclaimed_in(session: &str, listed: &Value, claimed: &[&str]) -> Vec<UnclaimedCoreTerminal> {
@@ -393,6 +441,16 @@ fn end_program(
     child_wait_completed: Option<&AtomicBool>,
     sweep_unconfirmed: bool,
 ) -> KillOutcome {
+    // A pane on a machine: its pid is the far side's, so close is
+    // `terminal.kill` only. Detached jobs of the program stay there, as
+    // core's own kill leaves them (core-phase5 D5).
+    if let Some(machine) = core.machine() {
+        let outcome = core.kill();
+        if !outcome.ended() {
+            warn!(pane = pane_id.raw(), %machine, %outcome, "the program on the machine may still run");
+        }
+        return outcome;
+    }
     // List the session before the kill: once core ends the session leader,
     // its session can no longer be looked up, and detached jobs would escape.
     // Without core's pids the guard cannot tell core's session from the
@@ -860,6 +918,7 @@ mod tests {
         let spawn = CoreSpawn {
             pane_id: PaneId::from_raw(5),
             session: core_session_name(),
+            on: None,
             argv: vec!["sh".into()],
             cwd: None,
             env: Map::new(),

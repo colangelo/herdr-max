@@ -194,6 +194,47 @@ const OUTER_AGENT_ENV_VARS: [&str; 6] = [
 pub(crate) struct PaneLaunchEnv {
     extra: Vec<(String, String)>,
     identity: PaneLaunchIdentity,
+    /// The core machine the pane runs on, instead of this Mac
+    /// (core-phase5 D5).
+    #[cfg(unix)]
+    on: Option<MachineTarget>,
+}
+
+/// What a request adds to a new pane's launch: its variables and, on Unix,
+/// the core machine it runs on (core-phase5 D5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LaunchExtra {
+    pub env: Vec<(String, String)>,
+    #[cfg(unix)]
+    pub on: Option<MachineTarget>,
+}
+
+impl From<Vec<(String, String)>> for LaunchExtra {
+    fn from(env: Vec<(String, String)>) -> Self {
+        Self {
+            env,
+            ..Self::default()
+        }
+    }
+}
+
+impl LaunchExtra {
+    pub(crate) fn is_empty(&self) -> bool {
+        #[cfg(unix)]
+        if self.on.is_some() {
+            return false;
+        }
+        self.env.is_empty()
+    }
+}
+
+/// A core machine a new pane runs on, and the folder there the request
+/// named (none of this Mac's folders goes; core-phase5 D5).
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineTarget {
+    pub machine: crate::core_machine::MachineName,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -209,11 +250,28 @@ enum PaneLaunchIdentity {
 }
 
 impl PaneLaunchEnv {
-    pub(crate) fn from_extra(extra: Vec<(String, String)>) -> Self {
+    pub(crate) fn from_extra(extra: impl Into<LaunchExtra>) -> Self {
+        let extra = extra.into();
         Self {
-            extra,
+            extra: extra.env,
             identity: PaneLaunchIdentity::Inherit,
+            #[cfg(unix)]
+            on: extra.on,
         }
+    }
+
+    /// The spawn of `program` on the pane's machine, when it has one.
+    #[cfg(unix)]
+    fn machine_spawn(
+        &self,
+        program: runtime_io::MachineProgram,
+    ) -> Option<runtime_io::MachineSpawn> {
+        self.on.as_ref().map(|target| runtime_io::MachineSpawn {
+            machine: target.machine.clone(),
+            program,
+            cwd: target.cwd.clone(),
+            env: self.extra.clone(),
+        })
     }
 
     pub(crate) fn with_identity(
@@ -308,6 +366,9 @@ enum PaneLaunch {
         spawn_error_message: &'static str,
         /// Which backend the program starts on (core-phase3 D13).
         runtime: RuntimeChoice,
+        /// The core machine it starts on instead (core-phase5 D5).
+        #[cfg(unix)]
+        machine: Option<runtime_io::MachineSpawn>,
     },
     #[cfg(unix)]
     ReattachCore {
@@ -2769,6 +2830,8 @@ impl PaneRuntime {
                 cmd,
                 spawn_error_message: "failed to spawn shell",
                 runtime,
+                #[cfg(unix)]
+                machine: launch_env.machine_spawn(runtime_io::MachineProgram::Shell),
             },
             SpawnInitialState {
                 detected_agent: None,
@@ -2815,6 +2878,9 @@ impl PaneRuntime {
                 cmd,
                 spawn_error_message: "failed to spawn command pane",
                 runtime,
+                #[cfg(unix)]
+                machine: launch_env
+                    .machine_spawn(runtime_io::MachineProgram::Line(command.to_string())),
             },
             SpawnInitialState::default(),
             agent_detection,
@@ -2866,6 +2932,8 @@ impl PaneRuntime {
                 cmd,
                 spawn_error_message: "failed to spawn argv command pane",
                 runtime,
+                #[cfg(unix)]
+                machine: launch_env.machine_spawn(runtime_io::MachineProgram::Argv(argv.to_vec())),
             },
             SpawnInitialState::default(),
             agent_detection,
@@ -2918,6 +2986,13 @@ impl PaneRuntime {
         let mut link = self.io.core_terminal()?;
         link.agent = self.agent_program.lock().ok().and_then(|agent| *agent);
         Some(link)
+    }
+
+    /// The core machine this pane's program runs on, `None` on this Mac
+    /// (core-phase5 D5).
+    #[cfg(unix)]
+    pub(crate) fn core_machine(&self) -> Option<&crate::core_machine::MachineName> {
+        self.io.core_machine()
     }
 
     /// Whether a core pane's program outlives this runtime, for the next
@@ -3319,12 +3394,16 @@ impl PaneRuntime {
                     cmd,
                     spawn_error_message,
                     runtime,
+                    #[cfg(unix)]
+                    machine,
                 } => {
                     let spec = runtime_io::SpawnSpec {
                         rows,
                         cols,
                         command: cmd,
                         spawn_error_message,
+                        #[cfg(unix)]
+                        machine,
                     };
                     PaneIo::spawn_preferred(
                         pane_id,

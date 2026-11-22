@@ -32,6 +32,7 @@ impl PaneIo {
             cols,
             command,
             spawn_error_message,
+            ..
         } = spec;
         let PaneIoSink {
             on_read, on_exit, ..

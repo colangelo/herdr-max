@@ -537,6 +537,8 @@ async fn v2_on_exit_runs_after_the_wait_is_marked_complete() {
             cols: 80,
             command: sh_command("exit 3"),
             spawn_error_message: "test spawn failed",
+            #[cfg(unix)]
+            machine: None,
         },
         PaneIoSink {
             on_read: ignore_output(),

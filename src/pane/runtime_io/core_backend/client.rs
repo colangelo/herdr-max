@@ -25,6 +25,15 @@ const PROTOCOL_GENERATION: u64 = 1;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest `hello` reply line this client reads.
 const HELLO_LIMIT: u64 = 64 * 1024;
+
+/// A core id as core 0.1.21 gives it (32 hex digits), within a generous
+/// bound: it goes into a label value, so nothing else is taken.
+fn is_core_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
 /// Core's credit window per stream (hc 0.1.21): a core that honours credit
 /// never has more than this in flight on one stream.
 pub(crate) const CREDIT_WINDOW: u32 = 256 * 1024;
@@ -158,6 +167,9 @@ struct Inner {
     next_id: AtomicU64,
     closed: AtomicBool,
     automatic_input: bool,
+    /// This core's own id (`hello.core.id`), the owner part of a machine
+    /// pane's session label (core-phase5 D5); `None` when it gave none.
+    core_id: Option<String>,
     on_event: Option<EventHandler>,
 }
 
@@ -248,6 +260,10 @@ impl CoreClient {
         let automatic_input = result["features"]
             .as_array()
             .is_some_and(|features| features.iter().any(|f| f == "automatic_input"));
+        let core_id = result["core"]["id"]
+            .as_str()
+            .filter(|id| is_core_id(id))
+            .map(str::to_string);
         stream
             .set_read_timeout(None)
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
@@ -264,6 +280,7 @@ impl CoreClient {
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
             automatic_input,
+            core_id,
             on_event,
         });
         let reader_inner = Arc::clone(&inner);
@@ -284,6 +301,11 @@ impl CoreClient {
     /// are not a person typing).
     pub(crate) fn automatic_input(&self) -> bool {
         self.inner.automatic_input
+    }
+
+    /// This core's id from its hello, when it gave a well-formed one.
+    pub(crate) fn core_id(&self) -> Option<&str> {
+        self.inner.core_id.as_deref()
     }
 
     pub(crate) fn is_closed(&self) -> bool {

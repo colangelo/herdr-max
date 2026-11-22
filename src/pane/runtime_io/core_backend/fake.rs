@@ -317,9 +317,14 @@ fn answer(
             None,
         ),
         "terminal.run" => {
-            let record = json!({"address": "t1", "pid": config.pid, "state": "live",
+            // `on` runs it on a machine: core names it `<machine>/t1`.
+            let address = match params["on"].as_str() {
+                Some(machine) => format!("{machine}/t1"),
+                None => "t1".into(),
+            };
+            let record = json!({"address": address, "pid": config.pid, "state": "live",
                                  "labels": params["labels"], "argv": params["argv"]});
-            lock(shared).terminals.insert("t1".into(), record.clone());
+            lock(shared).terminals.insert(address, record.clone());
             (Ok(record), None)
         }
         "terminal.attach" => {

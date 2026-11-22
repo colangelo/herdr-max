@@ -19,11 +19,14 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use super::address::CoreAddress;
 use super::client::{
     stream_channel, CoreClient, CoreError, StreamEvent, StreamEvents, StreamSink, CREDIT_WINDOW,
 };
 use super::frame::{kind, Frame};
 use super::status_mirror::StatusMirror;
+use crate::core_machine::panes::MachineLink;
+use crate::core_machine::MachineName;
 use crate::layout::PaneId;
 use crate::pane::runtime_io::{CoreStatusRecord, CoreTerminalLink};
 use crate::platform::{
@@ -69,11 +72,44 @@ impl Default for ReattachPolicy {
     }
 }
 
+/// Where a pane's program runs (core-phase5 D5). Every pid- or
+/// host-dependent call matches on it: a machine's pid is another host's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Host {
+    Local,
+    Machine(MachineName),
+}
+
+impl Host {
+    fn of(address: &CoreAddress) -> Self {
+        address.machine.clone().map_or(Self::Local, Self::Machine)
+    }
+}
+
+/// The `herdr.session` value of a pane herdr runs on a machine:
+/// `<label>@<core id>`, which no herdr build matches as its own (D5).
+pub(crate) fn machine_owner_label(labels: &mut serde_json::Map<String, Value>, core_id: &str) {
+    if let Some(Value::String(label)) = labels.get("herdr.session") {
+        let owned = format!("{label}@{core_id}");
+        labels.insert("herdr.session".into(), Value::String(owned));
+    }
+}
+
+/// The record's address when it names a terminal on `on` (this Mac's own
+/// core for `None`).
+fn address_on<'a>(record: &'a Value, on: Option<&MachineName>) -> Option<&'a str> {
+    let raw = record["address"].as_str()?;
+    let address = CoreAddress::parse(raw).ok()?;
+    (address.machine.as_ref() == on).then_some(raw)
+}
+
 /// What `terminal.run` needs for one pane.
 pub(crate) struct CoreSpawn {
     pub pane_id: PaneId,
     /// The core session the terminal runs in, saved in the pane's link.
     pub session: String,
+    /// The core machine it runs on; `None` for this Mac (core-phase5 D5).
+    pub on: Option<MachineName>,
     pub argv: Vec<String>,
     pub cwd: Option<String>,
     pub env: serde_json::Map<String, Value>,
@@ -149,6 +185,10 @@ struct Shared {
     pane_id: PaneId,
     session: String,
     address: String,
+    host: Host,
+    /// The machine's link state, for a pane on a machine: input waits for
+    /// it (core-phase5 D5).
+    machine: Option<Arc<MachineLink>>,
     /// The program as it was at attach, for telling a gone program from one
     /// core lost track of (core-phase3 D1a).
     program: Option<ProgramIdentity>,
@@ -224,16 +264,16 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
 /// lost can be found again (security review M3, Sol H7).
 const LAUNCH_LABEL: &str = "herdr.launch";
 
-/// The terminals of `listed` this Mac's core started for `launch`. A machine's
-/// record is left out even with the same label: its pid is a far process
-/// (core-phase5 F1).
-fn launched_here<'a>(listed: &'a Value, launch: &str) -> Vec<&'a Value> {
+/// The terminals of `listed` started for `launch` on `on` (this Mac's core
+/// for `None`). A record of another host is left out even with the same
+/// label: its pid is that host's (core-phase5 F1).
+fn launched_on<'a>(listed: &'a Value, launch: &str, on: Option<&MachineName>) -> Vec<&'a Value> {
     listed["terminals"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|terminal| terminal["labels"][LAUNCH_LABEL] == launch)
-        .filter(|terminal| super::address::local_address(terminal).is_some())
+        .filter(|terminal| address_on(terminal, on).is_some())
         .collect()
 }
 
@@ -349,22 +389,30 @@ impl StartedCore {
         })?;
         let mut labels = spawn.labels.clone();
         labels.insert(LAUNCH_LABEL.into(), Value::String(launch.clone()));
-        let reply = client.call(
-            "terminal.run",
-            json!({
-                "argv": spawn.argv,
-                "cwd": spawn.cwd,
-                "env": spawn.env,
-                "labels": labels,
-                "size": {"cols": spawn.cols, "rows": spawn.rows},
-                "no_parent": true,
-                "no_notify": true,
-                "keep": false,
-            }),
-            CALL_TIMEOUT,
-        );
+        if spawn.on.is_some() {
+            let core_id = client.core_id().ok_or_else(|| {
+                StartFailure::NotStarted(CoreError::Unavailable(
+                    "herdr-core gave no id, which a pane on a machine is labelled with".into(),
+                ))
+            })?;
+            machine_owner_label(&mut labels, core_id);
+        }
+        let mut params = json!({
+            "argv": spawn.argv,
+            "cwd": spawn.cwd,
+            "env": spawn.env,
+            "labels": labels,
+            "size": {"cols": spawn.cols, "rows": spawn.rows},
+            "no_parent": true,
+            "no_notify": true,
+            "keep": false,
+        });
+        if let Some(on) = &spawn.on {
+            params["on"] = Value::String(on.as_str().to_string());
+        }
+        let reply = client.call("terminal.run", params, CALL_TIMEOUT);
         let started = match reply {
-            Ok(record) => super::address::local_address(&record)
+            Ok(record) => address_on(&record, spawn.on.as_ref())
                 .map(|address| (address.to_string(), core_pid(&record["pid"])))
                 .ok_or_else(|| CoreError::Rpc {
                     kind: "protocol".into(),
@@ -401,7 +449,7 @@ impl StartedCore {
                     Ok((client, listed))
                 });
                 let (client, listed) = found.map_err(|_| StartFailure::Unknown(err.clone()))?;
-                let ours = launched_here(&listed, &launch);
+                let ours = launched_on(&listed, &launch, spawn.on.as_ref());
                 match ours.as_slice() {
                     [one] => {
                         let address = one["address"]
@@ -429,15 +477,20 @@ impl StartedCore {
         child_pid: &AtomicU32,
         connector: Connector,
     ) -> Result<Self, ReattachError> {
-        // A machine's terminal has a far pid; this pane's facts are local
-        // (core-phase5 F1). Nothing is asked of core for it.
-        if !super::address::CoreAddress::parse(&target.address).is_ok_and(|a| a.is_local()) {
-            return Err(ReattachError::NotOurs(format!(
-                "terminal {} is not on this Mac's core",
-                target.address
-            )));
-        }
+        let address = CoreAddress::parse(&target.address)
+            .map_err(|err| ReattachError::NotOurs(format!("terminal {}: {err}", target.address)))?;
         let client = connector().map_err(ReattachError::Unreachable)?;
+        // A pane on a machine carries the owner label (core-phase5 D5): the
+        // far herdr's own pane with our plain labels is not ours (F1).
+        let mut labels = target.labels.clone();
+        if address.machine.is_some() {
+            let core_id = client.core_id().ok_or_else(|| {
+                ReattachError::Unreachable(CoreError::Unavailable(
+                    "herdr-core gave no id, which a pane on a machine is labelled with".into(),
+                ))
+            })?;
+            machine_owner_label(&mut labels, core_id);
+        }
         let record = match client.call(
             "terminal.get",
             json!({"terminal": target.address}),
@@ -449,7 +502,7 @@ impl StartedCore {
             }
             Err(err) => return Err(ReattachError::Unreachable(err)),
         };
-        if let Some(refusal) = reattach_refusal(&record, &target.labels) {
+        if let Some(refusal) = reattach_refusal(&record, &labels) {
             let message = format!("terminal {} {refusal}", target.address);
             return Err(if record["state"] == "live" {
                 ReattachError::NotOurs(message)
@@ -492,6 +545,32 @@ impl StartedCore {
             cols,
             ours_to_kill,
         } = attach;
+        let host = match CoreAddress::parse(&address) {
+            Ok(parsed) => Host::of(&parsed),
+            Err(err) => {
+                return Err(StartFailure::Unknown(CoreError::Rpc {
+                    kind: "protocol".into(),
+                    message: err.to_string(),
+                }))
+            }
+        };
+        // A machine's pid is a process of another host: no local fact, sweep
+        // or status write may use it (core-phase5 D5, F1).
+        let pid = match &host {
+            Host::Local => pid,
+            Host::Machine(machine) => {
+                debug!(pane = pane_id.raw(), %machine, far_pid = pid, "pane on a core machine");
+                0
+            }
+        };
+        let machine = match &host {
+            Host::Local => None,
+            Host::Machine(name) => {
+                let link = crate::core_machine::panes::link(name);
+                link.set_connected(true);
+                Some(link)
+            }
+        };
         let (events_tx, events_rx) = stream_channel();
         let (channel, automatic_input) = match client.attach(
             // Output printed before this attach has scrolled past the first
@@ -532,6 +611,8 @@ impl StartedCore {
                 pane_id,
                 session,
                 address,
+                host,
+                machine,
                 program: ProgramIdentity::of(pid, policy.start_token),
                 policy,
                 connector,
@@ -603,10 +684,33 @@ impl CorePaneIo {
         }
     }
 
+    /// The machine this pane runs on, `None` on this Mac.
+    pub(crate) fn machine(&self) -> Option<&MachineName> {
+        match &self.shared.host {
+            Host::Local => None,
+            Host::Machine(machine) => Some(machine),
+        }
+    }
+
+    /// Input to a pane whose machine is away is not sent: it would land on
+    /// a screen nobody sees. It posts a wake instead (core-phase5 D5).
+    fn machine_away(&self) -> bool {
+        match &self.shared.machine {
+            Some(link) if !link.connected() => {
+                link.wake();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn try_send_bytes(
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if self.machine_away() {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        }
         self.queue(WriteCmd::User(bytes)).map_err(|err| match err {
             mpsc::error::TrySendError::Full(WriteCmd::User(bytes)) => {
                 mpsc::error::TrySendError::Full(bytes)
@@ -633,6 +737,12 @@ impl CorePaneIo {
         enter: Bytes,
         delay: Duration,
     ) -> std::io::Result<std_mpsc::Receiver<std::io::Result<()>>> {
+        if self.machine_away() {
+            return Err(std::io::Error::other(format!(
+                "{} is not connected; the input was not sent",
+                self.machine().map_or("the machine", MachineName::as_str)
+            )));
+        }
         let (reply, reply_rx) = std_mpsc::channel();
         self.queue(WriteCmd::Submit {
             text,
@@ -858,7 +968,15 @@ fn spawn_parser(
         .name(name)
         .spawn(move || {
             let mut on_exit = Some(on_exit);
+            let on_machine = matches!(shared.host, Host::Machine(_));
             let mut finish = |reason: ChildExitReason| {
+                // A suspended pane starts again in place, which for a pane
+                // on a machine would be on this Mac: it ends instead
+                // (core-phase5 D5, never started fresh).
+                let reason = match reason {
+                    ChildExitReason::Suspended(_) if on_machine => ChildExitReason::Interrupted,
+                    reason => reason,
+                };
                 if reason == ChildExitReason::Suspended(SuspendCause::CoreStopped) {
                     super::note_stopped_by_person(&shared.session);
                 }
@@ -1103,6 +1221,11 @@ fn try_reattach(shared: &Shared) -> ReattachOutcome {
         }
     };
     if let Some(exit) = answered {
+        // Core answered for the machine, which only a connected one does:
+        // its program is gone. No local process table can say otherwise.
+        if matches!(shared.host, Host::Machine(_)) {
+            return ReattachOutcome::Gone(exit);
+        }
         return match ProgramIdentity::liveness(shared.program, shared.policy.start_token) {
             ProgramLiveness::Gone => ReattachOutcome::Gone(exit),
             ProgramLiveness::Runs | ProgramLiveness::Unknown => {
@@ -1276,6 +1399,7 @@ mod tests {
         let spawn = CoreSpawn {
             pane_id: PaneId::from_raw(4),
             session: "herdr-test".into(),
+            on: None,
             argv: vec!["sh".into()],
             cwd: None,
             env: serde_json::Map::new(),
@@ -1368,6 +1492,7 @@ mod tests {
         let spawn = CoreSpawn {
             pane_id: PaneId::from_raw(6),
             session: "herdr-test".into(),
+            on: None,
             argv: vec!["sh".into()],
             cwd: None,
             env: serde_json::Map::new(),
@@ -1398,6 +1523,7 @@ mod tests {
         CoreSpawn {
             pane_id: PaneId::from_raw(6),
             session: "herdr-test".into(),
+            on: None,
             argv: vec!["sh".into()],
             cwd: None,
             env: serde_json::Map::new(),
@@ -1407,28 +1533,32 @@ mod tests {
         }
     }
 
-    // V26 (core-phase5 F1): a machine's terminal with our launch label is not
-    // our launch, and its pid is never taken for the pane's.
+    // V26 (core-phase5 F1): a terminal of another host with our launch
+    // label is not this launch, and its pid is never taken for the pane's.
     #[test]
-    fn the_launch_recovery_ignores_a_machines_terminal() {
+    fn the_launch_recovery_keeps_the_launchs_own_host() {
         let listed = json!({"terminals": [
             {"address": "loop/t1", "pid": 4321, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
             {"address": "t1", "pid": 11, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
             {"address": "t2", "pid": 12, "state": "live", "labels": {LAUNCH_LABEL: "other"}},
         ]});
-        let ours = launched_here(&listed, "abc");
-        assert_eq!(ours.len(), 1);
-        assert_eq!(ours[0]["address"], "t1");
+        let here = launched_on(&listed, "abc", None);
+        assert_eq!(here.len(), 1);
+        assert_eq!(here[0]["address"], "t1");
+        let machine = MachineName::parse("loop").expect("name");
+        let there = launched_on(&listed, "abc", Some(&machine));
+        assert_eq!(there.len(), 1);
+        assert_eq!(there[0]["address"], "loop/t1");
         let only_far = json!({"terminals": [
             {"address": "loop/t1", "pid": 4321, "state": "live", "labels": {LAUNCH_LABEL: "abc"}},
         ]});
-        assert!(launched_here(&only_far, "abc").is_empty());
+        assert!(launched_on(&only_far, "abc", None).is_empty());
     }
 
-    // V26: a link to a machine's terminal is never attached, and core is not
-    // asked about it.
+    // V26, V10's other side: the far herdr's own pane carries our plain
+    // labels, not the owner value, so it is never attached or killed.
     #[test]
-    fn a_reattach_never_attaches_to_a_machines_terminal() {
+    fn a_reattach_refuses_a_machines_terminal_without_the_owner_label() {
         let core = FakeCore::start();
         core.add_terminal(json!({"address": "loop/t1", "pid": 777, "state": "live",
                                   "labels": labels("w1-p2")}));
@@ -1436,7 +1566,133 @@ mod tests {
         let refused = StartedCore::reattach(target("loop/t1", "w1-p2"), &pid, connector_to(&core));
         assert!(matches!(refused, Err(ReattachError::NotOurs(_))));
         assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
-        assert!(core.methods().is_empty(), "{:?}", core.methods());
+        assert_eq!(
+            core.methods(),
+            ["terminal.get"],
+            "never attached, never killed"
+        );
+    }
+
+    fn machine_spawn(pane: &str) -> CoreSpawn {
+        CoreSpawn {
+            on: Some(MachineName::parse("loop").expect("name")),
+            ..spawn_for(pane)
+        }
+    }
+
+    fn ignore_pane(started: StartedCore) -> CorePaneIo {
+        started
+            .into_pane(
+                Box::new(|_: &[u8]| PtyReadResult {
+                    terminal_responses: Vec::new(),
+                }),
+                Box::new(|_| {}),
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("pane")
+    }
+
+    // V9 (D5): a pane on a machine runs there under the owner label, and
+    // no pid fact of this Mac is taken from it.
+    #[test]
+    fn a_machine_pane_runs_on_the_machine_under_the_owner_label_with_no_pid() {
+        let core = FakeCore::start();
+        let pid = AtomicU32::new(0);
+        let pane = ignore_pane(
+            StartedCore::start(machine_spawn("w1-p6"), &pid, connector_to(&core)).expect("start"),
+        );
+        let run = core
+            .requests()
+            .into_iter()
+            .find(|request| request["method"] == "terminal.run")
+            .expect("run");
+        assert_eq!(run["params"]["on"], "loop");
+        let session = labels("w1-p6")["herdr.session"].clone();
+        assert_eq!(
+            run["params"]["labels"]["herdr.session"],
+            format!("{}@fake", session.as_str().expect("label"))
+        );
+        assert_eq!(run["params"]["labels"]["herdr.pane_id"], "w1-p6");
+        assert_eq!(
+            pid.load(Ordering::Acquire),
+            0,
+            "the far pid is not published"
+        );
+        assert_eq!(pane.machine().map(MachineName::as_str), Some("loop"));
+        assert_eq!(pane.link().address, "loop/t1");
+        assert_eq!(pane.link().program, None, "no local program identity");
+        pane.shutdown();
+    }
+
+    // V12 (D5): close of a pane on a machine is `terminal.kill` only: no
+    // `server.status` for a sweep guard, no local signal.
+    #[test]
+    fn closing_a_machine_pane_is_a_kill_only() {
+        let core = FakeCore::start();
+        let pid = AtomicU32::new(0);
+        let pane = ignore_pane(
+            StartedCore::start(machine_spawn("w1-p6"), &pid, connector_to(&core)).expect("start"),
+        );
+        pane.shutdown();
+        let before = core.methods().len();
+        super::super::terminate_session(&pane, PaneId::from_raw(6), 0, None);
+        assert_eq!(core.methods()[before..], ["terminal.kill"]);
+        let kill = core.requests().pop().expect("kill");
+        assert_eq!(kill["params"]["terminal"], "loop/t1");
+    }
+
+    // D5: a pane on a machine attaches again by its address when its
+    // terminal carries the owner label.
+    #[test]
+    fn a_machine_pane_reattaches_by_address_with_the_owner_label() {
+        let core = FakeCore::start();
+        let mut owned = labels("w1-p2");
+        machine_owner_label(&mut owned, "fake");
+        core.add_terminal(json!({"address": "loop/t3", "pid": 777, "state": "live",
+                                  "labels": owned}));
+        let pid = AtomicU32::new(0);
+        let pane = ignore_pane(
+            StartedCore::reattach(target("loop/t3", "w1-p2"), &pid, connector_to(&core))
+                .expect("attached"),
+        );
+        assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
+        assert_eq!(pane.machine().map(MachineName::as_str), Some("loop"));
+        assert_eq!(core.methods(), ["terminal.get", "terminal.attach"]);
+        pane.shutdown();
+    }
+
+    // C.3 (D5): input to a pane whose machine is away is not sent.
+    #[test]
+    fn input_to_a_pane_whose_machine_is_away_is_not_sent() {
+        let core = FakeCore::start();
+        let pid = AtomicU32::new(0);
+        let mut spawn = machine_spawn("w1-p6");
+        spawn.on = Some(MachineName::parse("away-test").expect("name"));
+        let pane =
+            ignore_pane(StartedCore::start(spawn, &pid, connector_to(&core)).expect("start"));
+        crate::core_machine::panes::link(&MachineName::parse("away-test").expect("name"))
+            .set_connected(false);
+        assert!(matches!(
+            pane.try_send_bytes(Bytes::from_static(b"x")),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+        assert!(pane
+            .queue_user_input_submission(
+                Bytes::from_static(b"y"),
+                Bytes::from_static(b"\r"),
+                Duration::ZERO
+            )
+            .is_err());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            core.received()
+                .iter()
+                .all(|frame| frame.channel == 0 || frame.kind != kind::DATA),
+            "{:?}",
+            core.received()
+        );
+        pane.shutdown();
     }
 
     /// A connector that connects anew each time, as the server's does after

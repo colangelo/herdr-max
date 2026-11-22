@@ -40,3 +40,14 @@ pub(crate) fn call_running_primary(
         .map(Some)
         .map_err(|err| err.to_string())
 }
+
+/// The machine of a core address (`ac-mbm5/t7`); `None` for this Mac's
+/// own terminals and for an address that does not parse.
+pub(crate) fn machine_of_address(address: &str) -> Option<crate::core_machine::MachineName> {
+    super::address::CoreAddress::parse(address).ok()?.machine
+}
+
+/// Hands `event` to the server loop, when one runs in this process.
+pub(crate) fn tell_server(event: crate::events::AppEvent) {
+    super::tell_server(event);
+}
