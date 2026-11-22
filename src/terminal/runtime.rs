@@ -734,6 +734,7 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    #[cfg(unix)]
     pub(crate) fn test_set_agent_program(&self, agent: Option<crate::platform::ProgramIdentity>) {
         self.0.test_set_agent_program(agent);
     }

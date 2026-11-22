@@ -4623,6 +4623,7 @@ impl PaneRuntime {
 #[cfg(test)]
 impl PaneRuntime {
     /// The agent process detection would publish (core-phase3 D2, D9).
+    #[cfg(unix)]
     pub(crate) fn test_set_agent_program(&self, agent: Option<crate::platform::ProgramIdentity>) {
         *self.agent_program.lock().unwrap() = agent;
     }
