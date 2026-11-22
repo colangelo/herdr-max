@@ -21,6 +21,9 @@ struct Shared {
 pub(crate) struct CoreLabels {
     terminals: HashMap<CoreAddress, Shared>,
     on_screen: HashSet<CoreAddress>,
+    /// Marked read before core reported the terminal (the subscription was
+    /// still starting); raised when it does.
+    marked_early: HashSet<CoreAddress>,
 }
 
 impl CoreLabels {
@@ -38,14 +41,18 @@ impl CoreLabels {
                     })
                     .collect();
                 let on_screen: Vec<_> = self.on_screen.iter().cloned().collect();
-                on_screen
+                let mut writes: Vec<_> = on_screen
                     .iter()
                     .filter_map(|address| self.decide(address))
-                    .collect()
+                    .collect();
+                writes.extend(self.raise_marked_early());
+                writes
             }
             CoreFact::Upsert { address, observed } => {
                 self.terminals.entry(address.clone()).or_default().observed = observed;
-                self.decide_if_on_screen(&address)
+                let mut writes = self.decide_if_on_screen(&address);
+                writes.extend(self.raise_marked_early());
+                writes
             }
             CoreFact::Turn { address, turn } => {
                 let Some(shared) = self.terminals.get_mut(&address) else {
@@ -90,8 +97,27 @@ impl CoreLabels {
     /// A person marked the pane read (`pane.mark_seen`): raise the label to
     /// the turn, on screen or not.
     pub(crate) fn herdr_marked_seen(&mut self, address: &str) -> Option<LabelWrite> {
-        let shared = self.terminals.get_mut(address)?;
+        let Some(shared) = self.terminals.get_mut(address) else {
+            self.marked_early.insert(address.to_string());
+            return None;
+        };
         raise(address, &mut shared.observed)
+    }
+
+    fn raise_marked_early(&mut self) -> Vec<LabelWrite> {
+        let known: Vec<_> = self
+            .marked_early
+            .iter()
+            .filter(|address| self.terminals.contains_key(*address))
+            .cloned()
+            .collect();
+        known
+            .iter()
+            .filter_map(|address| {
+                self.marked_early.remove(address);
+                self.herdr_marked_seen(address)
+            })
+            .collect()
     }
 
     fn decide_if_on_screen(&mut self, address: &CoreAddress) -> Vec<LabelWrite> {
@@ -302,6 +328,21 @@ mod tests {
         assert_eq!(labels.herdr_marked_seen("t1"), None);
         assert_eq!(labels.herdr_marked_seen("t2"), None);
         assert_eq!(labels.herdr_marked_seen("t404"), None);
+    }
+
+    #[test]
+    fn a_mark_read_before_core_reports_the_terminal_lands_when_it_does() {
+        let mut labels = CoreLabels::default();
+        assert_eq!(labels.herdr_marked_seen("t1"), None, "not known yet");
+        assert_eq!(
+            labels.apply(CoreFact::Snapshot(vec![("t1".into(), at(2, Some(0)))])),
+            vec![seen("t1", 2)]
+        );
+        assert_eq!(
+            labels.apply(CoreFact::Snapshot(vec![("t1".into(), at(3, Some(2)))])),
+            vec![],
+            "raised once"
+        );
     }
 
     fn two_pane_space() -> (Vec<Workspace>, Vec<TerminalId>) {

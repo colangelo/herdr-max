@@ -17,8 +17,9 @@ use crate::events::AppEvent;
 use crate::pane::runtime_io::{CoreAddress, CoreFact, LabelWrite, Observed};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a lost subscription waits before it subscribes again.
-const RETRY: Duration = Duration::from_secs(10);
+/// How long a lost subscription waits before it subscribes again. Short: at
+/// startup the core may start only with the first core pane.
+const RETRY: Duration = Duration::from_secs(2);
 /// How often the thread looks for writes while events are quiet.
 const POLL: Duration = Duration::from_millis(100);
 
