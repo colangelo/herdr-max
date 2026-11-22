@@ -204,6 +204,7 @@ impl App {
             self.next_macos_services_check,
             self.suspended_pane_resume_deadline(),
             self.core_waiting_deadline(),
+            self.machine_poll_deadline(),
             self.default_workspace_reopen.deadline(),
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,

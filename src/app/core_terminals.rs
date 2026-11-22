@@ -61,6 +61,18 @@ impl App {
     }
 }
 
+/// Whether a core address names a terminal on a core machine.
+#[cfg(unix)]
+fn on_machine(address: &str) -> bool {
+    super::core_machine_panes::machine_of(address).is_some()
+}
+
+/// Without the core backend there are no machines.
+#[cfg(not(unix))]
+fn on_machine(_address: &str) -> bool {
+    false
+}
+
 /// The orphan notice's look-up command, once per core session that holds
 /// one (core-phase3 D5): the session to reach and the label that is ours.
 fn unclaimed_notice_context(
@@ -85,6 +97,27 @@ impl App {
         self.core_waiting_retry_at
     }
 
+    /// The next read of the core machines panes run on (core-phase5 D5).
+    pub(crate) fn machine_poll_deadline(&self) -> Option<Instant> {
+        #[cfg(unix)]
+        {
+            self.core_machine_poll_deadline()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    /// Panes waiting for a core session itself: a pane on a core machine
+    /// waits for its machine instead (`core_machine_panes`).
+    fn core_session_waiting_panes(&self) -> Vec<(PaneId, crate::terminal::state::CoreWaiting)> {
+        self.core_waiting_panes()
+            .into_iter()
+            .filter(|(_, waiting)| !on_machine(&waiting.link.address))
+            .collect()
+    }
+
     /// Panes waiting for Herdr Core, with what they wait for.
     fn core_waiting_panes(&self) -> Vec<(PaneId, crate::terminal::state::CoreWaiting)> {
         self.state
@@ -101,7 +134,7 @@ impl App {
 
     /// Arms the next look for the cores that waiting panes need.
     pub(crate) fn schedule_core_waiting_retry(&mut self, now: Instant) {
-        if self.core_waiting_retry_at.is_none() && !self.core_waiting_panes().is_empty() {
+        if self.core_waiting_retry_at.is_none() && !self.core_session_waiting_panes().is_empty() {
             self.core_waiting_retry_at = Some(now + CORE_WAITING_RETRY);
         }
     }
@@ -116,7 +149,7 @@ impl App {
         }
         self.core_waiting_retry_at = None;
         let mut sessions: Vec<String> = self
-            .core_waiting_panes()
+            .core_session_waiting_panes()
             .into_iter()
             .map(|(_, waiting)| waiting.link.session)
             .collect();
@@ -153,7 +186,7 @@ impl App {
     #[cfg(unix)]
     pub(crate) fn attach_waiting_panes(&mut self, sessions: &[String], now: Instant) {
         let mut changed = false;
-        for (pane_id, waiting) in self.core_waiting_panes() {
+        for (pane_id, waiting) in self.core_session_waiting_panes() {
             if sessions.contains(&waiting.link.session) {
                 changed |= self.attach_waiting_pane(pane_id, waiting);
             }
@@ -249,7 +282,7 @@ impl App {
 
     /// Attaches `pane_id` to the terminal `waiting` names and installs it.
     #[cfg(unix)]
-    fn attach_core_terminal(
+    pub(super) fn attach_core_terminal(
         &mut self,
         pane_id: PaneId,
         waiting: &crate::terminal::state::CoreWaiting,

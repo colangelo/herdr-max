@@ -344,6 +344,24 @@ pub enum CoreWaitReason {
     /// Its saved directory is gone: the pane only attaches to its program,
     /// never starts one.
     DirectoryUnavailable,
+    /// Its program runs on a core machine that is not connected
+    /// (core-phase5 D5): `dormant` when no lease allows the link (a key in
+    /// the pane wakes it), else the link is down. It attaches when the
+    /// machine is connected again, and is never started fresh.
+    MachineAway { machine: String, dormant: bool },
+}
+
+impl CoreWaitReason {
+    /// The API's `core_waiting_cause`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Conflict(_) => "conflict",
+            Self::DirectoryUnavailable => "directory_unavailable",
+            Self::MachineAway { dormant: true, .. } => "machine_dormant",
+            Self::MachineAway { dormant: false, .. } => "machine_unreachable",
+        }
+    }
 }
 
 impl TerminalState {

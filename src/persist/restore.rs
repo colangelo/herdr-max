@@ -734,7 +734,17 @@ fn restore_tab(
 
         let cwd = saved_cwd;
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
-        if !has_import && !cwd.is_dir() {
+        // A pane on a core machine runs in the machine's folders, which this
+        // Mac need not have (core-phase5 D5).
+        #[cfg(unix)]
+        let on_machine = saved_pane
+            .and_then(|pane| pane.core_terminal.as_ref())
+            .is_some_and(|saved| {
+                crate::pane::core_machines::machine_of_address(&saved.link().address).is_some()
+            });
+        #[cfg(not(unix))]
+        let on_machine = false;
+        if !has_import && !on_machine && !cwd.is_dir() {
             #[cfg_attr(not(unix), allow(unused_mut))]
             let mut terminal = unavailable_restored_terminal(
                 saved_pane,
@@ -860,6 +870,12 @@ fn restore_tab(
         let core_restore = match core_restore {
             CoreRestore::Attached(runtime) => Some(*runtime),
             CoreRestore::Fresh => None,
+            CoreRestore::Ended(message) => {
+                let terminal = unavailable_restored_terminal(saved_pane, cwd, message, todo_links);
+                panes.insert(*id, PaneState::new(terminal.id.clone()));
+                terminals.push(terminal);
+                continue;
+            }
             CoreRestore::Waiting(waiting) => {
                 let mut terminal = unavailable_restored_terminal(
                     saved_pane,
@@ -1153,6 +1169,9 @@ enum CoreRestore {
     /// terminals are labelled for the pane: start nothing, and hold the
     /// link (security review M3, Sol H5).
     Waiting(crate::terminal::state::CoreWaiting),
+    /// Its program ran on a core machine and core says it is gone: nothing
+    /// starts, here or there; the pane says why (core-phase5 D5).
+    Ended(String),
 }
 
 /// After the saved terminal did not attach: wait while the program may run
@@ -1232,6 +1251,32 @@ fn restore_core_pane(
             why,
         })
     };
+    // A pane on a machine waits for the machine, and is never started fresh
+    // nor searched for in this Mac's terminals (core-phase5 D5, F1).
+    if let Some(machine) = crate::pane::core_machines::machine_of_address(&link.address) {
+        return match failure {
+            crate::pane::CoreAttachFailure::Unreachable => {
+                let dormant = crate::core_machine::panes::dormant(&machine);
+                tracing::info!(
+                    pane_id = pane_id.raw(),
+                    %machine,
+                    address = %link.address,
+                    dormant,
+                    "the pane's core machine is not connected; the pane waits for it"
+                );
+                waiting(
+                    link,
+                    CoreWaitReason::MachineAway {
+                        machine: machine.to_string(),
+                        dormant,
+                    },
+                )
+            }
+            crate::pane::CoreAttachFailure::Gone | crate::pane::CoreAttachFailure::NotOurs => {
+                CoreRestore::Ended(format!("Its program on {machine} has ended."))
+            }
+        };
+    }
     let program = crate::platform::ProgramLiveness::of_pane(link.program, link.agent, lookup);
     if after_failed_attach(failure, program) == AfterFailedAttach::Wait {
         tracing::warn!(

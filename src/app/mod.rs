@@ -24,6 +24,8 @@ mod core_extras_doc;
 mod core_label_sync;
 #[cfg(unix)]
 pub(crate) mod core_labels;
+#[cfg(unix)]
+mod core_machine_panes;
 mod core_spaces_doc;
 mod core_status_mirror;
 mod core_terminals;
@@ -213,6 +215,10 @@ pub struct App {
     program_start_token: crate::platform::StartTokenLookup,
     /// When panes waiting for Herdr Core next try to attach (core-phase3 D1b).
     core_waiting_retry_at: Option<std::time::Instant>,
+    /// The poll of the core machines this server's panes run on
+    /// (core-phase5 D5).
+    #[cfg(unix)]
+    core_machine_poll: core_machine_panes::MachinePoll,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
@@ -921,6 +927,8 @@ impl App {
             pane_jobs_ready_probe: || true,
             program_start_token: crate::platform::process_start,
             core_waiting_retry_at: None,
+            #[cfg(unix)]
+            core_machine_poll: core_machine_panes::MachinePoll::default(),
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
@@ -971,6 +979,8 @@ impl App {
         if app.policy.restore_session {
             app.report_unclaimed_core_terminals();
             app.schedule_core_waiting_retry(std::time::Instant::now());
+            #[cfg(unix)]
+            app.schedule_core_machine_poll(std::time::Instant::now());
         }
         if app.core_status_mirror {
             app.sync_core_status_mirror();
@@ -1044,6 +1054,8 @@ impl App {
         app.refresh_restored_workspace_git_metadata();
         app.report_unclaimed_core_terminals();
         app.schedule_core_waiting_retry(std::time::Instant::now());
+        #[cfg(unix)]
+        app.schedule_core_machine_poll(std::time::Instant::now());
         if app.core_status_mirror {
             app.sync_core_status_mirror();
         }
@@ -3711,6 +3723,7 @@ mod tests {
                 focus: true,
                 right_click: Default::default(),
                 env: Default::default(),
+                on: None,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3758,6 +3771,7 @@ mod tests {
                 focus: false,
                 right_click: crate::api::schema::PaneRightClickTarget::Pane,
                 env: Default::default(),
+                on: None,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -3848,6 +3862,7 @@ mod tests {
                         focus: false,
                         right_click: Default::default(),
                         env: Default::default(),
+                        on: None,
                     },
                 ),
             });
@@ -3890,6 +3905,7 @@ mod tests {
                 focus: false,
                 right_click: Default::default(),
                 env: Default::default(),
+                on: None,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
