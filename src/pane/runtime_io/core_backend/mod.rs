@@ -7,6 +7,7 @@ pub(crate) mod client;
 pub(crate) mod fake;
 pub(crate) mod frame;
 pub(crate) mod labels;
+pub(crate) mod machines;
 mod pane_io;
 mod primary;
 mod sessions;

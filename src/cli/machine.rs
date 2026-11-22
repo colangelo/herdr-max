@@ -16,13 +16,23 @@ const HELP: &str = "Usage:
   herdr machine remove <profile-id>
   herdr machine enable <profile-id>
   herdr machine disable <profile-id>
+  herdr machine add --core <ssh-target> [--name <name>] [--remote-session <core-session>] [--ssh-config <file>]
+  herdr machine rm --core <name>
+  herdr machine login <name>
+  herdr machine status --core [<name>] [--json]
 
 Add prepares the remote Herdr installation and starts its server before saving.
 Missing or incompatible installations require approval in an interactive terminal.
 Changes apply automatically to open local Herdr clients.
 Removing or disabling a machine leaves its remote sessions running.
 Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
-SSH credentials and key material remain owned by OpenSSH.";
+SSH credentials and key material remain owned by OpenSSH.
+
+--core adds the machine to this herdr session's herdr-core instead (a person,
+in a terminal, never --install). Core reaches it through `herdr core-link`,
+which runs each dial as a fresh ssh login with no master and closes the gate
+after a Tailscale check, a stalled or failed login, or a far core that is not
+running; `herdr machine login` reopens it. status --core reports each gate.";
 
 #[derive(Serialize)]
 struct MachineListRow<'a> {
@@ -35,7 +45,12 @@ struct MachineListRow<'a> {
 }
 
 pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
+    let core = args.iter().any(|arg| arg == "--core");
     match args.first().map(String::as_str) {
+        Some("add") if core => core_command(CoreVerb::Add, &args[1..]),
+        Some("rm" | "remove") if core => core_command(CoreVerb::Remove, &args[1..]),
+        Some("status") if core => core_command(CoreVerb::Status, &args[1..]),
+        Some("login") => core_command(CoreVerb::Login, &args[1..]),
         Some("list") => list(&args[1..]),
         Some("status") => status(&args[1..]),
         Some("reconnect") => reconnect(&args[1..]),
@@ -52,6 +67,34 @@ pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
             eprintln!("{HELP}");
             Ok(2)
         }
+    }
+}
+
+enum CoreVerb {
+    Add,
+    Remove,
+    Status,
+    Login,
+}
+
+/// The core machine verbs (openspec/changes/core-phase5); herdr-core and so
+/// core machines are macOS and Linux only.
+fn core_command(verb: CoreVerb, args: &[String]) -> std::io::Result<i32> {
+    #[cfg(unix)]
+    {
+        use crate::core_machine::command;
+        match verb {
+            CoreVerb::Add => command::add(args),
+            CoreVerb::Remove => command::remove(args),
+            CoreVerb::Status => command::status(args),
+            CoreVerb::Login => command::login(args),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (verb, args);
+        eprintln!("core machines need herdr-core, which runs on macOS and Linux");
+        Ok(2)
     }
 }
 

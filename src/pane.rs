@@ -23,6 +23,8 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 use crate::render_signal::RenderSignal;
 pub(crate) use input_activity::InputActivity;
+#[cfg(unix)]
+pub(crate) use runtime_io::core_machines;
 pub(crate) use runtime_io::core_session_name;
 #[cfg(not(test))]
 pub(crate) use runtime_io::publish_core_spaces;

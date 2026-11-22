@@ -28,6 +28,8 @@ pub(crate) use choice::{set_core_pty_panes, stable_name, RuntimeChoice};
 pub(crate) use core_backend::fake::FakeCore;
 #[cfg(unix)]
 pub(crate) use core_labels::{CoreAddress, CoreFact, LabelWrite, Observed};
+#[cfg(unix)]
+pub(crate) use core_backend::machines as core_machines;
 pub(crate) use core_status::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
 /// What to start in a pane. `command` stays a `portable_pty::CommandBuilder`
