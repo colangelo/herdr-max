@@ -446,14 +446,26 @@ with a real Claude Code (no-connector settings) running a background agent.
 **The move, with a confirmed kill.** The move kills the old program first and starts the replacement only after
 the kill is confirmed:
 
+0. Agent pane: the agent's identity gets a SIGTERM, so it saves its session, and up to 3 s to exit; if it
+   outlives that, a SIGKILL of it and every process below it, and up to 2 s more. An agent behind a wrapper's
+   nested PTY leads a session of its own, which the pane's sweep does not reach (fork issue 301).
 1. PTY pane: the existing terminate and sweep; confirmed when the child pid's identity no longer runs.
    Core pane (legacy session): `CorePaneIo::kill` returns `KillOutcome` from `terminal.kill`'s observed result.
    Confirmed only for `finished` or `not_found` **and** the pid's identity gone.
-2. Anything else (an error, a timeout, a `live` answer, the pid still running) refuses with `core_unreachable`
-   and leaves the pane as it was: no replacement starts.
+2. A sent signal is a point of no return (fork issue 301). Only a shell pane whose kill core answered `live`
+   (nothing signalled, nothing swept) refuses with `core_unreachable` and stays as it was. In every other
+   unconfirmed case (no answer, an agent already stopped, a program still running after 2 s) the old runtime is
+   shut down and the pane is suspended (`TerminalGone`, with the program and agent identities), and the answer
+   is `moved`. D2 resumes it in place once both identities are gone. Leaving the runtime there would let the
+   exit of the killed program close the pane: on 2026-11-22 that closed 13 Claude panes.
 3. Confirmed: `respawn_pane_agent` (agent) or a shell in the pane's directory (shell), on the primary core, with
    herdr's parser history kept as in D8. A spawn that fails after a confirmed kill suspends the pane
    (`TerminalGone`), so D2 resumes it.
+
+The killed program's exit is absorbed (`respawn_replaced_runtimes`) while the pane runs a runtime that has not
+exited, and any exit is ignored while the pane has no runtime and waits to start again (suspended, or its agent's
+resume pending). A mark whose runtime never reported (a core stream forgotten before its CLOSE) does not swallow
+the exit of the runtime the pane runs later.
 
 A moved shell loses its process state (variables, jobs, history in memory). That is accepted for shells idle for
 10 minutes and stated in the docs; its directory and herdr's scrollback are kept.
@@ -637,7 +649,7 @@ after a beta, by the named actor.
 | V36 | guard visible and reset (D3a) | unit and `herdr server status` JSON | D3a | `GaveUp` appears as `core: gave_up`; one notice; a new server (handoff) starts `Allowed`, as the docs say |
 | V37 | `server_stop` (D3b) | live core: `hc server stop` on the scratch primary | D3b | panes `CoreStopped`, one notice; no core start for 60 s; `hc server start` by hand, then each resumes after the pid check; a second run ends with a herdr restart instead, which starts the core and resumes |
 | V38 | start rules (D3) | unit over `connect_session` with a socket file that refuses; the probe tables above as the answer key | D3, Context probes | a refused socket counts as missing for the primary only; a start that exits 5 is polled again; a secondary is never started |
-| V39 | confirmed kill (D9) | unit, `CorePaneIo::kill` against the fake core | D9 move steps | `terminal.kill` timeout, error or `live`: refused `core_unreachable`, no replacement, pane unchanged; `finished` with the pid gone: replaced; `finished` with the pid running: refused |
+| V39 | confirmed kill (D9) | unit, `CorePaneIo::kill` against the fake core | D9 move steps | `terminal.kill` `live`: refused `core_unreachable`, no replacement, pane unchanged; timeout or error: suspended, no replacement; `finished` with the pid gone: replaced; `finished` with the pid running: suspended, its exit keeps the pane (fork issue 301) |
 | V40 | move facts per agent and input paths (D9) | unit for the paths; on the Mac live smoke for Claude | D9 | a Codex pane: `unsupported_agent`; `pane.send_text`, a queued Submit still pending, and `agent.message` note `queued` each give `recent_input`; a resume launch does not; real Claude Code (`--settings ~/.config/claude/direct-noconnectors.settings.json`) with a background agent running: `background_work`; with a foreground subagent: `agent_busy`; record the CLI version |
 | V41 | foreign process in an agent pane (D9) | unit over a fake process table | D9 | a `sleep &` started from the agent's shell escape, outside its tree: `foreign_process`; the agent's own MCP children: no refusal |
 | V42 | `HC_SOCKET` is the primary's only (D6) | unit, `client.rs` | D6 | with `HC_SOCKET` set, the primary's path is it and a secondary's path follows core's rules |

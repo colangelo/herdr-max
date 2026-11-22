@@ -51,12 +51,24 @@ answer every reason it was refused. With `check_only` the server SHALL only answ
 
 ### Requirement: A move starts the replacement only after a confirmed kill
 
-A move SHALL end the old program first and SHALL start the replacement only when the runtime reports the terminal
-finished or not found and the program's pid no longer runs. Otherwise it SHALL refuse with `core_unreachable`.
+A move SHALL end the old program first, an agent by a SIGTERM and then a SIGKILL of its process tree, and SHALL
+start the replacement only when the runtime reports the terminal finished or not found and the program's pid no
+longer runs. It SHALL refuse with `core_unreachable` only when core answered that the kill did not take and
+nothing was signalled.
 
-#### Scenario: The kill is not confirmed
-- **WHEN** the legacy core does not answer the kill of a pane's terminal
+#### Scenario: The kill is refused before anything is signalled
+- **WHEN** the legacy core answers that a shell pane's terminal still runs after the kill
 - **THEN** the move is refused with `core_unreachable`, no replacement starts, and the pane is unchanged
+
+### Requirement: A move never closes the pane once it sent a signal
+
+Once a move sent a signal, it SHALL NOT close or refuse the pane. An unconfirmed end SHALL suspend the pane with
+its resume plan, and the pane SHALL start again in place once its old program is gone.
+
+#### Scenario: The agent outlives the kill
+- **WHEN** a moved pane's agent still runs after its kill, or core does not answer the kill
+- **THEN** the move answers `moved`, the pane is suspended with its resume plan, the killed program's exit does
+  not close it, and it resumes in place once the old program is gone
 
 ### Requirement: Input on every path is recent input
 

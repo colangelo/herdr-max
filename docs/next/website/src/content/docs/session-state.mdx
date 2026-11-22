@@ -218,11 +218,13 @@ The server refuses a move, and changes nothing, for each of these reasons:
 | `foreign_process` | Something other than the agent runs in the pane, for example a job that a shell escape left running. |
 | `shell_busy` | The shell is not at its prompt, or runs a job. |
 | `shell_recent` | Input reached the shell pane in the last 10 minutes. |
-| `core_unreachable` | Herdr Core did not confirm that the old program ended. The pane keeps its program. |
+| `core_unreachable` | Herdr Core answered that the old program still runs after the kill. The pane keeps its program. |
+
+Before a moved agent's pane is killed, Herdr sends the agent SIGTERM, so it saves its conversation, and kills it if it has not exited after 3 seconds. Once Herdr has sent a signal, the move does not close the pane or leave it as it was. If the old program still runs, or Herdr Core does not answer, the move still answers `moved`, and the pane waits, suspended, until the old program is gone. Then it starts again in place, as after a lost session.
 
 A moved agent starts again through its resume command, the same command that `pane respawn --resume` types, so it keeps its conversation, name, model, effort, and permission mode. A moved shell starts again in the same directory with the pane's scrollback. It loses its process state: shell variables, jobs, and the history in its memory. That is why a shell must be quiet for 10 minutes before it moves.
 
-`scripts/core_move_idle_panes.sh` moves every pane that can move, one at a time. Without `--move`, it lists the panes and the reason the server gives for each. With `--move`, it moves one pane first, checks it, then moves the rest and stops at the first pane whose check fails. Before an agent moves, `agent-bell` must report no queued message for its session. `--exclude <glob>` skips more names for that run. Use `--herdr herdr-beta` to drive a beta build.
+`scripts/core_move_idle_panes.sh` moves every pane that can move, one at a time. Without `--move`, it lists the panes and the reason the server gives for each. With `--move`, it moves one pane first, checks it, then moves the rest. It stops at the first pane whose check fails, whose move answers anything but `moved`, or that is gone or holds another agent than the one it listed. Before an agent moves, `agent-bell` must report no queued message for its session. `--exclude <glob>` skips more names for that run. Use `--herdr herdr-beta` to drive a beta build.
 
 ## macOS: after a logout
 
