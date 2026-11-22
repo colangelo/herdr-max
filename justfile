@@ -113,6 +113,7 @@ core-live-test:
     HERDR_TEST_HC=1 cargo nextest run --locked --run-ignored ignored-only -E 'test(~core_backend_live_tests)'
     cargo build --locked
     bash scripts/core_live_test.sh
+    bash scripts/core_machine_live_test.sh
     cargo build --release --locked
     bash scripts/core_default_session_live_test.sh
 
