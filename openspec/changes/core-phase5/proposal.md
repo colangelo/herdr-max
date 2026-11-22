@@ -19,21 +19,28 @@ Three facts shape it, two of them measured for this change (`probe/README.md`):
 
 ## What Changes
 
+- **First, alone: local scans ignore other machines' terminals.** Once any machine is added, core lists its
+  terminals with the far herdr's own labels; restore, the orphan scan and the close sweep would act on them
+  (roundtable F1). Every address is parsed, and local scans keep local ones only.
 - **Machines are core machines in the primary core.** `herdr machine add --core <target>` runs `hc machine add`
   in the person's terminal with herdr's link command as `--via`. Core owns the connection, retries, the merged
   terminal list and `--on`.
 - **Every dial passes a lease gate.** `herdr core-link <name>` dials ssh only while a lease is in force: a TUI
-  client's lease from human input (#260's clock, 10 min), a fleet CLI call's lease, or `herdr machine wake`.
-  Restores, live handoffs, core starts and agents' own `hc` calls never hold one. When the last lease ends, the
-  link closes and core's retries refuse locally.
+  client's lease from human input (#260's clock, 10 min), a fleet CLI call's lease, `herdr machine add`, `login`
+  or `wake`. Restores, live handoffs, core starts and agents' own `hc` calls never hold one. When the last lease
+  ends, the link closes and core's retries refuse locally. core-link execs ssh (nothing is orphaned when core kills
+  it), dials one at a time, answers within 15 s, keeps no ssh master, ends frozen links by keepalive, and never
+  starts the far core. `machine.connect` runs on a background dialer, never on an input path.
 - **A herdr-max pane can run on a machine.** `--on <machine>` on split, tab, workspace and agent start, behind
   an advertised API capability. The pane keeps its herdr id, gains optional `machine` and `core_address` fields,
-  carries an ownership label the other Mac's herdr never matches, gets no `HERDR_*` integration variables, and
-  waits in place while the machine is dormant or unreachable.
+  carries an ownership label the other Mac's herdr never matches, runs under `env -u` for every `HERDR_*`
+  integration variable (the far core's own environment may carry them), and waits in place while the machine is
+  dormant or unreachable.
 - **Another Mac's herdr panes are shown by a view server.** `herdr server --view <machine>` projects the far
   side's `herdr-app` document (the spaces herdr-max already publishes) and attaches to its terminals without
-  taking their size. The TUI reaches it as one more endpoint; `herdr --remote core:<machine>` opens it in a tab.
-  Structural actions and `herdr --machine <name>` go to the far side's own herdr CLI through `machine.exec`.
+  taking their size: a `resumed` attach that types only AUTOMATIC_INPUT, measured not to resize. The TUI reaches it as one more endpoint; `herdr --remote core:<machine>` opens it in a tab.
+  Structural actions and `herdr --machine <name>` go to the far side's own herdr CLI through `machine.exec`; on a
+  dormant machine `--machine` refuses unless `--dial` says to open ssh, and a cut reply is an error.
 - **SSH dials are classified and announced.** The link reuses the old remote's ssh options and ControlMaster,
   never prompts in the background, and closes its gate on a Tailscale SSH check banner, a stalled Touch ID or an
   auth failure until `herdr machine login`. `herdr machine status --json` gives agents what to announce.
