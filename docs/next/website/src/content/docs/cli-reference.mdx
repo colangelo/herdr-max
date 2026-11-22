@@ -284,6 +284,7 @@ herdr pane clear [<pane_id>|--pane ID|--current]
 herdr pane mark-seen [--workspace ID]
 herdr pane close <pane_id> [--force]
 herdr pane respawn <pane_id> [--resume] [--force]
+herdr pane respawn <pane_id> --if-idle [--check]
 ```
 
 Without `--preset`, `pane layout` reads the pane geometry. With it, the command rebuilds the target pane's tab. `--set` remains an alias for `--preset`; `even-h`, `even-v` and `main-v` abbreviate the corresponding names. For example, `herdr pane layout --preset main-vertical --current` places the tab's focused pane on the left half and stacks the other panes on the right in current pane order. Five or more other panes use two right columns, filled top-down with the first taking `ceil(n/2)` panes. Focus stays unchanged. The new preset uses `layout.apply_preset` and requires a server supporting that method; the three original presets keep using `layout.set_preset`.
@@ -327,6 +328,16 @@ todos. Use it to move an agent onto a newly installed Herdr binary, or to
 restart one that is stuck, without losing its conversation. A pane with no
 agent session Herdr can resume returns `no_agent_session` and changes nothing.
 `--force` works as above; an agent that is running needs it.
+
+`pane respawn --if-idle` moves a pane onto the primary Herdr Core session, the
+one where new panes start, and only while nothing happens in it. The server
+decides from what it sees at that moment, so input that arrives during the
+check cannot slip past it. The JSON result (`type: "pane_respawn_if_idle"`) has
+`moved` and `refusals`, every reason the pane did not move. `--check` only
+reports and changes nothing. See
+[Moving idle panes onto Herdr Core](/docs/session-state/#moving-idle-panes-onto-herdr-core)
+for the reasons and for what a move keeps. It sends `pane.respawn_if_idle`. A
+server without that method rejects the request and respawns nothing.
 
 For pane commands that accept `--current`, Herdr uses the calling pane's
 `HERDR_PANE_ID` when the command runs inside a Herdr pane. For `pane split`,

@@ -197,6 +197,33 @@ Each entry is a pattern: `*` matches any run of characters, and `?` matches one 
 
 A matching pane starts on the PTY when it is created with a command that names its agent, when it is restored, when it starts again after a suspension, and when it is respawned. A new pane that starts as a shell has no name yet, so it uses `runtime`. Name it, then run `herdr pane respawn` on it. A pane that already runs in Herdr Core stays there after you add a pattern. Run `herdr pane respawn` on it to move it to the PTY. `herdr server reload-config` applies changes to the list to the next pane that starts.
 
+### Moving idle panes onto Herdr Core
+
+Panes that already run on the PTY, or in the older Herdr Core session `herdr`, stay where they are. `herdr pane respawn <pane_id> --if-idle` moves one onto the session where new panes start, only when nothing happens in it. The server checks the pane and kills its old program in one step, and it starts the replacement only after Herdr Core confirms that the old program ended.
+
+The server refuses a move, and changes nothing, for each of these reasons:
+
+| Refusal | Meaning |
+|---|---|
+| `already_on_primary` | The pane already runs where new panes start. |
+| `excluded` | The pane matches `core_pty_panes`. |
+| `core_off` | `runtime` is not `core`, or Herdr gave up on Herdr Core. |
+| `not_movable` | The pane is suspended, waits for Herdr Core, is starting again, is an overlay, or a worktree removal is stopping it. |
+| `recent_input` | Input reached the pane in the last 60 seconds. This includes keys, text from the API, a message still waiting to be submitted, and a note sent to its agent. |
+| `unsupported_agent` | Herdr cannot tell when this agent is idle. Today only Claude Code can move. |
+| `agent_busy` | The agent has not been idle for 60 seconds. A Claude Code subagent keeps it busy. |
+| `background_work` | The agent shows background work: shells, monitors, background agents, or MCP tasks. |
+| `draft_in_box` | The agent's input box holds text, or Herdr cannot see it. |
+| `no_resume_plan` | Herdr has no command to resume the agent's session. |
+| `foreign_process` | Something other than the agent runs in the pane, for example a job that a shell escape left running. |
+| `shell_busy` | The shell is not at its prompt, or runs a job. |
+| `shell_recent` | Input reached the shell pane in the last 10 minutes. |
+| `core_unreachable` | Herdr Core did not confirm that the old program ended. The pane keeps its program. |
+
+A moved agent starts again through its resume command, the same command that `pane respawn --resume` types, so it keeps its conversation, name, model, effort, and permission mode. A moved shell starts again in the same directory with the pane's scrollback. It loses its process state: shell variables, jobs, and the history in its memory. That is why a shell must be quiet for 10 minutes before it moves.
+
+`scripts/core_move_idle_panes.sh` moves every pane that can move, one at a time. Without `--move`, it lists the panes and the reason the server gives for each. With `--move`, it moves one pane first, checks it, then moves the rest and stops at the first pane whose check fails. Before an agent moves, `agent-bell` must report no queued message for its session. `--exclude <glob>` skips more names for that run. Use `--herdr herdr-beta` to drive a beta build.
+
 ## macOS: after a logout
 
 On macOS, a server that Herdr starts in the background (the usual `herdr` launch) runs in your account's per-user context, which survives logging out. A server started another way, or carried forward by live handoffs from such a server, can run in a login session's context instead. When that login ends, for example after a crash logs you out, every pane the server starts can no longer resolve host names, read the keychain, or use `launchctl`.
