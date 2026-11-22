@@ -10,10 +10,25 @@ are in design.md § Verifier table.
 
 ## 2. PR A: core's turn counts herdr's turns
 
-- [ ] 2.1 `owed_turn` in `StatusMirror`: owed on a coalesced `working`, redundant records kept while owed, `working` plus the record in one write (verifier 1, 2)
-- [ ] 2.2 `view_dirty` on `AppState`, set by session-saving changes and client focus or shown-tab changes; the server loop re-offers every pane's record once per pass (verifier 4, unit)
-- [ ] 2.3 Live test: one turn per coalesced herdr turn; a read `done` pane turns `idle` in core (verifier 3, 4)
-- [ ] 2.4 Check: `just check`, `just core-live-test`, CI green
+- [x] 2.1 `owed_turn` in `StatusMirror`: owed on a coalesced `working`, redundant records kept while owed, `working` plus the record in one write (verifier 1, 2)
+- [x] 2.2 `view_dirty` on `AppState`, set by session-saving changes and client focus or shown-tab changes; the server loop re-offers every pane's record once per pass (verifier 4, unit)
+- [x] 2.3 Live test: one turn per coalesced herdr turn; a read `done` pane turns `idle` in core (verifier 3, 4)
+- [x] 2.4 Check: `just check`, `just core-live-test`, CI green
+
+As built (PR A). `StatusMirror` holds `owed_working: Option<CoreStatusRecord>`, the `working` itself, so
+the owed record carries the agent's `app`. `take_due` returns a `MirrorWrite` (`owed_working`, `record`)
+whose `encode` puts both records in the one `write`; `written` pays the debt, `busy` keeps it. The
+longest pair (two records with a 64-byte app) is under 256 bytes (unit test). `AppState::core_view_dirty`
+is set by `mark_session_dirty`, `mark_session_dirty_urgent`, `schedule_session_save` and
+`schedule_session_save_now`, and by `mark_active_tab_seen` when it changed a pane (the focus-in path).
+`App::sync_core_view` takes it once per server loop pass, next to `sync_core_spaces_schedule`, and with
+the mirror on hands every pane its record again. Live test
+`core_turn_counts_a_coalesced_herdr_turn_once`: a pane printing every 20 ms gets `working` then `done`
+50 ms apart; core's turn rises by exactly 1, and a following `idle` leaves it there.
+
+Limits: a seen change made by a path that neither saves the session nor goes through
+`mark_active_tab_seen` re-offers at the next pass that does. Native 7501 reporters can step core's turn
+twice for one turn (D6). CI is the coordinator's to watch.
 
 ## 3. PR B: herdr writes `herdr.seen`
 
