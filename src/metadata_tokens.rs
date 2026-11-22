@@ -88,6 +88,13 @@ impl MetadataTokens {
             .collect()
     }
 
+    /// Every token as key, value and expiry.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &str, Option<Instant>)> {
+        self.entries
+            .iter()
+            .map(|(key, token)| (key.as_str(), token.value.as_str(), token.expires_at))
+    }
+
     pub(crate) fn next_expiry(&self) -> Option<Instant> {
         self.entries
             .values()
