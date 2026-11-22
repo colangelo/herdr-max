@@ -263,7 +263,7 @@ SERVER
   python3 -I -c 'import json,sys; g = json.load(open(sys.argv[1])); sys.exit(0 if g["at"] > float(sys.argv[2]) else 1)' \
     "$LINK_ROOT/$V/gate.json" "$key" || fail "V38: retry_spent was not recorded after the key"
   echo "ok: V38 ${V38_SECS}s of refused auth: $execs dials, gate retry_spent; one key and its wake: exactly one more dial, then none in 40 s"
-  run_herdr machine rm --core "$V" >/dev/null 2>&1 || fail "V38: machine rm --core $V failed"
+  run_herdr machine rm --core "$V" >"$BASE/rm-v38.out" 2>&1 || fail "V38: machine rm --core $V failed: $(tail -n 5 "$BASE/rm-v38.out")"
   kill "$(cat "$SSHD2/server.pid")" 2>/dev/null || true
   hc_far2 server stop >/dev/null 2>&1 || true
 }
@@ -392,7 +392,7 @@ code=0; run_herdr machine wake "$L" >"$BASE/wake.out" 2>&1 || code=$?
 [[ "$(log_count "$L" "START")" == "$starts_before" ]] || fail "a refused wake dialled"
 echo "ok: V35 machine wake reopened far_core_down and connected; a wake over auth_failed refuses and points to login"
 
-run_herdr machine rm --core "$L" >/dev/null 2>&1 || fail "machine rm --core $L failed"
+run_herdr machine rm --core "$L" >"$BASE/rm.out" 2>&1 || fail "machine rm --core $L failed: $(tail -n 5 "$BASE/rm.out")"
 [[ ! -e "$LINK_ROOT/$L" && "$(machine_state "$L")" == absent ]] || fail "machine rm --core left $L"
 none_left() {
   local pid

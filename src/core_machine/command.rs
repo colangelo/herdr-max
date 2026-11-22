@@ -270,10 +270,26 @@ pub(crate) fn remove(args: &[String]) -> std::io::Result<i32> {
     let status = hc.args(["machine", "rm", name.as_str()]).status()?;
     let dir = MachineDir::at(&passwd_machines_root()?, &name);
     if dir.exists() {
-        std::fs::remove_dir_all(dir.path())?;
+        remove_link_state(&dir)?;
         println!("Removed herdr's link state for {name}.");
     }
     Ok(status.code().unwrap_or(1))
+}
+
+/// Removes a machine's folder. The link core just ended may still be
+/// winding down for a moment: its watcher writes the end to `link.log` and
+/// the gate, which can land between the removal's listing and its last
+/// `rmdir`. So a removal that fails is tried again for up to 2 s.
+fn remove_link_state(dir: &MachineDir) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir_all(dir.path()) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if std::time::Instant::now() >= deadline => return Err(err),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
 }
 
 pub(crate) fn login(args: &[String]) -> std::io::Result<i32> {
