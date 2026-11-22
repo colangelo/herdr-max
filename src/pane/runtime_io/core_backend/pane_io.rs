@@ -244,14 +244,54 @@ impl StartFailure {
     }
 }
 
-/// Whether core confirms the terminal at `address` ended: it killed it, or
-/// it no longer runs.
-fn kill_confirmed(client: &CoreClient, address: &str) -> bool {
-    match client.call("terminal.kill", json!({"terminal": address}), CALL_TIMEOUT) {
-        Ok(_) => true,
-        Err(CoreError::Rpc { kind, .. }) => kind == "not_found" || kind == "finished",
-        Err(_) => false,
+/// What core said to `terminal.kill`, which returns the terminal as it
+/// observed it (core-phase3 D9, roundtable item 8).
+#[derive(Debug)]
+pub(crate) enum KillOutcome {
+    /// The terminal's record says `finished`.
+    Finished,
+    /// Core no longer knows the terminal.
+    NotFound,
+    /// Core answered, and the terminal still runs.
+    Live,
+    /// No answer, or an error: core may still run the program.
+    Failed(CoreError),
+}
+
+impl KillOutcome {
+    pub(super) fn from_answer(answer: Result<Value, CoreError>) -> Self {
+        match answer {
+            Ok(record) if record["state"] == "finished" => Self::Finished,
+            Ok(_) => Self::Live,
+            Err(CoreError::Rpc { kind, .. }) if kind == "finished" => Self::Finished,
+            Err(CoreError::Rpc { kind, .. }) if kind == "not_found" => Self::NotFound,
+            Err(err) => Self::Failed(err),
+        }
     }
+
+    /// Core confirms the program ended: only `finished` or `not_found`.
+    pub(crate) fn ended(&self) -> bool {
+        matches!(self, Self::Finished | Self::NotFound)
+    }
+}
+
+impl std::fmt::Display for KillOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Finished => write!(f, "herdr-core ended the terminal"),
+            Self::NotFound => write!(f, "herdr-core no longer knows the terminal"),
+            Self::Live => write!(f, "herdr-core says the terminal still runs"),
+            Self::Failed(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+fn kill_terminal(client: &CoreClient, address: &str) -> KillOutcome {
+    KillOutcome::from_answer(client.call(
+        "terminal.kill",
+        json!({"terminal": address}),
+        CALL_TIMEOUT,
+    ))
 }
 
 /// A core terminal that is running and attached, before the pane hands over
@@ -457,7 +497,7 @@ impl StartedCore {
             Err(err) => {
                 // Do not leave a program running that no pane shows; one
                 // core does not confirm ended may still run.
-                if ours_to_kill && !kill_confirmed(&client, &address) {
+                if ours_to_kill && !kill_terminal(&client, &address).ended() {
                     return Err(StartFailure::Unknown(err));
                 }
                 return Err(StartFailure::NotStarted(err));
@@ -647,13 +687,9 @@ impl CorePaneIo {
     }
 
     /// Ends the program in core (D8's first half; the local sweep follows in
-    /// `terminate_session`).
-    pub(crate) fn kill(&self) {
-        let _ = self.shared.client().call(
-            "terminal.kill",
-            json!({"terminal": self.shared.address}),
-            CALL_TIMEOUT,
-        );
+    /// `terminate_session`) and says what core observed.
+    pub(crate) fn kill(&self) -> KillOutcome {
+        kill_terminal(&self.shared.client(), &self.shared.address)
     }
 
     /// The core server's and its holders' pids, for the sweep guard (D8).

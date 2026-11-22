@@ -677,6 +677,33 @@ impl PaneIo {
         }
     }
 
+    /// Ends the pane's program for the idle move (core-phase3 D9) with its
+    /// I/O still attached: a core pane only once `terminal.kill` confirms it
+    /// ended, so on `Err` (what core said) nothing else changed.
+    pub(super) fn end_program_for_move(
+        &self,
+        pane_id: crate::layout::PaneId,
+        child_pid: u32,
+        child_wait_completed: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        match self {
+            PaneIo::Actor(_) => {
+                pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed);
+                Ok(())
+            }
+            #[cfg(unix)]
+            PaneIo::Core(core) => {
+                core_backend::end_program_confirmed(core, pane_id, child_pid, child_wait_completed)
+                    .map_err(|outcome| outcome.to_string())
+            }
+            #[cfg(test)]
+            PaneIo::TestChannel { .. } => {
+                pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed);
+                Ok(())
+            }
+        }
+    }
+
     /// Preflight a complete API command without changing input queue semantics.
     pub(super) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
         match self {

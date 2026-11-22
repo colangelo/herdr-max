@@ -30,6 +30,9 @@ pub(crate) struct FakeConfig {
     pub lose_run_reply: bool,
     /// These calls answer with an `internal` error.
     pub failing: Vec<&'static str>,
+    /// `terminal.kill` answers with the terminal still `live`, as a core
+    /// whose kill did not take.
+    pub kill_leaves_live: bool,
 }
 
 impl Default for FakeConfig {
@@ -45,6 +48,7 @@ impl Default for FakeConfig {
             run_delay: std::time::Duration::ZERO,
             lose_run_reply: false,
             failing: Vec::new(),
+            kill_leaves_live: false,
         }
     }
 }
@@ -372,6 +376,22 @@ fn answer(
                 .collect();
             terminals.sort_by_key(|record| record["address"].to_string());
             (Ok(json!({"terminals": terminals})), None)
+        }
+        "terminal.kill" => {
+            let address = params["terminal"].as_str().unwrap_or_default();
+            let state = if config.kill_leaves_live {
+                "live"
+            } else {
+                "finished"
+            };
+            let mut shared = lock(shared);
+            let mut fallback = json!({"address": address});
+            let record = shared.terminals.get_mut(address).unwrap_or(&mut fallback);
+            record["state"] = json!(state);
+            if state == "finished" {
+                record["reason"] = json!("killed");
+            }
+            (Ok(record.clone()), None)
         }
         _ => (Ok(json!({})), None),
     };

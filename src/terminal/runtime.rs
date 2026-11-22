@@ -42,6 +42,10 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
+    pub fn end_program_for_move(&self) -> Result<(), String> {
+        self.0.end_program_for_move()
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()

@@ -2565,6 +2565,16 @@ impl PaneRuntime {
         self.preserve_processes_on_drop = true;
     }
 
+    /// Ends the program for the idle move (core-phase3 D9), keeping the
+    /// pane's I/O; `Err` says why core did not confirm the end.
+    pub fn end_program_for_move(&self) -> Result<(), String> {
+        self.io.end_program_for_move(
+            self.pane_id,
+            self.child_pid.load(Ordering::Acquire),
+            self.child_wait_completed.as_deref(),
+        )
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.io.duplicate_handoff_fd()

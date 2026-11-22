@@ -20,7 +20,8 @@ use tracing::warn;
 
 use client::CoreError;
 pub(crate) use pane_io::{
-    Connector, CorePaneIo, CoreReattach, CoreSpawn, ReattachError, StartFailure, StartedCore,
+    Connector, CorePaneIo, CoreReattach, CoreSpawn, KillOutcome, ReattachError, StartFailure,
+    StartedCore,
 };
 pub(crate) use sessions::{
     core_session_name, existing_core_connector, existing_session_connector, herdr_session_label,
@@ -354,6 +355,33 @@ pub(crate) fn terminate_session(
     if core.kept_on_drop() {
         return;
     }
+    end_program(core, pane_id, child_pid, child_wait_completed, true);
+}
+
+/// The idle move's kill (core-phase3 D9): as a close, but the local sweep
+/// runs only once core confirms the terminal ended, and the answer says
+/// whether it did. The pane's stream stays attached either way.
+pub(crate) fn end_program_confirmed(
+    core: &CorePaneIo,
+    pane_id: PaneId,
+    child_pid: u32,
+    child_wait_completed: Option<&AtomicBool>,
+) -> Result<(), KillOutcome> {
+    let outcome = end_program(core, pane_id, child_pid, child_wait_completed, false);
+    if outcome.ended() {
+        Ok(())
+    } else {
+        Err(outcome)
+    }
+}
+
+fn end_program(
+    core: &CorePaneIo,
+    pane_id: PaneId,
+    child_pid: u32,
+    child_wait_completed: Option<&AtomicBool>,
+    sweep_unconfirmed: bool,
+) -> KillOutcome {
     // List the session before the kill: once core ends the session leader,
     // its session can no longer be looked up, and detached jobs would escape.
     // Without core's pids the guard cannot tell core's session from the
@@ -366,7 +394,7 @@ pub(crate) fn terminate_session(
     } else {
         super::pty::session_pids(child_pid, child_wait_completed)
     };
-    core.kill();
+    let outcome = core.kill();
     if guarded {
         if unknown {
             warn!(
@@ -381,11 +409,12 @@ pub(crate) fn terminate_session(
                 "herdr-core program shares a session with core; not sweeping it"
             );
         }
-        return;
+        return outcome;
     }
-    if !pids.is_empty() {
+    if !pids.is_empty() && (sweep_unconfirmed || outcome.ended()) {
         super::pty::signal_session(pane_id, child_pid, &pids, child_wait_completed);
     }
+    outcome
 }
 
 /// True when the program's session is the session of a core server or holder
@@ -793,5 +822,38 @@ mod tests {
         pane.set_keep_on_drop(false);
         terminate_session(&pane, PaneId::from_raw(5), 0, None);
         assert_eq!(kills(&core), 1, "{:?}", core.methods());
+    }
+
+    // V39 (core-phase3 D9, roundtable item 8): the move's kill counts as
+    // confirmed only when core answers `finished` or `not_found`; a `live`
+    // answer, an error or no answer leaves the pane to the caller unchanged.
+    #[test]
+    fn only_a_finished_or_unknown_terminal_confirms_the_kill() {
+        let confirmed = |configure: fn(&mut fake::FakeConfig)| {
+            let core = fake::FakeCore::start_with(configure);
+            let pane = fake_core_pane(&core);
+            end_program_confirmed(&pane, PaneId::from_raw(5), 0, None)
+                .map_err(|outcome| outcome.to_string())
+        };
+        assert_eq!(confirmed(|_| {}), Ok(()));
+        assert_eq!(
+            confirmed(|config| config.kill_leaves_live = true),
+            Err("herdr-core says the terminal still runs".into())
+        );
+        assert!(confirmed(|config| config.failing.push("terminal.kill")).is_err());
+
+        let rpc = |kind: &str| CoreError::Rpc {
+            kind: kind.into(),
+            message: String::new(),
+        };
+        assert!(KillOutcome::from_answer(Err(rpc("not_found"))).ended());
+        assert!(KillOutcome::from_answer(Err(rpc("finished"))).ended());
+        assert!(!KillOutcome::from_answer(Err(CoreError::Timeout("terminal.kill"))).ended());
+        assert!(!KillOutcome::from_answer(Err(CoreError::Closed)).ended());
+        assert!(!KillOutcome::from_answer(Ok(serde_json::json!({"state": "live"}))).ended());
+        assert!(
+            !KillOutcome::from_answer(Ok(serde_json::json!({}))).ended(),
+            "no state is no proof"
+        );
     }
 }
