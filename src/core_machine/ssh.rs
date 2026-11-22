@@ -27,21 +27,37 @@ pub(crate) const LINK_SSH_OPTIONS: [&str; 5] = [
     "LogLevel=INFO",
 ];
 
+/// Pinned on the link and on `machine login` (security review M2): no
+/// agent, X11 or port forwarding and no local command, whatever a `Host`
+/// block or an included file says (ssh takes the first value it obtains,
+/// and the command line comes first). `SetEnv` keeps the first value too,
+/// and OpenSSH refuses an empty one, so an inert `HERDR_LINK=1` takes the
+/// place a config's `SetEnv` would (a far sshd drops it unless its
+/// `AcceptEnv` names it). `SendEnv` adds up instead, so the link's config
+/// clears it at its end ([`link_config_contents`]).
+pub(crate) const NO_FORWARDING_OPTIONS: [&str; 5] = [
+    "ForwardAgent=no",
+    "ForwardX11=no",
+    "ClearAllForwardings=yes",
+    "PermitLocalCommand=no",
+    "SetEnv=HERDR_LINK=1",
+];
+
 /// Core's POSIX line is `sh -c '...'`; its Windows fallback (`cmd /d /c
 /// ...`, R3) and anything else is not dialled (D2 step 1).
 pub(crate) fn is_posix_line(line: &str) -> bool {
     line.starts_with("sh -c '") && line.ends_with('\'')
 }
 
-/// `ssh -C -F <config> <non-interactive> <link options> -T <target>
-/// <guard && line>`. The managed config, or the one the machine was added
-/// with, is the only config ssh reads (D10).
-pub(crate) fn ssh_args(target: &Target, managed_config: &Path, line: &str) -> Vec<OsString> {
-    let config = target.ssh_config.as_deref().unwrap_or(managed_config);
+/// `ssh -C -F <config> <non-interactive> <link options> <no forwarding>
+/// -T <target> <guard && line>`. `config` is the link's own config
+/// ([`write_link_config`]), the only one ssh reads (D10).
+pub(crate) fn ssh_args(target: &Target, config: &Path, line: &str) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["-C".into(), "-F".into(), config.into()];
     for option in crate::remote::NONINTERACTIVE_SSH_OPTIONS
         .iter()
         .chain(LINK_SSH_OPTIONS.iter())
+        .chain(NO_FORWARDING_OPTIONS.iter())
     {
         args.push("-o".into());
         args.push((*option).into());
@@ -53,27 +69,49 @@ pub(crate) fn ssh_args(target: &Target, managed_config: &Path, line: &str) -> Ve
 }
 
 /// The ssh of `herdr machine login` (D10): in the person's terminal, so a
-/// key, host key or Tailscale check is answered there; still no master.
-pub(crate) fn login_ssh_args(target: &Target, managed_config: &Path) -> Vec<OsString> {
-    let config = target.ssh_config.as_deref().unwrap_or(managed_config);
+/// key, host key or Tailscale check is answered there; still no master and
+/// no forwarding.
+pub(crate) fn login_ssh_args(target: &Target, config: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["-C".into(), "-F".into(), config.into()];
-    for option in ["ControlMaster=no", "ControlPath=none", "ConnectTimeout=10"] {
+    for option in ["ControlMaster=no", "ControlPath=none", "ConnectTimeout=10"]
+        .iter()
+        .chain(NO_FORWARDING_OPTIONS.iter())
+    {
         args.push("-o".into());
-        args.push(option.into());
+        args.push((*option).into());
     }
     args.extend(["-T".into(), target.target.as_str().into(), "exit".into()]);
     args
 }
 
-/// Writes the managed ssh config (an `Include` of the user's config under
-/// the passwd home and of the system one) into the machine's folder.
-pub(crate) fn write_managed_config(
+/// What the link's ssh reads: an `Include` of the config the machine was
+/// added with (`--ssh-config`), or else of the user's config under the
+/// passwd home and of the system one; then `SendEnv -*` for every host, so
+/// no config sends a variable (M2; ssh's environment is the allowlist of
+/// [`ssh_env`] anyway).
+pub(crate) fn link_config_contents(
+    chosen: Option<&Path>,
+    user_config: &Path,
+    system_config: Option<&Path>,
+) -> String {
+    let mut contents = match chosen {
+        Some(chosen) => crate::remote::managed_ssh_config_contents(Some(chosen), None),
+        None => crate::remote::managed_ssh_config_contents(Some(user_config), system_config),
+    };
+    contents.push_str("Host *\n  SendEnv -*\n");
+    contents
+}
+
+/// Writes the link's ssh config into the machine's folder.
+pub(crate) fn write_link_config(
     dir: &super::state::MachineDir,
+    target: &Target,
     home: &Path,
 ) -> std::io::Result<std::path::PathBuf> {
     let path = dir.ssh_config_path();
-    let contents = crate::remote::managed_ssh_config_contents(
-        Some(&home.join(".ssh/config")),
+    let contents = link_config_contents(
+        target.ssh_config.as_deref(),
+        &home.join(".ssh/config"),
         crate::platform::remote_ssh_config_paths()
             .system_config
             .as_deref(),
@@ -154,7 +192,6 @@ pub(crate) fn far_guard(session: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::process::Command;
 
     use super::*;
@@ -211,6 +248,16 @@ mod tests {
             "ServerAliveCountMax=2",
             "-o",
             "LogLevel=INFO",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "ForwardX11=no",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "PermitLocalCommand=no",
+            "-o",
+            "SetEnv=HERDR_LINK=1",
             "-T",
             "ac@ac-mbm5",
         ];
@@ -246,6 +293,16 @@ mod tests {
                 "ControlPath=none",
                 "-o",
                 "ConnectTimeout=10",
+                "-o",
+                "ForwardAgent=no",
+                "-o",
+                "ForwardX11=no",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "PermitLocalCommand=no",
+                "-o",
+                "SetEnv=HERDR_LINK=1",
                 "-T",
                 "ac@ac-mbm5",
                 "exit"
@@ -254,11 +311,85 @@ mod tests {
     }
 
     #[test]
-    fn a_chosen_ssh_config_replaces_the_managed_one() {
+    fn a_chosen_ssh_config_replaces_the_managed_one_and_sendenv_is_cleared() {
+        let root = super::super::state::tests::scratch("linkcfg");
+        let chosen = root.join("test config");
+        let user = root.join("user_config");
+        let system = root.join("system_config");
+        for file in [&chosen, &user, &system] {
+            std::fs::write(file, "Host x\n").expect("config");
+        }
+        let with_chosen = link_config_contents(Some(&chosen), &user, Some(&system));
+        assert_eq!(
+            with_chosen,
+            format!("Include \"{}\"\nHost *\n  SendEnv -*\n", chosen.display())
+        );
+        let managed = link_config_contents(None, &user, Some(&system));
+        assert!(managed.contains(&user.display().to_string()), "{managed}");
+        assert!(managed.contains(&system.display().to_string()), "{managed}");
+        assert!(managed.ends_with("Host *\n  SendEnv -*\n"), "{managed}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M2, against this Mac's OpenSSH (`ssh -G` reads the config and dials
+    /// nothing): a config that forwards the agent, X11 and a port, sends
+    /// and sets variables and runs a local command loses all of it to the
+    /// link's options and config.
+    #[test]
+    fn a_forwarding_config_forwards_nothing_through_the_link() {
+        let Some(ssh) = ["/usr/bin/ssh", "/opt/homebrew/bin/ssh"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())
+        else {
+            return;
+        };
+        let root = super::super::state::tests::scratch("forward");
+        let chosen = root.join("forwarding_config");
+        std::fs::write(
+            &chosen,
+            "Host loop\n  HostName 127.0.0.1\n  ForwardAgent yes\n  ForwardX11 yes\n  \
+             LocalForward 9999 127.0.0.1:22\n  SendEnv FOO LANG\n  SetEnv FOO=1\n  \
+             PermitLocalCommand yes\n  LocalCommand true\n",
+        )
+        .expect("config");
+        let config = root.join("ssh_config");
+        std::fs::write(&config, link_config_contents(Some(&chosen), &chosen, None))
+            .expect("link config");
         let mut target = target();
-        target.ssh_config = Some(PathBuf::from("/cfg/test_ssh_config"));
-        let args = ssh_args(&target, Path::new("/st/loop/ssh_config"), CORE_POSIX_LINE);
-        assert_eq!(args[2], OsString::from("/cfg/test_ssh_config"));
+        target.target = "loop".into();
+        let mut args = ssh_args(&target, &config, CORE_POSIX_LINE);
+        args.pop();
+        args.pop();
+        let output = Command::new(ssh)
+            .arg("-G")
+            .args(&args)
+            .arg("loop")
+            .env_clear()
+            .env("HOME", &root)
+            .output()
+            .expect("ssh -G");
+        let effective = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        assert!(output.status.success(), "{output:?}");
+        for line in [
+            "forwardagent no",
+            "forwardx11 no",
+            "clearallforwardings yes",
+            "permitlocalcommand no",
+            "setenv herdr_link=1",
+        ] {
+            assert!(
+                effective.lines().any(|l| l == line),
+                "no {line:?} in:\n{effective}"
+            );
+        }
+        for key in ["sendenv ", "localforward ", "setenv foo"] {
+            assert!(
+                !effective.lines().any(|l| l.starts_with(key)),
+                "{key:?} in:\n{effective}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
