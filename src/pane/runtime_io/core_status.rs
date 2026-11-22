@@ -77,6 +77,16 @@ impl CoreStatusRecord {
     pub(crate) fn is_clear(&self) -> bool {
         matches!(self, Self::Clear)
     }
+
+    pub(crate) fn is_working(&self) -> bool {
+        matches!(
+            self,
+            Self::Report {
+                word: CoreStatusWord::Working,
+                ..
+            }
+        )
+    }
 }
 
 #[cfg(test)]

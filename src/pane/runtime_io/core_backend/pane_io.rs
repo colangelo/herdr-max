@@ -922,7 +922,7 @@ fn spawn_parser(
 /// D3, D4). A full terminal buffer keeps it for a retry; any other failure
 /// drops it, since the next status change sends a fresh one.
 fn write_mirrored_status(shared: &Shared, mirror: &mut StatusMirror) {
-    let Some(record) = mirror.take_due(Instant::now()) else {
+    let Some(write) = mirror.take_due(Instant::now()) else {
         return;
     };
     let terminal = {
@@ -940,10 +940,10 @@ fn write_mirrored_status(shared: &Shared, mirror: &mut StatusMirror) {
         );
         return;
     };
-    match terminal.write(&record.encode()) {
-        Ok(()) => mirror.written(record),
+    match terminal.write(&write.encode()) {
+        Ok(()) => mirror.written(write),
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-            mirror.busy(record, Instant::now());
+            mirror.busy(write, Instant::now());
         }
         Err(err) => debug!(
             pane = shared.pane_id.raw(),
