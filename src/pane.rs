@@ -3192,8 +3192,18 @@ impl PaneRuntime {
         pane_terminal.set_windows_powershell_prompt_cwd_reporting(
             initial_state.windows_powershell_prompt_cwd_reporting,
         );
-        if let Some(ansi) = initial_state.history_ansi {
+        if let Some(ansi) = initial_state.history_ansi.filter(|ansi| !ansi.is_empty()) {
             pane_terminal.seed_history_ansi(ansi);
+            // Core's first paint clears the screen, so the seeded lines on it
+            // go to the scrollback first (core-phase3 D8, D9).
+            let tries_core = match &launch {
+                PaneLaunch::Command { runtime, .. } => runtime_io::starts_on_core(*runtime),
+                #[cfg(unix)]
+                PaneLaunch::ReattachCore { .. } => false,
+            };
+            if tries_core {
+                pane_terminal.push_screen_into_history();
+            }
         }
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());

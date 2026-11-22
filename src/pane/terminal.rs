@@ -1623,6 +1623,23 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    /// Scrolls the screen's rows down to the cursor's into the scrollback,
+    /// so a repaint that clears the screen keeps them: a core pane's first
+    /// paint starts with `ESC[2J` (core-phase3 D8, D9).
+    pub fn push_screen_into_history(&self) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        let (Ok(rows), Ok(cursor_y)) = (core.terminal.rows(), core.terminal.cursor_y()) else {
+            return;
+        };
+        // A line feed on the bottom row moves the top row into the
+        // scrollback; the cursor's row goes too, as it may hold text.
+        let mut scroll = format!("\x1b[{rows};1H");
+        scroll.push_str(&"\n".repeat(usize::from(cursor_y) + 1));
+        core.terminal.write(scroll.as_bytes());
+    }
+
     #[cfg(unix)]
     pub fn seed_handoff_input_state(&self, input_state: InputState) {
         let Ok(mut core) = self.core.lock() else {
