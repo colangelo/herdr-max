@@ -1960,7 +1960,7 @@
           "key": "experimental.core_label_sync",
           "type": "boolean",
           "default": "false",
-          "description": "Share which agents you have seen with the Herdr apps, such as Herdr Mobile, through the herdr.seen label on herdr-core terminals. When a focused herdr client shows a herdr-core pane, herdr raises the label to the terminal's turn once per turn, and herdr pane mark-seen raises it too, so the apps stop showing the agent as done. New herdr-core panes start with herdr.seen=0. herdr still takes no status from herdr-core. Applies on reload. Unix only. Default: false."
+          "description": "Share which agents you have seen, and which are pinned, with the Herdr apps, such as Herdr Mobile, through the herdr.seen and herdr.pinned labels on herdr-core terminals. When a focused herdr client shows a herdr-core pane, herdr raises herdr.seen to the terminal's turn once per turn, and herdr pane mark-seen raises it too, so the apps stop showing the agent as done. An agent read or marked unread in an app is read or done in herdr. Pins follow in both directions. New herdr-core panes start with herdr.seen=0. herdr still takes no status from herdr-core. Applies on reload. See Session state. Unix only. Default: false."
         },
         {
           "key": "experimental.core_pty_panes",
