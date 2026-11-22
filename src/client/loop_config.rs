@@ -19,5 +19,6 @@ pub(super) struct ClientLoopConfig {
     /// A person's command started this client, not a reconnect after a
     /// live handoff or a re-exec onto the server's build: it writes its
     /// core machine lease at start (core-phase5 D3).
+    #[cfg(unix)]
     pub(super) person_started: bool,
 }

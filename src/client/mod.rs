@@ -271,6 +271,7 @@ fn run_client_with_mode(
         endpoint_keybindings,
         remote_image_paste_key,
         shell_config,
+        #[cfg(unix)]
         person_started: !reconnecting && std::env::var_os(reexec::REEXEC_ENV_VAR).is_none(),
     };
 
