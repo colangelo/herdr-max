@@ -192,6 +192,19 @@ pub(crate) fn signal(pid: u32, signal: Signal) {
     unsafe { libc::kill(pid as libc::pid_t, number) };
 }
 
+/// Whether a process with this pid exists (`kill(pid, 0)`; a pid of
+/// another account counts as alive).
+pub(crate) fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks that the pid exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Reads what is ready on `fd` within `timeout`: `None` on timeout,
 /// `Some(0)` at end of file.
 pub(crate) fn read_within(

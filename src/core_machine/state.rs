@@ -1,7 +1,7 @@
 //! A core machine's link state on this Mac (core-phase5 D2): one private
 //! folder per machine under the account's passwd home, holding
-//! `target.json`, `gate.json`, `leases/`, `dial.lock`, `dial.json`, the
-//! managed `ssh_config` and `link.log`. Every file is parsed here, at the
+//! `target.json`, `gate.json`, `leases/`, `dial.lock`, `connect.lock`,
+//! `dial.json`, the link's `ssh_config` and `link.log`. Every file is parsed here, at the
 //! boundary; a file that does not parse is refused, never guessed at.
 
 use std::fs;
@@ -101,6 +101,12 @@ impl MachineDir {
         self.path.join("dial.lock")
     }
 
+    /// Held by a herdr dialer around its `machine.connect` (D3a), so herdr
+    /// makes one connect per wake across its processes.
+    pub(crate) fn connect_lock_path(&self) -> PathBuf {
+        self.path.join("connect.lock")
+    }
+
     pub(crate) fn dial_record_path(&self) -> PathBuf {
         self.path.join("dial.json")
     }
@@ -167,17 +173,31 @@ impl MachineDir {
         serde_json::from_slice(&fs::read(self.dial_record_path()).ok()?).ok()
     }
 
-    /// Writes `leases/<holder>` with its expiry (write, then rename): each
-    /// holder writes only its own file (D3).
-    pub(crate) fn write_lease(&self, holder: &LeaseHolder, expires_at: f64) -> io::Result<()> {
+    /// Writes `leases/<holder>` with its expiry and the time of the human
+    /// act behind it (write, then rename): each holder writes only its own
+    /// file (D3).
+    pub(crate) fn write_lease(
+        &self,
+        holder: &LeaseHolder,
+        expires_at: f64,
+        input_at: f64,
+    ) -> io::Result<()> {
         write_atomic(
             &self.leases_dir().join(holder.as_str()),
-            format!("{expires_at:.3}\n").as_bytes(),
+            format!("{expires_at:.3} {input_at:.3}\n").as_bytes(),
         )
     }
 
+    /// Removes a holder's own lease (a CLI call's, after its reply).
+    pub(crate) fn remove_lease(&self, holder: &LeaseHolder) -> io::Result<()> {
+        match fs::remove_file(self.leases_dir().join(holder.as_str())) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        }
+    }
+
     /// Every lease file that parses, in force or not; `.new` files are
-    /// writes in progress.
+    /// writes in progress, and a file that does not parse is no lease.
     pub(crate) fn leases(&self) -> Vec<Lease> {
         let Ok(entries) = fs::read_dir(self.leases_dir()) else {
             return Vec::new();
@@ -187,12 +207,17 @@ impl MachineDir {
             .filter_map(|entry| {
                 let holder = LeaseHolder::parse(entry.file_name().to_str()?).ok()?;
                 let text = fs::read_to_string(entry.path()).ok()?;
-                let expires_at = text
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|at| at.is_finite())?;
-                Some(Lease { holder, expires_at })
+                let modified = || {
+                    entry
+                        .metadata()
+                        .ok()?
+                        .modified()
+                        .ok()?
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|at| at.as_secs_f64())
+                };
+                Lease::parse(holder, &text, modified)
             })
             .collect();
         leases.sort_by(|a, b| a.holder.cmp(&b.holder));
@@ -308,6 +333,12 @@ pub(crate) enum GateClass {
     AuthFailed,
     /// The far core does not run; reopens by itself after 5 min.
     FarCoreDown,
+    /// One dial ended without a link, or a link dropped (D2 step 9). It
+    /// closes nothing: core's next dial is the one retry.
+    DialFailed,
+    /// The retry failed too: closed until a human act gives a lease newer
+    /// than the failure (D2 step 9).
+    RetrySpent,
 }
 
 impl GateClass {
@@ -317,6 +348,8 @@ impl GateClass {
             Self::AuthStalled => "auth_stalled",
             Self::AuthFailed => "auth_failed",
             Self::FarCoreDown => "far_core_down",
+            Self::DialFailed => "dial_failed",
+            Self::RetrySpent => "retry_spent",
         }
     }
 }
@@ -334,21 +367,50 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
-    pub(crate) fn new(class: GateClass, detail: Option<String>) -> Self {
-        Self {
-            class,
-            at: now_unix(),
-            detail,
+    /// Whether this record still closes the gate at `now`, given the time
+    /// of the newest human act behind a lease in force (`human_at`): the
+    /// login classes until a person logs in, `far_core_down` for 5 min,
+    /// `retry_spent` until a lease newer than the failure (D2 step 9, D10).
+    pub(crate) fn closes_at(&self, now: f64, human_at: Option<f64>) -> bool {
+        match self.class {
+            GateClass::NeedsCheck | GateClass::AuthStalled | GateClass::AuthFailed => true,
+            GateClass::FarCoreDown => now < self.at + FAR_CORE_DOWN_SECS,
+            GateClass::DialFailed => false,
+            GateClass::RetrySpent => !human_at.is_some_and(|at| at > self.at),
         }
     }
+}
 
-    /// Whether this failure still closes the gate at `now`: every class
-    /// until a person logs in, `far_core_down` for 5 min.
-    pub(crate) fn closes_at(&self, now: f64) -> bool {
-        match self.class {
-            GateClass::FarCoreDown => now < self.at + FAR_CORE_DOWN_SECS,
-            _ => true,
-        }
+/// How a dial ended without a link, as the watcher saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Failure {
+    /// One of D10's classes, read on ssh's stderr or from the deadline.
+    Class(GateClass),
+    /// ssh ended with no class: refused, cut, timed out, or a link that
+    /// dropped (D2 step 9).
+    Ended(&'static str),
+}
+
+/// The gate a failure leaves (D2 step 9 over D10): the login classes stand
+/// as they are; any other failure is the first (`dial_failed`, or a
+/// timed `far_core_down`) when no failure is recorded, else `retry_spent`.
+/// `current` is the gate as recorded when the dial ended: a link that
+/// settled cleared it, so a drop after that is a first failure again.
+pub(crate) fn next_gate(current: Option<&Gate>, failure: Failure, now: f64) -> Gate {
+    let first = current.is_none();
+    let (class, detail) = match failure {
+        Failure::Class(
+            class @ (GateClass::NeedsCheck | GateClass::AuthStalled | GateClass::AuthFailed),
+        ) => (class, None),
+        Failure::Class(GateClass::FarCoreDown) if first => (GateClass::FarCoreDown, None),
+        Failure::Class(class) => (GateClass::RetrySpent, Some(class.as_str().to_string())),
+        Failure::Ended(why) if first => (GateClass::DialFailed, Some(why.to_string())),
+        Failure::Ended(why) => (GateClass::RetrySpent, Some(why.to_string())),
+    };
+    Gate {
+        class,
+        at: now,
+        detail,
     }
 }
 
@@ -368,12 +430,27 @@ impl LeaseHolder {
         Self("manual".into())
     }
 
+    /// A TUI client's lease.
+    pub(crate) fn client(pid: u32) -> Self {
+        Self(format!("client-{pid}"))
+    }
+
+    /// A fleet CLI call's lease (D7; written from PR E on).
+    #[cfg(test)]
+    pub(crate) fn cli(pid: u32) -> Self {
+        Self(format!("cli-{pid}"))
+    }
+
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
-        let ok = !raw.is_empty()
-            && raw.len() <= 64
-            && raw
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        let pid = |rest: &str| {
+            !rest.is_empty()
+                && rest.len() <= 10
+                && rest.bytes().all(|byte| byte.is_ascii_digit())
+                && !rest.starts_with('0')
+        };
+        let ok = raw == "manual"
+            || raw.strip_prefix("client-").is_some_and(pid)
+            || raw.strip_prefix("cli-").is_some_and(pid);
         ok.then(|| Self(raw.to_string()))
             .ok_or_else(|| format!("{raw:?} is not a lease holder"))
     }
@@ -381,17 +458,69 @@ impl LeaseHolder {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The pid of a `client-<pid>` holder.
+    pub(crate) fn client_pid(&self) -> Option<u32> {
+        self.0.strip_prefix("client-")?.parse().ok()
+    }
 }
 
+/// One lease: in force until `expires_at`; `input_at` is the time of the
+/// human act that wrote it (an input, a person's command), which is what
+/// reopens `retry_spent` (D2 step 9). A renewal that is no new act keeps
+/// its `input_at`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Lease {
     pub holder: LeaseHolder,
     pub expires_at: f64,
+    pub input_at: f64,
+}
+
+impl Lease {
+    /// `<expires_at> <input_at>`; a file with the expiry alone (PR A's
+    /// form) takes its modification time as the act.
+    fn parse(
+        holder: LeaseHolder,
+        text: &str,
+        modified: impl FnOnce() -> Option<f64>,
+    ) -> Option<Self> {
+        let mut fields = text.split_ascii_whitespace();
+        let number = |raw: &str| raw.parse::<f64>().ok().filter(|at| at.is_finite());
+        let expires_at = number(fields.next()?)?;
+        let input_at = match fields.next() {
+            Some(raw) => number(raw)?,
+            None => modified()?,
+        };
+        if fields.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            holder,
+            expires_at,
+            input_at,
+        })
+    }
+
+    pub(crate) fn in_force(&self, now: f64) -> bool {
+        self.expires_at > now
+    }
+}
+
+/// The time of the newest human act behind a lease in force, `None` when
+/// no lease is in force (dormant).
+pub(crate) fn newest_act(leases: &[Lease], now: f64) -> Option<f64> {
+    leases
+        .iter()
+        .filter(|lease| lease.in_force(now))
+        .map(|lease| lease.input_at)
+        .reduce(f64::max)
 }
 
 /// How long a `manual` lease from `machine add --core` or `machine login`
-/// lasts (D3).
+/// lasts, and `machine wake`'s default (D3).
 pub(crate) const MANUAL_LEASE_SECS: f64 = 30.0 * 60.0;
+/// The longest `machine wake --for` (D3).
+pub(crate) const MAX_WAKE_SECS: f64 = 12.0 * 3600.0;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -486,15 +615,84 @@ pub(crate) mod tests {
                 at,
                 detail: None,
             };
-            assert!(gate.closes_at(at + 86_400.0), "{class:?}");
+            assert!(
+                gate.closes_at(at + 86_400.0, Some(at + 86_000.0)),
+                "{class:?}"
+            );
         }
         let down = Gate {
             class: GateClass::FarCoreDown,
             at,
             detail: None,
         };
-        assert!(down.closes_at(at + 299.0));
-        assert!(!down.closes_at(at + 300.0));
+        assert!(down.closes_at(at + 299.0, Some(at + 200.0)));
+        assert!(!down.closes_at(at + 300.0, None));
+    }
+
+    #[test]
+    fn a_first_failure_closes_nothing_and_retry_spent_waits_for_a_newer_act() {
+        let failed = Gate {
+            class: GateClass::DialFailed,
+            at: 1_000.0,
+            detail: None,
+        };
+        assert!(!failed.closes_at(1_001.0, None));
+        let spent = Gate {
+            class: GateClass::RetrySpent,
+            at: 1_000.0,
+            detail: None,
+        };
+        assert!(spent.closes_at(1_001.0, None));
+        assert!(
+            spent.closes_at(1_001.0, Some(999.0)),
+            "a renewal with no new act"
+        );
+        assert!(spent.closes_at(1_001.0, Some(1_000.0)));
+        assert!(
+            !spent.closes_at(1_001.0, Some(1_000.5)),
+            "an act after the failure"
+        );
+    }
+
+    /// D2 step 9 as a sequence: a first failure, the one retry, then
+    /// `retry_spent` until an act newer than it; a link that settled
+    /// cleared the gate, so its drop is a first failure again.
+    #[test]
+    fn the_retry_budget_is_one_dial_per_act() {
+        let refused = Failure::Ended("ssh ended before the far side answered");
+        let first = next_gate(None, refused, 10.0);
+        assert_eq!(first.class, GateClass::DialFailed);
+        let spent = next_gate(Some(&first), refused, 20.0);
+        assert_eq!(spent.class, GateClass::RetrySpent);
+        assert_eq!(
+            spent.detail.as_deref(),
+            Some("ssh ended before the far side answered")
+        );
+        // An act at 30 reopens; its dial fails at 40: spent again, newer.
+        assert!(!spent.closes_at(31.0, Some(30.0)));
+        let again = next_gate(Some(&spent), refused, 40.0);
+        assert_eq!((again.class, again.at), (GateClass::RetrySpent, 40.0));
+        assert!(again.closes_at(41.0, Some(30.0)));
+
+        // far_core_down: timed the first time, spent the second.
+        let down = next_gate(None, Failure::Class(GateClass::FarCoreDown), 10.0);
+        assert_eq!(down.class, GateClass::FarCoreDown);
+        let down_again = next_gate(Some(&down), Failure::Class(GateClass::FarCoreDown), 400.0);
+        assert_eq!(down_again.class, GateClass::RetrySpent);
+        assert_eq!(down_again.detail.as_deref(), Some("far_core_down"));
+
+        // The login classes stand whatever was recorded before.
+        for class in [
+            GateClass::NeedsCheck,
+            GateClass::AuthStalled,
+            GateClass::AuthFailed,
+        ] {
+            assert_eq!(next_gate(None, Failure::Class(class), 1.0).class, class);
+            assert_eq!(
+                next_gate(Some(&spent), Failure::Class(class), 1.0).class,
+                class
+            );
+        }
     }
 
     #[test]
@@ -503,7 +701,11 @@ pub(crate) mod tests {
         let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
         dir.create().expect("create");
         assert_eq!(dir.read_gate().expect("none"), None);
-        let gate = Gate::new(GateClass::AuthStalled, Some("15 s".into()));
+        let gate = Gate {
+            class: GateClass::AuthStalled,
+            at: now_unix(),
+            detail: Some("15 s".into()),
+        };
         dir.write_gate(&gate).expect("write");
         assert_eq!(dir.read_gate().expect("read"), Some(gate));
         let text = fs::read_to_string(dir.gate_path()).expect("text");
@@ -519,26 +721,140 @@ pub(crate) mod tests {
         let root = scratch("lease");
         let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
         dir.create().expect("create");
-        dir.write_lease(&LeaseHolder::manual(), 2_000.0)
+        dir.write_lease(&LeaseHolder::manual(), 2_000.0, 100.0)
             .expect("manual");
-        dir.write_lease(&LeaseHolder::parse("cli-42").expect("cli"), 3_000.0)
+        dir.write_lease(&LeaseHolder::cli(42), 3_000.0, 200.0)
             .expect("cli");
-        fs::write(dir.leases_dir().join("manual.new"), "9").expect("in progress");
-        fs::write(dir.leases_dir().join("Bad Name"), "9").expect("bad");
+        fs::write(dir.leases_dir().join("manual.new"), "9 9").expect("in progress");
+        fs::write(dir.leases_dir().join("Bad Name"), "9 9").expect("bad");
+        fs::write(dir.leases_dir().join("client-7"), "9 9 9").expect("three fields");
         let leases = dir.leases();
         assert_eq!(
             leases,
             vec![
                 Lease {
-                    holder: LeaseHolder::parse("cli-42").expect("cli"),
-                    expires_at: 3_000.0
+                    holder: LeaseHolder::cli(42),
+                    expires_at: 3_000.0,
+                    input_at: 200.0,
                 },
                 Lease {
                     holder: LeaseHolder::manual(),
-                    expires_at: 2_000.0
+                    expires_at: 2_000.0,
+                    input_at: 100.0,
                 },
             ]
         );
+        assert_eq!(newest_act(&leases, 1_000.0), Some(200.0));
+        assert_eq!(newest_act(&leases, 2_500.0), Some(200.0));
+        assert_eq!(newest_act(&leases, 3_000.0), None, "both expired");
+        dir.remove_lease(&LeaseHolder::cli(42)).expect("remove");
+        dir.remove_lease(&LeaseHolder::cli(42))
+            .expect("remove twice");
+        assert_eq!(dir.leases().len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_one_field_lease_takes_its_mtime_as_the_act() {
+        let root = scratch("lease1");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let before = now_unix() - 1.0;
+        fs::write(dir.leases_dir().join("manual"), "5000.0\n").expect("write");
+        let lease = &dir.leases()[0];
+        assert_eq!(lease.expires_at, 5_000.0);
+        assert!(lease.input_at >= before && lease.input_at <= now_unix() + 1.0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn holders_are_the_three_kinds() {
+        for good in ["manual", "client-1", "cli-4242"] {
+            assert!(LeaseHolder::parse(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "client-",
+            "client-01",
+            "cli-x",
+            "manual-1",
+            "other",
+            "client-1.new",
+        ] {
+            assert!(LeaseHolder::parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(LeaseHolder::client(7).client_pid(), Some(7));
+        assert_eq!(LeaseHolder::cli(7).client_pid(), None);
+    }
+
+    /// V5: two clients and a CLI writer, each writing only its own lease
+    /// over and over while a reader lists them: every listing sees whole
+    /// files, never half of one; an expired lease is not in force.
+    #[test]
+    fn no_holder_writes_another_holders_lease() {
+        let root = scratch("lease-threads");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let holders = [
+            LeaseHolder::client(11),
+            LeaseHolder::client(12),
+            LeaseHolder::cli(13),
+        ];
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let dir = dir.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut reads = 0_u32;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for lease in dir.leases() {
+                        // Each holder writes expiry = act + 600 with its own
+                        // act base, so a mixed or torn file shows here.
+                        let base = match lease.holder.as_str() {
+                            "client-11" => 1_000.0,
+                            "client-12" => 2_000.0,
+                            "cli-13" => 3_000.0,
+                            other => panic!("unexpected holder {other}"),
+                        };
+                        assert_eq!(lease.expires_at, lease.input_at + 600.0, "{lease:?}");
+                        assert!(
+                            lease.input_at >= base && lease.input_at < base + 1_000.0,
+                            "{lease:?}"
+                        );
+                    }
+                    reads += 1;
+                }
+                reads
+            })
+        };
+        let writers: Vec<_> = holders
+            .iter()
+            .cloned()
+            .zip([1_000.0, 2_000.0, 3_000.0])
+            .map(|(holder, base)| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for step in 0..200 {
+                        let act = base + f64::from(step);
+                        dir.write_lease(&holder, act + 600.0, act).expect("write");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.join().expect("reader") > 0);
+        let leases = dir.leases();
+        assert_eq!(leases.len(), 3);
+        for lease in &leases {
+            assert_eq!(lease.input_at.fract(), 0.0);
+            assert_eq!(lease.expires_at, lease.input_at + 600.0);
+        }
+        // A dead holder's lease ends by its expiry alone.
+        assert_eq!(newest_act(&leases, 3_199.0 + 600.0), None);
+        assert!(newest_act(&leases, 3_199.0 + 599.0).is_some());
         let _ = fs::remove_dir_all(&root);
     }
 }
