@@ -1134,6 +1134,10 @@ pub struct AppState {
     /// (openspec/changes/core-spaces-doc, D4). Kept apart because pane-exit
     /// checkpoints clear `session_dirty` without a schedule pass.
     pub(crate) core_spaces_dirty: bool,
+    /// What a person sees, or what they have read, may have changed: a
+    /// session-saving change, a client's focus, a pane marked read. Core panes
+    /// re-offer their mirrored record (openspec/changes/core-phase4, D6).
+    pub(crate) core_view_dirty: bool,
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
@@ -1143,6 +1147,7 @@ impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
         self.core_spaces_dirty = true;
+        self.core_view_dirty = true;
     }
 
     /// [`Self::mark_session_dirty`] for content that skips the save debounce.
@@ -1150,6 +1155,7 @@ impl AppState {
         self.session_dirty = true;
         self.session_save_urgent = true;
         self.core_spaces_dirty = true;
+        self.core_view_dirty = true;
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {
@@ -1383,6 +1389,7 @@ impl AppState {
             session_dirty: false,
             session_save_urgent: false,
             core_spaces_dirty: false,
+            core_view_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         }
     }

@@ -780,6 +780,7 @@ impl App {
             session_dirty: false,
             session_save_urgent: false,
             core_spaces_dirty: false,
+            core_view_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
         };
 
