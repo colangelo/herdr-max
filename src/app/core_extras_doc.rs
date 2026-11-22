@@ -281,6 +281,7 @@ mod tests {
         let open_ids = [done.id - 1, third.id];
         let mut unpinned = Workspace::test_new("other");
         unpinned.pin_order = None;
+        unpinned.custom_name = None;
         let address = |id: &TerminalId| {
             order
                 .iter()
