@@ -221,7 +221,10 @@ impl App {
             return false;
         };
         let public_pane_id = self.public_pane_id(ws_idx, pane_id);
+        // The program the pane now waits for may still run there: the
+        // runtime only detaches, it never ends it (D5).
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            runtime.set_keep_core_terminal(true);
             runtime.shutdown();
         }
         panes::link(&machine).set_connected(false);
@@ -524,6 +527,15 @@ mod tests {
         assert!(!has_runtime(&app, pane));
         assert!(!panes::link(&name("loop")).connected());
         assert!(app.state.suspended_panes().is_empty());
+        // N1: the stream ended, the program it waits for may run on there.
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "the far program is never killed: {:?}",
+            core.methods()
+        );
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
