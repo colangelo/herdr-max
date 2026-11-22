@@ -32,13 +32,35 @@ twice for one turn (D6). CI is the coordinator's to watch.
 
 ## 3. PR B: herdr writes `herdr.seen`
 
-- [ ] 3.1 `src/app/core_labels.rs`: `CoreLabels`, `CoreFact`, `LabelWrite`, `look`, `herdr_marked_seen`, the write rules of D8 (verifier 5, 6, 7)
-- [ ] 3.2 `core_backend/labels.rs`: subscription on the server's core connection, framed channel routing in the client reader, `turn`/`labels`/`removed`/`finished`/`missed`/`heartbeat` parsed, `status` dropped, reconnect with a fresh snapshot, `terminal.label` writes (verifier 13)
-- [ ] 3.3 `panes_on_screen` in `client_views.rs`, recomputed on `view_dirty` (verifier 8)
-- [ ] 3.4 `pane.mark_seen` writes; `herdr.seen=0` in `pane_labels` (verifier 9, 10)
-- [ ] 3.5 `[experimental] core_label_sync` config, reload, `config-reference.json` entry
-- [ ] 3.6 Server-path live step: `herdr pane mark-seen` sets the label to the pane's turn (verifier 15, first clause)
-- [ ] 3.7 Check: `just check`, `just core-live-test`, CI green
+- [x] 3.1 `src/app/core_labels.rs`: `CoreLabels`, `CoreFact`, `LabelWrite`, `look`, `herdr_marked_seen`, the write rules of D8 (verifier 5, 6, 7)
+- [x] 3.2 `core_backend/labels.rs`: subscription on the server's core connection, framed channel routing in the client reader, `turn`/`labels`/`removed`/`finished`/`missed`/`heartbeat` parsed, `status` dropped, reconnect with a fresh snapshot, `terminal.label` writes (verifier 13)
+- [x] 3.3 `panes_on_screen` in `client_views.rs`, recomputed on `view_dirty` (verifier 8)
+- [x] 3.4 `pane.mark_seen` writes; `herdr.seen=0` in `pane_labels` (verifier 9, 10)
+- [x] 3.5 `[experimental] core_label_sync` config, reload, `config-reference.json` entry
+- [x] 3.6 Server-path live step: `herdr pane mark-seen` sets the label to the pane's turn (verifier 15, first clause)
+- [x] 3.7 Check: `just check`, `just core-live-test`, CI green
+
+As built (PR B). The fact and write types (`CoreAddress`, `Observed`, `CoreFact`, `LabelWrite`) live in
+`src/pane/runtime_io/core_labels.rs` so the core backend never imports `app`; the reducer
+`src/app/core_labels.rs` and the server side `src/app/core_label_sync.rs` are `#[cfg(unix)]`, like the
+event variant `AppEvent::CoreLabels` and every call site, so Windows builds carry none of it.
+`CoreClient::subscribe` routes the subscription's channel like an attach stream; the label thread
+(`herdr-core-labels`) credits each DATA frame, splits it into lines, and maps `created`/`restarted` and
+`labels` with a `record` to `Upsert`. The server recomputes `panes_on_screen` after a pass whose
+`sync_core_view` found the view dirty or that drained client events (focus, shown tab, attach). It is one
+walk over the attached clients' shown tabs, never per byte or per render. `pane.mark_seen` collects the
+unread panes first (`unread_panes`) and raises their labels. Server writes go through
+`App::core_label_write`, a recorder in unit tests.
+
+Found by the server live test: a mark read in the seconds before the subscription's first snapshot (the
+core starts with the first core pane) wrote nothing. Fixed: the reducer keeps such marks (`marked_early`)
+and raises them when the terminal is reported, and the thread retries every 2 s, not 10 s as D11 says.
+The same test's live handoff found a second one: `herdr.seen=0` had gone into `pane_labels`, which a
+reattach also checks, so after any label write the next server refused the pane's own terminal. The
+start label is now added at spawn only (`core_spawn_from`).
+
+Limits: a client-side overlay over the panes still counts as on screen (D7). A label write that core
+refuses is logged at debug and not retried; the next look or turn decides again.
 
 ## 4. PR C: herdr reads `herdr.seen` and syncs `herdr.pinned`
 
