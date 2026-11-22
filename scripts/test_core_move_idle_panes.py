@@ -31,7 +31,14 @@ FAKE_HERDR = textwrap.dedent(
         reply({"panes": [dict(p["info"], pane_id=i) for i, p in panes.items()]})
     if args == ["agent", "list"]:
         reply({"agents": [{"pane_id": i, "name": p.get("name")} for i, p in panes.items()]})
-    pane = panes[args[3] if args[2] == "--pane" else args[2]]
+    pane_id = args[3] if len(args) > 3 and args[2] == "--pane" else args[2]
+    if pane_id not in panes:
+        json.dump(state, open(path, "w"))
+        print(json.dumps({"id": "cli", "error": {"code": "pane_not_found", "message": f"pane {pane_id} not found"}}))
+        raise SystemExit(1)
+    pane = panes[pane_id]
+    if "replaced_by" in pane and args[:2] == ["pane", "get"]:
+        pane["info"] = pane["replaced_by"]
     if args[:2] == ["pane", "get"]:
         reply({"pane": dict(pane["info"], pane_id=args[2])})
     if args[:2] == ["pane", "process-info"]:
@@ -42,6 +49,11 @@ FAKE_HERDR = textwrap.dedent(
     if args[:2] == ["pane", "respawn"] and "--if-idle" in args:
         if pane.get("refusals"):
             reply({"moved": False, "refusals": pane["refusals"]})
+        if "move_answer" in pane:
+            reply(pane["move_answer"])
+        if pane.get("closes"):
+            del panes[args[2]]
+            reply({"moved": True, "refusals": []})
         pane["primary"] = not pane.get("breaks")
         reply({"moved": True, "refusals": []})
     raise SystemExit(f"unexpected call {args}")
@@ -144,6 +156,44 @@ class CoreMoveIdlePanesTest(unittest.TestCase):
         self.assertIn("refused: excluded", done.stdout)
         self.assertIn("skipped: 1 bell(s) queued", done.stdout)
         self.assertNotIn("w1-p3", done.stdout)
+
+    # Fork issue 301: a move that answers anything but moved stops the run,
+    # visibly, before the next pane, refusals or not.
+    def test_a_move_not_moved_stops_the_run_before_the_next_pane(self):
+        for answer in ({"moved": False, "refusals": []},
+                       {"moved": False, "refusals": ["core_unreachable"]}):
+            panes = {
+                "w1-p1": agent("canary", "sess-a", move_answer=answer),
+                "w1-p2": agent("later", "sess-b"),
+            }
+            done, state = self.run_driver(panes, "--move")
+            self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+            self.assertEqual(self.moves(state), ["w1-p1"])
+            self.assertIn("FAILED: w1-p1 was not moved", done.stdout)
+            expected = ", ".join(answer["refusals"]) or "no refusal given"
+            self.assertIn(f"({expected})", done.stdout)
+            self.assertIn("stopped at the first failure", done.stdout)
+
+    def test_a_pane_gone_after_its_move_stops_the_run(self):
+        panes = {
+            "w1-p1": agent("canary", "sess-a", closes=True),
+            "w1-p2": agent("later", "sess-b"),
+        }
+        done, state = self.run_driver(panes, "--move")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(self.moves(state), ["w1-p1"])
+        self.assertIn("FAILED: w1-p1: the pane cannot be read, so it may be gone", done.stdout)
+
+    def test_a_pane_holding_another_agent_than_listed_is_not_moved(self):
+        other = agent("someone-else", "sess-z")["info"]
+        panes = {
+            "w1-p1": agent("canary", "sess-a", replaced_by=other),
+            "w1-p2": agent("later", "sess-b"),
+        }
+        done, state = self.run_driver(panes, "--move")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertEqual(self.moves(state), [])
+        self.assertIn("before its move, the pane now holds session 'sess-z'", done.stdout)
 
     def test_arguments(self):
         for args in (["--exclude"], ["--bogus"], ["--settle", "soon"]):

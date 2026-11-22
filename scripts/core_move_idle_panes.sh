@@ -9,7 +9,10 @@
 #
 # Without --move it only lists each pane off the primary core and why the
 # server would refuse it. With --move it moves one canary first, then the
-# rest, and stops at the first pane that fails its check. A moved agent must
+# rest, and stops at the first pane that fails its check. It also stops, with
+# a FAILED line, when a move answers anything but moved, when a pane vanished
+# or now holds another agent than the one listed, and when a moved pane is
+# gone (fork issue 301: eleven panes closed while the run went on). A moved agent must
 # keep its conversation (session id), its name, its model, effort, permission
 # mode and settings; a moved shell its directory. Before an agent moves,
 # agent-bell must report no queued message for its session. --exclude adds
@@ -174,10 +177,28 @@ def check_shell(herdr, pane_id, before):
 def settle(check, seconds):
     deadline = time.monotonic() + seconds
     while True:
-        problem = check()
+        try:
+            problem = check()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
+            return f"the pane cannot be read, so it may be gone: {err}"
         if problem is None or time.monotonic() >= deadline:
             return problem
         time.sleep(1)
+
+
+def changed_since_listed(herdr, listed, name):
+    """None while the pane still exists and holds the agent it was listed with."""
+    pane_id = listed["pane_id"]
+    try:
+        now = herdr.pane(pane_id)
+        name_now = herdr.names().get(pane_id)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
+        return f"the pane is gone: {err}"
+    if name_now != name:
+        return f"the pane now holds {name_now!r}, it was listed with {name!r}"
+    if session_of(now) != session_of(listed):
+        return f"the pane now holds session {session_of(now)!r}, it was listed with {session_of(listed)!r}"
+    return None
 
 
 def main():
@@ -220,6 +241,12 @@ def main():
         if not options["move"]:
             summary.append((pane_id, name, "would move"))
             continue
+        problem = changed_since_listed(herdr, pane, name)
+        if problem:
+            print(f"FAILED: {pane_id}: before its move, {problem}; stopping", flush=True)
+            summary.append((pane_id, name, f"FAILED: before its move, {problem}"))
+            failed = True
+            break
         before = herdr.pane(pane_id)
         agent = bool(before.get("agent"))
         if agent:
@@ -230,16 +257,23 @@ def main():
                 continue
         role = "canary" if moved == 0 else "next"
         print(f"moving {pane_id} ({name or 'unnamed'}, {role})", flush=True)
-        answer = herdr.move(pane_id)
-        if not answer.get("moved"):
-            summary.append((pane_id, name, "refused: " + ", ".join(answer.get("refusals") or [])))
-            continue
+        try:
+            answer = herdr.move(pane_id)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
+            answer = {"error": str(err)}
+        if answer.get("moved") is not True:
+            refusals = ", ".join(answer.get("refusals") or []) or "no refusal given"
+            print(f"FAILED: {pane_id} was not moved ({refusals}); stopping", flush=True)
+            summary.append((pane_id, name, f"FAILED: not moved ({refusals}): {json.dumps(answer)}"))
+            failed = True
+            break
         moved += 1
         if agent:
             problem = settle(lambda: check_agent(herdr, pane_id, before, name), options["settle"])
         else:
             problem = settle(lambda: check_shell(herdr, pane_id, before), options["settle"])
         if problem:
+            print(f"FAILED: {pane_id}: {problem}; stopping", flush=True)
             summary.append((pane_id, name, f"FAILED: {problem}"))
             failed = True
             break
@@ -249,7 +283,7 @@ def main():
     for pane_id, name, outcome in summary:
         print(f"  {pane_id}\t{name or '-'}\t{outcome}")
     if failed:
-        print("stopped at the first failed check; the panes after it were not moved")
+        print("stopped at the first failure; the panes after it were not moved")
     raise SystemExit(1 if failed else 0)
 
 
