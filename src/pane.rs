@@ -1218,7 +1218,7 @@ fn process_probe_result(
 
 /// Result for an agent identified behind a recognised PTY wrapper.
 ///
-/// The agent, its process name and — through `foreground_is_pane_shell` — which
+/// The agent, its pid, its process name and — through `foreground_is_pane_shell` — which
 /// process holds the foreground come from `nested_job`, the job the agent was
 /// actually identified in, and `nested_process_group_id` carries that job on so
 /// the working directory the pane reports follows it too.
@@ -1231,13 +1231,12 @@ fn nested_process_probe_result(
     shell_pid: u32,
     nested_job: &crate::platform::ForegroundJob,
     pid: u32,
-    agent: Agent,
-    process_name: String,
+    (agent, process_name, agent_pid): (Agent, String, u32),
 ) -> ProcessProbeResult {
     #[cfg(not(unix))]
     let _ = shell_pid;
     ProcessProbeResult {
-        agent_pid: None,
+        agent_pid: Some(agent_pid),
         process_group_id: Some(job.process_group_id),
         #[cfg(unix)]
         nested_process_group_id: Some(nested_job.process_group_id),
@@ -1310,16 +1309,14 @@ fn probe_foreground_process_from_jobs(
             if let Some((shell_pid, nested_job)) =
                 crate::detect::wrapped_shell_job(job, nested_foreground_job)
             {
-                if let Some((agent, process_name)) =
-                    crate::detect::identify_agent_in_job(&nested_job)
+                if let Some(identified) = crate::detect::identify_agent_process_in_job(&nested_job)
                 {
                     return nested_process_probe_result(
                         job,
                         shell_pid,
                         &nested_job,
                         pid,
-                        agent,
-                        process_name,
+                        identified,
                     );
                 }
                 wrapped_shell = Some((shell_pid, nested_job.process_group_id));
@@ -6545,8 +6542,13 @@ mod tests {
             process_group_id: 200,
             processes: vec![foreground_process(200, "claude")],
         };
-        let wrapped =
-            nested_process_probe_result(&outer, 150, &nested, 1, Agent::Claude, "claude".into());
+        let wrapped = nested_process_probe_result(
+            &outer,
+            150,
+            &nested,
+            1,
+            (Agent::Claude, "claude".into(), 200),
+        );
         assert_eq!(wrapped.agent_process_group(), Some((Agent::Claude, 200)));
 
         let direct = process_probe_result(&nested, 1, (Agent::Claude, "claude".into(), 200));
@@ -7112,6 +7114,31 @@ mod tests {
         // appears on the pane's PTY.
         assert_eq!(result.process_group_id, Some(42));
         assert!(!result.foreground_is_pane_shell);
+    }
+
+    // Fork issue 295: the idle move found no agent process behind atuin, so
+    // every wrapped agent pane was refused as foreign. The agent is the one
+    // named `claude`, not the MCP server or listener in its group, and not
+    // the version string macOS reports as its name.
+    #[test]
+    fn a_wrapped_agent_is_reported_by_its_own_pid() {
+        let lookups = std::cell::Cell::new(0);
+        let nested = crate::platform::ForegroundJob {
+            process_group_id: 1905,
+            processes: vec![
+                foreground_process(2460, "python3.13"),
+                foreground_process(2124, "node"),
+                crate::platform::ForegroundProcess {
+                    argv0: Some("claude".into()),
+                    ..foreground_process(1905, "2.1.330")
+                },
+            ],
+        };
+
+        let result = wrapped_pane_probe("atuin", Some(nested), &lookups);
+
+        assert_eq!(result.agent, Some(Agent::Claude));
+        assert_eq!(result.agent_pid, Some(1905));
     }
 
     #[test]
