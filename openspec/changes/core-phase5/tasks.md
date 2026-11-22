@@ -23,13 +23,26 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR A0. Local scans ignore machine terminals (F1; first, alone)
 
-- [ ] A0.1 `CoreAddress { machine: Option<MachineName>, terminal }` parsed at the boundary from every core answer
+- [x] A0.1 `CoreAddress { machine: Option<MachineName>, terminal }` parsed at the boundary from every core answer
   that carries an address; unit V26 part 1
-- [ ] A0.2 `find_labelled_terminals`, `unclaimed_in`, the launch-label recovery in `pane_io.rs` and the
+  Built: `core_backend/address.rs` (`CoreAddress::parse`, `local_address(record)`); parsed at the `terminal.list`
+  scans, the `terminal.run` answer and the `reattach` target. Limit: `MachineName` is a bare string newtype until
+  PR A adds the validated one; `events.subscribe` has no reader in herdr yet, so nothing to filter there.
+- [x] A0.2 `find_labelled_terminals`, `unclaimed_in`, the launch-label recovery in `pane_io.rs` and the
   waiting-pane search keep local addresses only; no machine record's pid reaches a local fact or sweep; fake-core
   V26 part 2
-- [ ] A0.3 Loop case of V26 in `scripts/core_machine_live_test.sh` (a scratch machine added with `hc machine add
+  Built: those three scans filter on `local_address`; the waiting-pane and restore searches go through
+  `find_labelled_terminals`; `launched_here` is the launch recovery's filter; `reattach` refuses a machine address
+  as `NotOurs` before asking core. Tests: FakeCore with `t1` and `loop/t1` (same labels, `loop/t1` pid a live
+  `sleep`): the pane search finds `t1` only, the orphan scan lists no machine terminal, no kill, attach or get
+  reaches `loop/`, the process lives; unit tests for the launch filter and the refused reattach. Limit: the
+  launch recovery is tested through its filter, not a fake core, because the launch label is random.
+- [x] A0.3 Loop case of V26 in `scripts/core_machine_live_test.sh` (a scratch machine added with `hc machine add
   --via`, no herdr link command needed)
+  Built: the script (new; PR A extends it) and a line in `just core-live-test`. Two scratch cores, a `via.sh`
+  relay, `loop/t1` with pane A's labels and a live far pid; a live handoff, a restart and closing pane A leave it
+  listed and running. Checked to fail without the fix (the orphan notice names `loop/t1`). Limit: the far pid is
+  a live process on this Mac, which is what makes a wrong signal visible; it is not a second host.
 - [ ] A0.4 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows
 
 ## PR A. The link command and core machines (no dormancy yet)
