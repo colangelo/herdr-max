@@ -427,7 +427,12 @@ fn watch(dir: &MachineDir, ssh_pid: u32, reader: &OwnedFd, started: Instant) {
         let mut gone = None;
         // Read before checking the parent: what ssh wrote before it exited
         // (a refusal, the guard's answer) is still in the pipe.
-        match sys::read_within(reader.as_raw_fd(), &mut buf, Duration::from_millis(250)) {
+        // Wake for the next lease re-read on time, so a lease end is seen
+        // within 5 s, not 5 s plus a read's wait each round.
+        let wait = next_lease_check
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(250));
+        match sys::read_within(reader.as_raw_fd(), &mut buf, wait) {
             Ok(None) if sys::parent_pid() != ssh_pid => gone = Some("SSH GONE"),
             Ok(None) => {}
             Ok(Some(0)) | Err(_) => gone = Some("SSH EXITED"),
@@ -450,7 +455,7 @@ fn watch(dir: &MachineDir, ssh_pid: u32, reader: &OwnedFd, started: Instant) {
         } else {
             actions.extend(state.on_tick(started.elapsed()));
             if Instant::now() >= next_lease_check {
-                next_lease_check = Instant::now() + LEASE_RECHECK;
+                next_lease_check += LEASE_RECHECK;
                 if !leased(dir) {
                     actions.extend(state.on_no_lease());
                 }
