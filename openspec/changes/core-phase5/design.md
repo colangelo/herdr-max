@@ -110,7 +110,7 @@ machine's layout from m4m beyond the verbs in D7; the computer-use host (it stay
 ### D1. The machine lives in the primary core; herdr adds it, core owns the link
 
 A remote Mac or VM is a core machine of the herdr session's primary core (`default` for the release default
-session on both Macs). `herdr machine add --core <target> [--name N] [--session S]` runs `hc machine add` with
+session on both Macs). `herdr machine add --core <target> [--name N] [--remote-session S]` (`--session` is herdr's own global flag) runs `hc machine add` with
 herdr's link command (D2) in the person's terminal, so hc's own install question is asked there. Core then owns
 the connection, retries, the merged terminal list and `--on`. On ac's Macs: m4m adds `ac-mbm5` (its session
 `default`), and ac-mbm5 may add `m4m` the same way.
@@ -440,7 +440,9 @@ Alternatives:
 and keepalives added: `-C -F <managed config>` (`attach.rs` 3224-3263), `apply_noninteractive_ssh_options`
 (`BatchMode=yes`, `NumberOfPasswordPrompts=0`, `StrictHostKeyChecking=yes`, `ConnectTimeout=10`,
 `ConnectionAttempts=1`, `attach.rs` 1452-1464), then **`-o ControlMaster=no -o ControlPath=none -o
-ServerAliveInterval=5 -o ServerAliveCountMax=2`**, then `-T <target> <guard && line>` (D2 step 5).
+ServerAliveInterval=5 -o ServerAliveCountMax=2`**, plus `-o LogLevel=INFO` (task A.1: OpenSSH prints an auth
+banner only at INFO or above, and a user config may set less), then `-T <target> <guard && line>` (D2 step 5).
+A machine added with `--ssh-config <file>` reads that file instead of the managed config (the loopback tests use it).
 
 - **No master (F9).** With the old remote's `ControlMaster=auto` and `ControlPersist=600`, the master outlived the
   link by ten minutes and a new ssh reused it with no authentication, so the dormancy gate did not bound access.
@@ -462,7 +464,7 @@ until a person acts (`far_core_down` only for 5 min):
 
 | Class | Seen as | Why it closes the gate |
 |---|---|---|
-| `needs_check` | stderr contains a Tailscale SSH check banner (`Tailscale SSH requires an additional check`, exact text verified in task A.1) | each redial can open a new sign-in request in ac's browser |
+| `needs_check` | stderr contains a Tailscale SSH check banner: `# Tailscale SSH requires an additional check.` then `# To authenticate, visit: https://login.tailscale.com/a/<code>` (task A.1; core-link matches either line) | each redial can open a new sign-in request in ac's browser |
 | `auth_stalled` | no `HERDR-LINK-UP` on stderr 15 s after ssh started (D2 step 6; core kills the via at about 19.8 s) | an unanswered 1Password Touch ID or another prompt on this Mac |
 | `auth_failed` | ssh exit 255 with `Permission denied` or a host-key error | redials cannot succeed |
 | `far_core_down` (timed, 5 min, then open) | the guard's `herdr-link: herdr-core is not running there`, exit 69 (D2 step 5) | a dial authenticates before the guard runs; without the pause every retry while a lease holds would be a new authentication. It never starts the far core; ac-mbm5's herdr starts it from the desktop (core-phase3 D7) and `herdr machine wake` reopens the gate at once |
@@ -472,6 +474,19 @@ answered there), clears the gate and calls `machine.connect`. `herdr machine sta
 machine: `state` (core's), `gate` (`open`, `dormant`, `needs_check`, `auth_stalled`, `auth_failed`,
 `far_core_down`), the lease holders and their expiry, the last dial time. Agents read this to announce before acting, and the TUI shows the
 gate in the endpoint row.
+
+**The check banner (task A.1, read from public source and reports, no dial).** Tailscale's SSH server sends a
+`check` rule's hold as an SSH **auth banner** during user authentication, before any session:
+`ssh/tailssh/tailssh.go`, `(*conn).clientAuth`, the `HoldAndDelegate` branch, `SendAuthBanner(action.Message)`.
+The text is the control server's message, not a constant in the client source; as users report it (paramiko
+issue 2425), it is `# Tailscale SSH requires an additional check.` and `# To authenticate, visit:
+https://login.tailscale.com/a/<code>`, and after approval `# Authentication checked with Tailscale SSH.`. OpenSSH
+prints an auth banner on **stderr**, only when its log level is INFO or above (`sshconnect2.c`,
+`input_userauth_banner`), hence `LogLevel=INFO` in the argv. `ConnectTimeout` does not bound the hold: TCP and the
+key exchange are done, and the hold lasts until approval or Tailscale's own limit, so the banner arrives within a
+second or two of the dial and the watcher ends ssh then; the 15 s deadline (`auth_stalled`) covers a banner whose
+text changes. Because the message comes from the control server, the match is on text Tailscale may change: a
+changed banner degrades to `auth_stalled`, which also closes the gate.
 
 Every path that opens an SSH connection, and when it must be announced (house rule
 `no-unannounced-tailscale-ssh-check`; ac's Mac-to-Mac ssh goes through the 1Password agent, CONTEXT
@@ -660,7 +675,9 @@ All answered on 2026-11-22; the F-numbers are the findings above.
 
 1. Does ac-mbm5's herdr publish its spaces into its `default` core's `herdr-app` document today (core-spaces-doc
    switch)? D6 needs it on.
-2. The exact Tailscale SSH check banner and whether ssh prints it before or after `ConnectTimeout` (task A.1).
+2. ~~The exact Tailscale SSH check banner and whether ssh prints it before or after `ConnectTimeout` (task A.1).~~
+   Answered in D10 (the check banner): an auth banner from the control server, printed on stderr at LogLevel INFO,
+   after the connection is made, so `ConnectTimeout` does not bound it.
 3. Which app 1Password names when core's child ssh asks for the key (Herdr Core or herdr), and whether one approval
    covers later dials. With no master (D10, F9) this decides how often a wake prompts.
 4. Does core ever classify a via failure as `needs_login` (the 2, 5, 10 min ladder), and should `core-link` exit
