@@ -172,6 +172,29 @@ Earlier versions ran the default session's core panes in the Herdr Core session 
 
 If the Herdr Core in `default` was started over SSH, Herdr shows the notice `Herdr Core in session default was started over SSH; restart it from a desktop terminal`. Herdr does not restart that core, because other programs share it.
 
+### What Herdr shares with the Herdr apps
+
+Herdr can share three things with Herdr Mobile and the other Herdr apps. Each one has its own switch, and each is off until you turn it on:
+
+```toml
+[experimental]
+core_status_mirror = true
+core_spaces_doc = true
+core_label_sync = true
+```
+
+- `core_status_mirror` shows each agent's state (working, blocked, done, idle) in the apps' Inbox. The state is Herdr's own, from hooks and screen detection. Herdr does not read any state back from Herdr Core.
+- `core_spaces_doc` shows your workspaces and tabs as spaces in the apps.
+- `core_label_sync` shares which agents you have read, and which agents are pinned, through the `herdr.seen` and `herdr.pinned` labels on each core terminal.
+
+With `core_label_sync` on, reading an agent anywhere clears its `done` mark everywhere:
+
+- When a focused Herdr window shows a core pane, Herdr marks the pane's latest turn as seen. Herdr marks each turn once while the pane stays on screen. A window without focus, and a pane hidden behind a zoomed pane, do not count. `herdr pane mark-seen` marks the panes it reads as seen too.
+- When you read an agent on the phone, Herdr marks it read. When you mark an agent unread on the phone, Herdr shows it as `done` again.
+- Pinning or unpinning an agent in Herdr pins or unpins it in the apps, and the other way round. When Herdr connects, an agent that is pinned on either side ends up pinned on both.
+
+A label lives on its terminal. Panes on the PTY have no labels, so these panes are not shared.
+
 ### Rolling back with core panes open
 
 Rolling back to the previous version (the one that reads both `default` and `herdr`) is safe: it attaches to the panes in both sessions again. An older version, beta 202 or earlier, looks only in `herdr`. It starts each pane from `default` again as a new program and leaves the old program running. Before such a rollback, close the core panes, or list their terminals:
