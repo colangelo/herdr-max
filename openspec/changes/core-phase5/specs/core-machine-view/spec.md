@@ -20,14 +20,25 @@ status from the terminal's 7501 record. Closing a pane in it SHALL detach only.
 - **WHEN** a person closes a pane in the view
 - **THEN** the view detaches; the far side's program and pane stay
 
-### Requirement: The view never takes a terminal's size
+### Requirement: The view types without taking a terminal's size
 
-The view SHALL attach with the terminal's current size, SHALL answer each `size` event with a RESIZE of that same
-size, and SHALL never send another size. It SHALL draw the remote grid at its own pane size, cropped or padded.
+The view SHALL attach with `resumed: true` at the terminal's current size, SHALL send input only as
+AUTOMATIC_INPUT frames, and SHALL never send DATA or FOCUS frames. When the attach result does not offer automatic
+input, the view SHALL attach read-only and say so.
 
 #### Scenario: Typing in the view
-- **WHEN** a person types in the view's pane while its view pane is larger than the terminal
-- **THEN** the far side's terminal keeps its size
+- **WHEN** a person types, pastes, clicks and focuses the view's pane while it is larger than the terminal
+- **THEN** every key reaches the program and the far side's terminal keeps its size
+
+### Requirement: The view follows the far size without sending its own
+
+The view SHALL learn the size from the terminal's `size` events and SHALL send a RESIZE only of a far size
+different from the last one it sent. An idle view SHALL send no frame other than CREDIT. It SHALL draw the remote
+grid at its own pane size, cropped or padded.
+
+#### Scenario: The far herdr restarts
+- **WHEN** the far herdr's server detaches from the terminal while the view stays attached
+- **THEN** the terminal keeps the far herdr's last size
 
 ### Requirement: A bad far-side document does not break the view
 
@@ -52,6 +63,29 @@ sent. The output SHALL be the far side's own, with its pane ids.
 #### Scenario: A name with shell signs
 - **WHEN** a person renames a viewed workspace to `$(touch x); w`
 - **THEN** the far side's herdr receives the name as one argument and no shell runs it
+
+### Requirement: A cut or timed-out reply is an error
+
+A `machine.exec` reply marked `truncated` or `timed_out` SHALL make the CLI fail with a message and no partial
+output, whatever its exit code. A request over 8 MiB SHALL be refused before it is sent.
+
+#### Scenario: A cut reply
+- **WHEN** the far side's reply exceeds 8 MiB and `machine.exec` returns `truncated: true` with exit code 0
+- **THEN** the CLI exits 1 with a message and prints no partial output
+
+### Requirement: The fleet CLI dials a dormant machine only when asked
+
+On a machine that is not connected, `--machine` SHALL refuse with exit 75 and a message naming the ssh dial,
+unless `--dial` is given. With `--dial` it SHALL refuse a closed gate, else write its lease, wake the machine
+through the dialer, and then send.
+
+#### Scenario: A dormant machine
+- **WHEN** an agent runs `herdr --machine ac-mbm5 pane list --json` while ac-mbm5 is dormant
+- **THEN** the CLI exits 75 with a message naming the ssh dial and `--dial`, and no ssh starts
+
+#### Scenario: Dial on request
+- **WHEN** the same command runs with `--dial` and the gate is open
+- **THEN** one dial runs, the far side's JSON is printed, and the CLI's lease is removed after the reply
 
 ### Requirement: The old remote stays the fallback
 
