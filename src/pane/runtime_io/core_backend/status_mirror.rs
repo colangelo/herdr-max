@@ -113,7 +113,31 @@ pub(super) struct StatusMirror {
     last_output: Option<Instant>,
     pending: Option<CoreStatusRecord>,
     written: Option<CoreStatusRecord>,
+    /// A `working` herdr offered that a later record replaced before it was
+    /// written. Core's turn rises only when its record leaves `working`, so it
+    /// goes out just before the next record (openspec/changes/core-phase4, D6).
+    owed_working: Option<CoreStatusRecord>,
     not_before: Option<Instant>,
+}
+
+/// What one write puts in the program's terminal: the record, after the
+/// `working` that was owed, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MirrorWrite {
+    owed_working: Option<CoreStatusRecord>,
+    record: CoreStatusRecord,
+}
+
+impl MirrorWrite {
+    pub(super) fn encode(&self) -> Vec<u8> {
+        let mut bytes = self
+            .owed_working
+            .as_ref()
+            .map(CoreStatusRecord::encode)
+            .unwrap_or_default();
+        bytes.extend_from_slice(&self.record.encode());
+        bytes
+    }
 }
 
 impl StatusMirror {
@@ -124,13 +148,24 @@ impl StatusMirror {
     }
 
     /// A new record replaces any waiting one. A record already written, or a
-    /// `clear` when nothing was ever written, needs no write.
+    /// `clear` when nothing was ever written, needs no write, unless a
+    /// `working` is owed: then it carries that turn's end to core.
     pub(super) fn offer(&mut self, record: CoreStatusRecord) {
+        let working = record.is_working();
+        if working
+            && !self
+                .written
+                .as_ref()
+                .is_some_and(CoreStatusRecord::is_working)
+        {
+            self.owed_working = Some(record.clone());
+        }
         let redundant = match &self.written {
             Some(written) => *written == record,
             None => record.is_clear(),
         };
-        self.pending = (!redundant).then_some(record);
+        let carries_turn = !working && self.owed_working.is_some();
+        self.pending = (!redundant || carries_turn).then_some(record);
     }
 
     /// How long until a waiting record may be written; `None` when nothing
@@ -145,20 +180,31 @@ impl StatusMirror {
         Some(at.saturating_duration_since(now))
     }
 
-    /// The record to write now, if the gate is open.
-    pub(super) fn take_due(&mut self, now: Instant) -> Option<CoreStatusRecord> {
-        (self.wake_in(now)? == Duration::ZERO).then(|| self.pending.take())?
+    /// What to write now, if the gate is open.
+    pub(super) fn take_due(&mut self, now: Instant) -> Option<MirrorWrite> {
+        if self.wake_in(now)? != Duration::ZERO {
+            return None;
+        }
+        let record = self.pending.take()?;
+        let owed_working = (!record.is_working())
+            .then(|| self.owed_working.clone())
+            .flatten();
+        Some(MirrorWrite {
+            owed_working,
+            record,
+        })
     }
 
-    pub(super) fn written(&mut self, record: CoreStatusRecord) {
-        self.written = Some(record);
+    pub(super) fn written(&mut self, write: MirrorWrite) {
+        self.written = Some(write.record);
+        self.owed_working = None;
         self.not_before = None;
     }
 
     /// The terminal's buffer was full: try again later unless a newer record
-    /// arrived meanwhile.
-    pub(super) fn busy(&mut self, record: CoreStatusRecord, now: Instant) {
-        self.pending.get_or_insert(record);
+    /// arrived meanwhile. An owed `working` stays owed.
+    pub(super) fn busy(&mut self, write: MirrorWrite, now: Instant) {
+        self.pending.get_or_insert(write.record);
         self.not_before = Some(now + BUSY_RETRY);
     }
 }
@@ -269,7 +315,7 @@ mod tests {
         mirror.observe(b"le\x07", later);
         assert_eq!(mirror.wake_in(later), Some(QUIET));
         assert_eq!(mirror.take_due(later + QUIET / 2), None, "not quiet yet");
-        assert_eq!(mirror.take_due(later + QUIET), Some(working()));
+        assert_eq!(mirror.take_due(later + QUIET), Some(plain(working())));
         assert_eq!(mirror.wake_in(later + QUIET), None, "nothing left");
     }
 
@@ -278,7 +324,7 @@ mod tests {
         let now = Instant::now();
         let mut mirror = StatusMirror::default();
         mirror.offer(working());
-        assert_eq!(mirror.take_due(now), Some(working()));
+        assert_eq!(mirror.take_due(now), Some(plain(working())));
     }
 
     #[test]
@@ -294,7 +340,7 @@ mod tests {
         mirror.offer(working());
         mirror.observe(b"m", now);
         let due = mirror.take_due(now + QUIET).expect("due");
-        assert_eq!(due, working());
+        assert_eq!(due, plain(working()));
         mirror.written(due);
         assert_eq!(mirror.take_due(now + QUIET * 2), None, "one write");
 
@@ -306,7 +352,7 @@ mod tests {
         mirror.offer(CoreStatusRecord::Clear);
         assert_eq!(
             mirror.take_due(now + QUIET * 2),
-            Some(CoreStatusRecord::Clear)
+            Some(plain(CoreStatusRecord::Clear))
         );
     }
 
@@ -319,7 +365,7 @@ mod tests {
         mirror.busy(due, now);
         assert_eq!(mirror.wake_in(now), Some(BUSY_RETRY));
         let retried = mirror.take_due(now + BUSY_RETRY).expect("retried");
-        assert_eq!(retried, working());
+        assert_eq!(retried, plain(working()));
         mirror.written(retried);
 
         let later = now + BUSY_RETRY;
@@ -329,8 +375,120 @@ mod tests {
         mirror.busy(due, later);
         assert_eq!(
             mirror.take_due(later + BUSY_RETRY),
-            Some(CoreStatusRecord::Clear),
+            Some(plain(CoreStatusRecord::Clear)),
             "the newer record, not the one that met the full buffer"
         );
+    }
+
+    fn done() -> CoreStatusRecord {
+        CoreStatusRecord::Report {
+            word: CoreStatusWord::Done,
+            app: CoreStatusApp::parse("claude"),
+        }
+    }
+
+    fn plain(record: CoreStatusRecord) -> MirrorWrite {
+        MirrorWrite {
+            owed_working: None,
+            record,
+        }
+    }
+
+    fn after_working(record: CoreStatusRecord) -> MirrorWrite {
+        MirrorWrite {
+            owed_working: Some(working()),
+            record,
+        }
+    }
+
+    /// Writes what is due once the pane has been quiet, as the parser thread does.
+    fn write_due(mirror: &mut StatusMirror, at: Instant) -> Option<MirrorWrite> {
+        let due = mirror.take_due(at + QUIET)?;
+        mirror.written(due.clone());
+        Some(due)
+    }
+
+    // core-phase4 verifier 1: a `working` replaced before its write goes out
+    // in front of the record that replaced it, so core's turn still rises.
+    #[test]
+    fn a_coalesced_working_is_written_before_the_record_that_replaced_it() {
+        let now = Instant::now();
+        let mut mirror = StatusMirror::default();
+        mirror.offer(idle());
+        write_due(&mut mirror, now);
+
+        mirror.observe(b"output", now);
+        mirror.offer(working());
+        mirror.offer(done());
+        let due = write_due(&mut mirror, now).expect("due");
+        assert_eq!(due, after_working(done()));
+        assert_eq!(
+            due.encode(),
+            [working().encode(), done().encode()].concat(),
+            "one write, working first"
+        );
+        assert!(due.encode().len() < 256);
+
+        mirror.offer(working());
+        mirror.offer(done());
+        assert_eq!(
+            write_due(&mut mirror, now),
+            Some(after_working(done())),
+            "a second unread turn: done again, still a new turn"
+        );
+        assert_eq!(write_due(&mut mirror, now), None, "the debt is paid");
+    }
+
+    // core-phase4 verifier 2: no `working` is invented, and a written one
+    // settles the debt.
+    #[test]
+    fn no_working_is_owed_without_one_offered_or_after_one_was_written() {
+        let now = Instant::now();
+        let mut mirror = StatusMirror::default();
+        mirror.offer(idle());
+        write_due(&mut mirror, now);
+        mirror.offer(done());
+        assert_eq!(write_due(&mut mirror, now), Some(plain(done())));
+
+        mirror.offer(working());
+        assert_eq!(write_due(&mut mirror, now), Some(plain(working())));
+        mirror.offer(done());
+        assert_eq!(
+            write_due(&mut mirror, now),
+            Some(plain(done())),
+            "core saw working itself"
+        );
+    }
+
+    #[test]
+    fn a_full_buffer_keeps_the_owed_working() {
+        let now = Instant::now();
+        let mut mirror = StatusMirror::default();
+        mirror.offer(idle());
+        write_due(&mut mirror, now);
+        mirror.offer(working());
+        mirror.offer(idle());
+        let due = mirror.take_due(now + QUIET).expect("due");
+        mirror.busy(due, now);
+        assert_eq!(
+            mirror.take_due(now + BUSY_RETRY + QUIET),
+            Some(after_working(idle()))
+        );
+    }
+
+    #[test]
+    fn the_longest_pair_fits_one_write() {
+        let long = CoreStatusApp::parse(&"a".repeat(64));
+        let write = MirrorWrite {
+            owed_working: Some(CoreStatusRecord::Report {
+                word: CoreStatusWord::Working,
+                app: long.clone(),
+            }),
+            record: CoreStatusRecord::Report {
+                word: CoreStatusWord::Blocked,
+                app: long,
+            },
+        };
+        assert!(write.encode().len() < 256, "{}", write.encode().len());
     }
 }

@@ -68,16 +68,24 @@ impl ScratchCore {
 }
 
 impl ScratchCore {
-    /// The terminal's `status` as core keeps it (`Null` when it has none).
-    fn status(&self, address: &str) -> serde_json::Value {
+    fn record(&self, address: &str) -> serde_json::Value {
         let out = std::process::Command::new("hc")
             .args(["get", address, "--json"])
             .env("HC_SESSION", &self.session)
             .env("XDG_STATE_HOME", &self.state)
             .output()
             .expect("hc get");
-        let record: serde_json::Value = serde_json::from_slice(&out.stdout).expect("get json");
-        record["status"].clone()
+        serde_json::from_slice(&out.stdout).expect("get json")
+    }
+
+    /// The terminal's `status` as core keeps it (`Null` when it has none).
+    fn status(&self, address: &str) -> serde_json::Value {
+        self.record(address)["status"].clone()
+    }
+
+    /// Core's turn counter for the terminal.
+    fn turn(&self, address: &str) -> u64 {
+        self.record(address)["turn"].as_u64().unwrap_or(0)
     }
 
     async fn wait_for_status(
@@ -537,6 +545,67 @@ async fn core_status_mirror_reaches_cores_record_and_clears() {
             "a mirrored record became an agent report"
         );
     }
+}
+
+// core-phase4 verifier 3 and 4: a turn herdr reports while the pane prints
+// (its `working` replaced before the gate opens) still moves core's turn by
+// exactly one, and reading the pane turns core's `done` into `idle` with no
+// further turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs hc; set HERDR_TEST_HC=1"]
+async fn core_turn_counts_a_coalesced_herdr_turn_once() {
+    let Some(core) = ScratchCore::start() else {
+        return;
+    };
+    let scratch = Scratch::new("core-turn");
+    let (runtime, _events) = spawn_sh(
+        &scratch.0,
+        "printf 'TURN-READY\\n'; while [ ! -f go ]; do sleep 0.05; done; \
+         while [ ! -f stop ]; do printf .; sleep 0.02; done; \
+         printf 'TURN-STOPPED\\n'; exec sleep 30",
+        &[],
+        &PaneLaunchEnv::default(),
+        24,
+        80,
+        0,
+    );
+    assert!(is_core(&runtime));
+    assert!(wait_for_text(&runtime, "TURN-READY").await);
+    let address = runtime
+        .core_terminal()
+        .expect("a core pane has a link")
+        .address;
+    let report = |word| CoreStatusRecord::Report {
+        word,
+        app: CoreStatusApp::parse("claude"),
+    };
+
+    runtime.mirror_core_status(report(CoreStatusWord::Idle));
+    core.wait_for_status(&address, |status| status["state"] == "idle")
+        .await;
+    let before = core.turn(&address);
+
+    std::fs::write(scratch.path("go"), "").expect("go");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    runtime.mirror_core_status(report(CoreStatusWord::Working));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    runtime.mirror_core_status(report(CoreStatusWord::Done));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::fs::write(scratch.path("stop"), "").expect("stop");
+    assert!(wait_for_text(&runtime, "TURN-STOPPED").await);
+    core.wait_for_status(&address, |status| status["state"] == "done")
+        .await;
+    assert_eq!(
+        core.turn(&address),
+        before + 1,
+        "one herdr turn, one core turn"
+    );
+
+    runtime.mirror_core_status(report(CoreStatusWord::Idle));
+    core.wait_for_status(&address, |status| status["state"] == "idle")
+        .await;
+    assert_eq!(core.turn(&address), before + 1, "reading ends no turn");
+    runtime.shutdown();
 }
 
 async fn wait_for_text(runtime: &PaneRuntime, needle: &str) -> bool {
