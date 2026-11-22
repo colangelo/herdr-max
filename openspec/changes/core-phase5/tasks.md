@@ -165,6 +165,13 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   test, and the loop's loopback server logging forward and env requests under a config that asks for all of
   them. M3: design D10 § Check-free paths only and task R.2.0. M4-M8 are later changes.
 - [ ] B.6 Check: `just check` 0, `just core-live-test` 0, CI green
+  Local, m4m, 2026-11-22, under the shared lock: `just check` 0 (5754 + 158 tests). `just core-live-test`'s
+  steps 0, run with the built binaries copied out of the shared target dir first (another session rebuilt that
+  dir's `debug/herdr` from its own source mid-run): V3 300 s dormant, 0 link bytes, 0 ssh starts, 13 refused
+  pairs, Windows line at most 0.077 s after its POSIX line, pairs after the cap at least 30.06 s apart; V38
+  600 s, 2 ssh starts, 2 refused auths, `retry_spent`, one key and its wake gave exactly one more dial; V2
+  24.7 s; the client connected the dormant machine 0.67 s after it started. The live scripts now take their
+  herdr from `CARGO_TARGET_DIR` when set. CI not run (not pushed).
 
 ## PR C. A herdr-max pane on a machine
 
