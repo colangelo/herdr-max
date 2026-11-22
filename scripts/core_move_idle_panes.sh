@@ -29,17 +29,22 @@ import sys
 import time
 
 USAGE = ("usage: core_move_idle_panes.sh [--move] [--exclude GLOB]... [--herdr BIN] "
-         "[--agent-bell CMD] [--settle SECONDS]")
+         "[--agent-bell CMD] [--settle SECONDS] [--allow-queued]")
 PLAN_FLAGS = ("--model", "--effort", "--permission-mode", "--settings")
 
 
 def parse(argv):
-    options = {"move": False, "exclude": [], "herdr": "herdr", "bell": "agent-bell", "settle": 120.0}
+    options = {"move": False, "exclude": [], "herdr": "herdr", "bell": "agent-bell", "settle": 120.0,
+               "allow_queued": False}
     args = list(argv)
     while args:
         arg = args.pop(0)
         if arg == "--move":
             options["move"] = True
+        elif arg == "--allow-queued":
+            # Queued bells live in agent-bell's durable inbox, keyed by session id; the
+            # moved agent resumes the same session and reads them at its next turn.
+            options["allow_queued"] = True
         elif arg in ("--exclude", "--herdr", "--agent-bell", "--settle"):
             if not args or args[0].startswith("--"):
                 raise SystemExit(f"{arg} needs a value\n{USAGE}")
@@ -254,7 +259,8 @@ def main():
         if agent:
             session = session_of(before)
             waiting = bells_queued(options["bell"], session) if session else "no session id"
-            if waiting:
+            queued_only = waiting is not None and waiting.endswith("bell(s) queued")
+            if waiting and not (queued_only and options["allow_queued"]):
                 summary.append((pane_id, name, f"skipped: {waiting}"))
                 continue
         role = "canary" if moved == 0 else "next"

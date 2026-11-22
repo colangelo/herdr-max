@@ -168,6 +168,14 @@ class CoreMoveIdlePanesTest(unittest.TestCase):
         self.assertIn("skipped: 1 bell(s) queued", done.stdout)
         self.assertNotIn("w1-p3", done.stdout)
 
+    def test_allow_queued_moves_a_pane_whose_only_wait_is_a_queued_bell(self):
+        # The bell waits in agent-bell's durable inbox, keyed by session id,
+        # and the moved agent resumes the same session.
+        done, state = self.run_driver({"w1-p1": agent("y", "sess-b")},
+                                      "--move", "--allow-queued", bells="sess-b")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.moves(state), ["w1-p1"])
+
     # Fork issue 301: a move that answers anything but moved stops the run,
     # visibly, before the next pane, refusals or not.
     def test_a_move_not_moved_stops_the_run_before_the_next_pane(self):
