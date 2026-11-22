@@ -275,10 +275,24 @@ Decisions and limits:
 
 ## M. CPU re-measure (no code; after PR C, on its release build)
 
-- [ ] M.1 D11 protocol on m4m: alternating PTY and core, eight runs a side, default and `V12_ONE_PROCESS=1`,
+- [x] M.1 D11 protocol on m4m: alternating PTY and core, eight runs a side, default and `V12_ONE_PROCESS=1`,
   `V12_TOP` and load recorded, the noise band computed; idle cost of a second core recorded; results in
   `v12-phase3.md`; V22
-- [ ] M.2 Check: both gates met in both profiles, or PR E is opened before PR F and G roll out
+- [x] M.2 Check: both gates met in both profiles, or PR E is opened before PR F and G roll out
+
+Built: no code. On 2026-11-22, the release build of `415448a2` (hc 0.1.21, macOS 27.2.1) ran under the m4m heavy
+lock, PTY and core in ABBA order, at a load of 4.3-13.4. Results, from `v12-phase3.md`:
+
+- Default profile: after 8 runs the ratio was 1.22x, inside the 1.07 noise band of 1.3x, so 16 runs a side ran.
+  Our server: 1.275 s on core and 1.07 s on the PTY, **1.19x, gate 1 met**. Core total: 1.945 s against phase 2's
+  median of 2.115 s, **0.92x, gate 2 met**.
+- `V12_ONE_PROCESS=1`: 8 runs a side, noise band 1.03. Our server: 0.805 s on core and 0.73 s on the PTY,
+  **1.10x, gate 1 met**. Core total: 1.30 s against phase 2's 1.29 s, **1.01x, gate 2 met**.
+- A second idle core with one terminal costs 0.02-0.04 s per 30 s. The secondary connection adds nothing
+  measurable to our server.
+
+PR E is not needed. The default margin is thin: about one noise band, as in phase 2. The server's only extra on
+core is the reader-to-parser hop (2377 Mach calls in 20 s, against about 4 on the PTY).
 
 ## PR E. Batch-handing reader (only if M fails)
 
