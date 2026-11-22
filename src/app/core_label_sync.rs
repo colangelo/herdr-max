@@ -1,10 +1,13 @@
-//! The server side of `herdr.seen` sharing (openspec/changes/core-phase4,
-//! D8 and D11): facts from the label thread go through the reducer, and its
-//! writes go back to core. Unix only, like the core backend.
+//! The server side of `herdr.seen` and `herdr.pinned` sharing
+//! (openspec/changes/core-phase4, D8 to D11): facts from the label thread go
+//! through the reducer, its writes go back to core, and its effects change
+//! herdr's panes. Unix only, like the core backend.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use super::core_labels::{CoreAddress, CoreFact, CoreLabels, LabelWrite};
+use super::core_labels::{
+    CoreAddress, CoreFact, CoreLabels, LabelWrite, Outcome, PaneEffect, PaneFacts,
+};
 use super::App;
 use crate::layout::PaneId;
 use crate::terminal::TerminalId;
@@ -25,11 +28,94 @@ impl App {
     }
 
     pub(super) fn handle_core_labels(&mut self, fact: CoreFact) {
+        if self.core_labels.is_none() {
+            return;
+        }
+        let panes = self.core_panes();
+        let facts = facts_of(&panes);
         let Some(labels) = self.core_labels.as_mut() else {
             return;
         };
-        let writes = labels.apply(fact);
-        self.send_label_writes(writes);
+        let outcome = labels.apply(fact, &facts);
+        self.apply_label_outcome(outcome, &panes);
+    }
+
+    /// After a view change: herdr's own pin changes go to the labels (D10).
+    pub(crate) fn sync_core_label_pins(&mut self) {
+        if self.core_labels.is_none() {
+            return;
+        }
+        let panes = self.core_panes();
+        let facts = facts_of(&panes);
+        let Some(labels) = self.core_labels.as_mut() else {
+            return;
+        };
+        let outcome = labels.sync_pins(&facts);
+        self.apply_label_outcome(outcome, &panes);
+    }
+
+    /// herdr's core panes by primary address, with where they are and what
+    /// the reducer needs to know about them. One walk over the panes, at the
+    /// speed of label events and view changes.
+    fn core_panes(&self) -> HashMap<CoreAddress, ((usize, PaneId), PaneFacts)> {
+        let mut panes = HashMap::new();
+        for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+            for (pane_id, pane) in ws.tabs.iter().flat_map(|tab| tab.panes.iter()) {
+                let Some(address) = self.primary_core_address(&pane.attached_terminal_id) else {
+                    continue;
+                };
+                let terminal = self.state.terminals.get(&pane.attached_terminal_id);
+                let facts = PaneFacts {
+                    seen: pane.seen,
+                    idle_agent: terminal.is_some_and(|terminal| {
+                        terminal.state == crate::detect::AgentState::Idle
+                            && terminal.effective_agent_label().is_some()
+                    }),
+                    pinned: terminal.is_some_and(|terminal| terminal.pin_order.is_some()),
+                };
+                panes.insert(address, ((ws_idx, *pane_id), facts));
+            }
+        }
+        panes
+    }
+
+    fn apply_label_outcome(
+        &mut self,
+        outcome: Outcome,
+        panes: &HashMap<CoreAddress, ((usize, PaneId), PaneFacts)>,
+    ) {
+        self.send_label_writes(outcome.writes);
+        for effect in outcome.effects {
+            let address = match &effect {
+                PaneEffect::MarkSeen(address)
+                | PaneEffect::MarkUnseen(address)
+                | PaneEffect::Pin(address)
+                | PaneEffect::Unpin(address) => address,
+            };
+            let Some(&((ws_idx, pane_id), _)) = panes.get(address) else {
+                continue;
+            };
+            match effect {
+                PaneEffect::MarkSeen(_) | PaneEffect::MarkUnseen(_) => {
+                    let seen = matches!(effect, PaneEffect::MarkSeen(_));
+                    if let Some(pane) = self
+                        .state
+                        .workspaces
+                        .get_mut(ws_idx)
+                        .and_then(|ws| ws.pane_state_mut(pane_id))
+                    {
+                        pane.seen = seen;
+                        self.state.core_view_dirty = true;
+                    }
+                }
+                PaneEffect::Pin(_) => {
+                    self.state.pin_agent(pane_id);
+                }
+                PaneEffect::Unpin(_) => {
+                    self.state.unpin_agent(pane_id);
+                }
+            }
+        }
     }
 
     /// The core panes some person is looking at now (D7).
@@ -94,6 +180,15 @@ impl App {
     }
 }
 
+fn facts_of(
+    panes: &HashMap<CoreAddress, ((usize, PaneId), PaneFacts)>,
+) -> HashMap<CoreAddress, PaneFacts> {
+    panes
+        .iter()
+        .map(|(address, (_, facts))| (address.clone(), *facts))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +228,7 @@ mod tests {
             Observed {
                 turn: 2,
                 seen: None,
+                pinned: false,
             },
         )]));
         app.look_core_labels(["t1".to_string()].into_iter().collect());
@@ -148,6 +244,7 @@ mod tests {
             Observed {
                 turn: 2,
                 seen: Some(1),
+                pinned: false,
             },
         )]));
         app.look_core_labels(["t1".to_string()].into_iter().collect());
