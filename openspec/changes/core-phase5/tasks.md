@@ -47,20 +47,62 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR A. The link command and core machines (no dormancy yet)
 
-- [ ] A.1 Read the Tailscale SSH check banner text and where ssh prints it from Tailscale's docs or source (no
+- [x] A.1 Read the Tailscale SSH check banner text and where ssh prints it from Tailscale's docs or source (no
   dial); record it in design D10
-- [ ] A.2 `src/core_machine/`: `MachineName`, `target.json` (with the adding terminal's `SSH_AUTH_SOCK`),
+  Done: D10 § The check banner. An SSH auth banner from the control server's message (`tailssh.go` `clientAuth`,
+  `SendAuthBanner`), reported as `# Tailscale SSH requires an additional check.` / `# To authenticate, visit:
+  https://login.tailscale.com/a/<code>`; OpenSSH prints auth banners on stderr only at LogLevel INFO or above, so
+  the link argv adds `-o LogLevel=INFO`. Limit: the text is Tailscale's to change; a changed one degrades to
+  `auth_stalled`, which also closes the gate. Open question 2 answered.
+- [x] A.2 `src/core_machine/`: `MachineName`, `target.json` (with the adding terminal's `SSH_AUTH_SOCK`),
   `gate.json` types parsed at the boundary; the state dir from the passwd home (D2); the ssh argv builder reusing
   `attach.rs`'s managed config and non-interactive options, with `ControlMaster=no`, `ControlPath=none`,
   `ServerAliveInterval=5`, `ServerAliveCountMax=2` (D10), and the allowlisted ssh environment
-- [ ] A.3 `herdr core-link <name>` per D2 steps 1-8 (`probe/fix/corelink.py` is the reference): POSIX line only,
+  Built: `core_machine/name.rs` (`MachineName`, now also the machine part of `CoreAddress`), `state.rs`
+  (`MachineDir` 0700 and owner-checked, `Target` with `deny_unknown_fields` and validated destination, session and
+  absolute paths, `Gate`/`GateClass`, `LeaseHolder` and lease files written then renamed, `dial.json`, `link.log`
+  with one 1 MiB rotation), `ssh.rs` (argv, env, guard, line kind). Shared helpers moved out of `attach.rs`:
+  `NONINTERACTIVE_SSH_OPTIONS`, `managed_ssh_config_contents`. Platform calls (getpwuid_r, flock, fork, setsid,
+  dup2, exec, poll, kill) in `platform/core_link.rs`. Limits: the root is `herdr-dev` for a debug build (as herdr's
+  other folders); the ssh options are fixed in code, not stored in `target.json`; a machine may name its own ssh
+  config (`--ssh-config`), which then replaces the managed one.
+- [x] A.3 `herdr core-link <name>` per D2 steps 1-8 (`probe/fix/corelink.py` is the reference): POSIX line only,
   gate check, `dial.lock`, fork the watcher, exec ssh; the far guard and `HERDR-LINK-UP`; the 15 s deadline;
   failure classes including `far_core_down` (D10); a lease check that, until PR B, treats every machine as leased.
   A unit test pins core's line shape (V35)
-- [ ] A.4 `herdr machine add --core`, `rm --core`, `login`, `status [--json]` for core machines; refusal without a
+  Built: `core_machine/link.rs`, dispatched first in `main` while single-threaded. Order: line kind, gate, lease
+  (always in force until B.1), target, `dial.lock` (2 s, kept across exec), managed config, fork, exec ssh with
+  core's stdin and stdout and the watcher's pipe on stderr. The watcher drops core's streams and every other
+  descriptor, reads ssh's stderr before checking its parent, records the first class only (`needs_check` ends ssh,
+  `far_core_down` and `auth_failed` let it exit, `auth_stalled` at 15 s ends it: SIGTERM, SIGKILL after 1 s, only
+  while ssh is its parent), and clears the gate when the link comes up. Not in A: step 7 (lease re-read) and step 9
+  (retry budget) are tasks B.3 and B.3a. Limits: `auth_failed` is matched on ssh's stderr text, not its exit code
+  (the watcher is ssh's child and cannot wait on it); on a far side whose `nc` has no `-U` the guard falls back to a
+  socket-file test (D2 step 5), and `nc -U` on Linux images is unmeasured.
+- [x] A.4 `herdr machine add --core`, `rm --core`, `login`, `status [--json]` for core machines; refusal without a
   terminal; no `--install` (V23); add and login write the `manual` lease before calling hc (V33)
-- [ ] A.5 Loop harness `scripts/core_machine_live_test.sh`: two scratch cores, fake `ssh`, the probe's byte log;
+  Built: `core_machine/command.rs`, routed from `cli/machine.rs` (`--core`; `login` is core-only; Windows says core
+  machines need macOS or Linux). Add: needs a terminal (else prints the command), records the absolute `ssh` on
+  PATH and the terminal's `SSH_AUTH_SOCK`, writes the lease, runs `hc machine add --name --session --via
+  '<herdr> core-link <name>'`; a failed add prints core-link's log and removes the state. Login: lease, then ssh in
+  the terminal (no BatchMode, no master), clears the gate, `machine.connect`. Status: core's `machine.list` (never
+  starting core) merged with the state folders: state, gate, leases, last dial, whether core's target is herdr's
+  link. Limits: the core session flag is `--remote-session` (herdr's global `--session` takes `--session`); status
+  is `herdr machine status --core`, so the saved-machine status output is unchanged; the old-hc notice of D9 comes
+  with the link-establishment work of PR B/C. V23 is a source scan (`core_machine/tests.rs`).
+- [x] A.5 Loop harness `scripts/core_machine_live_test.sh`: two scratch cores, fake `ssh`, the probe's byte log;
   the loopback OpenSSH server for V34 and V36; V8, V23, V27, V28, V31 (core-link part), V34, V35, V36
+  Built: `scripts/core_link_live_test.sh`, sourced by `core_machine_live_test.sh` after V26 (V23 is the unit test).
+  Fake ssh with modes relay, slow, hang, banner, denied, logging names only and a byte log; machines named per run
+  under the passwd-home state root and removed after. Results on m4m: add refused without a terminal; add and
+  login leases before their dials (V33 add and login parts); ssh pid = core-link pid; V31 allowlisted names with
+  the recorded agent under a foreign HOME/XDG_STATE_HOME/SSH_AUTH_SOCK; V28 busy refusal in 2.05 s, Windows line
+  refused, one ssh; V8 three classes, `auth_stalled` 15.1 s, login reopens; V27 through core 15.2 s, kill -9 leaves
+  no watcher; V35 stopped and stale far core give `far_core_down`, no far core starts; V34 no control socket, the
+  redial authenticates again; V36 unreachable 25.9 s after SIGSTOP, `terminal.list` 3.0 s per call until then.
+  Limits: V35's "no dial for 5 min" is shown by an immediate refused dial plus the unit test of the expiry, not a
+  5 min wait, and the reopening is by `machine login` (`machine wake` is B.3); V34 ends the link by SIGTERM of ssh
+  (the lease end is B.3); the loopback server is paramiko through `uv`.
 - [ ] A.6 Check: `just check` 0, `just core-live-test` 0, CI green on Linux, macOS and Windows
 
 ## PR B. Leases and dormancy (#260 on core machines)
