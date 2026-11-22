@@ -549,6 +549,82 @@ mod tests {
         assert_eq!(kills(&core), 0, "{:?}", core.methods());
     }
 
+    /// What the build before machine panes (origin/master 7c273562, the
+    /// previous beta) does with one saved pane, transcribed from its code:
+    /// `restore_tab` (src/persist/restore.rs:737) holds a pane whose `cwd`
+    /// is no folder, with its link, as `DirectoryUnavailable`; its waiting
+    /// retry then gets `NotOurs` for any address with a machine
+    /// (pane_io.rs:436), searches, finds no terminal with its plain labels
+    /// and, the folder gone, only shows an error (core_terminals.rs:204):
+    /// it never starts. A pane whose `cwd` exists goes through the same
+    /// refusal and search at restore, and starts fresh on this Mac.
+    fn previous_beta_restores(pane: &serde_json::Value) -> &'static str {
+        #[derive(serde::Deserialize)]
+        struct OldLink {
+            #[allow(dead_code)] // read as the old build reads it
+            address: String,
+        }
+        // As the old build's `PaneSnapshot`: unknown fields are ignored.
+        #[derive(serde::Deserialize)]
+        struct OldPane {
+            cwd: std::path::PathBuf,
+            #[serde(default)]
+            core_terminal: Option<OldLink>,
+        }
+        let old: OldPane = serde_json::from_value(pane.clone()).expect("the old build reads it");
+        match (old.cwd.is_dir(), old.core_terminal.is_some()) {
+            (false, true) => "held: directory unavailable, never started",
+            (false, false) => "error: directory unavailable, never started",
+            (true, _) => "started fresh on this Mac",
+        }
+    }
+
+    // N3 (D5): a saved pane on a machine is safe for the previous beta: its
+    // `cwd` is a folder no host has, so that build holds it and never
+    // starts it here, while this build restores it with its real folder,
+    // waiting for its machine.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_machine_pane_is_never_started_by_the_previous_beta() {
+        let core = FakeCore::start();
+        core.set_machine("loop", "unreachable");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        let real = std::env::temp_dir();
+        app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
+        let saved = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            None,
+        );
+        let json = serde_json::to_value(&saved).expect("json");
+        let pane_json = &json["workspaces"][0]["tabs"][0]["panes"][pane.raw().to_string()];
+        assert_eq!(
+            previous_beta_restores(pane_json),
+            "held: directory unavailable, never started",
+            "{pane_json}"
+        );
+        // What this branch saved before the fix: the real folder, which the
+        // previous beta started the pane in.
+        let mut before = pane_json.clone();
+        before["cwd"] = serde_json::json!(real);
+        assert_eq!(previous_beta_restores(&before), "started fresh on this Mac");
+        // This build keeps the folder and restores the pane waiting.
+        let back: crate::persist::SessionSnapshot =
+            serde_json::from_value(json).expect("this build reads it");
+        assert_eq!(
+            back.workspaces[0].tabs[0].panes[&pane.raw()].program_cwd(),
+            real.as_path()
+        );
+        assert_eq!(
+            back.workspaces[0].identity_cwd, real,
+            "named by its real folder"
+        );
+    }
+
     // C5 (D5, P5): a poll said connected, but core has not linked the
     // machine yet when the pane asks: its `not_found` is not final, and the
     // pane keeps waiting.

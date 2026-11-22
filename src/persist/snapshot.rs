@@ -168,6 +168,17 @@ pub struct PaneSnapshot {
     pub core_terminal: Option<PaneCoreTerminalSnapshot>,
 }
 
+impl PaneSnapshot {
+    /// The folder the pane's program runs in: for a pane on a core machine
+    /// the one saved with its link, else `cwd` (core-phase5 D5).
+    pub(crate) fn program_cwd(&self) -> &std::path::Path {
+        self.core_terminal
+            .as_ref()
+            .and_then(|link| link.machine_cwd.as_deref())
+            .unwrap_or(&self.cwd)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneCoreTerminalSnapshot {
     pub session: String,
@@ -186,7 +197,18 @@ pub struct PaneCoreTerminalSnapshot {
     pub agent_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid_started: Option<u64>,
+    /// The folder of a pane on a core machine, there (core-phase5 D5). Its
+    /// pane's `cwd` is then `MACHINE_PANE_CWD`, a folder no host has, so a
+    /// build from before machine panes, which would start the pane on this
+    /// Mac in its `cwd`, holds it as "Saved directory is unavailable"
+    /// instead. Absent for a pane on this Mac and in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_cwd: Option<PathBuf>,
 }
+
+/// The saved `cwd` of a pane on a core machine: below `/dev/null`, a
+/// character device, so no folder by that name can exist (core-phase5 D5).
+pub(crate) const MACHINE_PANE_CWD: &str = "/dev/null/herdr-pane-on-a-core-machine";
 
 impl PaneCoreTerminalSnapshot {
     pub(crate) fn from_link(link: crate::pane::CoreTerminalLink) -> Self {
@@ -197,6 +219,7 @@ impl PaneCoreTerminalSnapshot {
             pid_started: link.program.map(|program| program.started),
             agent_pid: link.agent.map(|agent| agent.pid),
             agent_pid_started: link.agent.map(|agent| agent.started),
+            machine_cwd: None,
         }
     }
 
@@ -479,7 +502,7 @@ fn capture_workspace(
     let identity_cwd = tabs
         .first()
         .and_then(|tab| tab.root_pane.and_then(|id| tab.panes.get(&id)))
-        .map(|pane| pane.cwd.clone())
+        .map(|pane| pane.program_cwd().to_path_buf())
         .unwrap_or_else(|| ws.identity_cwd.clone());
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
@@ -551,11 +574,21 @@ fn capture_tab(
         // A pane without a runtime keeps the link it was suspended or
         // restored with, so the next restore still checks that terminal
         // before it starts anything (core-phase3 D1b).
-        let core_terminal = terminal_id
+        let link = terminal_id
             .and_then(|id| terminal_runtimes.get(id))
             .and_then(|runtime| runtime.core_terminal())
-            .or_else(|| terminal.and_then(crate::terminal::state::TerminalState::held_core_link))
-            .map(PaneCoreTerminalSnapshot::from_link);
+            .or_else(|| terminal.and_then(crate::terminal::state::TerminalState::held_core_link));
+        let on_machine = link.as_ref().is_some_and(|link| link.machine().is_some());
+        let mut core_terminal = link.map(PaneCoreTerminalSnapshot::from_link);
+        // A pane on a core machine saves its folder with its link and a
+        // `cwd` no host has, so an older build never starts it here (D5).
+        let cwd = match core_terminal.as_mut() {
+            Some(saved) if on_machine => {
+                saved.machine_cwd = Some(cwd);
+                PathBuf::from(MACHINE_PANE_CWD)
+            }
+            _ => cwd,
+        };
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
         // bottom of the buffer once per capture, only for a Claude record.
@@ -1958,6 +1991,7 @@ mod tests {
                 pid_started: None,
                 agent_pid: None,
                 agent_pid_started: None,
+                machine_cwd: None,
             })
         );
         let back = serde_json::to_value(&pane).unwrap();

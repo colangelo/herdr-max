@@ -729,7 +729,7 @@ fn restore_tab(
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
         let saved_cwd = saved_pane
-            .map(|p| p.cwd.clone())
+            .map(|p| p.program_cwd().to_path_buf())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
         let cwd = saved_cwd;
