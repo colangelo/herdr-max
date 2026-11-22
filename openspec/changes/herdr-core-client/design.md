@@ -688,16 +688,16 @@ tasks) disappear in B because our server still does those jobs. Only blockers 1 
 Each phase ends in a beta that ac runs (`herdr-dogfood`), and the old path stays selectable until the
 next phase starts.
 
-Status (2026-11-21, herdr-core; issue numbers are AC-forks/herdr-max on Gitea):
+Status (2026-11-22, herdr-core; issue numbers are AC-forks/herdr-max on Gitea):
 
 | Phase | Status | Done | Left |
 |---|---|---|---|
 | 0 Pilot gates | done | Q4, Q6, Q9, Q11-Q13 on hc 0.1.21 (§ 5a); Q8 logout as V7 on 2026-11-19 (49/51 panes kept, 32/34 Claude sessions resumed) | — |
 | 1 Runtime seam | done | #277, beta 194 | — |
 | 2 Core backend | done | #280 closed 2026-11-21: `runtime = "core"` on m4m since 11-16 and ac-mbm5 since 11-21; re-adoption after restart and handoff (D10, #284); mixed PTY/core restore; status mirrored to core as OSC 7501 (#293, PR 58, beta 202); every m4m pane and most ac-mbm5 panes moved to core | — |
-| 3 Restore and update through core | partly done in 2 | re-adoption by address; mixed-session restore (V7) | #287 (per-terminal responsibility: quitting Herdr Core ends every core pane); #293 1b (herdr-max on the default core session, re-adoption across the move); CPU re-measure (`V12_TOP`, `V12_ONE_PROCESS`); `runtime = "core"` as the default on both Macs, old PTY panes moved when idle |
-| 4 Layout in a core document | started | herdr-max's own layout stays home (6.6, decision 2); PR 59 projects herdr-max-owned spaces one way into the shared `herdr-app` document so Herdr Mobile shows them (#293 (b)) | the `herdr-max` document for our extras; `herdr.seen` / `herdr.pinned` label sync with the apps |
-| 5 Remote through core machines | not started | — | all |
+| 3 Restore and update through core | done | #295 closed 2026-11-22 with beta 212 (`openspec/changes/archive/*-core-phase3`): a core loss suspends and resumes panes (#287; upstream already fixed, no report); one connection per core session; the default herdr session on core `default` (#293 1b); idle panes moved onto it, then the legacy core and the zshenv bridge retired on both Macs; restored panes start on core; CPU re-measure met both gates (1.19x, 1.10x) | carry-overs in #307 (both-Macs phone check, `hc update` gap, quit drill, live move facts); batching #306; the move off the server loop #302 |
+| 4 Layout in a core document | code done | herdr-max's own layout stays home (6.6, decision 2); PR 59 projects herdr-max-owned spaces into the shared `herdr-app` document (#293 (b)); `herdr.seen` / `herdr.pinned` label sync and the `herdr-max` document (#299, PRs 75, 77, 78, 80), on in beta 210 on both Macs | ac's phone checks V21-V23, then close #299 |
+| 5 Remote through core machines | in progress | plan (`openspec/changes/core-phase5`, PR 79); local scans keep local addresses (PR 81); `herdr core-link` (PR 83); leases, dormancy and the retry budget (PR 85) (#300) | panes on a machine (PR C), the view server (D), the fleet CLI (E), the rollout with the first real machine add (R.2) |
 | 6 Delete the old runtime | not started | — | all |
 
 0. **Pilot gates (go/no-go for phase 1).** Finish the pilot questions that can kill the plan, on
