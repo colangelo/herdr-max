@@ -142,6 +142,19 @@ the state and calls `machine.connect`.
 - **THEN** `core-link` records `auth_stalled` and ends ssh before core kills it, and no further dial starts until
   a person runs `herdr machine login`
 
+### Requirement: Core's own reconnects stop after one failed retry
+
+Any dial that ends without a link, or a drop of a link that was up, SHALL be recorded with its time. After it,
+`core-link` SHALL allow one more dial on core's own initiative. When that one also fails, it SHALL close the gate as
+`retry_spent` and refuse every later dial until a human action gives a lease newer than the failure: input in a
+view or a far pane, `herdr machine wake`, `herdr machine login`, or a CLI call with `--dial`. A link that comes up
+SHALL clear the budget.
+
+#### Scenario: A far side that refuses authentication for ten minutes
+- **WHEN** the far side refuses every authentication for 10 min while a client lease is kept alive with no new input
+- **THEN** at most 2 ssh processes start in those 10 min, the gate reads `retry_spent`, and one key in a far pane
+  gives exactly one more dial
+
 ### Requirement: Machine status is readable by agents
 
 `herdr machine status [--json]` SHALL report for each core machine its core state, its gate (`open`, `dormant`,

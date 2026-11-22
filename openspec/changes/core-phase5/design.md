@@ -160,6 +160,15 @@ as the last argument. `core-link` (prototype: `probe/fix/corelink.py`, R2-R5, R9
 7. **Lease end.** Every 5 s the watcher re-reads the leases; when none is in force it ends ssh. The link closes;
    core marks the machine unreachable and its next retries hit step 2.
 8. **Classes.** The watcher reads ssh's stderr for the classes of D10 and writes them to `gate.json`.
+9. **Retry budget (herdr's review, 2026-11-22).** With `ControlMaster=no` (F9), every dial authenticates, which can
+   mean a Touch ID prompt. So core's own reconnects must never turn a sleeping or flapping far side into a stream of
+   prompts. Any dial that ends without a link (an `auth_*` class, a refusal, `far_core_down`, or a drop of a link
+   that was up) is written to `gate.json` with its time. After that, `core-link` allows **one** more dial on core's
+   own initiative. A second failure closes the gate as `retry_spent`, and every later dial exits 75, until a human
+   action gives a lease newer than the gate: input in a view or a far pane (the client lease's mtime, D3), `herdr
+   machine wake`, `herdr machine login`, or a CLI call with `--dial` (D7). A lease that was only kept alive by its
+   10-minute window, with no new input since the failure, does not reopen it. A link that comes up clears the
+   budget.
 
 The link state lives in `<home>/.local/state/herdr/core-machines/<name>/` (mode 0700), where `<home>` is the
 account's passwd home (`getpwuid`), never `HOME` or `XDG_STATE_HOME` from the environment core passes: that is the
@@ -578,6 +587,7 @@ in-process test server of core-backend. No test dials a real Mac.
 | V35 | a dial never starts the far core (F10) | loop: far core stopped; far core SIGKILLed (stale socket); lease held | D2 step 5, R5 | far socket stays absent or dead and no far core process starts; gate `far_core_down`; no further dial for 5 min; after the far core is started, `herdr machine wake` connects; a unit test pins core's POSIX line shape (`sh -c '...connect'`) |
 | V36 | a frozen link ends in bounded time (F11) | real OpenSSH to the loopback server, then SIGSTOP of the server | D10 keepalives, R9 | machine `unreachable` ≤ 30 s after the freeze; `terminal.list` latency on the primary recorded each 2 s in the test log |
 | V37 | cut or timed-out exec replies are errors (F12) | fake core answering `machine.exec` with `truncated: true` and with `timed_out: true`, exit code 0 | D7 | the CLI exits 1 with the message and prints no partial output; an input over 8 MiB is refused before sending |
+| V38 | a refusing far side costs at most 2 dials (herdr's review) | loop with real OpenSSH to `probe/fix/sshd_fake.py` set to refuse auth, and a client lease renewed every 30 s by a timer (no input); 10 min; then one simulated key in a far pane | D2 step 9 | at most 2 ssh starts (server AUTH attempts at most 2) in the 10 min; gate `retry_spent` after the second; the key gives exactly one more dial |
 | V25 | live on both Macs | beta on m4m and ac-mbm5 in one step; m4m views ac-mbm5 and runs one pane there; one night with the view attached | Goals 1-3 | ac-mbm5 `pmset -g log` shows no dark-wake run from the link; panes intact in the morning; the first key wakes the view |
 
 ## Roundtable findings
