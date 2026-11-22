@@ -825,38 +825,6 @@ async fn core_v10_a_kept_pane_is_reattached_by_the_next_server() {
     assert!(wait_until_gone(pid), "closing the reattached pane ends it");
 }
 
-// D1: with `runtime = "core"`, a pane restored fresh (no saved core terminal,
-// or one that is gone) still runs on the PTY; only new panes use core.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs hc; set HERDR_TEST_HC=1"]
-async fn core_v1_a_restored_pane_stays_on_the_pty() {
-    let Some(_core) = ScratchCore::start() else {
-        return;
-    };
-    let scratch = Scratch::new("core-v1r");
-    let (events, _event_rx) = mpsc::channel(64);
-    let restored = PaneRuntime::spawn_with_initial_history(
-        PaneId::alloc(),
-        24,
-        80,
-        scratch.0.clone(),
-        0,
-        crate::terminal_theme::TerminalTheme::default(),
-        None,
-        PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::default()),
-        &PaneLaunchEnv::default(),
-        Some("saved history\r\n"),
-        crate::pane::RuntimeChoice::for_pane(None).restored(),
-        events,
-        Arc::new(Notify::new()),
-        Arc::new(RenderSignal::new()),
-    )
-    .expect("restored pane");
-    assert!(!is_core(&restored), "a restored pane stays on the PTY");
-    assert!(restored.core_terminal().is_none());
-    restored.shutdown();
-}
-
 // V3 (flow, D3): output far beyond core's 256 KiB credit window arrives whole
 // with credit sent back in batches; a stall would leave the marker unseen.
 #[tokio::test(flavor = "multi_thread")]

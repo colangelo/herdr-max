@@ -2727,9 +2727,10 @@ impl PaneRuntime {
         )
     }
 
-    /// A shell seeded with saved history: a restored pane's, which passes
-    /// `RuntimeChoice::restored` (a restored core pane reattaches through
-    /// `reattach_core` instead, core-backend D1).
+    /// A shell seeded with saved history: a restored pane's fresh program,
+    /// on core when `runtime` says so (core-phase3 D8; a restored core pane
+    /// whose program runs reattaches through `reattach_core` instead,
+    /// core-backend D10).
     // Runtime construction needs to thread PTY size, environment, theme, and render hooks together.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_initial_history(

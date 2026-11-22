@@ -1900,7 +1900,8 @@ pub struct ExperimentalConfig {
     pub pane_history: bool,
     /// Which backend new panes run on: `"pty"` (default) or `"core"`, a
     /// herdr-core terminal (Unix only; falls back to the PTY when core is not
-    /// usable). Existing and restored panes keep their backend.
+    /// usable). Restored panes that start a fresh program follow it too;
+    /// running panes, and programs a live handoff adopts, keep their backend.
     pub runtime: PaneRuntimeChoice,
     /// Start each new macOS PTY pane under its own launchd job, so stopping an
     /// app launched from one pane can end at most that pane (fork issue 288).

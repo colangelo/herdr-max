@@ -1,6 +1,8 @@
 //! Which backend a pane's program starts on (openspec/changes/core-phase3
 //! D13, D3a, D8). Every path into `PaneIo::spawn_preferred` passes a
-//! `RuntimeChoice`, so a pane that skips core says why.
+//! `RuntimeChoice`, so a pane that skips core says why. A restored pane's
+//! fresh program asks like any other (D8); a program adopted by fd in a live
+//! handoff never reaches `spawn_preferred`, so it keeps its PTY.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -18,8 +20,6 @@ pub(crate) enum PtyReason {
     Excluded,
     /// The core loss guard gave up on core (D3a).
     GaveUp,
-    /// A restored pane's fresh program, until restore starts it on core (D8).
-    Restored,
 }
 
 /// `[experimental] core_pty_panes`, set at startup and on every reload.
@@ -58,15 +58,6 @@ impl RuntimeChoice {
     /// command gives its agent.
     pub(crate) fn for_argv(argv: &[String]) -> Self {
         Self::for_pane(crate::agent_resume::argv_launch_name(argv).as_deref())
-    }
-
-    /// A restored pane's fresh program stays on the PTY until PR F (D8),
-    /// keeping a more specific reason.
-    pub(crate) fn restored(self) -> Self {
-        match self {
-            Self::Preferred => Self::Pty(PtyReason::Restored),
-            pty => pty,
-        }
     }
 }
 
@@ -206,10 +197,6 @@ mod tests {
                 RuntimeChoice::for_pane(Some(host)),
                 RuntimeChoice::Pty(PtyReason::Excluded)
             );
-            assert_eq!(
-                RuntimeChoice::for_pane(Some(host)).restored(),
-                RuntimeChoice::Pty(PtyReason::Excluded)
-            );
         }
         let argv = [
             "/opt/bin/claude",
@@ -224,10 +211,6 @@ mod tests {
             RuntimeChoice::Pty(PtyReason::Excluded)
         );
         assert_eq!(RuntimeChoice::for_pane(None), RuntimeChoice::Preferred);
-        assert_eq!(
-            RuntimeChoice::for_pane(None).restored(),
-            RuntimeChoice::Pty(PtyReason::Restored)
-        );
         set_core_pty_panes(Vec::new());
         assert_eq!(
             RuntimeChoice::for_pane(Some("manager-lab-hlp")),

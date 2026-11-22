@@ -796,11 +796,12 @@ fn restore_tab(
         let restored_agent_launch = saved_pane
             .and_then(saved_agent_launch)
             .filter(|_| !startup.duplicate_agent_session);
+        // A fresh program starts where a new pane's would (core-phase3 D8),
+        // unless `core_pty_panes` names the pane (D13).
         let restored_runtime = crate::pane::RuntimeChoice::for_pane(crate::pane::stable_name(
             saved_pane.and_then(saved_agent_launch).as_ref(),
             saved_agent_name.as_deref(),
-        ))
-        .restored();
+        ));
         let initial_restore_agent = startup
             .restore_plan
             .as_ref()
