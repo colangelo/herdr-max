@@ -15,7 +15,8 @@
 # core until a config reload; V19, a pane in a second core session is kept
 # through a handoff and a restart, and a stop ends both sessions' panes; V33,
 # a pane named by `core_pty_panes` stays on the PTY when respawned, resumed
-# and restored (macOS: it uses pane jobs).
+# and restored (macOS: it uses pane jobs), and the idle move refuses it; V20,
+# the idle move takes idle panes onto core and refuses busy ones.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -665,6 +666,10 @@ int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) fprintf(out, " %s", argv[i]);
   fprintf(out, "\n");
   fclose(out);
+  /* An empty Claude-like input box, for the idle move's draft check;
+     no line feed after it, so it fits a three-row pane. */
+  printf("\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf \n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+  fflush(stdout);
   for (;;) pause();
 }
 STUB
@@ -734,6 +739,16 @@ not_a_core_program "$(stub_pid)"
 on_core "$X" || fail "X is not on core after the restart: $(core_terminals)"
 echo "ok: V33: after a restart, H was restored on the PTY and X reattached on core"
 
+refusals_of() {
+  run_herdr pane respawn "$@" | python3 -I -c 'import json,sys; r=json.load(sys.stdin)["result"]; print(("moved " if r["moved"] else "") + ",".join(r["refusals"]))'
+}
+STUB_PID="$(stub_pid)"
+[[ "$(refusals_of "$H" --if-idle --check)" == *excluded* ]] || fail "H's move check said $(refusals_of "$H" --if-idle --check)"
+[[ "$(refusals_of "$H" --if-idle)" == *excluded* ]] || fail "H was not refused excluded"
+[[ "$(stub_pid)" == "$STUB_PID" ]] && alive "$STUB_PID" || fail "the refused move touched H's agent"
+on_pty "$H" || fail "H left the PTY: $(core_terminals)"
+echo "ok: V33: pane respawn --if-idle refuses H as excluded and leaves it on the PTY"
+
 set_v33_config core ''
 run_herdr server reload-config >/dev/null
 STUB_PID="$(stub_pid)"
@@ -743,4 +758,58 @@ wait_until "H on core without the pattern" on_core "$H"
 echo "ok: V33: with no core_pty_panes, the same respawn put H on core"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
-echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37)"
+
+# 6. V20 (core-phase3 D9): the idle move. Panes started on the PTY, then
+#    runtime = "core": an idle shell moves with its directory; a shell running
+#    `sleep 30` and a pane typed into just before are refused with their
+#    reasons; an idle agent stand-in moves and is resumed with its plan's
+#    arguments. The windows are shortened (debug build only): input 3 s,
+#    agent idle 3 s, shell quiet 6 s.
+SESSION="v20"
+CORE_SESSION="herdrdev-$SESSION"
+SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
+set_v33_config pty ''
+HERDR_TEST_MOVE_WINDOWS_MS=3000,3000,6000 run_herdr server >/dev/null 2>&1 &
+wait_until "v20 server socket" socket_up
+S1="$(api "{\"id\":\"v20\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')"
+S2="$(split_down "$S1")"
+S3="$(split_down "$S2")"
+AG="$(split_down "$S3")"
+mkdir -p "$BASE/v20 dir"
+send_line "$S1" "cd \"$BASE/v20 dir\""
+send_line "$S2" "sleep 30"
+: > "$BASE/h.args"
+send_line "$AG" "exec claude --name v20-agent"
+wait_until "the stand-in started in AG" file_has_line "$BASE/h.args"
+AG_PID="$(stub_pid)"
+# As a Claude hook does once the agent runs: its session and resume
+# command, so it has a plan.
+run_herdr pane report-agent "$AG" --source v20:test --agent claude --state idle \
+  --agent-session-id sess-v20 -- claude --resume sess-v20 >/dev/null
+set_v33_config core ''
+run_herdr server reload-config >/dev/null
+# Past every window: the setup lines above were input.
+for _ in $(seq 1 140); do sleep 0.05; done
+send_line "$S3" "true"
+[[ "$(refusals_of "$S3" --if-idle)" == *recent_input* ]] || fail "S3 typed into was not refused recent_input"
+[[ "$(refusals_of "$S2" --if-idle)" == *shell_busy* ]] || fail "S2 running sleep was not refused shell_busy"
+on_pty "$S2" && on_pty "$S3" || fail "a refused pane moved: $(core_terminals)"
+PLAN="--resume sess-v20 --name v20-agent"
+[[ "$(refusals_of "$S1" --if-idle --check)" == "" ]] || fail "S1 check said $(refusals_of "$S1" --if-idle --check)"
+on_pty "$S1" || fail "a check moved S1"
+[[ "$(refusals_of "$S1" --if-idle)" == "moved " ]] || fail "the idle shell S1 did not move"
+wait_until "S1 on core" on_core "$S1"
+send_line "$S1" "pwd -P > \"$BASE/s1.pwd\""
+wait_until "S1's directory" file_has_line "$BASE/s1.pwd"
+[[ "$(cat "$BASE/s1.pwd")" == "$(cd "$BASE/v20 dir" && pwd -P)" ]] || fail "S1 moved to $(cat "$BASE/s1.pwd")"
+echo "ok: V20: the idle shell moved onto core in its directory; the busy and the typed-into panes were refused"
+[[ "$(refusals_of "$AG" --if-idle)" == "moved " ]] || fail "the idle agent did not move: $(refusals_of "$AG" --if-idle --check)"
+gone "$AG_PID" || fail "the old agent $AG_PID still runs"
+wait_long "AG's agent resumed" stub_restarted "$AG_PID"
+wait_until "AG on core" on_core "$AG"
+[[ "$(stub_args)" == "$PLAN" ]] || fail "AG resumed with '$(stub_args)', its plan was '$PLAN'"
+echo "ok: V20: the idle agent moved onto core and resumed with its plan ($PLAN)"
+run_herdr server stop >/dev/null
+hc_scratch server stop >/dev/null 2>&1 || true
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37; V20)"
