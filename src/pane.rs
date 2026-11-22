@@ -667,9 +667,18 @@ fn resolved_pane_cwd(
     if child_pid == 0 {
         return None;
     }
-    nested_job(child_pid)
-        .and_then(|job| foreground_job_cwd(&job, &mut cwd_of))
-        .or_else(|| cwd_of(child_pid))
+    let Some(job) = nested_job(child_pid) else {
+        return cwd_of(child_pid);
+    };
+    // An agent below the wrapper is the process the user sits in front of. Its
+    // MCP servers, language servers and runtimes share its job and may sit in
+    // other directories, so no member may stand in for it, and neither may the
+    // wrapper's launch directory: when the agent cannot answer (its directory
+    // was removed, say) the pane keeps the last directory it knew.
+    if let Some((_, _, agent_pid)) = crate::detect::identify_agent_process_in_job(&job) {
+        return cwd_of(agent_pid);
+    }
+    foreground_job_cwd(&job, &mut cwd_of).or_else(|| cwd_of(child_pid))
 }
 
 /// `resolved_pane_cwd` against the real process table. `nested_foreground_job`
@@ -8555,6 +8564,54 @@ mod tests {
             cwd,
             Some(std::path::PathBuf::from("/p20")),
             "a wrapper's own directory must not outrank the shell it re-runs"
+        );
+    }
+
+    // Fork issue 304: behind atuin the pane reported the directory of a language
+    // server claude had started, and the space lost its branch line.
+    fn wrapped_claude_job() -> crate::platform::ForegroundJob {
+        crate::platform::ForegroundJob {
+            process_group_id: 1905,
+            processes: vec![
+                foreground_process(2460, "python3.13"),
+                foreground_process(2124, "node"),
+                foreground_process(2301, "pyright-langserver"),
+                crate::platform::ForegroundProcess {
+                    argv0: Some("claude".into()),
+                    ..foreground_process(1905, "2.1.330")
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn resolved_pane_cwd_of_a_wrapped_agent_is_the_agent_s_own() {
+        let cwd = resolved_pane_cwd(
+            7,
+            |_| Some(wrapped_claude_job()),
+            |pid| {
+                Some(std::path::PathBuf::from(match pid {
+                    1905 => "/repo",
+                    7 => "/atuin-launch",
+                    _ => "/pyright/dist",
+                }))
+            },
+        );
+
+        assert_eq!(cwd, Some(std::path::PathBuf::from("/repo")));
+    }
+
+    #[test]
+    fn resolved_pane_cwd_never_falls_to_a_helper_of_a_wrapped_agent() {
+        let cwd = resolved_pane_cwd(
+            7,
+            |_| Some(wrapped_claude_job()),
+            |pid| (pid != 1905).then(|| std::path::PathBuf::from(format!("/p{pid}"))),
+        );
+
+        assert_eq!(
+            cwd, None,
+            "a helper's or the wrapper's directory must not stand in for the agent's"
         );
     }
 
