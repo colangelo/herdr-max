@@ -284,8 +284,14 @@ impl App {
     }
 
     /// Kills the old program, and only once that is confirmed starts the
-    /// replacement on the primary core (D9's move steps). On `Err` the pane
-    /// is as it was.
+    /// replacement on the primary core (D9's move steps). An agent is asked
+    /// to stop first (`stop_agent`), so it saves its session.
+    ///
+    /// A sent signal is a point of no return (fork issue 301): from then on
+    /// the pane either runs its replacement or is suspended with its resume
+    /// plan and starts again in place once its old program is gone, and the
+    /// answer is `Ok`. Only a kill core refused before anything was signalled
+    /// answers `Err`, with the pane as it was.
     fn move_pane(&mut self, pane_id: PaneId, agent: bool) -> Result<(), Refusal> {
         let (ws_idx, pane_state) = self.find_pane(pane_id).ok_or(Refusal::NotMovable)?;
         let terminal_id = pane_state.attached_terminal_id.clone();
@@ -296,27 +302,35 @@ impl App {
         let (program, agent_program) = runtime.program_identities();
         let cwd = runtime.cwd_for_persistence().or_else(|| runtime.cwd());
         let history = (!agent).then(|| runtime.snapshot_history()).flatten();
+        let lookup = self.program_start_token;
         // The exit the killed program reports belongs to the old runtime.
         let absorbed =
             runtime.child_pid().is_some() && self.respawn_replaced_runtimes.insert(pane_id);
-        if let Err(reason) = runtime.end_program_for_move() {
-            tracing::warn!(pane = pane_id.raw(), %reason, "pane not moved: herdr-core did not confirm its program ended");
-            if absorbed {
-                self.respawn_replaced_runtimes.remove(&pane_id);
-            }
-            return Err(Refusal::CoreUnreachable);
+        if agent {
+            stop_agent(pane_id, agent_program, lookup);
         }
-        if !program_gone(program, agent_program, self.program_start_token) {
-            if absorbed {
-                self.respawn_replaced_runtimes.remove(&pane_id);
+        let killed = match runtime.end_program_for_move() {
+            Ok(()) => true,
+            Err(kill) if !agent && !kill.maybe_ended => {
+                tracing::warn!(pane = pane_id.raw(), reason = %kill.reason, "pane not moved: herdr-core did not confirm its program ended");
+                if absorbed {
+                    self.respawn_replaced_runtimes.remove(&pane_id);
+                }
+                return Err(Refusal::CoreUnreachable);
             }
+            Err(kill) => {
+                tracing::warn!(pane = pane_id.raw(), reason = %kill.reason, "herdr-core did not confirm the moved pane's program ended; the pane is suspended");
+                false
+            }
+        };
+        let gone = killed && program_gone(program, agent_program, lookup);
+        if killed && !gone {
             tracing::warn!(
                 pane = pane_id.raw(),
                 ?program,
                 ?agent_program,
-                "pane not moved: its old program still runs after the kill"
+                "the moved pane's old program still runs after the kill; the pane is suspended"
             );
-            return Err(Refusal::CoreUnreachable);
         }
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
             runtime.shutdown();
@@ -324,17 +338,18 @@ impl App {
         if let (Some(cwd), Some(terminal)) = (cwd, self.state.terminals.get_mut(&terminal_id)) {
             terminal.cwd = cwd;
         }
-        let started = if agent {
-            self.respawn_pane_agent(pane_id).is_some()
-                && (self.terminal_runtimes.get(&terminal_id).is_some()
-                    || self
-                        .state
-                        .terminals
-                        .get(&terminal_id)
-                        .is_some_and(|terminal| terminal.pending_agent_resume_plan.is_some()))
-        } else {
-            self.start_moved_shell(pane_id, history)
-        };
+        let started = gone
+            && if agent {
+                self.respawn_pane_agent(pane_id).is_some()
+                    && (self.terminal_runtimes.get(&terminal_id).is_some()
+                        || self
+                            .state
+                            .terminals
+                            .get(&terminal_id)
+                            .is_some_and(|terminal| terminal.pending_agent_resume_plan.is_some()))
+            } else {
+                self.start_moved_shell(pane_id, history)
+            };
         if !started {
             self.suspend_after_failed_move(pane_id, &terminal_id, program, agent_program);
         }
@@ -368,8 +383,9 @@ impl App {
         }
     }
 
-    /// A replacement that failed after a confirmed kill leaves the pane
-    /// suspended (`TerminalGone`), so the resume path starts it (D2).
+    /// A replacement that failed or could not start after the kill leaves
+    /// the pane suspended (`TerminalGone`), so the resume path starts it once
+    /// the old program is gone (D2).
     fn suspend_after_failed_move(
         &mut self,
         pane_id: PaneId,
@@ -395,8 +411,91 @@ impl App {
     }
 }
 
+/// How long a stopped agent may take to save its session and exit before
+/// it is killed (fork issue 301).
+const AGENT_STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// Stops the pane's agent before its pane is killed (fork issue 301): a
+/// SIGTERM, so it saves its session, then a SIGKILL of it and of every
+/// process below it if it outlives `AGENT_STOP_GRACE`. An agent behind a
+/// wrapper's nested PTY is in a session of its own, which the pane's kill
+/// does not reach, and it outlives the hangup it gets.
+fn stop_agent(
+    pane_id: PaneId,
+    agent: Option<ProgramIdentity>,
+    lookup: crate::platform::StartTokenLookup,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    let runs = || ProgramIdentity::liveness(Some(agent), lookup) == ProgramLiveness::Runs;
+    if !runs() {
+        return;
+    }
+    crate::platform::signal_processes(&[agent.pid], crate::platform::Signal::Terminate);
+    if wait_until(AGENT_STOP_GRACE, || !runs()) {
+        return;
+    }
+    // Rechecked: a pid freed since is no longer the agent's.
+    if !runs() {
+        return;
+    }
+    let members = crate::platform::session_members(&[agent.pid]);
+    let mut tree = descendants(agent.pid, &members);
+    tree.push(agent.pid);
+    tracing::warn!(
+        pane = pane_id.raw(),
+        pid = agent.pid,
+        processes = tree.len(),
+        "the moved pane's agent outlived its SIGTERM; killing it"
+    );
+    crate::platform::signal_processes(&tree, crate::platform::Signal::Kill);
+    let _ = wait_until(KILL_SETTLE, || !runs());
+}
+
+/// Polls `done` until it holds or `limit` passes; whether it held.
+fn wait_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Every member whose parent line reaches `root`.
+fn descendants(root: u32, members: &[SessionMember]) -> Vec<u32> {
+    let parents: std::collections::HashMap<u32, u32> = members
+        .iter()
+        .map(|member| (member.pid, member.parent))
+        .collect();
+    members
+        .iter()
+        .map(|member| member.pid)
+        .filter(|pid| *pid != root)
+        .filter(|pid| {
+            let mut seen = std::collections::HashSet::new();
+            let mut current = *pid;
+            while let Some(parent) = parents.get(&current).copied() {
+                if parent == root {
+                    return true;
+                }
+                if parent <= 1 || !seen.insert(parent) {
+                    return false;
+                }
+                current = parent;
+            }
+            false
+        })
+        .collect()
+}
+
 /// Whether the killed program left the process table within `KILL_SETTLE`:
-/// a probe that cannot tell keeps the pane as it was.
+/// a probe that cannot tell counts as still running.
 fn program_gone(
     program: Option<ProgramIdentity>,
     agent: Option<ProgramIdentity>,
@@ -651,6 +750,8 @@ mod tests {
         let legacy =
             crate::pane::FakeCore::start_in(dir.join("herdr-core"), "legacy.sock", |config| {
                 config.kill_leaves_live = matches!(kill, Kill::StaysLive);
+                // Core ends the attached stream when the kill finishes.
+                config.kill_closes_stream = matches!(kill, Kill::Finished).then_some(1);
                 if matches!(kill, Kill::Fails) {
                     config.failing.push("terminal.kill");
                 }
@@ -680,7 +781,7 @@ mod tests {
                 agent: None,
                 session: "legacy".into(),
                 address: "t7".into(),
-                program: None,
+                program: ProgramIdentity::of(program.id(), crate::platform::process_start),
             },
             Some("w1-p1".into()),
             0,
@@ -736,39 +837,77 @@ mod tests {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
-    // V39 (core-phase3 D9, roundtable item 8): a kill core does not confirm
-    // (an error, or the terminal still live) refuses `core_unreachable` and
-    // leaves the pane as it was: attached in its session, its program
-    // running, no replacement.
+    // V39 (core-phase3 D9, roundtable item 8): a kill core answers as not
+    // taken (the terminal still live) refuses `core_unreachable` and leaves
+    // the pane as it was: attached in its session, its program running, no
+    // replacement.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_unconfirmed_kill_starts_no_replacement() {
-        for kill in [Kill::StaysLive, Kill::Fails] {
-            let mut setup = legacy_pane(kill);
-            let pane = setup.pane;
-            assert_eq!(
-                setup.app.move_pane(pane, false),
-                Err(Refusal::CoreUnreachable)
-            );
-            assert_eq!(core_session(&setup.app, pane).as_deref(), Some("legacy"));
-            assert!(alive(setup.program.id()), "the old program was not swept");
-            assert!(
-                !setup
-                    .primary
-                    .methods()
-                    .iter()
-                    .any(|method| method == "terminal.run"),
-                "nothing started on the primary"
-            );
-            setup.app.state.assert_invariants_for_test();
+    async fn a_kill_core_says_did_not_take_starts_no_replacement() {
+        let mut setup = legacy_pane(Kill::StaysLive);
+        let pane = setup.pane;
+        assert_eq!(
+            setup.app.move_pane(pane, false),
+            Err(Refusal::CoreUnreachable)
+        );
+        assert_eq!(core_session(&setup.app, pane).as_deref(), Some("legacy"));
+        assert!(alive(setup.program.id()), "the old program was not swept");
+        assert!(
+            !setup.app.respawn_replaced_runtimes.contains(&pane),
+            "no exit is expected"
+        );
+        assert!(
+            !started_on(&setup.primary),
+            "nothing started on the primary"
+        );
+        setup.app.state.assert_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    fn started_on(core: &crate::pane::FakeCore) -> bool {
+        core.methods().iter().any(|method| method == "terminal.run")
+    }
+
+    #[cfg(unix)]
+    fn suspension_of(app: &App, pane: PaneId) -> Option<crate::terminal::state::Suspension> {
+        let terminal_id = &app.find_pane(pane)?.1.attached_terminal_id;
+        match &app.state.terminals.get(terminal_id)?.hold {
+            Some(crate::terminal::state::PaneHold::Suspended(suspension)) => {
+                Some(suspension.clone())
+            }
+            _ => None,
         }
     }
 
-    // V39: core says `finished`, but the old program's pid still runs: no
-    // replacement either.
+    // Fork issue 301: a kill core did not answer may have ended the program,
+    // so the pane cannot stay as it was; it is suspended, starts nothing yet,
+    // and the exit its old stream may still report does not close it.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_finished_kill_whose_program_still_runs_is_refused() {
+    async fn a_kill_core_did_not_answer_suspends_the_pane() {
+        let mut setup = legacy_pane(Kill::Fails);
+        let pane = setup.pane;
+        assert_eq!(setup.app.move_pane(pane, false), Ok(()));
+        let suspension = suspension_of(&setup.app, pane).expect("suspended");
+        assert_eq!(
+            suspension.cause,
+            crate::platform::SuspendCause::TerminalGone
+        );
+        assert!(
+            !started_on(&setup.primary),
+            "nothing started on the primary"
+        );
+        handle_events_for(&mut setup.app, Duration::from_millis(300)).await;
+        assert!(setup.app.find_pane(pane).is_some(), "the pane stays");
+        setup.app.state.assert_invariants_for_test();
+    }
+
+    // V39, fork issue 301: core says `finished`, but the old program's pid
+    // still runs: no replacement, and the pane is suspended, not left with a
+    // dying program whose exit would close it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finished_kill_whose_program_still_runs_suspends_the_pane() {
         static TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut setup = legacy_pane(Kill::Finished);
         let pane = setup.pane;
@@ -779,18 +918,22 @@ mod tests {
         setup.app.program_start_token = |_| {
             crate::platform::ProcessStart::Started(TOKEN.load(std::sync::atomic::Ordering::Relaxed))
         };
-        assert_eq!(
-            setup.app.move_pane(pane, false),
-            Err(Refusal::CoreUnreachable)
-        );
+        assert_eq!(setup.app.move_pane(pane, false), Ok(()));
         assert!(
-            !setup
-                .primary
-                .methods()
-                .iter()
-                .any(|method| method == "terminal.run"),
+            !started_on(&setup.primary),
             "nothing started on the primary"
         );
+        let suspension = suspension_of(&setup.app, pane).expect("suspended");
+        assert_eq!(
+            suspension.program.map(|program| program.pid),
+            Some(setup.program.id()),
+            "the resume waits for the old program"
+        );
+        // Core ended the stream with the kill: that exit keeps the pane.
+        handle_events_for(&mut setup.app, Duration::from_millis(500)).await;
+        assert!(setup.app.find_pane(pane).is_some(), "the pane stays");
+        assert!(suspension_of(&setup.app, pane).is_some(), "still suspended");
+        setup.app.state.assert_invariants_for_test();
     }
 
     // V39: `finished` and the pid gone: the pane runs a shell on the primary
@@ -818,5 +961,405 @@ mod tests {
             move_refusals(&facts, MoveWindows::default()),
             [Refusal::AlreadyOnPrimary]
         );
+    }
+
+    /// A stand-in agent in a session of its own, as an agent behind a
+    /// wrapper's nested PTY is: the pane's session sweep never reaches it.
+    /// A thread reaps it, so its pid is gone the moment it exits.
+    #[cfg(unix)]
+    struct StandInAgent {
+        identity: ProgramIdentity,
+        exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl StandInAgent {
+        fn start(script: &str) -> Self {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", script]);
+            // SAFETY: setsid is async-signal-safe and touches no parent state.
+            unsafe {
+                command.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().expect("spawn the stand-in agent");
+            let identity = ProgramIdentity::of(child.id(), crate::platform::process_start)
+                .expect("the stand-in's identity");
+            let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reaped = exited.clone();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+                reaped.store(true, std::sync::atomic::Ordering::Release);
+            });
+            // Let the shell set its traps before anything signals it.
+            std::thread::sleep(Duration::from_millis(200));
+            Self { identity, exited }
+        }
+
+        fn exited(&self) -> bool {
+            self.exited.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StandInAgent {
+        fn drop(&mut self) {
+            if !self.exited() {
+                unsafe { libc::kill(self.identity.pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+    }
+
+    /// An agent that outlives the pane's hangup and a SIGTERM by more than
+    /// `KILL_SETTLE`, as Claude did in fork issue 301.
+    #[cfg(unix)]
+    const STUBBORN_AGENT: &str = "trap '' HUP TERM; sleep 4";
+
+    #[cfg(unix)]
+    fn give_agent(app: &mut App, pane: PaneId, agent: &StandInAgent) {
+        let terminal_id = app.find_pane(pane).unwrap().1.attached_terminal_id.clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        let _ = terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            Instant::now(),
+        );
+        terminal.restore_reported_resume(crate::agent_resume::ReportedAgentResume {
+            source: "herdr-test".into(),
+            agent: "claude".into(),
+            argv: vec!["herdr-move-301".into(), "--resume".into(), "sid-301".into()],
+        });
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .test_set_agent_program(Some(agent.identity));
+        assert!(app.pane_agent_resume_plan(pane).is_some(), "a resume plan");
+    }
+
+    /// One PTY pane running `/bin/cat`, which a hangup ends.
+    #[cfg(unix)]
+    fn pty_pane() -> (App, PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("move")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        // `cat` as the shell: a typed resume command is echoed, never run.
+        app.state.default_shell = "/bin/cat".into();
+        crate::pane::set_preferred_runtime(false);
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.respawn_pane_runtime(pane, super::super::api::RespawnTarget::Shell));
+        (app, pane)
+    }
+
+    /// Runs the app's own event handling for `wait`: the exits the killed
+    /// programs report arrive and are handled as the server loop would.
+    #[cfg(unix)]
+    async fn handle_events_for(app: &mut App, wait: Duration) {
+        let until = Instant::now() + wait;
+        while Instant::now() < until {
+            app.drain_internal_events();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn screen_of(app: &App, pane: PaneId) -> String {
+        let terminal_id = &app
+            .find_pane(pane)
+            .expect("the pane")
+            .1
+            .attached_terminal_id;
+        app.terminal_runtimes
+            .get(terminal_id)
+            .map(|runtime| runtime.visible_text())
+            .unwrap_or_default()
+    }
+
+    // Fork issue 301 (a): a PTY pane whose agent outlives the hangup of its
+    // shell keeps the pane: the move stops the agent, and the pane resumes
+    // it by its plan.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pty_agent_that_outlives_the_hangup_moves_and_keeps_its_pane() {
+        let agent = StandInAgent::start(STUBBORN_AGENT);
+        let (mut app, pane) = pty_pane();
+        give_agent(&mut app, pane, &agent);
+
+        let answer = app.move_pane(pane, true);
+        handle_events_for(&mut app, Duration::from_secs(1)).await;
+        assert!(
+            app.find_pane(pane).is_some(),
+            "the move closed the pane (it answered {answer:?})"
+        );
+        assert_eq!(answer, Ok(()));
+        assert!(agent.exited(), "the move ended the old agent");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !screen_of(&app, pane).contains("sid-301") {
+            assert!(Instant::now() < deadline, "the agent never resumed");
+            handle_events_for(&mut app, Duration::from_millis(100)).await;
+        }
+        app.state.assert_invariants_for_test();
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    /// The legacy pane's program is swept by the kill but stays a zombie of
+    /// the test: it counts as gone.
+    #[cfg(unix)]
+    static SWEPT_PROGRAM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(unix)]
+    fn swept_program_is_gone(pid: u32) -> crate::platform::ProcessStart {
+        if pid == SWEPT_PROGRAM.load(std::sync::atomic::Ordering::Relaxed) {
+            return crate::platform::ProcessStart::table(None);
+        }
+        crate::platform::process_start(pid)
+    }
+
+    // Fork issue 301 (a): the same for a pane in a legacy core session, whose
+    // stream core ends with the kill: the agent resumes on the primary core.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_legacy_core_agent_that_outlives_the_kill_moves_and_keeps_its_pane() {
+        let agent = StandInAgent::start(STUBBORN_AGENT);
+        let mut setup = legacy_pane(Kill::Finished);
+        let pane = setup.pane;
+        SWEPT_PROGRAM.store(setup.program.id(), std::sync::atomic::Ordering::Relaxed);
+        setup.app.program_start_token = swept_program_is_gone;
+        give_agent(&mut setup.app, pane, &agent);
+
+        let answer = setup.app.move_pane(pane, true);
+        handle_events_for(&mut setup.app, Duration::from_secs(1)).await;
+        assert!(
+            setup.app.find_pane(pane).is_some(),
+            "the move closed the pane (it answered {answer:?})"
+        );
+        assert_eq!(answer, Ok(()));
+        assert!(agent.exited(), "the move ended the old agent");
+        assert_eq!(
+            core_session(&setup.app, pane),
+            Some(crate::pane::core_session_name()),
+            "the pane runs on the primary"
+        );
+        let resumed = || {
+            setup
+                .primary
+                .requests()
+                .iter()
+                .map(|request| request.to_string())
+                .chain(
+                    setup
+                        .primary
+                        .received()
+                        .iter()
+                        .map(|frame| String::from_utf8_lossy(&frame.payload).into_owned()),
+                )
+                .any(|sent| sent.contains("sid-301"))
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !resumed() {
+            assert!(Instant::now() < deadline, "the agent never resumed");
+            handle_events_for(&mut setup.app, Duration::from_millis(100)).await;
+        }
+        setup.app.state.assert_invariants_for_test();
+        for (_, runtime) in setup.app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    /// The stand-in agent the probe reports as still running, whatever it
+    /// does, until the test lets it go (0: none).
+    #[cfg(unix)]
+    static HELD_AGENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(unix)]
+    static HELD_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    #[cfg(unix)]
+    fn held_agent_runs(pid: u32) -> crate::platform::ProcessStart {
+        if pid != 0 && pid == HELD_AGENT.load(std::sync::atomic::Ordering::Relaxed) {
+            return crate::platform::ProcessStart::Started(
+                HELD_TOKEN.load(std::sync::atomic::Ordering::Relaxed),
+            );
+        }
+        swept_program_is_gone(pid)
+    }
+
+    #[cfg(unix)]
+    fn hold_agent(agent: &StandInAgent) {
+        HELD_TOKEN.store(agent.identity.started, std::sync::atomic::Ordering::Relaxed);
+        HELD_AGENT.store(agent.identity.pid, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Fork issue 301 (b): an agent herdr still sees after the kill. The
+    /// move answers `Ok` and the pane stays suspended with its plan through
+    /// the exits the killed program reports; once the agent is gone, it
+    /// resumes in place (`resumed`).
+    #[cfg(unix)]
+    async fn suspends_then_resumes_in_place(
+        app: &mut App,
+        pane: PaneId,
+        agent: &StandInAgent,
+        resumed: impl Fn(&App) -> bool,
+    ) {
+        hold_agent(agent);
+        app.program_start_token = held_agent_runs;
+        app.pane_jobs_ready_probe = || true;
+        let terminal_id = app.find_pane(pane).unwrap().1.attached_terminal_id.clone();
+
+        let answer = app.move_pane(pane, true);
+        handle_events_for(app, Duration::from_secs(1)).await;
+        assert!(
+            app.find_pane(pane).is_some(),
+            "the move closed the pane (it answered {answer:?})"
+        );
+        assert_eq!(answer, Ok(()), "a killed pane is never refused");
+        let suspension = suspension_of(app, pane).expect("suspended");
+        assert_eq!(
+            suspension.cause,
+            crate::platform::SuspendCause::TerminalGone
+        );
+        assert_eq!(suspension.agent, Some(agent.identity));
+        assert!(app.terminal_runtimes.get(&terminal_id).is_none());
+        assert!(app.pane_agent_resume_plan(pane).is_some(), "the plan stays");
+        app.state.assert_invariants_for_test();
+
+        // Still running: a resume round waits for it.
+        app.request_suspended_pane_resume(Instant::now());
+        app.resume_suspended_panes_if_due(Instant::now());
+        handle_events_for(app, Duration::from_millis(300)).await;
+        assert!(
+            suspension_of(app, pane).is_some(),
+            "waits for the old agent"
+        );
+
+        HELD_AGENT.store(0, std::sync::atomic::Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !resumed(app) {
+            assert!(Instant::now() < deadline, "the pane never resumed");
+            assert!(app.find_pane(pane).is_some(), "the pane stays");
+            app.request_suspended_pane_resume(Instant::now());
+            app.resume_suspended_panes_if_due(Instant::now());
+            handle_events_for(app, Duration::from_millis(100)).await;
+        }
+        assert!(suspension_of(app, pane).is_none(), "no longer suspended");
+        assert_eq!(
+            app.state.workspaces[0].terminal_id(pane),
+            Some(&terminal_id),
+            "the same pane, in place"
+        );
+        app.state.assert_invariants_for_test();
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pty_agent_still_running_after_the_kill_suspends_and_resumes_in_place() {
+        let agent = StandInAgent::start(STUBBORN_AGENT);
+        let (mut app, pane) = pty_pane();
+        give_agent(&mut app, pane, &agent);
+        suspends_then_resumes_in_place(&mut app, pane, &agent, |app| {
+            screen_of(app, pane).contains("sid-301")
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_legacy_core_agent_still_running_after_the_kill_suspends_and_resumes_in_place() {
+        let agent = StandInAgent::start(STUBBORN_AGENT);
+        let mut setup = legacy_pane(Kill::Finished);
+        let pane = setup.pane;
+        SWEPT_PROGRAM.store(setup.program.id(), std::sync::atomic::Ordering::Relaxed);
+        give_agent(&mut setup.app, pane, &agent);
+        let primary = &setup.primary;
+        suspends_then_resumes_in_place(&mut setup.app, pane, &agent, |_| {
+            primary
+                .requests()
+                .iter()
+                .map(|request| request.to_string())
+                .chain(
+                    primary
+                        .received()
+                        .iter()
+                        .map(|frame| String::from_utf8_lossy(&frame.payload).into_owned()),
+                )
+                .any(|sent| sent.contains("sid-301"))
+        })
+        .await;
+    }
+
+    // Fork issue 301: the agent is asked to stop before its pane is killed,
+    // and has saved its last turn before the move answers, so the resume
+    // finds it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moved_agent_saves_its_last_turn_before_it_resumes() {
+        let record = std::env::temp_dir().join(format!(
+            "herdr-move-301-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent = StandInAgent::start(&format!(
+            "trap '' HUP; trap 'echo last-turn > {}; exit 0' TERM; while :; do sleep 0.1; done",
+            record.display()
+        ));
+        let (mut app, pane) = pty_pane();
+        give_agent(&mut app, pane, &agent);
+
+        assert_eq!(app.move_pane(pane, true), Ok(()));
+        assert_eq!(
+            std::fs::read_to_string(&record).ok().as_deref(),
+            Some("last-turn\n"),
+            "the agent saved its last turn before the move went on"
+        );
+        assert!(agent.exited(), "it exited on its own, from the SIGTERM");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !screen_of(&app, pane).contains("sid-301") {
+            assert!(Instant::now() < deadline, "the agent never resumed");
+            handle_events_for(&mut app, Duration::from_millis(100)).await;
+        }
+        assert!(app.find_pane(pane).is_some());
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_file(record);
+    }
+
+    #[test]
+    fn the_agents_tree_is_every_process_below_it() {
+        // atuin (10) -> zsh (11) -> claude (12) -> mcp (13) -> helper (14)
+        let tree = [
+            member(10, 1),
+            member(11, 10),
+            member(12, 11),
+            member(13, 12),
+            member(14, 13),
+            member(20, 1),
+        ];
+        let mut below = descendants(12, &tree);
+        below.sort_unstable();
+        assert_eq!(below, [13, 14]);
+        assert_eq!(descendants(14, &tree), Vec::<u32>::new());
     }
 }

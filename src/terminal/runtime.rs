@@ -42,7 +42,7 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
-    pub fn end_program_for_move(&self) -> Result<(), String> {
+    pub fn end_program_for_move(&self) -> Result<(), crate::pane::UnconfirmedKill> {
         self.0.end_program_for_move()
     }
 
@@ -734,6 +734,10 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    pub(crate) fn test_set_agent_program(&self, agent: Option<crate::platform::ProgramIdentity>) {
+        self.0.test_set_agent_program(agent);
+    }
+
     #[cfg(unix)]
     pub(crate) fn test_start_basic_detection(&mut self) -> mpsc::Receiver<crate::events::AppEvent> {
         self.0.test_start_basic_detection()

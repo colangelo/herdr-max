@@ -273,6 +273,11 @@ impl KillOutcome {
     pub(crate) fn ended(&self) -> bool {
         matches!(self, Self::Finished | Self::NotFound)
     }
+
+    /// No answer: core may have ended the program, or may still run it.
+    pub(crate) fn maybe_ended(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
 }
 
 impl std::fmt::Display for KillOutcome {

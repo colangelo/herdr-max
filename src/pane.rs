@@ -33,6 +33,7 @@ pub(crate) use runtime_io::FakeCore;
 use runtime_io::PaneIo;
 use runtime_io::PtyReadResult;
 pub(crate) use runtime_io::PtyReason;
+pub(crate) use runtime_io::UnconfirmedKill;
 #[cfg(unix)]
 pub(crate) use runtime_io::{
     core_attach_failure, find_pane_core_terminals, CoreAttachFailure, PaneCoreSearch,
@@ -2563,7 +2564,7 @@ impl PaneRuntime {
 
     /// Ends the program for the idle move (core-phase3 D9), keeping the
     /// pane's I/O; `Err` says why core did not confirm the end.
-    pub fn end_program_for_move(&self) -> Result<(), String> {
+    pub fn end_program_for_move(&self) -> Result<(), UnconfirmedKill> {
         self.io.end_program_for_move(
             self.pane_id,
             self.child_pid.load(Ordering::Acquire),
@@ -4621,6 +4622,11 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    /// The agent process detection would publish (core-phase3 D2, D9).
+    pub(crate) fn test_set_agent_program(&self, agent: Option<crate::platform::ProgramIdentity>) {
+        *self.agent_program.lock().unwrap() = agent;
+    }
+
     #[cfg(unix)]
     pub(crate) fn test_enable_kitty_source_forwarding(&self) {
         let mut core = self.terminal.ghostty.core.lock().unwrap();

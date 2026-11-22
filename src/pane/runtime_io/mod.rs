@@ -678,13 +678,14 @@ impl PaneIo {
 
     /// Ends the pane's program for the idle move (core-phase3 D9) with its
     /// I/O still attached: a core pane only once `terminal.kill` confirms it
-    /// ended, so on `Err` (what core said) nothing else changed.
+    /// ended. On `Err` herdr swept nothing; whether core may have ended the
+    /// program anyway is in the error.
     pub(super) fn end_program_for_move(
         &self,
         pane_id: crate::layout::PaneId,
         child_pid: u32,
         child_wait_completed: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<(), String> {
+    ) -> Result<(), UnconfirmedKill> {
         match self {
             PaneIo::Actor(_) => {
                 pty::shutdown_pane_processes(pane_id, child_pid, child_wait_completed);
@@ -693,7 +694,10 @@ impl PaneIo {
             #[cfg(unix)]
             PaneIo::Core(core) => {
                 core_backend::end_program_confirmed(core, pane_id, child_pid, child_wait_completed)
-                    .map_err(|outcome| outcome.to_string())
+                    .map_err(|outcome| UnconfirmedKill {
+                        maybe_ended: outcome.maybe_ended(),
+                        reason: outcome.to_string(),
+                    })
             }
             #[cfg(test)]
             PaneIo::TestChannel { .. } => {
@@ -719,6 +723,18 @@ impl PaneIo {
             PaneIo::TestChannel { .. } => Ok(()),
         }
     }
+}
+
+/// Why the idle move's kill was not confirmed (core-phase3 D9).
+// Only a herdr-core answer leaves a kill unconfirmed, and core is Unix only.
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct UnconfirmedKill {
+    /// What core said, or why it did not answer.
+    pub reason: String,
+    /// Core did not answer, so it may have ended the program anyway: the
+    /// pane can no longer be left as it was (fork issue 301).
+    pub maybe_ended: bool,
 }
 
 /// The answer a backend without a PTY master fd gives to a handoff by fd

@@ -33,6 +33,9 @@ pub(crate) struct FakeConfig {
     /// `terminal.kill` answers with the terminal still `live`, as a core
     /// whose kill did not take.
     pub kill_leaves_live: bool,
+    /// After a `terminal.kill` that finished, ends this stream with the
+    /// finished record, as core ends the streams attached to the terminal.
+    pub kill_closes_stream: Option<u32>,
 }
 
 impl Default for FakeConfig {
@@ -49,6 +52,7 @@ impl Default for FakeConfig {
             lose_run_reply: false,
             failing: Vec::new(),
             kill_leaves_live: false,
+            kill_closes_stream: None,
         }
     }
 }
@@ -391,7 +395,17 @@ fn answer(
             if state == "finished" {
                 record["reason"] = json!("killed");
             }
-            (Ok(record.clone()), None)
+            let close = (state == "finished")
+                .then_some(config.kill_closes_stream)
+                .flatten()
+                .map(|channel| {
+                    Frame::new(
+                        channel,
+                        kind::CLOSE,
+                        serde_json::to_vec(&*record).unwrap_or_default(),
+                    )
+                });
+            (Ok(record.clone()), close)
         }
         _ => (Ok(json!({})), None),
     };
