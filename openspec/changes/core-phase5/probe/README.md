@@ -40,3 +40,32 @@ Attach streams were read with the phase 0 client `~/.local/share/herdr-core-pilo
 Not measured: how long an attach stream stays open past 25 s unreachable; what core does when the via command
 hangs instead of failing; whether core ever classifies a via failure as `needs_login` (the 2, 5, 10 minute
 ladder of `docs/machines.md`).
+
+# Roundtable probes (2026-11-22, m4m, hc 0.1.21)
+
+After the roundtable on ea5d5eb5 (findings F1-F12, `~/.local/state/herdr-core-p1/p5-roundtable.md`; its repros are in
+`/tmp/arena-p5/candidate-1..4` and `/tmp/arena-p5/verify`). The scripts are in `fix/`, written for
+`/tmp/arena-p5/fix` (`env.sh`: local core `p5fix-loc`, far core `p5fix-far`, scratch XDG directories, a clean
+environment). `fix/corelink.py` is a prototype of `herdr core-link` (D2): it reads leases and the gate, takes
+`dial.lock`, forks a watcher and then **execs ssh**, so the via pid core holds is ssh itself. Its ssh is
+`fix/fakessh.py` (one process owning the link, modes `relay`, `hang`, `slow`, `banner`) or, with `h/ssh_real`, real
+OpenSSH to `fix/sshd_fake.py` on 127.0.0.1:2298 (paramiko, a throwaway key, `ControlMaster=no`,
+`ServerAliveInterval=5`, `ServerAliveCountMax=2`). The far core of R6 was started with five fake `HERDR_*`
+variables, as a far core a bare `hc` in a herdr pane would carry. Both cores, the loopback server and every
+terminal were stopped at the end; no default or `herdr` core was touched; nothing dialled another host.
+
+| # | Finding | Question | Result |
+|---|---|---|---|
+| R1 | F1 | What tells a far terminal apart in local `terminal.list` | `terminal.list` takes only `all` and `labels`. A far record has the same keys as a local one and **no machine field**; only the address prefix differs (`t1` and `loop/t1` both listed with `herdr.session=herdr`, `herdr.pane_id=w1:p1`). The `events.subscribe` snapshot also lists `loop/t1`. |
+| R2 | F2 | Can core-link classify a silent dial before core's ~19.8 s kill, and leave nothing | With the watcher's 15 s deadline: gate `auth_stalled` written at 15.0 s, ssh (the via pid) ended at 16.0 s, `machine.connect` answered `unreachable` after 16.3 s; the next dial was refused by the gate; no process left. `kill -9` of the via pid at 3 s (as core does): ssh is that pid, the watcher saw EOF and exited; nothing orphaned. |
+| R3 | F3, F12 | How core runs the via per retry | Each retry runs the POSIX line (`sh -c '...'`), and when that fails, **a Windows line** 76-100 ms later (`cmd /d /c "if exist .\AppData\...herdr-core.exe ..."`). The prototype refuses the Windows line locally, so a retry dials once. A dormant machine: refused pairs at +8, +16, then every 30 s. |
+| R4 | F3 | Concurrent `machine.connect` | Three at once: core ran **one** via, all three answered `connected` after 5.2 s. Three 1 s apart during a slow dial: core **ended the in-flight via and started a new one** for each call (each a fresh ssh, each its own auth); the lock handed over cleanly each time. |
+| R5 | F10 | Can a dial avoid starting a stopped far core | Far guard `nc -U -w 2 <far socket> </dev/null` before core's line: 0 on a live socket, 1 on a missing one and on the **stale socket file a SIGKILLed core leaves**. With the far core stopped, two dials were refused (`herdr-core is not running there`, exit 69), the far socket stayed absent and no far core started. |
+| R6 | F6 | Remote env | Unwrapped `terminal.run --on loop`: the program saw `HERDR_ENV HERDR_TAB_ID HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_PANE_ID` (names only). Wrapped in `env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH`: none. macOS `env -u NAME -u MISSING -- sh -c ...` exits 0. |
+| R7 | F5 | Can the view type without taking the size (A = far herdr attached 100x30, B = view through the link at 160x50) | `observe: true`: no resize, but input (DATA and kind 6) **not delivered**. Plain attach: resized to 160x50 at attach. `resumed: true` + DATA: resized on the first key. **`resumed: true` + AUTOMATIC_INPUT (kind 6): input delivered, far size stayed 100x30 and followed A to 90x25.** A FOCUS frame from the `resumed` attach **resized the far terminal to 160x50**. Mouse reports as kind 6: delivered, no resize. |
+| R8 | F5 | What the view's size follows | `size` events from `events.subscribe {terminal: "loop/tN"}` on the local core arrive within 2 ms of the far resize. The `resumed` view attached at the far size and echoing only a **changed** size as RESIZE: no extra size event, no storm (3 events for 3 far resizes, none in 3 s idle). When A detached, core applied the view's recorded size, which was then the last far size (120x40 kept); without the echo it was the view's stale attach size (160x50). |
+| R9 | F9, F11 | Real OpenSSH with `ControlMaster=no` and keepalives, then the loopback server SIGSTOPped | No control socket anywhere. Frozen at t=0: ssh exited at 15 s (keepalive), the redial ended at 25 s (`ConnectTimeout=10` covers the banner), machine `unreachable` at 26 s. `terminal.list` on the primary took **3.00 s per call** while `connected` and `connecting`, 0.00 s once `unreachable`. Healthy: the marker came 39 ms after start. |
+| R10 | F7 | `machine.exec` on a dormant machine; the CLI flow | Dormant: `unavailable` at once. CLI flow (write `cli-<pid>` lease, `machine.connect`, `machine.exec`, remove the lease): connected in 0.16 s, exec answered `code 0`, `truncated: false`, `timed_out: false`; the link ended within 7 s of the lease's removal. |
+
+Not measured: the 1Password agent's prompt per dial with `ControlMaster=no` (open question 3); `nc -U` on the
+Linux VMs' images (D2 falls back to a socket-file test there).
