@@ -1449,18 +1449,20 @@ fn decode_windows_remote_path(encoded: &str) -> io::Result<String> {
     Ok(path)
 }
 
+/// The `-o` options of every background ssh: no prompt, no unknown host,
+/// a bounded connect. Shared with `herdr core-link` (core-phase5 D10).
+pub(crate) const NONINTERACTIVE_SSH_OPTIONS: [&str; 5] = [
+    "BatchMode=yes",
+    "NumberOfPasswordPrompts=0",
+    "StrictHostKeyChecking=yes",
+    "ConnectTimeout=10",
+    "ConnectionAttempts=1",
+];
+
 fn apply_noninteractive_ssh_options(command: &mut Command) {
-    command
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("NumberOfPasswordPrompts=0")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-o")
-        .arg("ConnectionAttempts=1");
+    for option in NONINTERACTIVE_SSH_OPTIONS {
+        command.arg("-o").arg(option);
+    }
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
@@ -3216,6 +3218,26 @@ fn ssh_user_config_include(path: Option<&Path>) -> Option<String> {
         .map(ssh_config_include_path)
 }
 
+/// The managed ssh config: an `Include` of the user's config and of the
+/// system one, each when it exists, and nothing else. Shared with `herdr
+/// core-link` (core-phase5 D10), which writes it into the machine's state.
+pub(crate) fn managed_ssh_config_contents(
+    user_config: Option<&Path>,
+    system_config: Option<&Path>,
+) -> String {
+    let mut contents = String::new();
+    if let Some(include) = ssh_user_config_include(user_config) {
+        contents.push_str(&format!("Include {include}\n"));
+    }
+    if let Some(system_config) = system_config.filter(|path| path.is_file()) {
+        contents.push_str(&format!(
+            "Include {}\n",
+            ssh_config_include_path(system_config)
+        ));
+    }
+    contents
+}
+
 /// Builds a temporary ssh config that includes the user's and system settings.
 /// Herdr adds no `ServerAlive*` keepalive of its own: a keepalive every few
 /// seconds wakes a sleeping remote Mac all night (fork issue 260), and the
@@ -3234,16 +3256,8 @@ fn write_managed_ssh_config(target: &str) -> io::Result<ManagedSshConfig> {
 
     let dir = crate::platform::create_remote_ssh_config_dir(SSH_CONTROL_SOCKET_NAME)?;
     let path = dir.join("config");
-    let mut contents = String::new();
-    if let Some(include) = ssh_user_config_include(paths.user_config.as_deref()) {
-        contents.push_str(&format!("Include {include}\n"));
-    }
-    if let Some(system_config) = paths.system_config.filter(|path| path.is_file()) {
-        contents.push_str(&format!(
-            "Include {}\n",
-            ssh_config_include_path(&system_config)
-        ));
-    }
+    let contents =
+        managed_ssh_config_contents(paths.user_config.as_deref(), paths.system_config.as_deref());
 
     let write_result = (|| {
         let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
