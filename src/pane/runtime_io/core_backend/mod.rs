@@ -241,10 +241,16 @@ pub(crate) fn core_spawn_from(
         Some(cwd) => Some(cwd.to_str()?.to_string()),
         None => None,
     };
-    let labels = pane_labels(
+    let mut labels = pane_labels(
         env.get(crate::integration::HERDR_PANE_ID_ENV_VAR)
             .and_then(Value::as_str),
     );
+    // A terminal a client starts has been seen up to turn 0 (herdr-app
+    // docs/labels.md; core-phase4 D8). Set at the start only: it changes
+    // later, so it is no part of the identity a reattach checks.
+    if labels::enabled() {
+        labels.insert("herdr.seen".into(), Value::String("0".into()));
+    }
     Some(CoreSpawn {
         pane_id,
         session: core_session_name(),
@@ -337,11 +343,6 @@ fn unclaimed_in(session: &str, listed: &Value, claimed: &[&str]) -> Vec<Unclaime
 pub(crate) fn pane_labels(public_pane_id: Option<&str>) -> Map<String, Value> {
     let mut labels = Map::new();
     labels.insert("herdr.session".into(), Value::String(herdr_session_label()));
-    // A terminal a client starts has been seen up to turn 0 (herdr-app
-    // docs/labels.md; core-phase4 D8).
-    if labels::enabled() {
-        labels.insert("herdr.seen".into(), Value::String("0".into()));
-    }
     if let Some(public) = public_pane_id {
         labels.insert("herdr.pane_id".into(), Value::String(public.to_string()));
     }
