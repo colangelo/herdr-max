@@ -983,6 +983,13 @@
                 "null"
               ]
             },
+            "core_address": {
+              "description": "The pane's terminal address as the primary herdr-core names it (`t7`,\nor `ac-mbm5/t7` on a machine). Absent for a pane outside herdr-core.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "core_unreachable_since": {
               "description": "Since when (unix ms) herdr-core has not answered this core pane; its\nprogram keeps running and the pane keeps retrying. Absent while core\nanswers.",
               "format": "uint64",
@@ -995,6 +1002,13 @@
             "core_waiting": {
               "description": "The pane's program may still run in a herdr-core session that does\nnot answer, so nothing was started for it; it attaches when that core\nanswers. Absent means false.",
               "type": "boolean"
+            },
+            "core_waiting_cause": {
+              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it) or `machine_unreachable`; a newer server\nmay add others.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "cwd": {
               "type": [
@@ -1028,6 +1042,13 @@
               "format": "int64",
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "machine": {
+              "description": "The core machine the pane's program runs on (`herdr machine add\n--core`, `pane.split {on}`). Absent for a pane on this Mac.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -4436,6 +4457,13 @@
               "default": false,
               "type": "boolean"
             },
+            "on": {
+              "description": "Runs the new pane on this core machine (`herdr machine add --core`)\ninstead of this Mac. Sent only to a server that advertises\n`spawn_on_machine`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ratio": {
               "format": "float",
               "type": [
@@ -5599,6 +5627,13 @@
                 "null"
               ]
             },
+            "on": {
+              "description": "Runs the new tab's pane on this core machine (`herdr machine add --core`)\ninstead of this Mac. Sent only to a server that advertises\n`spawn_on_machine`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "workspace_id": {
               "type": [
                 "string",
@@ -6247,6 +6282,13 @@
               "type": "boolean"
             },
             "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "on": {
+              "description": "Runs the new workspace's pane on this core machine (`herdr machine add --core`)\ninstead of this Mac. Sent only to a server that advertises\n`spawn_on_machine`.",
               "type": [
                 "string",
                 "null"
@@ -11150,6 +11192,13 @@
                 "null"
               ]
             },
+            "core_address": {
+              "description": "The pane's terminal address as the primary herdr-core names it (`t7`,\nor `ac-mbm5/t7` on a machine). Absent for a pane outside herdr-core.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "core_unreachable_since": {
               "description": "Since when (unix ms) herdr-core has not answered this core pane; its\nprogram keeps running and the pane keeps retrying. Absent while core\nanswers.",
               "format": "uint64",
@@ -11162,6 +11211,13 @@
             "core_waiting": {
               "description": "The pane's program may still run in a herdr-core session that does\nnot answer, so nothing was started for it; it attaches when that core\nanswers. Absent means false.",
               "type": "boolean"
+            },
+            "core_waiting_cause": {
+              "description": "Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,\n`directory_unavailable`, `machine_dormant` (its core machine sleeps:\na key in the pane wakes it) or `machine_unreachable`; a newer server\nmay add others.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "cwd": {
               "type": [
@@ -11195,6 +11251,13 @@
               "format": "int64",
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "machine": {
+              "description": "The core machine the pane's program runs on (`herdr machine add\n--core`, `pane.split {on}`). Absent for a pane on this Mac.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -14421,6 +14484,10 @@
               "type": "boolean"
             },
             "live_handoff": {
+              "type": "boolean"
+            },
+            "spawn_on_machine": {
+              "description": "Accepts `on` (a core machine) on `pane.split`, `tab.create` and\n`workspace.create`. A server without it ignores `on` and would start\nthe pane on its own host (core-phase5 D5), so clients send `on` only\nwhen this is true.",
               "type": "boolean"
             },
             "ssh_agent_registration": {

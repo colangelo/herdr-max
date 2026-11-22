@@ -324,6 +324,23 @@ mod tests {
                 "layout.set_split_ratio",
                 "a606d4fb0b80f1b68b282f7c342493a6adcbedd3bb19087904d10977f27554cb",
             ),
+            // Fork (herdr-max, core-phase5 D5): the create methods carry an
+            // optional `on` (a core machine). An older server would ignore
+            // it and start the pane on its own host, so a client sends it
+            // only when the server advertises `spawn_on_machine`; without
+            // it the v1 behavior is unchanged.
+            (
+                "pane.split",
+                "7768bc6a74d61468a36ffbad5e77f10390390cac494690eecb19677b66c8c611",
+            ),
+            (
+                "tab.create",
+                "4082e44be6e505ea71898dc8691850eb5d30f4f0c1a21886783a966861d48982",
+            ),
+            (
+                "workspace.create",
+                "2523aceeb3119d54d56d8fa0945329692f39d2fa414e58027260b5aa65ac1c0a",
+            ),
         ] {
             let actual_digest = actual.remove(method);
             assert_eq!(
@@ -495,6 +512,9 @@ mod tests {
             "tab.close",
             "workspace.close",
             "layout.set_split_ratio",
+            "pane.split",
+            "tab.create",
+            "workspace.create",
         ] {
             expected.remove(method);
         }

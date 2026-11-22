@@ -51,6 +51,7 @@ impl App {
             focus,
             label,
             env,
+            on,
         } = params;
         let ws_idx = if let Some(workspace_id) = workspace_id {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
@@ -62,6 +63,7 @@ impl App {
         } else {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
+        let machine_cwd = cwd.clone();
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
@@ -75,6 +77,10 @@ impl App {
             Err((code, message)) => return encode_error(id, &code, message),
         };
         let run_id = super::env::run_id_from_env(&extra_env);
+        let extra_env = match super::env::launch_extra(extra_env, on, machine_cwd.as_deref()) {
+            Ok(extra) => extra,
+            Err((code, message)) => return encode_error(id, &code, message),
+        };
         let result = self
             .state
             .workspaces
@@ -621,6 +627,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
 

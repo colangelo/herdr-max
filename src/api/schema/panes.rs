@@ -35,6 +35,11 @@ pub struct PaneSplitParams {
     pub right_click: PaneRightClickTarget,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
+    /// Runs the new pane on this core machine (`herdr machine add --core`)
+    /// instead of this Mac. Sent only to a server that advertises
+    /// `spawn_on_machine`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -642,6 +647,20 @@ pub struct PaneInfo {
     /// answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_unreachable_since: Option<u64>,
+    /// Why the pane waits, while `core_waiting`: `unreachable`, `conflict`,
+    /// `directory_unavailable`, `machine_dormant` (its core machine sleeps:
+    /// a key in the pane wakes it) or `machine_unreachable`; a newer server
+    /// may add others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_waiting_cause: Option<String>,
+    /// The core machine the pane's program runs on (`herdr machine add
+    /// --core`, `pane.split {on}`). Absent for a pane on this Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// The pane's terminal address as the primary herdr-core names it (`t7`,
+    /// or `ac-mbm5/t7` on a machine). Absent for a pane outside herdr-core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_address: Option<String>,
     /// Why the pane is suspended: `holder_lost`, `host_shutdown`,
     /// `core_stopped`, `stopped_by_restart`, `terminal_gone` or
     /// `pane_job_ended`; a newer server may add others. Absent while the pane
@@ -935,6 +954,7 @@ cli_projection! {
         focus => Field::new(false).input(binding::boolean("focus", true)).input(binding::boolean("no-focus", false)),
         right_click => Field::new(PaneRightClickTarget::Herdr).input(binding::right_click()),
         env => Field::new(HashMap::new()).input(binding::environment()),
+        on => Field::new(None).input(binding::optional_text("on", "MACHINE")),
         }
 }
 

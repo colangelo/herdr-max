@@ -75,4 +75,10 @@ pub struct ServerCapabilities {
     /// Supports connection-scoped `server.ssh_agent.register` on the local JSON API.
     #[serde(default)]
     pub ssh_agent_registration: bool,
+    /// Accepts `on` (a core machine) on `pane.split`, `tab.create` and
+    /// `workspace.create`. A server without it ignores `on` and would start
+    /// the pane on its own host (core-phase5 D5), so clients send `on` only
+    /// when this is true.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub spawn_on_machine: bool,
 }

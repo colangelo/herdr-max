@@ -56,6 +56,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: HashMap::new(),
+                on: None,
             }
         );
         assert_eq!(

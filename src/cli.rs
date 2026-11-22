@@ -818,7 +818,7 @@ pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Val
         return Ok(response);
     }
     let client = target::api_client()?;
-    ensure_server_protocol_compatible(&client, &request.id)?;
+    ensure_server_protocol_compatible(&client, request)?;
     client
         .request_value(request)
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
@@ -831,7 +831,35 @@ pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
-fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
+/// The core machine a request starts its pane on (`--on`).
+fn machine_target(method: &Method) -> Option<&str> {
+    match method {
+        Method::PaneSplit(params) => params.on.as_deref(),
+        Method::TabCreate(params) => params.on.as_deref(),
+        Method::WorkspaceCreate(params) => params.on.as_deref(),
+        _ => None,
+    }
+}
+
+/// Why `method` must not be sent: it starts a pane on a machine and the
+/// server does not advertise `spawn_on_machine`. An older server would
+/// ignore `on`, start the pane on its own host and report success
+/// (core-phase5 D5; AGENTS.md § Stable client endpoint contract).
+fn machine_capability_refusal(
+    method: &Method,
+    capabilities: Option<&crate::api::schema::ServerCapabilities>,
+) -> Option<String> {
+    let machine = machine_target(method)?;
+    if capabilities.is_some_and(|capabilities| capabilities.spawn_on_machine) {
+        return None;
+    }
+    Some(format!(
+        "this herdr server cannot place panes on machines, so no pane was started on {machine}; update and restart the server (`herdr server restart`), or run it on a macOS or Linux host"
+    ))
+}
+
+fn ensure_server_protocol_compatible(client: &ApiClient, request: &Request) -> std::io::Result<()> {
+    let request_id = request.id.as_str();
     let status = target::server_status(client)
         .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
     let server_protocol = status
@@ -840,6 +868,12 @@ fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> st
     let Some(response) =
         protocol_guard::mismatch_response(request_id, server_protocol, &target::restart_guidance())
     else {
+        if let Some(message) =
+            machine_capability_refusal(&request.method, status.capabilities.as_ref())
+        {
+            eprintln!("{message}");
+            return Err(protocol_guard::reported_error());
+        }
         return Ok(());
     };
 
@@ -1214,6 +1248,69 @@ mod fork_regression_tests {
             super::short_read_note(text, true, None),
             None,
             "no line count asked"
+        );
+    }
+}
+
+#[cfg(test)]
+mod machine_capability_tests {
+    use super::*;
+    use crate::api::schema::{PaneSplitParams, ServerCapabilities, SplitDirection};
+
+    fn split(on: Option<&str>) -> Method {
+        Method::PaneSplit(PaneSplitParams {
+            workspace_id: None,
+            target_pane_id: None,
+            direction: SplitDirection::Right,
+            ratio: None,
+            cwd: None,
+            focus: false,
+            right_click: Default::default(),
+            env: Default::default(),
+            on: on.map(str::to_string),
+        })
+    }
+
+    fn capabilities(spawn_on_machine: bool) -> ServerCapabilities {
+        ServerCapabilities {
+            live_handoff: true,
+            detached_server_daemon: false,
+            endpoint_protocol_generation: Some(1),
+            surface_interest: true,
+            health_check: true,
+            ssh_agent_registration: false,
+            spawn_on_machine,
+        }
+    }
+
+    // V13 (core-phase5 D5): `--on` goes only to a server that advertises
+    // `spawn_on_machine`; an older one would start the pane on its own host.
+    #[test]
+    fn on_is_refused_unless_the_server_advertises_spawn_on_machine() {
+        let refused = machine_capability_refusal(&split(Some("loop")), Some(&capabilities(false)))
+            .expect("refused");
+        assert!(
+            refused.contains("cannot place panes on machines"),
+            "{refused}"
+        );
+        assert!(refused.contains("loop"), "{refused}");
+        assert!(machine_capability_refusal(&split(Some("loop")), None).is_some());
+        assert!(
+            machine_capability_refusal(&split(Some("loop")), Some(&capabilities(true))).is_none()
+        );
+        // A split without `on` goes to any server.
+        assert!(machine_capability_refusal(&split(None), Some(&capabilities(false))).is_none());
+    }
+
+    #[test]
+    fn an_old_servers_capabilities_have_no_spawn_on_machine() {
+        let old: ServerCapabilities =
+            serde_json::from_str(r#"{"live_handoff": true}"#).expect("old capabilities");
+        assert!(!old.spawn_on_machine);
+        let json = serde_json::to_value(capabilities(false)).expect("json");
+        assert!(
+            json.get("spawn_on_machine").is_none(),
+            "absent when false: {json}"
         );
     }
 }

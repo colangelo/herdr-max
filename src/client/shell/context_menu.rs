@@ -467,6 +467,7 @@ impl ClientShellState {
                             focus: true,
                             label: None,
                             env: Default::default(),
+                            on: None,
                         }),
                         outcome,
                     );
@@ -567,6 +568,7 @@ impl ClientShellState {
                         focus: true,
                         right_click: Default::default(),
                         env: Default::default(),
+                        on: None,
                     }),
                     outcome,
                 );

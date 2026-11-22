@@ -462,6 +462,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                spawn_on_machine: false,
             }),
             macos_services: None,
             core: None,

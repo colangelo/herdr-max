@@ -32,6 +32,39 @@ pub(super) fn normalize_launch_env(
     Ok(normalized)
 }
 
+/// What a create request launches with: its env and, with `on`, the core
+/// machine the pane runs on, there in the folder the request named
+/// (core-phase5 D5).
+pub(super) fn launch_extra(
+    env: Vec<(String, String)>,
+    on: Option<String>,
+    cwd: Option<&str>,
+) -> Result<crate::pane::LaunchExtra, (String, String)> {
+    let Some(on) = on else {
+        return Ok(env.into());
+    };
+    #[cfg(unix)]
+    {
+        let machine = crate::core_machine::MachineName::parse(&on)
+            .map_err(|err| ("invalid_machine".to_string(), err.0))?;
+        Ok(crate::pane::LaunchExtra {
+            env,
+            on: Some(crate::pane::MachineTarget {
+                machine,
+                cwd: cwd.map(str::to_string),
+            }),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (env, cwd);
+        Err((
+            "unsupported".to_string(),
+            format!("a pane on a machine ({on}) needs a macOS or Linux server"),
+        ))
+    }
+}
+
 /// The reserved env key that names the run a pane is started for.
 const RUN_ID_ENV: &str = "HERDR_RUN_ID";
 const RUN_ID_MAX_BYTES: usize = 128;

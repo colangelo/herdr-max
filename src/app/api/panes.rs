@@ -53,6 +53,11 @@ impl App {
             Err((code, message)) => return encode_error(id, &code, message),
         };
         let run_id = super::env::run_id_from_env(&extra_env);
+        let extra_env =
+            match super::env::launch_extra(extra_env, params.on.clone(), params.cwd.as_deref()) {
+                Ok(extra) => extra,
+                Err((code, message)) => return encode_error(id, &code, message),
+            };
         let direction = match params.direction {
             crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
             crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
@@ -4427,6 +4432,7 @@ mod tests {
                     ("HERDR_RUN_ID".to_string(), "run-split".to_string()),
                     ("OTHER".to_string(), "kept".to_string()),
                 ]),
+                on: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -4460,6 +4466,7 @@ mod tests {
                     "HERDR_RUN_ID".to_string(),
                     "run-tab".to_string(),
                 )]),
+                on: None,
             },
         );
         assert!(!response.contains("\"error\""), "{response}");

@@ -124,7 +124,7 @@ impl App {
         &mut self,
         initial_cwd: PathBuf,
         focus: bool,
-        extra_env: Vec<(String, String)>,
+        extra_env: impl Into<crate::pane::LaunchExtra>,
     ) -> std::io::Result<usize> {
         let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
@@ -328,6 +328,11 @@ impl App {
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         let presentation = terminal.effective_presentation();
+        let core_link = self
+            .terminal_runtimes
+            .get(&terminal.id)
+            .and_then(|runtime| runtime.core_terminal())
+            .or_else(|| terminal.core_waiting().map(|waiting| waiting.link.clone()));
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             pane_key: Some(terminal.pane_key.clone()),
@@ -346,6 +351,14 @@ impl App {
             suspended: terminal.is_suspended(),
             core_waiting: terminal.core_waiting().is_some(),
             core_unreachable_since: terminal.core_unreachable_since,
+            core_waiting_cause: terminal
+                .core_waiting()
+                .map(|waiting| waiting.why.as_str().to_string()),
+            machine: core_link
+                .as_ref()
+                .and_then(|link| link.address.split_once('/'))
+                .map(|(machine, _)| machine.to_string()),
+            core_address: core_link.map(|link| link.address),
             suspend_cause: terminal
                 .suspension()
                 .map(|suspension| suspension.cause.as_str().to_string()),

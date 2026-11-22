@@ -75,6 +75,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         surface_interest: true,
         health_check: true,
         ssh_agent_registration: false,
+        spawn_on_machine: cfg!(unix),
     })
 }
 
@@ -1167,6 +1168,9 @@ mod tests {
             suspended: false,
             core_waiting: false,
             core_unreachable_since: None,
+            core_waiting_cause: None,
+            machine: None,
+            core_address: None,
             suspend_cause: None,
             label: None,
             agent: Some("pi".into()),
@@ -1428,6 +1432,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                spawn_on_machine: false,
             }),
             None,
             None,

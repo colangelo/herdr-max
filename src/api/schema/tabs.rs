@@ -36,6 +36,11 @@ cli_params! {
         pub label: Option<String> => Field::new(None).input(bindings::optional_text("label", "TEXT").order(2)),
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         pub env: HashMap<String, String> => Field::new(HashMap::new()).input(bindings::environment().order(3)),
+        /// Runs the new tab's pane on this core machine (`herdr machine add --core`)
+        /// instead of this Mac. Sent only to a server that advertises
+        /// `spawn_on_machine`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub on: Option<String> => Field::new(None).input(bindings::optional_text("on", "MACHINE").order(6)),
     }
 }
 

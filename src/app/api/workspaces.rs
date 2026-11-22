@@ -55,13 +55,16 @@ impl App {
                 None => self.workspace_creation_source(),
             }
         };
+        let machine_cwd = params.cwd.clone();
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
             source_workspace_index.map_or_else(
                 || self.resolve_new_terminal_cwd(None),
                 |index| self.resolved_new_workspace_cwd_from(index),
             )
         });
-        let extra_env = match super::env::normalize_launch_env(params.env) {
+        let extra_env = match super::env::normalize_launch_env(params.env)
+            .and_then(|env| super::env::launch_extra(env, params.on, machine_cwd.as_deref()))
+        {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
@@ -462,6 +465,7 @@ mod tests {
                 focus: true,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -492,6 +496,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
 
@@ -553,6 +558,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -573,6 +579,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
         let error: ErrorResponse = serde_json::from_str(&invalid).unwrap();
@@ -586,6 +593,7 @@ mod tests {
                 focus: false,
                 label: None,
                 env: Default::default(),
+                on: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&captured).unwrap();

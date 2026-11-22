@@ -1048,6 +1048,7 @@ impl ClientShellState {
                     label: (!trimmed.is_empty() && trimmed != suggested_name)
                         .then(|| trimmed.to_owned()),
                     env: Default::default(),
+                    on: None,
                 },
             )),
             ClientRenameTarget::Workspace { workspace_id } => (!trimmed.is_empty()).then(|| {
@@ -1069,6 +1070,7 @@ impl ClientShellState {
                     label: (!trimmed.is_empty() && trimmed != default_name)
                         .then(|| trimmed.to_owned()),
                     env: Default::default(),
+                    on: None,
                 },
             )),
             ClientRenameTarget::Tab {
