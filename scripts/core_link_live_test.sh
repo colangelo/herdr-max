@@ -284,8 +284,10 @@ first=$!
 wait_for "the first dial holds dial.lock" 5 locked "$locked_before"
 wait_for "the first dial's ssh" 5 sh -c "tail -n 1 '$SSH_LOG' | grep -q mode=slow"
 before="$(ssh_starts direct-target)"
+# The lease first, outside the timed refusal.
+write_lease "$D" "cli-$$" "$(plus 120)" "$(now)"
 started="$(now)"
-code=0; link "$ok_line" 2>/dev/null || code=$?
+code=0; link_bare "$ok_line" 2>/dev/null || code=$?
 elapsed="$(since "$started")"
 [[ "$code" == 75 ]] || fail "a second dial during the first exited $code, not 75"
 le "$elapsed" 2.1 || fail "the second dial took ${elapsed}s to refuse"
