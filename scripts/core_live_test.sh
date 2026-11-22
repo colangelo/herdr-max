@@ -15,9 +15,11 @@
 # core until a config reload; V19, a pane in a second core session is kept
 # through a handoff and a restart, and a stop ends both sessions' panes; V33,
 # a pane named by `core_pty_panes` stays on the PTY when respawned, resumed
-# and restored (macOS: it uses pane jobs), and the idle move refuses it; V20,
-# the idle move takes idle panes onto core, an agent behind atuin too, and
-# refuses busy ones.
+# and restored (macOS: it uses pane jobs), and the idle move refuses it; V10
+# and V18, a pane restored with no live saved terminal starts on core, after a
+# `herdr server restart` and after a `herdr server stop`, with its saved screen
+# and its agent's resume command typed once; V20, the idle move takes idle
+# panes onto core, an agent behind atuin too, and refuses busy ones.
 #
 # Everything lives under one scratch folder: herdr's config and sockets, and
 # the herdr-core session `herdrdev-<session>` it starts there (core follows
@@ -141,6 +143,21 @@ core_terminals() {
   done
 }
 
+pid_of() { core_terminals | awk -v pane="$1" '$3 == pane { print $2 }'; }
+address_of() { core_terminals | awk -v pane="$1" '$3 == pane { print $1 }'; }
+on_core() { [[ -n "$(pid_of "$1")" ]]; }
+server_pid() {
+  python3 -I - "$SOCKET" <<'PY2'
+import socket, struct, sys
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(sys.argv[1])
+if sys.platform == "darwin":
+    print(struct.unpack("i", client.getsockopt(0, 2, 4))[0])  # SOL_LOCAL, LOCAL_PEERPID
+else:
+    print(struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0])
+PY2
+}
+
 set_runtime() {
   printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_label_sync = true\ncore_extras_doc = true\ncore_spaces_doc = %s\n' \
     "$1" "${2:-true}" > "$CONFIG_HOME/herdr-dev/config.toml"
@@ -197,7 +214,8 @@ else:
           " ".join("%s=%s" % (p["id"], p["terminal"]) for s in spaces for p in s["panes"]))'
 }
 extras_published() { [[ "$(extras_summary)" == "1 $CORE_SESSION | $(our_space) | $B=$ADDR" ]]; }
-merged() { [[ "$(doc_summary)" == "s9 +$(our_space) | $B=$ADDR" ]]; }
+# After the restart A is on core too (D8), left of B in the layout.
+merged() { [[ "$(doc_summary)" == "s9 +$(our_space) | $A=$(address_of "$A") $B=$ADDR" ]]; }
 withdrawn() { [[ "$(doc_summary)" == "s9 | " ]]; }
 
 echo "herdr: $HERDR_BIN"
@@ -349,19 +367,24 @@ echo "ok: live handoff kept both programs and the core; B reattached to $ADDR an
 doc_clobber
 [[ "$(doc_summary)" == "s9 | " ]] || fail "the foreign write did not land: $(doc_summary)"
 
-# 3. herdr server restart: the PTY pane starts fresh on the PTY (D1), the core
-#    pane is kept and reattached.
+# 3. herdr server restart: the core pane is kept and reattached. The PTY
+#    pane's program ends; with runtime = "core" the restored pane starts its
+#    fresh program on core (core-phase3 D8, V10).
 run_herdr server restart --yes >"$BASE/restart.out" 2>&1 &
 wait_until "PTY program ended by the restart" gone "$A_PID"
 wait_until "server after restart" socket_up
 alive "$B_PID" || fail "core pane's program ended in the restart"
-[[ "$(core_terminals)" == "$ADDR $CORE_PID $B" ]] \
-  || fail "expected only B's kept terminal (A restores on the PTY, D1): $(core_terminals)"
+wait_until "pane A restored on core" on_core "$A"
+[[ "$(core_terminals | awk -v pane="$B" '$3 == pane')" == "$ADDR $CORE_PID $B" ]] \
+  || fail "B is not on its kept terminal: $(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 2 ]] \
+  || fail "expected B's kept terminal and A's new one: $(core_terminals)"
+[[ "$(pid_of "$A")" != "$A_PID" ]] || fail "A's restored program has the old pid"
 send_line "$B" "echo after-restart > $BASE/b.restart"
 wait_until "input to B after the restart" file_has_line "$BASE/b.restart"
 [[ "$(core_pid)" == "$CORE" ]] || fail "core changed in the restart"
 no_orphan_report "the restart"
-echo "ok: server restart kept the core and B's program in $ADDR, and reattached it"
+echo "ok: server restart kept the core and B's program in $ADDR, and reattached it; A restored on core"
 wait_until "the restarted server's layout merged beside the foreign space" merged
 set_runtime core false
 run_herdr server reload-config >/dev/null
@@ -390,39 +413,49 @@ split_down() {
   api "{\"id\":\"v14\",\"method\":\"pane.split\",\"params\":{\"target_pane_id\":\"$1\",\"direction\":\"down\"}}" \
     | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print((r.get("pane") or r)["pane_id"])'
 }
-pid_of() { core_terminals | awk -v pane="$1" '$3 == pane { print $2 }'; }
-address_of() { core_terminals | awk -v pane="$1" '$3 == pane { print $1 }'; }
-send_line "$A" "echo \$\$ > $BASE/a2.pid"
-wait_until "pane A pid after the restart" file_has_line "$BASE/a2.pid"
-A_PID="$(cat "$BASE/a2.pid")"
+# A runs on core since the restart (D8); P, started while runtime = "pty",
+# is the PTY pane the holder loss must not touch.
+set_runtime pty false
+run_herdr server reload-config >/dev/null
+P="$(split_down "$A")"
+send_line "$P" "echo \$\$ > $BASE/p.pid"
+wait_until "pane P pid" file_has_line "$BASE/p.pid"
+P_PID="$(cat "$BASE/p.pid")"
+set_runtime core false
+run_herdr server reload-config >/dev/null
+on_core "$P" && fail "pane P is on core: $(core_terminals)"
 C="$(split_down "$B")"
 send_line "$C" "echo \$\$ > $BASE/c.pid"
 wait_until "pane C pid" file_has_line "$BASE/c.pid"
 D="$(split_down "$C")"
 send_line "$D" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v14:test --agent claude --state idle --agent-session-id sess-p3 -- p3stub --resume sess-p3 > $BASE/d.report 2>&1; echo \$\$ > $BASE/d.pid; exec sleep 600"
 wait_until "pane D reported" file_has_line "$BASE/d.pid"
-[[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "expected three core panes: $(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 4 ]] || fail "expected four core panes: $(core_terminals)"
 OLD_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
 HOLDER="$(hc_scratch server status --json | python3 -I -c 'import json,sys; h=json.load(sys.stdin)["holders"]; print(h[0]["pid"] if h else 0)')"
 [[ "$HOLDER" != 0 ]] || fail "no holder to quit"
 kill -TERM "$HOLDER"
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_until "pane $pane suspended by the holder loss" is_suspended "$pane"
 done
-alive "$A_PID" || fail "the PTY pane ended with the holder"
-echo "ok: the holder loss suspended B, C and D in place; A runs on"
+alive "$P_PID" || fail "the PTY pane ended with the holder"
+echo "ok: the holder loss suspended A, B, C and D in place; P runs on"
 # Three ends within 2 s are a burst: the panes settle 30 s before they resume.
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_long "pane $pane resumed" is_running "$pane"
 done
 wait_until "the agent stand-in resumed" file_has_line "$BASE/stub.args"
 [[ "$(cat "$BASE/stub.args")" == "args=--resume sess-p3" ]] || fail "the stand-in ran with $(cat "$BASE/stub.args")"
-[[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "expected three core panes after the resume: $(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 4 ]] || fail "expected four core panes after the resume: $(core_terminals)"
 NEW_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
 [[ "$NEW_PIDS" != "$OLD_PIDS" ]] || fail "the panes did not start new programs"
 NEW_HOLDER="$(hc_scratch server status --json | python3 -I -c 'import json,sys; h=json.load(sys.stdin)["holders"]; print(h[0]["pid"] if h else 0)')"
 [[ "$NEW_HOLDER" != 0 && "$NEW_HOLDER" != "$HOLDER" ]] || fail "the panes are not on a new holder ($NEW_HOLDER)"
-echo "ok: B, C and D started again on holder $NEW_HOLDER; the agent resumed with --resume sess-p3"
+echo "ok: A, B, C and D started again on holder $NEW_HOLDER; the agent resumed with --resume sess-p3"
+# A PTY pane would start fresh on core at the next restart and so start the
+# core at once (D8); V29a needs every pane's program kept in the killed core.
+api "{\"id\":\"v14\",\"method\":\"pane.close\",\"params\":{\"pane_id\":\"$P\"}}" >/dev/null
+wait_until "the PTY pane's program ended by its close" gone "$P_PID"
 
 # 3c. V29a (core-phase3 D1a, D1b): with the core server killed (its socket
 #     stays and refuses; the holder and the programs run on), a restart and a
@@ -433,34 +466,35 @@ core_terminals > "$BASE/before"
 before_of() { awk -v pane="$1" '$3 == pane { print $1, $2 }' "$BASE/before"; }
 before_pid() { awk -v pane="$1" '$3 == pane { print $2 }' "$BASE/before"; }
 CORE="$(core_pid)"
+HERDR_PID="$(server_pid)"
 kill -KILL "$CORE"
 wait_until "core server gone" gone "$CORE"
 run_herdr server restart --yes >"$BASE/restart2.out" 2>&1 &
-wait_until "PTY program ended by the second restart" gone "$A_PID"
+wait_long "the old server gone in the second restart" gone "$HERDR_PID"
 wait_until "server after the second restart" socket_up
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_until "pane $pane waiting for core after the restart" is_waiting "$pane"
   alive "$(before_pid "$pane")" || fail "pane $pane's program ended in the restart"
 done
 run_herdr server live-handoff --import-exe "$HERDR_BIN" >/dev/null \
   || fail "live handoff with panes waiting for core did not complete"
 wait_until "server after the handoff" socket_up
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   # Waiting, or already attached to its own program if herdr started the
   # core in the meantime: never a fresh program.
   is_waiting "$pane" || is_running "$pane" || fail "pane $pane neither waits nor runs after the handoff"
   alive "$(before_pid "$pane")" || fail "pane $pane's program ended in the handoff"
 done
-echo "ok: with the core server down, a restart and a handoff started nothing for B, C and D"
-for pane in "$B" "$C" "$D"; do
+echo "ok: with the core server down, a restart and a handoff started nothing for A, B, C and D"
+for pane in "$A" "$B" "$C" "$D"; do
   wait_long "pane $pane attached once core runs" is_running "$pane"
   [[ "$(address_of "$pane") $(pid_of "$pane")" == "$(before_of "$pane")" ]] \
     || fail "pane $pane is on $(address_of "$pane") $(pid_of "$pane"), not $(before_of "$pane")"
 done
-[[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "a program was started: $(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 4 ]] || fail "a program was started: $(core_terminals)"
 send_line "$B" "echo after-wait > $BASE/b.wait"
 wait_until "input to B after it attached" file_has_line "$BASE/b.wait"
-echo "ok: B, C and D attached to the same programs once herdr started the core; nothing was started twice"
+echo "ok: A, B, C and D attached to the same programs once herdr started the core; nothing was started twice"
 
 # 3d. V15 (core-phase3 D3): the core server killed while herdr runs. Its
 #     socket stays and refuses; after 3 s herdr starts the core, which finds
@@ -492,7 +526,7 @@ wait_long "herdr started the core again" core_up
 GAP="$(python3 -I -c 'import sys,time; print(f"{time.monotonic()-float(sys.argv[1]):.1f}")' "$KILLED_AT")"
 python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[1]) >= 3.0 else 1)' "$GAP" \
   || fail "herdr started the core after only $GAP s"
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_long "pane $pane reattached after the core came back" is_running "$pane"
 done
 [[ "$(core_terminals | sort)" == "$(sort "$BASE/before15")" ]] \
@@ -501,48 +535,51 @@ done
 send_line "$B" "echo after-v15 > $BASE/b.v15"
 wait_until "input to B after the core came back" file_has_line "$BASE/b.v15"
 core_env_is_clean recovery
-echo "ok: herdr started the killed core again after $GAP s; B, C and D kept their programs; its environment is clean"
+echo "ok: herdr started the killed core again after $GAP s; A, B, C and D kept their programs; its environment is clean"
 
 # 3e. V37 (core-phase3 D3b): `hc server stop` is a person's stop. The panes
 #     are suspended, `core_stopped`, and herdr does not start the core; once
 #     someone starts it, each pane resumes after the dead-program check.
 OLD_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
 hc_scratch server stop >/dev/null
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_until "pane $pane suspended by the stop" is_suspended "$pane"
   [[ "$(pane_field "$pane" suspend_cause)" == core_stopped ]] \
     || fail "pane $pane suspended as $(pane_field "$pane" suspend_cause)"
 done
 for _ in $(seq 1 60); do
   [[ "$(core_socket_state)" == missing ]] || fail "herdr started the core a person stopped"
-  for pane in "$B" "$C" "$D"; do
+  for pane in "$A" "$B" "$C" "$D"; do
     is_suspended "$pane" || fail "pane $pane resumed while the core was stopped"
   done
   sleep 1
 done
-echo "ok: after hc server stop, B, C and D stayed suspended and no core was started for 60 s"
+echo "ok: after hc server stop, A, B, C and D stayed suspended and no core was started for 60 s"
 hc_scratch server start >/dev/null
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_long "pane $pane resumed once the core runs" is_running "$pane"
 done
 NEW_PIDS="$(core_terminals | awk '{print $2}' | sort | tr '\n' ' ')"
-[[ "$(core_terminals | wc -l | tr -d ' ')" == 3 ]] || fail "expected three core panes: $(core_terminals)"
+[[ "$(core_terminals | wc -l | tr -d ' ')" == 4 ]] || fail "expected four core panes: $(core_terminals)"
 [[ "$NEW_PIDS" != "$OLD_PIDS" ]] || fail "the panes did not start new programs"
-echo "ok: once the core was started by hand, B, C and D resumed on it"
+echo "ok: once the core was started by hand, A, B, C and D resumed on it"
 
 #     V37, second run: stopped again, then a herdr restart, whose first
 #     connection may start the core; the panes come back.
 hc_scratch server stop >/dev/null
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_until "pane $pane suspended by the second stop" is_suspended "$pane"
 done
+HERDR_PID="$(server_pid)"
 run_herdr server restart --yes >"$BASE/restart3.out" 2>&1 &
+wait_long "the old server gone in the third restart" gone "$HERDR_PID"
 wait_until "server after the third restart" socket_up
-for pane in "$B" "$C" "$D"; do
+for pane in "$A" "$B" "$C" "$D"; do
   wait_long "pane $pane running after the restart" is_running "$pane"
+  # Their programs are gone, so each restored pane starts fresh, on core (D8).
+  wait_until "pane $pane restored on core" on_core "$pane"
 done
-# Restored panes start on the PTY until PR F (core-phase3 D8).
-echo "ok: after a second stop, a herdr restart brought B, C and D back"
+echo "ok: after a second stop, a herdr restart brought A, B, C and D back on core"
 
 # 3f. V16 (core-phase3 D3a): a holder that keeps dying. Each loss suspends
 #     the core panes and they resume on a new holder; the third burst in ten
@@ -554,7 +591,6 @@ wait_until "pane E pid" file_has_line "$BASE/e.pid"
 F="$(split_down "$E")"
 send_line "$F" "echo \$\$ > $BASE/f.pid"
 wait_until "pane F pid" file_has_line "$BASE/f.pid"
-on_core() { [[ -n "$(pid_of "$1")" ]]; }
 on_core "$E" || fail "pane E is not on core: $(core_terminals)"
 on_core "$F" || fail "pane F is not on core: $(core_terminals)"
 server_core_field() {
@@ -602,17 +638,6 @@ other_run() {
   hc_other run --bg --json --no-parent --label "herdr.session=$CORE_SESSION" \
     --label "herdr.pane_id=$1" -- /bin/sh -c 'echo $$ > "$0"; exec /bin/sh' "$2" \
     | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["address"])'
-}
-server_pid() {
-  python3 -I - "$SOCKET" <<'PY2'
-import socket, struct, sys
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-client.connect(sys.argv[1])
-if sys.platform == "darwin":
-    print(struct.unpack("i", client.getsockopt(0, 2, 4))[0])  # SOL_LOCAL, LOCAL_PEERPID
-else:
-    print(struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0])
-PY2
 }
 # Points the saved link of the pane on $1 in our session's saved files at
 # $2 in $OTHER, as a link from before the pid fields; prints the count.
@@ -749,6 +774,17 @@ int main(int argc, char **argv) {
      no line feed after it, so it fits a three-row pane. */
   printf("\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf \n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
   fflush(stdout);
+  /* Each line typed into it goes to <args file>.in (V18: a resume command
+     typed twice would land here). */
+  char in_path[4096], line[4096];
+  snprintf(in_path, sizeof in_path, "%s.in", path ? path : "$BASE/h.args");
+  while (fgets(line, sizeof line, stdin)) {
+    FILE *in = fopen(in_path, "a");
+    if (in) {
+      fputs(line, in);
+      fclose(in);
+    }
+  }
   for (;;) pause();
 }
 STUB
@@ -878,6 +914,62 @@ echo "ok: V33: with no core_pty_panes, the same respawn put H on core"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
 
+# 5b. V18 (core-phase3 D8): restore on core. With runtime = "core" and pane
+#     history on, a shell pane and an agent stand-in run on core; `herdr
+#     server stop` ends both programs, and the next server restores both on
+#     core: the shell with its saved screen, the agent by its resume command,
+#     typed once. Its own herdr session, so its own core session.
+SESSION="v18"
+CORE_SESSION="herdrdev-$SESSION"
+SOCKET="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr.sock"
+SESSION_DIR="$CONFIG_HOME/herdr-dev/sessions/$SESSION"
+printf 'onboarding = false\n\n[experimental]\nruntime = "core"\npane_history = true\n' \
+  > "$CONFIG_HOME/herdr-dev/config.toml"
+pane_text() {
+  api "{\"id\":\"v18\",\"method\":\"pane.read\",\"params\":{\"pane_id\":\"$1\",\"source\":\"recent\",\"lines\":200}}" \
+    | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["read"]["text"])'
+}
+pane_shows() { [[ "$(pane_text "$1")" == *"$2"* ]]; }
+saved_has() { grep -q -- "$2" "$SESSION_DIR/$1" 2>/dev/null; }
+run_herdr server >/dev/null 2>&1 &
+wait_until "v18 server socket" socket_up
+R1="$(api "{\"id\":\"v18\",\"method\":\"workspace.create\",\"params\":{\"cwd\":\"$BASE\",\"focus\":true}}" \
+  | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["root_pane"]["pane_id"])')"
+R2="$(split_down "$R1")"
+send_line "$R1" "echo V18-SHELL-MARK"
+wait_until "R1's mark on screen" pane_shows "$R1" V18-SHELL-MARK
+: > "$BASE/h.args"
+send_line "$R2" "\"$HERDR_BIN\" pane report-agent \"\$HERDR_PANE_ID\" --source v18:test --agent claude --state idle --agent-session-id sess-v18 -- claude --resume sess-v18; exec claude --name v18-agent"
+wait_until "the stand-in started in R2" file_has_line "$BASE/h.args"
+on_core "$R1" || fail "R1 is not on core: $(core_terminals)"
+on_core "$R2" || fail "R2 is not on core: $(core_terminals)"
+wait_long "R1's screen saved" saved_has session-history.json V18-SHELL-MARK
+wait_long "R2's session and launch name saved" saved_has session.json '"v18-agent"'
+saved_has session.json '"sess-v18"' || fail "R2's agent session was not saved"
+R1_PID="$(pid_of "$R1")"
+STUB_PID="$(stub_pid)"
+rm -f "$BASE/h.args.in"
+run_herdr server stop >/dev/null
+wait_until "R1's program ended by the stop" gone "$R1_PID"
+wait_until "R2's agent ended by the stop" gone "$STUB_PID"
+[[ -z "$(core_terminals)" ]] || fail "core terminals still live after the stop: $(core_terminals)"
+run_herdr server >/dev/null 2>&1 &
+wait_until "v18 server socket after the stop" socket_up
+wait_long "R2's agent restored" stub_restarted "$STUB_PID"
+wait_long "R1 restored on core" on_core "$R1"
+wait_long "R2 restored on core" on_core "$R2"
+[[ "$(pid_of "$R1")" != "$R1_PID" ]] || fail "R1 kept its old pid"
+[[ "$(stub_args)" == "--resume sess-v18 --name v18-agent" ]] || fail "R2 resumed with $(stub_args)"
+pane_shows "$R1" V18-SHELL-MARK || fail "R1's saved screen is not in the pane: $(pane_text "$R1")"
+# A second resume command would be read by the running stand-in.
+RESTORED_STUB="$(stub_pid)"
+for _ in $(seq 1 200); do sleep 0.05; done
+[[ ! -s "$BASE/h.args.in" ]] || fail "R2's agent was typed into after it started: $(cat "$BASE/h.args.in")"
+[[ "$(stub_pid)" == "$RESTORED_STUB" ]] && alive "$RESTORED_STUB" || fail "R2's agent started twice"
+echo "ok: V18: after herdr server stop, R1 restored on core with its saved screen; R2's agent resumed on core, typed once"
+run_herdr server stop >/dev/null
+hc_scratch server stop >/dev/null 2>&1 || true
+
 # 6. V20 (core-phase3 D9): the idle move. Panes started on the PTY, then
 #    runtime = "core": an idle shell moves with its directory; a shell running
 #    `sleep 30` and a pane typed into just before are refused with their
@@ -977,4 +1069,4 @@ wait_until "AS on core" on_core "$AS"
 echo "ok: V20: an agent that outlived the hangup and SIGTERM was killed, kept its pane, and resumed on core with its session"
 run_herdr server stop >/dev/null
 hc_scratch server stop >/dev/null 2>&1 || true
-echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V14, V15, V16, V19, V29a, V33, V37; V20)"
+echo "PASS: core live test (V10 server half, V11, V15, core-spaces-doc; core-phase3 V10, V14, V15, V16, V18, V19, V29a, V33, V37; V20)"

@@ -5,7 +5,8 @@
 # `herdr`, so only a release build can show it. V17: a new pane goes to
 # `default`, a pane whose saved link names the legacy `herdr` core is
 # re-adopted there, and a terminal in `default` without our label (the
-# phone's) is never touched. V19: a PTY pane, a pane in `herdr` and one in
+# phone's) is never touched; a PTY pane whose program ended restores into
+# `default` (core-phase3 D8). V19: a PTY pane, a pane in `herdr` and one in
 # `default` through a live handoff, a restart and a stop. V21, when
 # HERDR_R0_BIN (the PR B beta) and HERDR_202_BIN (beta 202) name binaries:
 # a live handoff to the PR B beta re-adopts a `default` pane with its pid; a
@@ -272,7 +273,19 @@ wait_long "pane G attached in herdr" is_running "$G"
 [[ -z "$(pid_in default "$G")" ]] || fail "a program was started for G in default: $(terminals default)"
 [[ "$(shell_pid "$B" "$BASE/b.after")" == "$B_PID" ]] || fail "B lost its program in default"
 A_PID="$(shell_pid "$A" "$BASE/a2.pid")"
+[[ "$(pid_in default "$A")" == "$A_PID" ]] \
+  || fail "PTY pane A did not restore into default (core-phase3 D8): $(terminals default)"
 echo "ok: pane G re-adopted from the legacy core herdr (pid $G_PID), nothing started for it in default"
+echo "ok: PTY pane A, whose program the kill ended, restored into default (pid $A_PID)"
+# A runs in default since that restore; P, made while runtime = "pty", is
+# V19's PTY pane.
+write_config pty
+run_herdr server reload-config >/dev/null
+P="$(split "$A" down)"
+P_PID="$(shell_pid "$P" "$BASE/p.pid")"
+write_config core
+run_herdr server reload-config >/dev/null
+[[ -z "$(pid_in default "$P")" ]] || fail "pane P is in default: $(terminals default)"
 
 foreign_untouched() {
   alive "$FOREIGN_PID" || fail "the unlabelled terminal in default ended ($1)"
@@ -287,27 +300,32 @@ echo "ok: the unlabelled terminal $FOREIGN in default is untouched"
 
 # 2. V19 (core-backend V10): live handoff, then restart, then stop.
 handoff_to "$HERDR_BIN"
-for pid in "$A_PID" "$B_PID" "$G_PID"; do alive "$pid" || fail "program $pid ended in the handoff"; done
-[[ "$(shell_pid "$A" "$BASE/a.handoff")" == "$A_PID" ]] || fail "PTY pane A changed in the handoff"
+for pid in "$P_PID" "$A_PID" "$B_PID" "$G_PID"; do alive "$pid" || fail "program $pid ended in the handoff"; done
+[[ "$(shell_pid "$P" "$BASE/p.handoff")" == "$P_PID" ]] || fail "PTY pane P changed in the handoff"
+[[ "$(shell_pid "$A" "$BASE/a.handoff")" == "$A_PID" ]] || fail "A changed in the handoff"
 [[ "$(shell_pid "$B" "$BASE/b.handoff")" == "$B_PID" ]] || fail "B changed in the handoff"
 [[ "$(shell_pid "$G" "$BASE/g.handoff")" == "$G_PID" ]] || fail "G changed in the handoff"
-echo "ok: live handoff kept PTY pane A, B in default and G in herdr, each with its pid"
+echo "ok: live handoff kept PTY pane P, A and B in default and G in herdr, each with its pid"
 
 HERDR_PID="$(server_pid)"
 run_herdr server restart --yes >"$BASE/restart.out" 2>&1 &
 wait_long "the old server gone in the restart" gone "$HERDR_PID"
 wait_until "server after the restart" socket_up
-wait_until "PTY program ended by the restart" gone "$A_PID"
+wait_until "PTY program ended by the restart" gone "$P_PID"
+wait_long "pane P restored into default" pid_in default "$P"
+wait_long "pane A back after the restart" is_running "$A"
 wait_long "pane B back after the restart" is_running "$B"
 wait_long "pane G back after the restart" is_running "$G"
+[[ "$(shell_pid "$A" "$BASE/a.restart")" == "$A_PID" ]] || fail "A changed in the restart"
 [[ "$(shell_pid "$B" "$BASE/b.restart")" == "$B_PID" ]] || fail "B changed in the restart"
 [[ "$(shell_pid "$G" "$BASE/g.restart")" == "$G_PID" ]] || fail "G changed in the restart"
 [[ "$(core_server_pid default)" == "$DEFAULT_CORE" && "$(core_server_pid herdr)" == "$HERDR_CORE" ]] \
   || fail "a core changed in the restart"
 foreign_untouched "after the restart"
-echo "ok: restart kept B in default and G in herdr; A restarted on the PTY"
+echo "ok: restart kept A and B in default and G in herdr; PTY pane P started fresh in default (D8)"
 
 run_herdr server stop >/dev/null
+wait_until "A's program ended by the stop" gone "$A_PID"
 wait_until "B's program ended by the stop" gone "$B_PID"
 wait_until "G's program in herdr ended by the stop" gone "$G_PID"
 alive "$DEFAULT_CORE" || fail "core session default ended with our server"
