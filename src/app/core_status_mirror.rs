@@ -56,6 +56,10 @@ impl App {
         if dirty && self.core_status_mirror {
             self.sync_core_status_mirror();
         }
+        #[cfg(unix)]
+        if dirty {
+            self.sync_core_label_pins();
+        }
         dirty
     }
 

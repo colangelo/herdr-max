@@ -1918,10 +1918,12 @@ pub struct ExperimentalConfig {
     /// spaces with the core panes as terminals. herdr's layout is the source:
     /// an edit made in an app is overwritten. Unix only. Default: false.
     pub core_spaces_doc: bool,
-    /// Share which agents a person has seen with the Herdr apps through the
-    /// `herdr.seen` label on herdr-core terminals: herdr writes it when a
-    /// focused client shows a core pane, and on a mark read. herdr still takes
-    /// no status from core. Unix only. Default: false.
+    /// Share which agents a person has seen, and which are pinned, with the
+    /// Herdr apps through the `herdr.seen` and `herdr.pinned` labels on
+    /// herdr-core terminals: herdr writes `herdr.seen` when a focused client
+    /// shows a core pane and on a mark read, follows other clients' reads,
+    /// mark unreads and pins, and writes its own pins. herdr still takes no
+    /// status from core. Unix only. Default: false.
     pub core_label_sync: bool,
     /// Panes that always start on the PTY, even with `runtime = "core"`: glob
     /// patterns (`*` any run, `?` one character, case-sensitive) matched
