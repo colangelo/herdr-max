@@ -142,7 +142,7 @@ core_terminals() {
 }
 
 set_runtime() {
-  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_label_sync = true\ncore_spaces_doc = %s\n' \
+  printf 'onboarding = false\n\n[experimental]\nruntime = "%s"\ncore_status_mirror = true\ncore_label_sync = true\ncore_extras_doc = true\ncore_spaces_doc = %s\n' \
     "$1" "${2:-true}" > "$CONFIG_HOME/herdr-dev/config.toml"
 }
 
@@ -181,6 +181,22 @@ doc_clobber() {
     "$FOREIGN" "$version" | hc_scratch connect | grep -q '"result"' || fail "the foreign doc.set was refused"
 }
 published() { [[ "$(doc_summary)" == "+$(our_space) | $B=$ADDR" ]]; }
+# Core's `herdr-max` document as `<format> <writer> | <space> | pane=address...`
+# (core-phase4 D3), to join with the `herdr-app` summary by id.
+extras_summary() {
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-max"}}' \
+    | hc_scratch connect \
+    | python3 -I -c '
+import json, sys
+value = json.load(sys.stdin)["result"]["value"]
+if value is None:
+    print("null")
+else:
+    spaces = value["spaces"]
+    print(value["format"], value["writer"]["session"], "|", " ".join(s["id"] for s in spaces), "|",
+          " ".join("%s=%s" % (p["id"], p["terminal"]) for s in spaces for p in s["panes"]))'
+}
+extras_published() { [[ "$(extras_summary)" == "1 $CORE_SESSION | $(our_space) | $B=$ADDR" ]]; }
 merged() { [[ "$(doc_summary)" == "s9 +$(our_space) | $B=$ADDR" ]]; }
 withdrawn() { [[ "$(doc_summary)" == "s9 | " ]]; }
 
@@ -266,6 +282,8 @@ wait_until "B's status mirrored into core" mirrored
 echo "ok: core_status_mirror put B's status in core: $(core_status)"
 wait_until "the layout in core's herdr-app document" published
 echo "ok: core_spaces_doc published B as $(doc_summary); PTY pane A is left out"
+wait_until "herdr-max's extras in core's herdr-max document" extras_published
+echo "ok: core_extras_doc published $(extras_summary), the same space and pane ids as herdr-app"
 
 # core-phase4 verifier 10 and 15: with core_label_sync on, a core pane starts
 # seen up to turn 0, and `herdr pane mark-seen` raises herdr.seen to the
