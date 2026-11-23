@@ -751,6 +751,13 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   kind) as no lease and ends that link when the other leases end (old binaries; until those links redial). A
   grant that core-link turns into keep just as the CLI removes its lease can leave a keep lease of a gone CLI for
   its minute (it admits no dial).
+  Gates, m4m, 2026-11-23, under the shared lock: targeted tests (fleet, state, link, core_link, remote, cli target
+  and status) green, each new test failing with its fix reverted; `just check` 0 on 562177f6 (5881 + 158 tests;
+  windows-lint skipped on macOS; 9ea6a0cd after it changes the fleet live script only);
+  `CORE_MACHINE_PARTS="link lease fleet" core_machine_live_test.sh` 0 on a debug binary of 9ea6a0cd copied out
+  of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`, not 300 and 600): V26, the link part,
+  the lease part and the fleet part with the new `--dial` line and grant checks; nothing left running or in the
+  passwd home's state.
 - [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
   Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
   probe and `fleet.rs`'s `exec` and wrapper are what they will call.
