@@ -642,6 +642,27 @@ fn a_pane_not_attached_takes_no_action() {
         .is_ok());
 }
 
+// Fork issue 316, review item 7: a far pane whose program ended before the
+// view attached (core shows its run with no pid) is refused, and the notice
+// says the far program has ended rather than that the pane is not attached.
+#[test]
+fn a_pane_whose_far_program_ended_before_the_view_attached_says_so() {
+    let mut app = app();
+    app.view.as_mut().unwrap().bind_instance_for_test(
+        "loop/t2",
+        FarInstance::of(&json!({"pid": 0, "labels": {"herdr.launch": "launch-t2"}})),
+    );
+    for method in [
+        close("w3:p2", false),
+        split(Some("w3:p2")),
+        pane_rename("w3:p2"),
+    ] {
+        let err = app.view_far_action(&method, FIRST_TAB).expect_err("ended");
+        assert!(err.contains("has ended"), "{err}");
+        assert!(!err.contains("not attached"), "{err}");
+    }
+}
+
 // Security review of E.3, M2 P2: closing the last pane of a far workspace
 // closes the workspace there, and a worktree group's parent closes its
 // whole group. A view refuses it, from its own layout and again from the
@@ -1173,7 +1194,12 @@ fn an_unknown_or_one_sided_instance_takes_no_action() {
             let err = app
                 .view_far_action(&method, FIRST_TAB)
                 .expect_err("not known in full");
-            assert!(err.contains("is not attached to its program"), "{err}");
+            // A launch label with no pid is a run core shows no process for:
+            // the notice says the far program has ended (review item 7).
+            assert!(
+                err.contains("is not attached to its program") || err.contains("has ended"),
+                "{err}"
+            );
         }
     }
 

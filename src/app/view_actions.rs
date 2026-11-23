@@ -275,6 +275,12 @@ impl App {
                 .pane_terminal(pane)
                 .and_then(|state| self.terminal_runtimes.get(&state.id))
                 .is_some_and(crate::terminal::TerminalRuntime::view_replaced);
+            let ended = view.far_instance(pane).is_some_and(FarInstance::has_ended);
+            if ended && !replaced {
+                return Err(format!(
+                    "core shows no process for the program of pane {id} on {machine}: it has ended (or core did not say), so a view cannot act on it; do this in {machine}'s herdr"
+                ));
+            }
             let instance = view
                 .far_instance(pane)
                 .filter(|instance| instance.is_known() && !replaced)

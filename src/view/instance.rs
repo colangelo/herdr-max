@@ -56,6 +56,12 @@ impl FarInstance {
         self.launch.is_string() && self.pid != 0
     }
 
+    /// Whether core knows the run (it has a launch label) but reports no
+    /// process for it: the far program ended before the view attached to it.
+    pub(crate) fn has_ended(&self) -> bool {
+        self.launch.is_string() && self.pid == 0
+    }
+
     /// What a guarded far pane action names for the far herdr to check
     /// (`pane.close_if_terminal` and the others, fork issue 316): the far
     /// core's address of the terminal, the pid and the launch label. `None`
