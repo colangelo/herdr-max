@@ -9,7 +9,10 @@
 # refuses with exit 75 and writes nothing; `--dial` writes its lease before
 # the one dial, and removes it after), `--dial` refused over a gate only a
 # login reopens, a SIGTERM that removes the lease and the bridge folder, and
-# a link dropped during a call that is not redialled on its account.
+# a link dropped during a call that is not redialled on its account; E.3
+# and V20 live: a new tab named `$(touch x); w` from a view of the machine
+# reaches the far herdr as that one name, through the same far bridge, and
+# no shell ran it.
 #
 # The far side is a scratch core on this Mac with its own herdr server,
 # reached through herdr's own link command and a fake `ssh` that runs the
@@ -42,6 +45,18 @@ FL_HC="$(command -v hc)"
 FL_PY="$(command -v python3)"
 FL_PROFILE="0123456789abcdef0123456789abcd$(printf '%02x' $(( $$ % 256 )))"
 FL_ENDPOINTS="$STATE_DIR/herdr-dev/client/endpoints.json"
+FL_TMUX="hcf$$"
+FL_VIEW_LOCK="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$FT.lock"
+FL_VIEW_LOG="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$FT.log"
+fl_tm() { tmux -L "$FL_TMUX" -f /dev/null "$@"; }
+# The view a client of the test started, by the pid in its lock, checked to
+# be a herdr.
+fl_stop_view() {
+  local pid
+  pid="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$FL_VIEW_LOCK" 2>/dev/null)"
+  [[ -n "$pid" ]] && ps -o comm= -p "$pid" 2>/dev/null | grep -q herdr && kill "$pid" 2>/dev/null
+  return 0
+}
 
 hc_fl() {
   env -i HOME="$HOME" USER="${USER:-}" PATH="$F3B:/usr/bin:/bin" TMPDIR="${TMPDIR:-/tmp}" \
@@ -81,6 +96,8 @@ fl_tty() {
 eval "$(declare -f link_cleanup | sed '1s/link_cleanup/link_cleanup_before_fleet/')"
 link_cleanup() {
   set +e
+  fl_tm kill-server >/dev/null 2>&1
+  fl_stop_view
   [[ -S "$FL_FAR_API" ]] && far_fl_herdr server stop >/dev/null 2>&1
   [[ -S "$FL_LOCAL_SOCK" ]] && hc_scratch machine rm "$FT" >/dev/null 2>&1
   local pid
@@ -128,7 +145,10 @@ same_json() {
 
 echo "--- PR E: the fleet CLI over core machine $FT"
 mkdir -p "$F3R" "$F3S" "$F3C/herdr-dev" "$F3B" "$FL_BIN"
-printf 'onboarding = false\n' > "$F3C/herdr-dev/config.toml"
+# Core runtime and the spaces document, so a view of the machine shows the
+# far herdr's panes (E.3 below).
+printf 'onboarding = false\n\n[experimental]\nruntime = "core"\ncore_spaces_doc = true\n' \
+  > "$F3C/herdr-dev/config.toml"
 # The far herdr, behind a wrapper that logs each run's arguments and the
 # names (never the values) of the HERDR_* variables it got.
 cat > "$F3B/herdr" <<FAR
@@ -262,6 +282,57 @@ code=0; wait "$term_pid" || code=$?
 [[ "$(fl_cli_leases)" == 0 ]] || fail "SIGTERM left the cli lease"
 [[ "$(fl_folders_of "$term_pid")" == 0 ]] || fail "SIGTERM left the bridge folder"
 echo "ok: 2.1 a connected call's lease keeps the link only and ends within 60 s; SIGTERM removed it and the folder (exit 143)"
+
+# --- E.3 and V20 live: a new tab from a view of the machine, named
+# `$(touch x); w`, typed into the view's own new-tab prompt by a person's
+# keys. The view sends it as one JSON string through the far bridge; no
+# shell there or here ran it, and the action's lease is gone after.
+FL_NAME='$(touch x); w'
+fl_x_files() {
+  local f
+  for f in "$HOME/x" "$PWD/x" "$BASE/x" "$F3C/x" "$F3S/x"; do [[ -e "$f" ]] && printf '%s ' "$f"; done
+  return 0
+}
+x_before="$(fl_x_files)"
+fl_tm new-session -d -s flview -x 170 -y 55 \
+  "$(printf '%q ' env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \
+     -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u TMUX -u HC_SOCKET -u HC_SESSION -u CLAUDECODE \
+     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
+     TERM=xterm-256color HERDR_NO_MACHINE_LEASES=1 SHELL=/bin/sh PATH="$FL_BIN:$PATH" \
+     "$HERDR_BIN" --session "$SESSION" --remote "core:$FT") 2>$BASE/fl-view.err"
+fl_tm set-option -t flview remain-on-exit on >/dev/null
+fl_view_shows() { fl_tm capture-pane -p -t flview 2>/dev/null | grep -q "far-work"; }
+fl_wait "the view of $FT showing the far space" 60 fl_view_shows
+fl_tabs() {
+  far_fl_herdr tab list 2>/dev/null \
+    | python3 -I -c 'import json,sys; print("\n".join(t["label"] for t in json.load(sys.stdin)["result"]["tabs"]))'
+}
+tabs_before="$(fl_tabs | wc -l | tr -d ' ')"
+bridges="$(grep -c "args=--session $FL_SESSION remote-api-bridge --request" "$FL_FAR_LOG" || true)"
+fl_tm send-keys -t flview C-b c
+sleep 1
+fl_tm send-keys -t flview -l "$FL_NAME"
+sleep 0.3
+fl_tm send-keys -t flview Enter
+fl_named_tab() { fl_tabs | grep -qxF "$FL_NAME"; }
+fl_wait "the far tab named $FL_NAME" 30 fl_named_tab
+[[ "$(fl_tabs | wc -l | tr -d ' ')" == $((tabs_before + 1)) ]] || fail "E.3: the view's new tab made $(( $(fl_tabs | wc -l) - tabs_before )) far tabs, not 1"
+[[ "$(grep -c "args=--session $FL_SESSION remote-api-bridge --request" "$FL_FAR_LOG")" -gt "$bridges" ]] \
+  || fail "E.3: the view's action did not go through the far bridge"
+fl_view_follows() { grep 'view layout' "$FL_VIEW_LOG" 2>/dev/null | tail -n 1 | grep -q "tabs=$((tabs_before + 1))"; }
+fl_wait "the view following the far tab" 10 fl_view_follows
+[[ "$(fl_x_files)" == "$x_before" ]] \
+  || fail "V20: a file x appeared: the name ran as a shell line"
+[[ "$(fl_cli_leases)" == 0 ]] || fail "E.3: the view action's lease outlived it: $(ls "$FL_DIR/leases")"
+fl_tm kill-server >/dev/null 2>&1
+fl_stop_view
+echo "ok: E.3/V20 a new tab named '$FL_NAME' from a view of $FT is that far tab, through the far bridge; nothing ran it; no lease left"
+# The far layout changed: the link's answer is read again, and checked
+# against the far herdr's own, for the comparisons below.
+fleet_cli --machine "$FT" pane list >"$BASE/fl-core.json" 2>"$BASE/fl-core.err" \
+  || fail "--machine $FT pane list after the view's tab failed: $(cat "$BASE/fl-core.err")"
+far_fl_herdr pane list >"$BASE/fl-local.json" 2>/dev/null || fail "the far herdr's own pane list failed"
+same_json "$BASE/fl-core.json" "$BASE/fl-local.json" || fail "--machine $FT gave other JSON than the far herdr after the view's tab"
 
 # --- V31 (exec part): the far core has the six names, the far herdr none
 hc_scratch exec --json --on "$FT" sh -c 'env | sed "s/=.*//" | grep "^HERDR_" | sort' >"$BASE/fl-control.json" \

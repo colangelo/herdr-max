@@ -12,8 +12,9 @@
 # AUTOMATIC_INPUT, CREDIT and one RESIZE per changed far size go from the
 # view, read by a frame-logging proxy between the view and the near core),
 # V30 (an idle view sends nothing but CREDIT for 60 s; when the far herdr
-# drops, core keeps the far size), V17 (closing a pane in the view and
-# stopping the view leave the far program and pane as they were), D4's
+# drops, core keeps the far size), V17 (closing a pane in a view of a machine
+# herdr's link does not reach is refused with a notice, E.3; stopping the
+# view leaves the far program and pane as they were), D4's
 # `--remote core:<machine>`; M2 and L3.4 (one view per machine, a newer client
 # restarts it).
 set -euo pipefail
@@ -405,11 +406,18 @@ far "$HERDR_BIN" --session far server >/dev/null 2>&1 &
 FAR_PID=$!
 wait_until "far herdr again" far_up
 
-# --- V17: closing in the view is a detach ---------------------------------
+# --- V17: closing in the view never ends the far program here -------------
+# A pane's close in a view is sent to the far herdr (E.3, D5: a person's
+# close). This loop was added with hc, not `herdr machine add --core`, so
+# herdr's link does not reach it: the view refuses the close with a notice
+# and sends nothing (core_fleet_live_test.sh drives an action over herdr's
+# own link).
 tm send-keys -t view C-b x
 sleep 0.5
 tm send-keys -t view y
-sleep 2
+close_refused() { tm capture-pane -p -t view | grep -q "herdr here did not add loop"; }
+wait_until "the view's notice refusing the close" close_refused
+sleep 1
 [[ "$(far_pid "$FAR_ADDR")" == "$FAR_PROGRAM" ]] || fail "V17: closing the view's pane ended the far program"
 api_far "{\"id\":\"v\",\"method\":\"pane.get\",\"params\":{\"pane_id\":\"$PANE\"}}" >/dev/null \
   || fail "V17: the far pane is gone"
@@ -422,7 +430,7 @@ sleep 1
 [[ "$(far_pid "$FAR_ADDR")" == "$FAR_PROGRAM" ]] || fail "V17: stopping the view ended the far program"
 api_far "{\"id\":\"v\",\"method\":\"pane.get\",\"params\":{\"pane_id\":\"$PANE\"}}" >/dev/null \
   || fail "V17: the far pane is gone after the view stopped"
-echo "ok: V17 closing a pane in the view and stopping the view left far program $FAR_PROGRAM and pane $PANE"
+echo "ok: V17 a close in the view was refused with a notice (no herdr link to loop); it and stopping the view left far program $FAR_PROGRAM and pane $PANE"
 
 # --- M2, L3.4 (review): one view per machine; a newer client restarts it --
 view_client() {
