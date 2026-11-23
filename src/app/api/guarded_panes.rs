@@ -592,6 +592,86 @@ mod tests {
         assert_eq!(far.app.state.workspaces.len(), 1, "a plain close closes it");
     }
 
+    // Fork issue 317 M8: a guarded close of a worktree group parent's last
+    // pane is refused under both `confirm_close` settings: with it off, a
+    // plain close would close the whole group, the linked workspace's
+    // programs included; with it on, it would ask. The group stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_guarded_close_never_closes_a_worktree_group() {
+        let core = FakeCore::start_with(|config| config.distinct_addresses = true);
+        let parent = crate::workspace::Workspace::test_new("parent");
+        let linked = crate::workspace::Workspace::test_new("linked");
+        let panes = vec![parent.tabs[0].root_pane, linked.tabs[0].root_pane];
+        let app = super::test_app_on_fake_core(&core, vec![parent, linked], &panes);
+        let mut far = Far { app, core, panes };
+        for (ws, is_linked_worktree) in [(0, false), (1, true)] {
+            far.app.state.workspaces[ws].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: format!("/repo/checkout-{ws}").into(),
+                    is_linked_worktree,
+                });
+        }
+        assert!(far.app.state.workspace_close_would_close_worktree_group(0));
+        for confirm_close in [false, true] {
+            far.app.state.confirm_close = confirm_close;
+            let refused = far.call(
+                "pane.close_if_terminal",
+                json!({"pane_id": far.id(0), "force": true, "expect": far.expect(0)}),
+            );
+            assert_eq!(
+                refused["error"]["code"], "would_close_workspace",
+                "confirm_close {confirm_close}: {refused}"
+            );
+            assert_eq!(far.app.state.workspaces.len(), 2, "the group stays");
+        }
+    }
+
+    // Fork issue 317 M8: a floating pane (the popup) beside a workspace's
+    // last tiled pane does not make that pane's close a close of one pane:
+    // the workspace's close counts its tiled panes, so the guarded close is
+    // refused, and the workspace and the floating pane stay. The floating
+    // pane itself is no pane a guarded action names.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_floating_pane_beside_the_last_tiled_one_closes_nothing() {
+        let mut far = far();
+        let terminal_id = crate::terminal::TerminalId::alloc();
+        far.app.state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id.clone(), "/popup".into()),
+        );
+        let floating = PaneId::alloc();
+        far.app.state.popup_pane = Some(crate::app::state::PopupPaneState {
+            pane_id: floating,
+            terminal_id,
+            width: None,
+            height: None,
+            plugin_id: None,
+        });
+        let alone = far.id(2);
+        let refused = far.call(
+            "pane.close_if_terminal",
+            json!({"pane_id": alone, "expect": far.expect(2)}),
+        );
+        assert_eq!(
+            refused["error"]["code"], "would_close_workspace",
+            "{refused}"
+        );
+        assert_eq!(far.app.state.workspaces.len(), 2, "the workspace stays");
+        assert!(
+            far.app.state.popup_pane.is_some(),
+            "the floating pane stays"
+        );
+        let named = far.call(
+            "pane.close_if_terminal",
+            json!({"pane_id": format!("p_{}", floating.raw()), "expect": far.expect(2)}),
+        );
+        assert_eq!(named["error"]["code"], "pane_not_found", "{named}");
+        assert!(far.app.state.popup_pane.is_some());
+    }
+
     // A pane whose program is not in herdr-core has no terminal a view could
     // have named: refused, with nothing done. The pane here is a real PTY
     // pane (a shell, its runtime present), the third pane of the fixture
