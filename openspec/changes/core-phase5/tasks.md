@@ -335,9 +335,80 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `unavailable` and `needs_framed`; a stream CLOSE carries the finished record (or nothing for a drop).
   Limits: a machine pane that core never lists again waits forever (a person closes it, which sends nothing);
   the live reattach loop checks state, not labels, so a far core whose state was wiped and reused the address
-  would be attached; after a downgrade to a build before PR C the old build drops the pane's link
+  would be attached (fixed in C.9); after a downgrade to a build before PR C the old build drops the pane's link
   (`core_machine_terminal`, a field it does not know) from its next save (rule R.0); a far program whose pane a
   stop kept, and whose next server never comes, runs on as an orphan there.
+- [ ] C.9 (PR C2, https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/308) Security review M1-M8 of PR C
+  (ac/security 050caaa, `docs/reviews/2026-11-22-herdr-machine-panes.md`) and the third read's findings 1-7.
+  Built, each with a test that fails with its fix reverted (all 19 checked in one reverted build):
+  M1, output from a machine pane is far data: `PaneLaunch::far_output()` (a `Command` with `machine`, a
+  `ReattachCore` whose link names a machine) gives the terminal `KittyMedia::InlineOnly`
+  (`enable_kitty_graphics_with`, ghostty-vt: file and shared-memory off, no temp-file folder, on both screens;
+  t=f, t=t and t=s load nothing and the qualifying temp file stays, t=d draws); `publish_output_requests`
+  drops its OSC 52 writes and keeps its OSC 7 folder in `persistence_cwd` only (never `reported_cwd`, never
+  `TerminalCwdReported`), so `cwd()`, `cached_cwd()`, `follow_cwd()` stay `None`; `--cwd` with `--on`
+  (`pane.split`, `tab.create`, `workspace.create`) goes to the machine only, the pane's folder here is a new
+  pane's; the far folder travels as `CoreTerminalLink.machine_cwd` (filled from `persistence_cwd` by
+  `PaneRuntime::core_terminal`, seeded from the request or the saved link) into
+  `core_machine_terminal.machine_cwd`, and `PaneSnapshot::local_cwd()` (replacing `program_cwd()`) is `None`
+  for a machine pane, so restore, the workspace's `identity_cwd`, git status and a local split never see it.
+  Tests: `inline_only_kitty_graphics_refuse_local_media_and_still_draw_inline`,
+  `far_output_sets_no_clipboard_and_its_folder_stays_save_metadata`,
+  `a_machine_folder_never_becomes_a_folder_here` (a far `--cwd` that this Mac also has).
+  M2 and finding 1, the launch label: `CoreTerminalLink.launch` (saved as `core_machine_terminal.launch`) is
+  the run's `herdr.launch`; for a machine pane `Shared.identity` is the owner value and that launch, checked
+  on the run answer, the attach answer (`AttachResult.terminal`, so the stream itself is bound), a CLOSE's
+  finished record, `machine_reattach_check` and the live loop's attach, and before `terminal.kill`
+  (`terminal.get` first: a finished record kills nothing, any other terminal is not killed). A mismatch waits
+  (`Missing`/`Unreachable`), never ends, never kills; a link without a launch waits. Tests:
+  `a_restored_machine_pane_attaches_only_to_its_launch`, `a_live_machine_pane_never_takes_another_run_at_its_address`
+  (another run with the pane's owner and pane labels: not attached, not its end, not killed),
+  `a_machine_close_without_the_launch_label_is_not_an_end`, and `only_a_finished_record_ends_...` and
+  `a_dropped_machine_pane_ends_only_on_a_finished_record` with labelled records (finding 1's test).
+  Finding 2: closing a waiting machine pane sends nothing; chosen: the notice, not a pending kill. The
+  `machine_dormant` and `machine_unreachable` waits now say that closing sends nothing there and the program
+  shows as an orphan once the machine is back, as `machine_terminal_missing` did. A pending kill would be a
+  second, delayed kill path outside the person's act, kept only in memory (a restart would drop the promise
+  silently) and fired at an address whose launch must be checked again then; the notice plus the orphan scan
+  covers it with no new automatic action. Test: `a_machine_wait_says_closing_sends_nothing_there`.
+  Finding 3: the pane `cwd` no host has is never a folder (`local_cwd()`), and `on_machine()` and `link()`
+  never take it for `machine_cwd`. Test: `the_machine_pane_cwd_is_never_a_folder`.
+  Finding 4: `PaneMoveRefusal::Unknown` with `serde(other)`; schema regenerated. Test:
+  `an_unknown_move_refusal_reads_as_unknown`.
+  M5 and finding 5: a failed attach or thread start of a machine pane detaches and kills nothing
+  (`abandon_setup`; this Mac's panes are killed as before). Test: `a_machine_pane_setup_failure_kills_nothing`.
+  Finding 6: `finish` keeps the program only after a finished record; after a suspend cause the server's
+  `wait_for_machine_after_exit` keeps it, so a person's close racing the CLOSE still kills (label-checked);
+  `suspend_pane_after_exit` makes a machine pane wait before its overlay and worktree-removal checks; a
+  worktree removal does not stop a machine pane's runtime (it holds no folder here). Tests:
+  `a_close_racing_a_suspend_cause_still_ends_the_machine_program`,
+  `a_machine_pane_waits_even_where_a_pane_would_close`, `a_worktree_removal_leaves_a_machine_pane_running`.
+  Finding 7: `wait_for_machine_instead_of_resume` requests a render. Test: the render assertion in
+  `a_suspended_machine_pane_is_never_resumed_here`.
+  M3: only this Mac's own terminal marks the primary stopped by a person. Test:
+  `a_machine_streams_server_stop_is_not_this_macs_core_stop`.
+  M6: restore decides the host from the saved address first; `machine_cwd` is never a local folder, and a pane
+  saved with the machine `cwd` and no machine link is held unavailable, never started (on every platform).
+  Test: `a_machine_folder_is_never_a_local_one`.
+  M7: decided: API input may wake a machine only while a lease is in force, as keys; the wake thread checks
+  the lease before it dials (API input writes no lease), and the 5 s per-machine limit applies to both. Test:
+  `input_without_a_lease_does_not_dial_a_gated_machine`.
+  M8: `HC_*` is dropped from a request's env to a machine. Test: the env names in
+  `a_machine_spawn_passes_no_integration_variable_and_no_local_environment`.
+  Limits: M4 (machine RPCs on the server loop) stays with https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/302;
+  hc 0.1.21 has no kill bound to a label, so the launch check and `terminal.kill` are two calls (a reset
+  between them could still give the address away); a machine pane saved before this change (no launch) waits
+  and never attaches, so close it and open it again; the orphan notice's `hc ls --label` command still does not
+  find machine orphans (C.8); the inline-only and clipboard rules apply to machine panes only, not to an `ssh`
+  typed in a local pane (security's P3 for panes in general; a setting for every pane is not built).
+  Check (m4m, 2026-11-23, under the shared lock, head 3af9f2a9, binary copied out of the shared target dir as
+  `herdr-h308-3af9f2a9`): `just check` 0 (5823 + 158 tests; windows-lint skipped on macOS); the 16 core backend
+  live tests (`HERDR_TEST_HC=1`) passed; `core_machine_live_test.sh` through its V26 and PR C parts (link and
+  lease parts not run) passed: V26, V9, V31 (pane part), V10, V12 (close: launch label checked, then killed),
+  V6 unreachable and dormant (the saved launch attached the same far pid after a restart and a live handoff),
+  V4's server part (wake within 1 s, with a lease in force), V11 with a 120 s drop (same far pid after). Not
+  run: `core_live_test.sh`, the default-session script, the PR A/B parts, the bench, Windows lint, CI (not
+  pushed). Security reads this change once before R.2.
 
 ## PR D. The view server
 
@@ -379,7 +450,10 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   path has a Tailscale SSH `check` rule. Only a check-free path (an `accept` rule for ac to ac between ac's own
   devices, or OpenSSH over the tailnet) is added as a core machine; a target with a check rule gets no
   background dials (login or an announced wake only). The M1 sandbox results (`probe/README.md` § M1) go into
-  the announcement: which sandboxes reach the primary core socket, and so the link
+  the announcement: which sandboxes reach the primary core socket, and so the link. The announcement also names
+  herdr's own API socket among who reaches the far machine (security review of PR C, M8): any process that can
+  open it can start a program there with `pane.split --on` while the machine's link is up, so the same sandbox rule (or the note that
+  the same network rule covers it) applies to it
 - [ ] R.2 Announcement S1 through the gestore desk: "herdr-core needs ssh ac@ac-mbm5 from m4m's Herdr Core now, to
   add ac-mbm5 as a core machine; later dials happen when you use the view or a pane there after 10 min idle, each a
   fresh ssh login (1Password may ask for Touch ID), and never start Herdr Core on ac-mbm5". Wait for ac's

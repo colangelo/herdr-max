@@ -319,6 +319,12 @@ host-dependent call matches on it.
   terminals); the pane waits (`machine_terminal_missing`) and is asked again. Nothing automatic sends
   `terminal.kill` to a machine: not an end, a lost stream, a stop of either core, or a stop of this server;
   only a person's close of the pane does (tasks C.8).
+- **Far output is far data (security review of PR C, M1; tasks C.9).** A machine pane's terminal takes inline
+  kitty graphics only, drops OSC 52 clipboard writes, and keeps the folder its program reports (OSC 7), and a
+  request's `--cwd`, as far metadata on its link (`machine_cwd`), never as this Mac's cwd, a git root, the
+  workspace's identity or a local split's folder.
+- **Launch label (M2).** The link saves the run's `herdr.launch`; attach, the live reattach loop, an end and a
+  kill take only a terminal shown to carry the owner value and that launch. Anything else waits.
 - **In-band notices.** Core's `[line to <m> lost; reconnecting...]` and the CAN-led repaint (P8) go through the
   parser like any output. The CAN repaint resets the screen; no filtering.
 - **Input while not connected** is not sent. The first key posts a wake to the dialer (D3, D3a) and the pane shows
@@ -550,6 +556,8 @@ S1 announcement.
   Touch ID. Today the 1Password prompt gates each new ssh master. D3's leases bound the window to ten minutes after
   human input, and with no ssh master (D10, F9) nothing authenticated outlives the link. The security agent
   reviews this before task R.2.
+- herdr's own API socket reaches the far machine too: whoever can open it can start a program there with
+  `pane.split --on` while the link is up (security review of PR C, M8). R.2's announcement names it.
 - The link never starts the far core (D2 step 5, F10), so the far core's environment and its parent stay what
   ac-mbm5's own herdr gave them; panes and `machine.exec` there still strip `HERDR_*` (D5, F6).
 - `core-link` reads only its own state directory, found from the passwd home, never from the environment core
