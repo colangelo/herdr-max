@@ -18,6 +18,9 @@
 # lease and wake (B.2, B.5) and V33's wake part (core_lease_live_test.sh).
 # V3 and V38 wait 5 and 10 min (V3_SECS, V38_SECS).
 #
+# PR E (the fleet CLI over the link, D7): V18, V31 (exec part), V32 and the
+# far herdr's probe once per link (core_fleet_live_test.sh).
+#
 # V26 (PR A0, F1): a far terminal that carries the same labels as one of our
 # panes, and a pid that is a live process here, is never adopted, listed as an
 # orphan, killed or signalled by the local server, across a live handoff, a
@@ -198,7 +201,11 @@ gone_local() { [[ "$(listed_addresses)" == "loop/t1" ]]; }
 wait_until "the local terminal ended" gone_local
 alive "$FAR_PID" || fail "closing pane A ended the far program (pid $FAR_PID)"
 echo "ok: closing pane A ended $LOCAL only; the far program (pid $FAR_PID) still runs"
-source "$ROOT/scripts/core_machine_panes_live_test.sh"
-source "$ROOT/scripts/core_link_live_test.sh"
-source "$ROOT/scripts/core_lease_live_test.sh"
+# CORE_MACHINE_PARTS picks the parts after V26 (all by default); `lease`
+# needs `link`.
+PARTS=" ${CORE_MACHINE_PARTS:-panes link lease fleet} "
+[[ "$PARTS" == *" panes "* ]] && source "$ROOT/scripts/core_machine_panes_live_test.sh"
+[[ "$PARTS" == *" link "* ]] && source "$ROOT/scripts/core_link_live_test.sh"
+[[ "$PARTS" == *" lease "* ]] && source "$ROOT/scripts/core_lease_live_test.sh"
+[[ "$PARTS" == *" fleet "* ]] && source "$ROOT/scripts/core_fleet_live_test.sh"
 echo "core machine live test: all checks passed"
