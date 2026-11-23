@@ -893,7 +893,19 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
         println!("No plugins installed.");
         return Ok(0);
     }
-    println!(
+    print!("{}", plugin_list_text(&plugins));
+    Ok(0)
+}
+
+/// The installed-plugins list as printed. Far strings go through
+/// `target::shown`. The config folder is this Mac's, so a remote target
+/// omits it: the far reply does not carry the far one.
+fn plugin_list_text(plugins: &[InstalledPluginInfo]) -> String {
+    use super::target::shown;
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{} plugin{} installed:",
         plugins.len(),
         if plugins.len() == 1 { "" } else { "s" }
@@ -909,45 +921,50 @@ fn print_plugin_list_human(response: &serde_json::Value) -> std::io::Result<i32>
         } else {
             format!("; {} warning(s)", plugin.warnings.len())
         };
-        println!(
+        let _ = writeln!(
+            out,
             "- {} ({}) {} [{}{}]",
-            plugin.plugin_id,
-            plugin.name,
+            shown(&plugin.plugin_id),
+            shown(&plugin.name),
             enabled,
-            source_display(&plugin),
+            source_display(plugin),
             warning
         );
-        println!(
-            "  config: {}",
-            crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
-        );
-        for warning in plugin.warnings {
-            println!("  warning: {warning}");
+        if !super::target::is_remote() {
+            let _ = writeln!(
+                out,
+                "  config: {}",
+                crate::plugin_paths::plugin_config_dir(&plugin.plugin_id).display()
+            );
+        }
+        for warning in &plugin.warnings {
+            let _ = writeln!(out, "  warning: {}", shown(warning));
         }
     }
-    Ok(0)
+    out
 }
 
 fn source_display(plugin: &InstalledPluginInfo) -> String {
     match plugin.source.kind {
         PluginSourceKind::Github => {
-            let owner = plugin.source.owner.as_deref().unwrap_or("unknown");
-            let repo = plugin.source.repo.as_deref().unwrap_or("unknown");
+            let owner = super::target::shown(plugin.source.owner.as_deref().unwrap_or("unknown"));
+            let repo = super::target::shown(plugin.source.repo.as_deref().unwrap_or("unknown"));
             let subdir = plugin
                 .source
                 .subdir
                 .as_deref()
-                .map(|subdir| format!("/{subdir}"))
+                .map(|subdir| format!("/{}", super::target::shown(subdir)))
                 .unwrap_or_default();
             let reference = plugin
                 .source
                 .requested_ref
                 .as_deref()
                 .or(plugin.source.resolved_commit.as_deref())
-                .unwrap_or("unknown");
+                .map(super::target::shown)
+                .unwrap_or("unknown".into());
             format!("github:{owner}/{repo}{subdir}@{reference}")
         }
-        PluginSourceKind::Local => format!("local:{}", plugin.plugin_root),
+        PluginSourceKind::Local => format!("local:{}", super::target::shown(&plugin.plugin_root)),
     }
 }
 
@@ -1369,8 +1386,44 @@ fn print_plugin_response(method: Method) -> std::io::Result<i32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::cli) mod tests {
     use super::*;
+
+    fn far_plugin() -> InstalledPluginInfo {
+        use crate::cli::target::FAR_CONTROLS as F;
+        let mut plugin = github_plugin(F, F, F, Some(F));
+        plugin.name = F.to_string();
+        plugin.warnings = vec![F.to_string()];
+        plugin.source.requested_ref = Some(F.to_string());
+        plugin
+    }
+
+    /// `plugin list` as printed, for the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        plugin_list_text(&[far_plugin()])
+    }
+
+    #[test]
+    fn a_remote_plugin_list_prints_escaped_and_a_local_one_raw() {
+        use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+        assert_escaped(&as_remote(walk_text));
+        assert!(walk_text().contains(FAR_CONTROLS));
+    }
+
+    #[test]
+    fn a_remote_plugin_list_does_not_print_this_macs_config_folder() {
+        let plugin = github_plugin("far.plugin", "o", "r", None);
+        let local_dir = crate::plugin_paths::plugin_config_dir("far.plugin");
+        let local_dir = local_dir.display().to_string();
+        let remote = crate::cli::target::as_remote(|| plugin_list_text(&[plugin.clone()]));
+        assert!(!remote.contains("config:"), "{remote}");
+        assert!(!remote.contains(&local_dir), "{remote}");
+        let local = plugin_list_text(&[plugin]);
+        assert!(
+            local.contains(&format!("  config: {local_dir}\n")),
+            "{local}"
+        );
+    }
 
     #[test]
     fn machine_plugin_connection_errors_never_use_local_offline_state() {
