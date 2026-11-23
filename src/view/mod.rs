@@ -145,38 +145,48 @@ impl ViewRecord {
 const RECORD_MAX: u64 = 4096;
 
 /// Opens the view's lock file at `path`, never through a symlink, and
-/// only as a regular file of this account in a folder no one else writes
-/// (review M8): a planted link cannot point the lock, or its truncation,
-/// at another file.
+/// only as a regular file of this account in a folder of this account that
+/// not everyone can write (review M8): a planted link cannot point the
+/// lock, or its truncation, at another file. The folder is checked, and the
+/// file opened, at its real path, so a symlinked config folder is its
+/// target's; a group-writable one (umask 002) is this account's still. The
+/// open never waits (`O_NONBLOCK`): a FIFO planted as the lock is refused,
+/// not waited on.
 fn open_lock(path: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let uid = unsafe { libc::getuid() };
-    if let Some(dir) = path.parent() {
-        if create {
-            std::fs::create_dir_all(dir)?;
-        }
-        let meta = std::fs::symlink_metadata(dir)?;
-        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("{} is not a private folder of this account", dir.display()),
-            ));
-        }
+    let not_ours = |what: &std::path::Path, why: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not {why}", what.display()),
+        )
+    };
+    let (Some(dir), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return Err(not_ours(path, "a lock file path"));
+    };
+    if create {
+        std::fs::create_dir_all(dir)?;
     }
+    let dir = std::fs::canonicalize(dir)?;
+    let meta = std::fs::metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o002 != 0 {
+        return Err(not_ours(
+            &dir,
+            "a folder of this account that not everyone can write",
+        ));
+    }
+    let path = dir.join(file_name);
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(create)
         .create(create)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.uid() != uid {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("{} is not a regular file of this account", path.display()),
-        ));
+        return Err(not_ours(&path, "a regular file of this account"));
     }
     Ok(file)
 }
@@ -458,6 +468,70 @@ mod tests {
         std::fs::create_dir_all(&shared).unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(take_lock_at(&shared.join("herdr-view-loop.lock")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // #312 follow-up: a folder only everyone may not write. A group-writable
+    // one (an umask of 002) is this account's, and a symlinked folder (a
+    // linked `~/.config/herdr`) is its target's, with the lock in the target.
+    #[test]
+    fn a_group_writable_or_linked_folder_of_this_account_holds_the_lock() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-view-group-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let group = dir.join("group");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::set_permissions(&group, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let held = take_lock_at(&group.join("herdr-view-loop.lock"))
+            .expect("a group-writable folder of this account")
+            .expect("held");
+        assert!(running_view_at(&group.join("herdr-view-loop.lock")).is_some());
+        drop(held);
+
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let linked = dir.join("linked");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let held = take_lock_at(&linked.join("herdr-view-loop.lock"))
+            .expect("a linked folder")
+            .expect("held");
+        assert!(real.join("herdr-view-loop.lock").is_file(), "in the target");
+        assert!(running_view_at(&linked.join("herdr-view-loop.lock")).is_some());
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // #312 follow-up: a FIFO planted as the lock is refused at once, never
+    // waited on (the probe opens without blocking).
+    #[test]
+    fn a_fifo_lock_is_refused_without_waiting() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-view-fifo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("herdr-view-loop.lock");
+        let raw = std::ffi::CString::new(lock.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0, "mkfifo");
+        let (done, finished) = std::sync::mpsc::channel();
+        let probe = lock.clone();
+        std::thread::spawn(move || {
+            let _ = done.send((running_view_at(&probe), take_lock_at(&probe).is_err()));
+        });
+        let (running, refused) = finished
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("the probe waited on a FIFO");
+        assert_eq!(running, None);
+        assert!(refused, "a FIFO is no lock");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
