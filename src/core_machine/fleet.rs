@@ -984,6 +984,15 @@ fn bridge_argv(far: &FarHerdr, session: &str) -> Vec<String> {
     argv
 }
 
+/// Whether a far bridge's output is one whole reply line.
+fn whole_reply(stdout: &[u8]) -> Result<(), &'static str> {
+    match stdout {
+        [] => Err("answered with no reply"),
+        [line @ .., b'\n'] if !line.contains(&b'\n') => Ok(()),
+        _ => Err("answered with no whole reply line"),
+    }
+}
+
 /// What the bridge thread needs for each request.
 struct Bridge {
     core: CoreAt,
@@ -1037,6 +1046,16 @@ impl Bridge {
         };
         match exec(&self.core, &self.name, &self.argv, Some(&line), timeout) {
             Ok(ran) if ran.code == Some(0) => {
+                // A far side that ended well with no whole reply line (an
+                // API that closed first) may still have run the request
+                // (#310): a failure, never an empty success.
+                if let Err(why) = whole_reply(&ran.stdout) {
+                    self.fail(format!(
+                        "herdr on {} ({}) {why}; {MAY_HAVE_RUN}",
+                        self.name, self.far_path
+                    ));
+                    return;
+                }
                 let mut connection = connection;
                 if let Err(err) = connection.write_all(&ran.stdout) {
                     tracing::debug!(%err, "the fleet CLI left before its reply");

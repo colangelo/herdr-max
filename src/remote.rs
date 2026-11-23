@@ -90,6 +90,20 @@ fn forward_one_api_request(
     api.flush()?;
     let mut reply = Vec::new();
     std::io::BufReader::new(api).read_until(b'\n', &mut reply)?;
+    // An API that closed with no reply, or in the middle of one, may have
+    // run the request: an error, so the caller says so (core-phase5 #310).
+    if reply.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the Herdr API closed with no reply",
+        ));
+    }
+    if !reply.ends_with(b"\n") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the Herdr API closed in the middle of its reply",
+        ));
+    }
     output.write_all(&reply)?;
     output.flush()
 }
@@ -189,6 +203,38 @@ mod tests {
         assert_eq!(line, b"{\"id\":\"w\",\"method\":\"ping\"}\n");
         assert!(!half_closed, "the bridge half-closed the API connection");
         assert_eq!(output, b"{\"id\":\"w\",\"result\":{}}\n");
+    }
+
+    /// #310: an API that closes with no reply line is an error, never an
+    /// empty success, and nothing is passed on.
+    #[cfg(unix)]
+    #[test]
+    fn the_request_bridge_fails_when_the_api_closes_without_a_reply() {
+        use std::io::{BufRead as _, Write as _};
+        for (reply, why) in [
+            (&b""[..], "closed with no reply"),
+            (&b"{\"id\":\"w\",\"res"[..], "in the middle of its reply"),
+        ] {
+            let (bridge_end, api_end) = std::os::unix::net::UnixStream::pair().expect("pair");
+            let server = std::thread::spawn(move || {
+                let mut line = Vec::new();
+                let mut api_end = api_end;
+                std::io::BufReader::new(api_end.try_clone().expect("clone"))
+                    .read_until(b'\n', &mut line)
+                    .expect("request");
+                api_end.write_all(reply).expect("reply");
+            });
+            let mut output = Vec::new();
+            let error = forward_one_api_request(
+                &b"{\"id\":\"w\",\"method\":\"ping\"}\n"[..],
+                bridge_end,
+                &mut output,
+            )
+            .expect_err("no reply");
+            server.join().expect("server");
+            assert!(error.to_string().contains(why), "{error}");
+            assert!(output.is_empty());
+        }
     }
 
     #[test]

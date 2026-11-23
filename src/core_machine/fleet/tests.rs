@@ -971,3 +971,26 @@ fn a_failed_probe_says_the_request_was_not_sent() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// #310: a far bridge that ends well with no reply, or with no whole
+/// reply line, is a failure that says the request may have run; nothing
+/// is passed to the CLI.
+#[test]
+fn an_empty_reply_is_a_failure_that_may_have_run() {
+    for stdout in [&b""[..], b"{\"id\":\"fleet:test\"", b"{}\n{}\n"] {
+        let core = FakeCore::start_with(|config| {
+            config.exec_reply = Some(exec_reply(stdout, false, false))
+        });
+        let (root, dir) = machine_dir("fleet-empty");
+        let link = link_to(&core, &dir);
+        assert!(client(&link).request_value(&ping()).is_err());
+        let failure = link.reported_failure().expect("failure").to_string();
+        assert!(
+            failure.starts_with("herdr on loop (/opt/homebrew/bin/herdr-beta) answered with no")
+                && failure.ends_with(MAY_RUN),
+            "{stdout:?}: {failure}"
+        );
+        drop(link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
