@@ -29,8 +29,10 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
+
+use serde_json::Value;
 
 use super::{
     bridge_argv, check_request_line, far_herdr_session, far_herdr_within, CoreAt, FarRoute,
@@ -64,14 +66,18 @@ const VIEW_LEASE_SECS: f64 = super::LEASE_LIFE_SECS;
 /// A second is refused, never queued (review M3).
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// Where a view's actions go: the primary core, herdr's machine state and
-/// the view's lease holder. A test points them at a fake core and a
-/// scratch folder.
+/// Reads the far `herdr-app` document (`doc.get {on}`), bounded.
+pub(crate) type LayoutReader = Arc<dyn Fn(&MachineName) -> Result<Value, String> + Send + Sync>;
+
+/// Where a view's actions go: the primary core, herdr's machine state, the
+/// view's lease holder and the far document's reader. A test points them
+/// at a fake core and a scratch folder.
 #[derive(Clone)]
 pub(crate) struct ViewRoute {
     core: CoreAt,
     root: Result<PathBuf, String>,
     holder: LeaseHolder,
+    layout: LayoutReader,
 }
 
 impl ViewRoute {
@@ -80,16 +86,26 @@ impl ViewRoute {
             core: CoreAt::primary(),
             root: passwd_machines_root().map_err(|err| err.to_string()),
             holder: LeaseHolder::cli(std::process::id()),
+            layout: Arc::new(|machine| {
+                crate::pane::view_link::layout_document(&crate::pane::view_connector(), machine)
+                    .map_err(|err| err.to_string())
+            }),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn at(socket: &std::path::Path, root: PathBuf) -> Self {
+    pub(crate) fn at(socket: &std::path::Path, root: PathBuf, layout: LayoutReader) -> Self {
         Self {
             core: CoreAt::at(socket),
             root: Ok(root),
             holder: LeaseHolder::cli(std::process::id()),
+            layout,
         }
+    }
+
+    /// The far document as core has it now.
+    pub(crate) fn far_layout(&self, machine: &MachineName) -> Result<Value, String> {
+        (self.layout)(machine)
     }
 }
 

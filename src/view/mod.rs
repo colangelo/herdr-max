@@ -5,8 +5,11 @@
 //! Its layout is the far side's `herdr-app` document, read through the
 //! primary core (`doc.get {on}`); its panes are the far terminals, attached
 //! so that the view never becomes their active viewer (D6 Size). It saves
-//! nothing, publishes nothing, serves no JSON API and starts no program; a
-//! TUI client connects to its own client socket as to any herdr server.
+//! nothing, publishes nothing, serves no JSON API and starts no program on
+//! this Mac; its structural actions go to the far herdr (D7, E.3), where a
+//! new tab or a split starts a far shell and a pane's close ends the far
+//! program. A TUI client connects to its own client socket as to any herdr
+//! server.
 //! Unix only, as the core backend is.
 
 pub(crate) mod doc;

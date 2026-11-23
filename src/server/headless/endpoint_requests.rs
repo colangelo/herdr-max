@@ -181,7 +181,7 @@ impl HeadlessServer {
             respond_to,
             response_write_complete: None,
         };
-        let Some(message) = self.take_view_action(message) else {
+        let Some(message) = self.take_view_action(client_id, message) else {
             return foreground_changed;
         };
         foreground_changed | self.handle_client_shell_api_request(client_id, message)
@@ -190,10 +190,13 @@ impl HeadlessServer {
     /// In a view, a structural action goes to the far herdr (core-phase5
     /// D7, E.3), and its answer comes back through `respond_to`, off the
     /// loop: `None`. Any other request, and every request outside a view,
-    /// is handed back for this server to do.
+    /// is handed back for this server to do. Ids the action leaves out
+    /// resolve against the sending client's own tab, never this server's
+    /// focus, which another client may have moved (review L4).
     #[cfg(unix)]
     fn take_view_action(
         &mut self,
+        client_id: u64,
         message: api::ApiRequestMessage,
     ) -> Option<api::ApiRequestMessage> {
         if self.app.view.is_none()
@@ -201,14 +204,29 @@ impl HeadlessServer {
         {
             return Some(message);
         }
+        let client_tab = self.client_own_tab(client_id);
         self.app
-            .forward_view_action(message.request, message.respond_to);
+            .forward_view_action(message.request, message.respond_to, client_tab);
         None
+    }
+
+    /// The (workspace, tab) a client's own window shows, `None` when it
+    /// shows none this server has.
+    #[cfg(unix)]
+    fn client_own_tab(&self, client_id: u64) -> Option<(usize, usize)> {
+        let tab_id = self
+            .clients
+            .get(&client_id)?
+            .shell_location
+            .as_ref()?
+            .focused_tab_id()?;
+        self.app.parse_tab_id(tab_id)
     }
 
     #[cfg(not(unix))]
     fn take_view_action(
         &mut self,
+        _client_id: u64,
         message: api::ApiRequestMessage,
     ) -> Option<api::ApiRequestMessage> {
         Some(message)

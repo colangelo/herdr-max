@@ -72,6 +72,26 @@ pub(crate) enum ViewNode {
     },
 }
 
+impl ViewLayout {
+    /// The far terminal (`t7`) the far pane `far_pane` (`w3:p4`) shows,
+    /// `None` when the document has no such pane.
+    pub(crate) fn terminal_of(&self, far_pane: &str) -> Option<&str> {
+        fn find<'a>(node: &'a ViewNode, far_pane: &str) -> Option<&'a str> {
+            match node {
+                ViewNode::Pane { id, terminal, .. } => (id == far_pane).then_some(terminal),
+                ViewNode::Split { first, second, .. } => {
+                    find(first, far_pane).or_else(|| find(second, far_pane))
+                }
+            }
+        }
+        self.spaces
+            .iter()
+            .flat_map(|space| &space.tabs)
+            .filter_map(|tab| tab.root.as_ref())
+            .find_map(|root| find(root, far_pane))
+    }
+}
+
 #[cfg(test)]
 impl ViewLayout {
     /// Every pane's far terminal address, in order.

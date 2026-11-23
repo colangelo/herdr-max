@@ -20,7 +20,7 @@ use crate::terminal::{TerminalId, TerminalState};
 use crate::view::doc::{ViewLayout, ViewNode, ViewSpace};
 use crate::view::lifetime::ViewPresence;
 use crate::view::watch::ViewEvent;
-use crate::workspace::{public_tab_id_for_number, Tab, Workspace};
+use crate::workspace::{public_pane_id_for_number, public_tab_id_for_number, Tab, Workspace};
 
 /// The most far attaches a view runs at once (review M5): each holds a
 /// blocking thread for its `terminal.get` and attach, so a far layout that
@@ -57,12 +57,24 @@ pub(crate) struct ViewApp {
     /// far layout put another address under the pane's id, or the address
     /// holds another program after a far core reset. Input typed for the old
     /// one must reach neither, so such a pane takes none until a person
-    /// clicks it or focuses it again.
+    /// clicks it or focuses it again. A pane whose public id (`w3:p4`)
+    /// another pane had, or whose own public id changed (a number the view
+    /// gave a far pane that has none, review M4), is held too: a client
+    /// holding that id meant another pane.
     held: HashSet<PaneId>,
+    /// Each pane's public id in the last projection.
+    public_ids: HashMap<PaneId, String>,
+    /// The far panes whose close the far herdr was asked for without
+    /// `force`, with the pane and far terminal it was: a forced close (the
+    /// person confirmed) goes only to that same one (review M2).
+    close_asked: HashMap<String, (PaneId, String)>,
     /// Where the view's structural actions go (E.3); the primary core and
     /// herdr's own machine state unless a test points it elsewhere.
     route: Option<crate::core_machine::fleet::view::ViewRoute>,
 }
+
+/// The most closes waiting for a person's confirmation the view keeps.
+const MAX_CLOSE_ASKED: usize = 32;
 
 impl ViewApp {
     pub(crate) fn new(machine: MachineName) -> Self {
@@ -79,6 +91,8 @@ impl ViewApp {
             notice: None,
             bound: HashMap::new(),
             held: HashSet::new(),
+            public_ids: HashMap::new(),
+            close_asked: HashMap::new(),
             route: None,
         }
     }
@@ -87,6 +101,21 @@ impl ViewApp {
     /// the far document named it.
     pub(crate) fn far_pane(&self, pane_id: PaneId) -> Option<&str> {
         self.far_panes.get(&pane_id).map(String::as_str)
+    }
+
+    /// The far core's address (`t7`) of the terminal `pane_id` showed in
+    /// the last projection.
+    pub(crate) fn far_terminal(&self, pane_id: PaneId) -> Option<&str> {
+        let address = self.bound.get(&pane_id)?;
+        address
+            .strip_prefix(self.machine.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+    }
+
+    /// Whether `pane_id` takes no input now (review M3, M4): neither does
+    /// it take a structural action (M2).
+    pub(crate) fn is_held(&self, pane_id: PaneId) -> bool {
+        self.held.contains(&pane_id)
     }
 
     pub(crate) fn route(&self) -> crate::core_machine::fleet::view::ViewRoute {
@@ -98,6 +127,22 @@ impl ViewApp {
     #[cfg(test)]
     pub(crate) fn set_route(&mut self, route: crate::core_machine::fleet::view::ViewRoute) {
         self.route = Some(route);
+    }
+
+    /// The far herdr was asked to close `far_pane` (the view's `pane_id`,
+    /// on far terminal `terminal`) without `force`.
+    pub(crate) fn note_close_asked(&mut self, far_pane: &str, pane_id: PaneId, terminal: &str) {
+        if self.close_asked.len() >= MAX_CLOSE_ASKED && !self.close_asked.contains_key(far_pane) {
+            self.close_asked.clear();
+        }
+        self.close_asked
+            .insert(far_pane.to_string(), (pane_id, terminal.to_string()));
+    }
+
+    /// The pane and far terminal whose close of `far_pane` was asked for,
+    /// once.
+    pub(crate) fn take_close_asked(&mut self, far_pane: &str) -> Option<(PaneId, String)> {
+        self.close_asked.remove(far_pane)
     }
 
     fn address(&self, terminal: &str) -> String {
@@ -394,6 +439,8 @@ impl App {
             .retain(|_, pane_id| far_panes.contains_key(pane_id));
         view.bound.retain(|pane_id, _| live_panes.contains(pane_id));
         view.held.retain(|pane_id| live_panes.contains(pane_id));
+        view.close_asked
+            .retain(|_, (pane_id, _)| live_panes.contains(pane_id));
 
         let find = |id: &Option<String>| {
             id.as_ref()
@@ -402,6 +449,7 @@ impl App {
         let active = find(&kept.active_workspace).or((!workspaces.is_empty()).then_some(0));
         let selected = find(&kept.selected_workspace).or(active).unwrap_or(0);
         self.state.workspaces = workspaces;
+        hold_moved_public_ids(&mut view, &self.state.workspaces);
         self.state.active = active;
         self.state.selected = selected;
         self.state.mode = if active.is_some() {
@@ -693,6 +741,43 @@ impl App {
         );
         state.revision = state.revision.saturating_add(1);
     }
+}
+
+/// Holds each pane whose public id changed, or that took an id another
+/// pane had (review M4): a number the view gave a far pane that has none
+/// moves when the far herdr numbers another pane, and a client that still
+/// holds the old id must reach neither.
+fn hold_moved_public_ids(view: &mut ViewApp, workspaces: &[Workspace]) {
+    let public: HashMap<PaneId, String> = workspaces
+        .iter()
+        .flat_map(|ws| {
+            ws.tabs.iter().flat_map(move |tab| {
+                tab.layout.pane_ids().into_iter().filter_map(move |pane| {
+                    ws.public_pane_number(pane)
+                        .map(|number| (pane, public_pane_id_for_number(&ws.id, number)))
+                })
+            })
+        })
+        .collect();
+    let owner_before: HashMap<&str, PaneId> = view
+        .public_ids
+        .iter()
+        .map(|(pane, id)| (id.as_str(), *pane))
+        .collect();
+    let moved: Vec<PaneId> = public
+        .iter()
+        .filter(|(pane, id)| {
+            view.public_ids
+                .get(*pane)
+                .is_some_and(|before| before != *id)
+                || owner_before
+                    .get(id.as_str())
+                    .is_some_and(|before| before != *pane)
+        })
+        .map(|(pane, _)| *pane)
+        .collect();
+    view.held.extend(moved);
+    view.public_ids = public;
 }
 
 /// The channels a tab is built with.

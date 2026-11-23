@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -83,8 +83,12 @@ fn execs(core: &FakeCore) -> Vec<Value> {
         .collect()
 }
 
+fn no_layout() -> LayoutReader {
+    Arc::new(|_| Ok(Value::Null))
+}
+
 fn route(core: &FakeCore, root: &std::path::Path) -> ViewRoute {
-    ViewRoute::at(&core.socket, root.to_path_buf())
+    ViewRoute::at(&core.socket, root.to_path_buf(), no_layout())
 }
 
 fn soon() -> Instant {
