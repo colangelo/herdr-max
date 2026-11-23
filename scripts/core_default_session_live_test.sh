@@ -48,7 +48,7 @@ run_bin() {
     -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
     -u CLAUDECODE \
     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
-    SHELL=/bin/sh PATH="$BASE/bin:$PATH" \
+    SHELL=/bin/sh PATH="$BASE/bin:$PATH" HERDR_NO_MACHINE_LEASES=1 \
     "$bin" "$@"
 }
 run_herdr() { run_bin "$HERDR_BIN" "$@"; }

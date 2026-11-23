@@ -504,6 +504,7 @@ fn server_unreachable_shows_clear_error() {
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
+        .env(support::NO_MACHINE_LEASES_ENV, "1")
         .env("HERDR_DISABLE_SOUND", "1")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)

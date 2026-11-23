@@ -51,6 +51,7 @@ run_herdr() {
     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
     SHELL=/bin/sh PATH="$BASE/bin:$PATH" \
     HERDR_M4_SENTINEL_TOKEN=leak SSH_AUTH_SOCK="$BASE/sentinel-agent.sock" \
+    HERDR_NO_MACHINE_LEASES=1 \
     "$HERDR_BIN" --session "$SESSION" "$@"
 }
 

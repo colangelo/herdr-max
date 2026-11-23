@@ -261,6 +261,7 @@ fn session_attach_without_terminal_leaves_no_session() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
         command
             .args(args)
+            .env(support::NO_MACHINE_LEASES_ENV, "1")
             .env("XDG_CONFIG_HOME", &config_home)
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env_remove("HERDR_CONFIG_PATH")
@@ -716,6 +717,7 @@ fn auto_detect_respects_nested_guard_before_auto_attach() {
         .unwrap_or(0);
 
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .env(support::NO_MACHINE_LEASES_ENV, "1")
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .env("HERDR_SOCKET_PATH", &api_socket)

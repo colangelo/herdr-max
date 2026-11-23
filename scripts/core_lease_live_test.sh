@@ -5,9 +5,11 @@
 # V2 (a lease's end closes the link), V7 (a core start while dormant dials
 # nothing), V3 (dormant means zero link bytes), V38 (a refusing far side
 # costs at most 2 dials) beside V3 on a second far core, then a TUI client
-# in a pty (its lease at start, the wake through its dialer, one write a
-# minute), V33's wake part with `herdr machine wake` and its view part (a
-# view's first client through `--remote core:<machine>`, PR D). Every time
+# in a pty (no lease at its start, its first key's lease, the wake through
+# its dialer, one write a minute, no lease in a folder its primary does not
+# list), V33's wake part with `herdr machine wake` and its view part (a
+# view's first client through `--remote core:<machine>`, PR D: no dial
+# until a key). Every time
 # constant that is shortened is shortened through the lease files (the
 # interface herdr reads), never a test-only setting; the waits of V3 and
 # V38 are the design's 5 and 10 min unless V3_SECS or V38_SECS say less.
@@ -18,6 +20,7 @@
 [[ -n "${LINK_ROOT:-}" && -n "${RUN_TAG:-}" ]] || { echo "source this after core_link_live_test.sh" >&2; exit 1; }
 
 L="$RUN_TAG-lease"     # fake ssh to the far core: V2, V7, V3, the client, wake
+U="$RUN_TAG-unlisted"  # a folder herdr links that the scratch primary does not list (H7)
 V="$RUN_TAG-spent"     # real OpenSSH to a loopback server, a second far core: V38
 V3_SECS="${V3_SECS:-300}"
 V38_SECS="${V38_SECS:-600}"
@@ -59,7 +62,7 @@ link_cleanup() {
   [[ -n "$CLIENT_PID" ]] && rm -f "$LINK_ROOT"/*/leases/"client-$CLIENT_PID"
   link_cleanup_a
   [[ -S "$FAR2_SOCK" ]] && hc_far2 server stop >/dev/null 2>&1
-  for name in "$L" "$V"; do
+  for name in "$L" "$V" "$U"; do
     case "$name" in t[0-9]*-*) rm -rf "${LINK_ROOT:?}/$name" ;; esac
   done
 }
@@ -320,10 +323,11 @@ wait "$V38_PID" || { cat "$BASE/v38.log" >&2; V38_PID=""; fail "V38 failed (log 
 V38_PID=""
 cat "$BASE/v38.log"
 
-# --- B.2, B.5: a TUI client started by a person's command writes its lease
-# at start, before its dialer's connect; a dormant machine connects at once,
-# not at core's next retry (30 s apart by now); input within the minute
-# writes nothing more.
+# --- B.2, B.5, review M3 and H7: a TUI client writes no lease at its start
+# (opening herdr dials nothing); its first key writes it, before its
+# dialer's connect, and a dormant machine connects at once, not at core's
+# next retry (30 s apart by now); input within the minute writes nothing
+# more. It writes no lease into a folder its primary core does not list.
 cat > "$BASE/client_pty.py" <<'PY'
 import fcntl, os, pty, select, signal, struct, sys, termios, time
 hold, keys_from = float(sys.argv[1]), float(sys.argv[2])
@@ -350,8 +354,14 @@ PY
 # for the client's dial.
 last_refused="$(log_count "$L" "REFUSE NotPosixLine")"
 wait_for "a refused retry to start the client after" 40 more_in_log "$L" "REFUSE NotPosixLine" "$last_refused"
+# A folder herdr links (a target.json) that the scratch primary core does not
+# list: another session's machine, for this client (H7).
+mkdir -m 700 -p "$LINK_ROOT/$U/leases"
+cp "$LINK_ROOT/$L/target.json" "$LINK_ROOT/$U/target.json"
+chmod 600 "$LINK_ROOT/$U/target.json"
 client_start="$(now)"
 starts_before="$(log_count "$L" "START")"
+execs_at_start="$(log_count "$L" "EXEC")"
 python3 -I "$BASE/client_pty.py" 12 4 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH \
   -u HERDR_SESSION -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
   -u HERDR_CLIENT_REEXEC -u CLAUDECODE TERM=xterm-256color \
@@ -361,7 +371,12 @@ client_runner=$!
 wait_for "the client's pid" 5 test -s "$BASE/client.out"
 CLIENT_PID="$(head -n 1 "$BASE/client.out")"
 CLIENT_LEASE="$LINK_ROOT/$L/leases/client-$CLIENT_PID"
-wait_for "the client's lease" 5 test -f "$CLIENT_LEASE"
+sleep 2.5   # the client runs; its first key comes at 4 s
+[[ ! -e "$CLIENT_LEASE" ]] || fail "M3: the client wrote a lease at its start, before any key"
+[[ "$(log_count "$L" "EXEC")" == "$execs_at_start" ]] || fail "M3: the client's start dialled $L"
+wait_for "the client's lease after its first key" 6 test -f "$CLIENT_LEASE"
+ge "$(mtime "$CLIENT_LEASE")" "$(python3 -I -c 'import sys; print(float(sys.argv[1]) + 3.5)' "$client_start")" \
+  || fail "M3: the client's lease came before its first key"
 wait_for "$L connected by the client's wake" 4 state_is "$L" connected
 connected_after="$(since "$client_start")"
 le "$(mtime "$CLIENT_LEASE")" "$(log_time "$L" START $((starts_before + 1)))" \
@@ -372,9 +387,11 @@ lease_text="$(cat "$CLIENT_LEASE")"
 sleep 8   # keys from 4 s on, every 0.5 s
 [[ "$(cat "$CLIENT_LEASE")" == "$lease_text" ]] || fail "the client wrote its lease again within the minute"
 wait "$client_runner" || true
+[[ -z "$(ls -A "$LINK_ROOT/$U/leases")" ]] || fail "H7: the client wrote a lease into $U, which its primary core does not list: $(ls "$LINK_ROOT/$U/leases")"
+rm -rf "${LINK_ROOT:?}/$U"
 ends="$(log_count "$L" "LEASE END")"
 rm -f "$LINK_ROOT"/*/leases/"client-$CLIENT_PID"
-echo "ok: B.2/B.5 the client's lease at start preceded its dial; $L connected ${connected_after}s after the client started; keys within the minute wrote nothing"
+echo "ok: B.2/B.5/M3/H7 no lease and no dial at the client's start; its first key's lease preceded its dial; $L connected ${connected_after}s after the client started; keys within the minute wrote nothing; no lease in a folder its primary does not list"
 
 # --- V33 (wake part) and V35's reopening: herdr machine wake from dormant
 wait_for "$L dormant after the client" 15 more_in_log "$L" "LEASE END" "$ends"
@@ -408,9 +425,10 @@ code=0; run_herdr machine wake "$L" >"$BASE/wake.out" 2>&1 || code=$?
 [[ "$(log_count "$L" "START")" == "$starts_before" ]] || fail "a refused wake dialled"
 echo "ok: V35 machine wake reopened far_core_down and connected; a wake over auth_failed refuses and points to login"
 
-# --- V33 (view part, PR D): a view's first client, from dormant. `herdr
-# --remote core:<machine>` starts the view server; the person's client writes
-# its lease before any dial, and the dial that follows is a real one.
+# --- V33 (view part, PR D, review M3): a view's first client, from dormant.
+# `herdr --remote core:<machine>` starts the view server; neither the start
+# nor the attach dials; the person's first key writes the client's lease
+# before any dial, and the dial that follows is a real one.
 rm -f "$LINK_ROOT/$L/gate.json"
 ends="$(log_count "$L" "LEASE END")"
 wait_for "the wake's 20 s lease ends" 30 more_in_log "$L" "LEASE END" "$ends"
@@ -418,14 +436,26 @@ wait_for "$L unreachable before the view" 15 state_is "$L" unreachable
 starts_before="$(log_count "$L" "START")"
 execs_before="$(log_count "$L" "EXEC")"
 view_start="$(now)"
-python3 -I "$BASE/client_pty.py" 10 30 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH \
+python3 -I "$BASE/client_pty.py" 14 6 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH \
   -u HERDR_SESSION -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
   -u HERDR_CLIENT_REEXEC -u CLAUDECODE TERM=xterm-256color \
   XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" SHELL=/bin/sh \
   "$HERDR_BIN" --session "$SESSION" --remote "core:$L" >"$BASE/view-client.out" 2>/dev/null &
 view_runner=$!
 wait_for "the view server" 15 test -S "$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.sock"
-wait_for "$L connected by the view's first client" 10 state_is "$L" connected
+sleep 2   # attached; the first key comes 6 s after the client's start
+# A client lease written since the view started (the script's own
+# client-$$ from V3 may still lie there, expired).
+new_client_lease() {
+  local f
+  for f in "$LINK_ROOT/$L"/leases/client-*; do
+    [[ -f "$f" && "$(basename "$f")" != "client-$$" ]] && ge "$(mtime "$f")" "$view_start" && return 0
+  done
+  return 1
+}
+! new_client_lease || fail "M3: the view's client wrote a lease before any key"
+[[ "$(log_count "$L" "EXEC")" == "$execs_before" ]] || fail "M3: the view's start or attach dialled $L"
+wait_for "$L connected by the first key in the view" 14 state_is "$L" connected
 view_lease="$(ls -t "$LINK_ROOT/$L"/leases/client-* 2>/dev/null | head -n 1)"
 [[ -n "$view_lease" ]] || fail "V33: the view's client wrote no lease"
 lease_at="$(mtime "$view_lease")"
@@ -436,7 +466,7 @@ execs_between() { awk -v a="$1" -v b="$2" '$1 >= a && $1 < b && $3 == "EXEC"' "$
 [[ "$(execs_between "$view_start" "$lease_at")" == 0 ]] || fail "V33: a dial ran before the view client's lease"
 [[ "$(execs_between "$lease_at" 9999999999)" -ge 1 ]] || fail "V33: no dial followed the view client's lease"
 [[ "$(log_count "$L" "EXEC")" -gt "$execs_before" ]] || fail "V33: the view's wake did not dial"
-echo "ok: V33 the view's first client wrote its lease before the START it led to, which dialled; $L connected $(since "$view_start")s after"
+echo "ok: V33/M3 the view's start and attach dialled nothing; its client's first key wrote the lease before the START it led to, which dialled; $L connected $(since "$view_start")s after"
 wait "$view_runner" || true
 rm -f "$view_lease"
 # The view server exits 10 min after its last client; this test ends it now.

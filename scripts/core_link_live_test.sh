@@ -114,7 +114,7 @@ herdr_tty() {
   script -q /dev/null env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \
     -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION -u CLAUDECODE \
     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" SHELL=/bin/sh \
-    "$@" </dev/null
+    HERDR_NO_MACHINE_LEASES=1 "$@" </dev/null
 }
 # Like wait_until, for up to $2 seconds.
 wait_for() {

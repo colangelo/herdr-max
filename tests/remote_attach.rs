@@ -111,6 +111,8 @@ exit 255
     let child = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .args(["--remote", "check-host"])
         .env("PATH", path)
+        // A test's client writes no core machine lease (core-phase5 H7).
+        .env("HERDR_NO_MACHINE_LEASES", "1")
         .env("FAKE_SSH_FRAMED", if framed_shell { "1" } else { "0" })
         .env("FAKE_SSH_STARTED", &started_path)
         .env("FAKE_SSH_APPROVED", &approval_path)

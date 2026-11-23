@@ -592,6 +592,7 @@ fn explicit_client_command_respects_nested_guard() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
         .arg("client")
+        .env("HERDR_NO_MACHINE_LEASES", "1")
         .env("HERDR_ENV", "1")
         .env("XDG_CONFIG_HOME", &base)
         .env_remove("HERDR_CONFIG_PATH")

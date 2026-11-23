@@ -41,7 +41,7 @@ run_far_herdr() {
     -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
     -u CLAUDECODE \
     XDG_CONFIG_HOME="$PC_CONFIG" XDG_RUNTIME_DIR="$PC_RUNTIME" XDG_STATE_HOME="$PC_STATE" \
-    SHELL=/bin/sh "$HERDR_BIN" --session "$SESSION" "$@"
+    SHELL=/bin/sh HERDR_NO_MACHINE_LEASES=1 "$HERDR_BIN" --session "$SESSION" "$@"
 }
 
 link_cleanup() {

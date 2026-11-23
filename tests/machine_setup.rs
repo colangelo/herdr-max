@@ -167,6 +167,8 @@ fn setup_options(
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // A test's client writes no core machine lease (core-phase5 review H7).
+    command.env("HERDR_NO_MACHINE_LEASES", "1");
     if handoff {
         command.args(["--remote", "fake-host", "--handoff"]);
     } else {

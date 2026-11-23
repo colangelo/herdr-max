@@ -129,6 +129,10 @@ fn sweep_stale_test_dirs(root: &Path) {
 /// waits seconds to start (fork issue 253).
 pub const PANE_ANCHOR_ENV: &str = "HERDR_PANE_ANCHOR";
 
+/// Set on every herdr process a test starts: a test's client writes no core
+/// machine lease into the account's machine folders (core-phase5 review H7).
+pub const NO_MACHINE_LEASES_ENV: &str = "HERDR_NO_MACHINE_LEASES";
+
 pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_STARTUP_CWD");
     command.env_remove("HERDR_SESSION");
@@ -137,12 +141,14 @@ pub fn isolate_herdr_test_process(command: &mut CommandBuilder) {
     command.env_remove("HERDR_TAB_ID");
     command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
     command.env(PANE_ANCHOR_ENV, "off");
+    command.env(NO_MACHINE_LEASES_ENV, "1");
 }
 
 /// The same ownership for a server spawned with `std::process::Command`.
 pub fn bind_server_to_test_process(command: &mut std::process::Command) {
     command.env(TEST_PARENT_PID_ENV, std::process::id().to_string());
     command.env(PANE_ANCHOR_ENV, "off");
+    command.env(NO_MACHINE_LEASES_ENV, "1");
 }
 
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
