@@ -131,7 +131,7 @@ fn core_route(
     unknown: String,
 ) -> Result<Route, io::Result<super::CommandOutcome>> {
     use crate::core_machine::fleet::{self, Lookup};
-    match fleet::open(selector, fleet::dial_requested(dial)) {
+    match fleet::open(selector, dial) {
         Lookup::NotCore => Err(usage_error(unknown)),
         Lookup::Refused { message, code } => {
             eprintln!("error: {message}");
@@ -204,12 +204,17 @@ pub(super) fn api_client() -> io::Result<ApiClient> {
     })
 }
 
+/// How long the status probe of a machine waits for its answer. A core
+/// machine's bridge gives the probe's run less than this (D7), so it is
+/// done when the probe gives up.
+const REMOTE_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub(super) fn server_status(
     client: &ApiClient,
 ) -> Result<crate::api::RuntimeStatus, crate::api::client::ApiClientError> {
     let probe = || {
         if is_remote() {
-            client.status_with_timeout(std::time::Duration::from_secs(15))
+            client.status_with_timeout(REMOTE_STATUS_TIMEOUT)
         } else {
             client.status()
         }
@@ -471,6 +476,19 @@ pub(super) fn with_test_client<T>(client: ApiClient, run: impl FnOnce() -> T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 3.1: a core machine's status probe runs, and its core call ends,
+    /// before the CLI's probe gives up, so the bridge is not left waiting
+    /// on a request the CLI abandoned.
+    #[cfg(unix)]
+    #[test]
+    fn a_core_machines_probe_ends_before_the_cli_gives_up() {
+        use crate::core_machine::fleet::{CALL_MARGIN_SECS, PING_EXEC_SECS};
+        assert!(
+            std::time::Duration::from_secs(PING_EXEC_SECS + CALL_MARGIN_SECS)
+                < REMOTE_STATUS_TIMEOUT
+        );
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()

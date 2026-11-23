@@ -42,6 +42,11 @@ pub(crate) struct FakeConfig {
     /// These calls are recorded and then the connection drops before any
     /// answer, as a link lost after the request was sent.
     pub hang_up_on: Vec<&'static str>,
+    /// These calls are recorded and never answered, the connection left
+    /// open, as a far program that runs on.
+    pub stall_on: Vec<&'static str>,
+    /// The error `machine.exec` answers instead of a result.
+    pub exec_error: Option<Value>,
 }
 
 impl Default for FakeConfig {
@@ -61,6 +66,8 @@ impl Default for FakeConfig {
             kill_closes_stream: None,
             exec_reply: None,
             hang_up_on: Vec::new(),
+            stall_on: Vec::new(),
+            exec_error: None,
         }
     }
 }
@@ -318,6 +325,9 @@ fn answer(
         let _ = out.shutdown(std::net::Shutdown::Both);
         return;
     }
+    if config.stall_on.contains(&method) {
+        return;
+    }
     let (result, then): (Result<Value, Value>, Option<Frame>) = match method {
         _ if config.failing.contains(&method) => (
             Err(
@@ -411,6 +421,9 @@ fn answer(
                 .collect();
             terminals.sort_by_key(|record| record["address"].to_string());
             (Ok(json!({"terminals": terminals})), None)
+        }
+        "machine.exec" if config.exec_error.is_some() => {
+            (Err(config.exec_error.clone().unwrap_or_default()), None)
         }
         "machine.exec" => (
             Ok(config.exec_reply.clone().unwrap_or_else(|| {

@@ -205,6 +205,37 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Runs `cleanup` on the first SIGINT, SIGTERM or SIGHUP, then ends the
+/// process as that signal's default action does (a shell sees it killed by
+/// the signal). Installed once per process: a fleet CLI's lease and bridge
+/// folder must not outlive a Ctrl-C (core-phase5 D7). Every later call
+/// returns the first one's result.
+pub(crate) fn clean_up_on_termination(cleanup: fn()) -> io::Result<()> {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<Result<(), String>> = OnceLock::new();
+    INSTALLED
+        .get_or_init(|| {
+            let mut signals =
+                signal_hook::iterator::Signals::new([libc::SIGINT, libc::SIGTERM, libc::SIGHUP])
+                    .map_err(|err| err.to_string())?;
+            std::thread::Builder::new()
+                .name("herdr-termination".into())
+                .spawn(move || {
+                    if let Some(signal) = signals.forever().next() {
+                        cleanup();
+                        if let Err(err) = signal_hook::low_level::emulate_default_handler(signal) {
+                            tracing::warn!(%err, signal, "could not end on the signal");
+                        }
+                        std::process::exit(128 + signal);
+                    }
+                })
+                .map(drop)
+                .map_err(|err| err.to_string())
+        })
+        .clone()
+        .map_err(io::Error::other)
+}
+
 /// Reads what is ready on `fd` within `timeout`: `None` on timeout,
 /// `Some(0)` at end of file.
 pub(crate) fn read_within(
