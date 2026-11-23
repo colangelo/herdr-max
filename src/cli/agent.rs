@@ -737,3 +737,34 @@ mod fork_regression_tests {
         assert!(parse_agent_list_args(&args(&["--json", "extra"])).is_err());
     }
 }
+
+#[cfg(test)]
+mod far_output_tests {
+    use super::*;
+
+    use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+    use serde_json::json;
+
+    fn explain() -> serde_json::Value {
+        json!({
+            "agent": FAR_CONTROLS, "state": FAR_CONTROLS,
+            "manifest_source": FAR_CONTROLS, "manifest_version": FAR_CONTROLS,
+            "matched_rule": {"id": FAR_CONTROLS, "region": FAR_CONTROLS, "priority": 1},
+            "fallback_reason": FAR_CONTROLS, "screen_detection_skip_reason": FAR_CONTROLS,
+            "blocked_reason": FAR_CONTROLS, "skipped_update_reason": FAR_CONTROLS,
+            "warning": FAR_CONTROLS, "cached_remote_version": FAR_CONTROLS,
+            "remote_update_status": FAR_CONTROLS, "remote_update_error": FAR_CONTROLS,
+            "evaluated_rules": [{"id": FAR_CONTROLS, "region": FAR_CONTROLS,
+                "state": FAR_CONTROLS, "matched": true, "priority": 1,
+                "evidence": {"region_preview": FAR_CONTROLS, "contains": [FAR_CONTROLS]}}]
+        })
+    }
+
+    #[test]
+    fn a_remote_agent_explain_prints_escaped_and_a_local_one_raw() {
+        assert_escaped(&as_remote(|| agent_explain_text(&explain(), true)));
+        let local = agent_explain_text(&explain(), true);
+        assert!(local.contains(&format!("agent: {FAR_CONTROLS}")));
+        assert!(local.contains(&format!("remote_update_error: {FAR_CONTROLS}")));
+    }
+}

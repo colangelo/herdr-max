@@ -73,3 +73,24 @@ fn list_text(response: &serde_json::Value) -> Option<String> {
     }
     Some(lines.iter().map(|line| format!("{line}\n")).collect())
 }
+
+#[cfg(test)]
+mod far_output_tests {
+    use super::*;
+
+    use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+    use serde_json::json;
+
+    fn response() -> serde_json::Value {
+        json!({"result": {"unread_count": 1, "notifications": [{
+            "id": 1, "read": false, "posted_at_unix": 0,
+            "kind": FAR_CONTROLS, "title": FAR_CONTROLS, "context": FAR_CONTROLS
+        }]}})
+    }
+
+    #[test]
+    fn a_remote_notification_list_prints_escaped_and_a_local_one_raw() {
+        assert_escaped(&as_remote(|| list_text(&response()).unwrap()));
+        assert!(list_text(&response()).unwrap().contains(FAR_CONTROLS));
+    }
+}
