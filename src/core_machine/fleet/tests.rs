@@ -937,3 +937,37 @@ fn far_text_in_messages_shows_its_controls_escaped() {
     assert!(!refused.chars().any(char::is_control), "{refused:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #310: the probe runs before the request is sent, so no failure of it
+/// says that the request may have run: a link lost, no answer, a timeout.
+#[test]
+fn a_failed_probe_says_the_request_was_not_sent() {
+    let lost = || {
+        FakeCore::start_with(|config| {
+            config.exec_error = Some(json!({"code": -32000,
+                "message": "lost the line to loop during the call",
+                "data": {"kind": "unavailable"}}))
+        })
+    };
+    let silent = || FakeCore::start_with(|config| config.hang_up_on = vec!["machine.exec"]);
+    let late =
+        || FakeCore::start_with(|config| config.exec_reply = Some(exec_reply(b"", false, true)));
+    for (what, core) in [("lost", lost()), ("silent", silent()), ("late", late())] {
+        let (root, dir) = machine_dir("fleet-probe-fails");
+        let error = far_herdr(
+            &CoreAt::at(&core.socket),
+            &machine(),
+            &dir,
+            "default",
+            "default",
+        )
+        .expect_err(what);
+        assert!(!error.contains("may have run"), "{what}: {error}");
+        assert!(
+            error.starts_with("could not find the herdr on loop: ")
+                && error.ends_with("; the request was not sent"),
+            "{what}: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

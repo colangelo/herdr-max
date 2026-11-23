@@ -647,7 +647,14 @@ fn probe_far_herdr(
             .map(String::from),
     );
     argv.extend(binary_names());
-    let done = exec(core, name, &argv, None, PROBE_SECS)?;
+    // The probe runs before the request is sent: none of its failures may
+    // say that the request may have run (#310).
+    let done = exec(core, name, &argv, None, PROBE_SECS).map_err(|failure| {
+        format!(
+            "could not find the herdr on {name}: {}; the request was not sent",
+            failure.message()
+        )
+    })?;
     if done.code != Some(0) {
         return Err(format!(
             "no herdr on {name} answers remote-api-bridge --request (looked for {} on its PATH and in \
@@ -821,20 +828,49 @@ struct ExecResult {
 /// How every failure after a request may have reached the far side ends.
 const MAY_HAVE_RUN: &str = "it may have run there, and it is not sent again";
 
+/// Why one `machine.exec` gave no whole run, by what it says of the
+/// program: never started, may have run, or ran.
+#[derive(Debug, PartialEq)]
+enum ExecFailure {
+    NotSent(String),
+    MayHaveRun(String),
+    Ran(String),
+}
+
+impl ExecFailure {
+    /// What happened, without what it means for the program.
+    fn message(&self) -> &str {
+        match self {
+            Self::NotSent(message) | Self::MayHaveRun(message) | Self::Ran(message) => message,
+        }
+    }
+
+    /// The message for an API request carried by the run (F12).
+    fn for_request(&self) -> String {
+        match self {
+            Self::NotSent(message) => message.clone(),
+            Self::MayHaveRun(message) => format!("{message}; {MAY_HAVE_RUN}"),
+            Self::Ran(message) => format!("{message}; it ran there, and it is not sent again"),
+        }
+    }
+}
+
 /// One `machine.exec`, sent once. Refusals, a lost answer, a cut reply and
-/// a timed-out run are errors with their message; a reply's output is
-/// returned only when it is whole (F12).
+/// a timed-out run are failures that say whether the program may have
+/// run; a reply's output is returned only when it is whole (F12). Core's
+/// messages can quote the far side, so they are shown escaped (M1).
 fn exec(
     core: &CoreAt,
     name: &MachineName,
     argv: &[String],
     input: Option<&[u8]>,
     timeout_secs: u64,
-) -> Result<Ran, String> {
+) -> Result<Ran, ExecFailure> {
+    use ExecFailure::{MayHaveRun, NotSent, Ran as RanThere};
     if input.is_some_and(|input| input.len() > INPUT_LIMIT) {
-        return Err(format!(
+        return Err(NotSent(format!(
             "the request is over 8 MiB, so it was not sent to {name}"
-        ));
+        )));
     }
     let mut params = json!({"on": name.as_str(), "argv": argv, "timeout": timeout_secs});
     if let Some(input) = input {
@@ -846,47 +882,57 @@ fn exec(
         Duration::from_secs(timeout_secs + CALL_MARGIN_SECS),
     ) {
         Ok(Some(reply)) => reply,
-        Ok(None) => return Err("herdr-core is not running here".into()),
+        Ok(None) => return Err(NotSent("herdr-core is not running here".into())),
         // Core answers `unavailable` both for a machine that is not
         // connected and for a link lost during the run ("lost the line to
         // <m> during the call", hc 0.1.21), so it may have run.
         Err(CallError::Rpc { kind, message }) if kind == "unavailable" => {
-            return Err(format!(
-                "herdr-core lost {name} (unavailable: {message}); {MAY_HAVE_RUN}"
-            ))
+            return Err(MayHaveRun(format!(
+                "herdr-core lost {name} (unavailable: {})",
+                visible_line(&message)
+            )))
         }
         Err(CallError::Rpc { kind, message }) => {
-            return Err(format!(
-                "herdr-core refused the request for {name}: {kind}: {message}"
-            ))
+            return Err(NotSent(format!(
+                "herdr-core refused the request for {name}: {}: {}",
+                visible_line(&kind),
+                visible_line(&message)
+            )))
         }
         Err(CallError::NoAnswer(why)) => {
-            return Err(format!(
-                "no answer from {name} after the request was sent ({why}); {MAY_HAVE_RUN}"
-            ))
+            return Err(MayHaveRun(format!(
+                "no answer from {name} after the request was sent ({})",
+                visible_line(&why)
+            )))
         }
         Err(CallError::NotSent(why)) => {
-            return Err(format!("herdr-core here is not reachable: {why}"))
+            return Err(NotSent(format!(
+                "herdr-core here is not reachable: {}",
+                visible_line(&why)
+            )))
         }
     };
     let result: ExecResult = serde_json::from_value(reply).map_err(|err| {
-        format!("herdr-core's answer from {name} does not parse: {err}; {MAY_HAVE_RUN}")
+        MayHaveRun(format!(
+            "herdr-core's answer from {name} does not parse: {}",
+            visible_line(&err.to_string())
+        ))
     })?;
     if result.timed_out {
-        return Err(format!(
-            "the reply from {name} timed out after {timeout_secs} s; {MAY_HAVE_RUN}"
-        ));
+        return Err(MayHaveRun(format!(
+            "the reply from {name} timed out after {timeout_secs} s"
+        )));
     }
     if result.truncated {
-        return Err(format!(
-            "the reply from {name} was cut at 8 MiB; it ran there, and it is not sent again"
-        ));
+        return Err(RanThere(format!("the reply from {name} was cut at 8 MiB")));
     }
     let decode = |field: &str, raw: &str| {
         base64::engine::general_purpose::STANDARD
             .decode(raw)
             .map_err(|err| {
-                format!("the {field} of the reply from {name} is not base64: {err}; {MAY_HAVE_RUN}")
+                MayHaveRun(format!(
+                    "the {field} of the reply from {name} is not base64: {err}"
+                ))
             })
     };
     Ok(Ran {
@@ -1013,7 +1059,7 @@ impl Bridge {
                     ran.stderr_tail()
                 ));
             }
-            Err(message) => self.fail(message),
+            Err(failure) => self.fail(failure.for_request()),
         }
     }
 }
