@@ -78,6 +78,10 @@ impl fmt::Display for ProfileId {
 pub(crate) enum ClientEndpointId {
     Local,
     Ssh(ProfileId),
+    /// A view of a Herdr Core machine (core-phase5 D6): a view server on
+    /// this Mac, reached at its own socket and started on demand.
+    #[cfg(unix)]
+    Core(crate::core_machine::MachineName),
 }
 
 impl ClientEndpointId {
@@ -89,6 +93,8 @@ impl ClientEndpointId {
         match self {
             Self::Local => "local".into(),
             Self::Ssh(profile_id) => format!("ssh:{profile_id}"),
+            #[cfg(unix)]
+            Self::Core(machine) => format!("core:{machine}"),
         }
     }
 }

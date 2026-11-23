@@ -286,7 +286,7 @@ fn run_client_with_mode(
     } else {
         endpoint::EndpointCatalog::default()
     };
-    let federated = endpoint_catalog.has_enabled_ssh();
+    let federated = endpoint_catalog.has_other_machines();
 
     let initial_stream = match crate::ipc::connect_local_stream(&socket_path) {
         Ok(stream) => Some(stream),
@@ -550,12 +550,14 @@ async fn run_client_loop(
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
-    let mut federated = endpoint_catalog.has_enabled_ssh();
+    let mut federated = endpoint_catalog.has_other_machines();
     if let Some(shell) = state.shell.as_mut() {
         shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
+        #[cfg(unix)]
+        shell.set_core_endpoints(&endpoint_catalog.core);
         shell.set_endpoint_server_version(
             &endpoint::ClientEndpointId::Local,
             initial
@@ -706,6 +708,8 @@ async fn run_client_loop(
     };
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
+    #[cfg(unix)]
+    supervisors.reconcile_core(&endpoint_catalog.core, std::time::Instant::now());
     // `herdr --remote` runs this client over a forwarded socket: its local
     // endpoint reaches the remote machine (fork issue 260).
     supervisors.set_local_is_remote(is_remote_client);

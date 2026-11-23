@@ -49,6 +49,9 @@ pub(crate) enum EndpointSupervisorEvent {
 enum ConnectTarget {
     Local(PathBuf),
     Ssh(super::SavedSshEndpoint),
+    /// A core machine's view server, started when none listens (D6).
+    #[cfg(unix)]
+    Core(crate::core_machine::MachineName),
 }
 
 struct ReconnectState {
@@ -205,6 +208,39 @@ impl EndpointSupervisors {
                 .entry(ClientEndpointId::Ssh(profile.id.clone()))
                 .or_insert_with(|| ReconnectState::new(ConnectTarget::Ssh(profile.clone()), now));
             state.target = ConnectTarget::Ssh(profile.clone());
+        }
+        retired
+    }
+
+    /// The core machines herdr links (core-phase5 D6): one view endpoint
+    /// each; ones no longer linked are retired and returned.
+    #[cfg(unix)]
+    pub(crate) fn reconcile_core(
+        &mut self,
+        machines: &[crate::core_machine::MachineName],
+        now: Instant,
+    ) -> Vec<ClientEndpointId> {
+        let mut retired = Vec::new();
+        let retiring = &mut self.retired;
+        self.endpoints.retain(|endpoint_id, state| {
+            let ClientEndpointId::Core(machine) = endpoint_id else {
+                return true;
+            };
+            let keep = machines.contains(machine);
+            if !keep {
+                retired.push(endpoint_id.clone());
+                if !state.completed.load(Ordering::Acquire) {
+                    retiring
+                        .entry(endpoint_id.clone())
+                        .or_insert_with(|| Arc::clone(&state.completed));
+                }
+            }
+            keep
+        });
+        for machine in machines {
+            self.endpoints
+                .entry(ClientEndpointId::Core(machine.clone()))
+                .or_insert_with(|| ReconnectState::new(ConnectTarget::Core(machine.clone()), now));
         }
         retired
     }
@@ -515,6 +551,18 @@ fn connect_once(
                 Arc::clone(&cancelled),
             )?;
             (connected.stream, Box::new(connected.bridge))
+        }
+        // A view server on this Mac: started here when none listens; it
+        // dials nothing by starting (D3, D6).
+        #[cfg(unix)]
+        ConnectTarget::Core(machine) => {
+            let path = crate::view::start::ensure_running(machine)?;
+            let stream = crate::ipc::connect_local_stream_cancellable(
+                &path,
+                &cancelled,
+                Instant::now() + super::super::handshake::LOCAL_HANDSHAKE_READ_TIMEOUT,
+            )?;
+            (stream, Box::new(()))
         }
     };
     let handshake = super::super::do_handshake(

@@ -79,6 +79,11 @@ pub(crate) struct EndpointCatalog {
     pub(crate) selected_profile: Option<ProfileId>,
     #[serde(default)]
     pub(crate) ssh: Vec<SavedSshEndpoint>,
+    /// The core machines herdr links, each a view endpoint (core-phase5
+    /// D6). Read from their state folders at load, never saved here.
+    #[cfg(unix)]
+    #[serde(skip)]
+    pub(crate) core: Vec<crate::core_machine::MachineName>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,13 +99,24 @@ impl Default for EndpointCatalog {
             version: CATALOG_VERSION,
             selected_profile: None,
             ssh: Vec::new(),
+            #[cfg(unix)]
+            core: Vec::new(),
         }
     }
 }
 
 impl EndpointCatalog {
     pub(crate) fn load() -> Result<Self, String> {
-        Self::load_from_paths(&catalog_path(), &selection_path())
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut catalog = Self::load_from_paths(&catalog_path(), &selection_path())?;
+        #[cfg(unix)]
+        {
+            catalog.core = crate::core_machine::command::linked_machines()
+                .into_iter()
+                .map(|machine| machine.name)
+                .collect();
+        }
+        Ok(catalog)
     }
 
     pub(crate) fn load_profiles() -> Result<Vec<SavedSshEndpoint>, String> {
@@ -207,6 +223,10 @@ impl EndpointCatalog {
                 true
             }
             super::ClientEndpointId::Ssh(profile_id) => self.select_ssh(profile_id),
+            // A core view is not a saved profile: the selection stays as it
+            // was saved (core-phase5 D6).
+            #[cfg(unix)]
+            super::ClientEndpointId::Core(_) => true,
         }
     }
 
@@ -224,6 +244,16 @@ impl EndpointCatalog {
 
     pub(crate) fn has_enabled_ssh(&self) -> bool {
         self.ssh.iter().any(|profile| profile.enabled)
+    }
+
+    /// Whether this client shows other machines: a saved machine, or a core
+    /// machine's view (core-phase5 D6).
+    pub(crate) fn has_other_machines(&self) -> bool {
+        #[cfg(unix)]
+        if !self.core.is_empty() {
+            return true;
+        }
+        self.has_enabled_ssh()
     }
 
     pub(crate) fn contains_enabled_target_session(&self, target: &str, session: &str) -> bool {

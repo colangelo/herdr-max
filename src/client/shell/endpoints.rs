@@ -91,6 +91,14 @@ impl ClientShellState {
             });
         }
 
+        // Core views are not saved profiles: they stay as they are.
+        #[cfg(unix)]
+        next.extend(
+            self.endpoints
+                .iter()
+                .filter(|endpoint| matches!(endpoint.endpoint_id, ClientEndpointId::Core(_)))
+                .cloned(),
+        );
         if !next
             .iter()
             .any(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
@@ -102,6 +110,41 @@ impl ClientShellState {
                 .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
         });
         self.endpoints = next;
+    }
+
+    /// The core machines herdr links, as view endpoints after the saved
+    /// machines (core-phase5 D6), labelled with the machine's name. One that
+    /// is no longer linked goes; the rest keep their state.
+    #[cfg(unix)]
+    pub(crate) fn set_core_endpoints(&mut self, machines: &[crate::core_machine::MachineName]) {
+        self.endpoints
+            .retain(|endpoint| match &endpoint.endpoint_id {
+                ClientEndpointId::Core(machine) => machines.contains(machine),
+                _ => true,
+            });
+        for machine in machines {
+            let endpoint_id = ClientEndpointId::Core(machine.clone());
+            if self
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.endpoint_id == endpoint_id)
+            {
+                continue;
+            }
+            self.endpoints.push(ClientShellEndpoint {
+                endpoint_id,
+                label: machine.to_string(),
+                status: ClientEndpointStatus::Connecting,
+                ..local_endpoint()
+            });
+        }
+        if !self
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        {
+            self.select_unavailable_local();
+        }
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
