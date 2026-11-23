@@ -1315,12 +1315,16 @@ fn spawn_writer(
         .map_err(|err| CoreError::Unavailable(format!("writer thread: {err}")))
 }
 
-/// A view's writer (core-phase5 D6 Size): keys, pastes, mouse reports and
-/// terminal replies go as AUTOMATIC_INPUT, which core delivers without
-/// making the view the active viewer; a read-only view sends none. A resize
-/// carries the far size (the grid keeps it) and goes as RESIZE only when it
-/// differs from the last one sent, so core records it and emits no event;
-/// no FACTS frame, no FOCUS frame, no DATA ever.
+/// A view's writer (core-phase5 D6 Size): keys, pastes and mouse reports
+/// go as AUTOMATIC_INPUT, which core delivers without making the view the
+/// active viewer; a read-only view sends none. A view sends no terminal
+/// reply at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, a
+/// resize's report): the far herdr answers its own programs, and a reply
+/// from here would be input no person typed, a second answer, or one to a
+/// query replayed from history. A resize carries the far size (the grid
+/// keeps it) and goes as RESIZE only when it differs from the last one sent,
+/// so core records it and emits no event; no FACTS frame, no FOCUS frame,
+/// no DATA ever.
 fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>) {
     let typed = |bytes: &Bytes| {
         if !view.read_only {
@@ -1329,7 +1333,8 @@ fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>)
     };
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            WriteCmd::User(bytes) | WriteCmd::Reply(bytes) => typed(&bytes),
+            WriteCmd::User(bytes) => typed(&bytes),
+            WriteCmd::Reply(_) => {}
             WriteCmd::Submit {
                 text,
                 enter,
@@ -1355,7 +1360,7 @@ fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>)
                 rows,
                 cols,
                 cell: _,
-                replies,
+                replies: _,
             } => {
                 let changed = {
                     let mut sent = lock(&view.sent);
@@ -1364,9 +1369,6 @@ fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>)
                 if changed {
                     let channel = shared.channel.load(Ordering::Acquire);
                     let _ = shared.client().send(&Frame::resize(channel, cols, rows));
-                }
-                for reply in replies {
-                    typed(&reply);
                 }
             }
         }
@@ -1472,8 +1474,13 @@ fn spawn_parser(
                         mirror.observe(&bytes, Instant::now());
                         let consumed = bytes.len() as u32;
                         let PtyReadResult { terminal_responses } = on_read(&bytes);
-                        for reply in terminal_responses {
-                            let _ = writer.try_send(WriteCmd::Reply(reply));
+                        // A view answers no query (see `view_writer`): its
+                        // replies are not even queued, so a history replayed
+                        // at attach cannot fill the queue ahead of a key.
+                        if shared.view.is_none() {
+                            for reply in terminal_responses {
+                                let _ = writer.try_send(WriteCmd::Reply(reply));
+                            }
                         }
                         let channel = shared.channel.load(Ordering::Acquire);
                         if let Some(bytes) = credit.consumed(channel, consumed) {
@@ -2985,11 +2992,18 @@ mod tests {
         .recv_timeout(Duration::from_secs(5))
         .expect("answer")
         .expect("sent");
+        // A view sends no terminal reply, nor a resize's report (H1).
         pane.write_terminal_response(|| Some(Bytes::from_static(b"\x1b[0n")));
         // The view's own rect is not the far size: the runtime resizes to the
         // far size only, so a repeat of the attach size sends nothing.
         pane.resize(30, 100, 8, 16, Vec::new());
-        pane.resize(25, 90, 8, 16, Vec::new());
+        pane.resize(
+            25,
+            90,
+            8,
+            16,
+            vec![Bytes::from_static(b"\x1b[48;25;90;400;720t")],
+        );
         pane.resize(25, 90, 8, 16, Vec::new());
         std::thread::sleep(Duration::from_millis(200));
         let frames = stream_frames(&core);
@@ -3000,12 +3014,11 @@ mod tests {
                 kind::AUTOMATIC_INPUT,
                 kind::AUTOMATIC_INPUT,
                 kind::AUTOMATIC_INPUT,
-                kind::AUTOMATIC_INPUT,
                 kind::RESIZE
             ],
             "{frames:?}"
         );
-        let resize = &frames[4].1;
+        let resize = &frames[3].1;
         assert_eq!(
             (
                 u16::from_le_bytes([resize[0], resize[1]]),
@@ -3031,6 +3044,55 @@ mod tests {
             pane.kept_on_drop(),
             "dropping a view's pane leaves the far program"
         );
+    }
+
+    // H1 (core-phase5 D6): far output a view replays or streams can hold
+    // queries (DA, DSR, `?u`, OSC 10/11); the pane's terminal answers them,
+    // and the view sends none of those answers to the far program.
+    #[test]
+    fn a_view_pane_sends_no_reply_to_far_queries() {
+        let core = FakeCore::start_with(|config| {
+            config.first_paint = b"history\x1b[c\x1b[6n".to_vec();
+        });
+        let address = "view-replies/t1".to_string();
+        core.add_terminal(json!({"address": address, "state": "live", "cols": 80, "rows": 24}));
+        let (reads_tx, reads_rx) = std_mpsc::channel();
+        let pane = StartedCore::view(
+            PaneId::from_raw(42),
+            "herdr".into(),
+            address,
+            (24, 80),
+            connector_to(&core),
+        )
+        .expect("view")
+        .into_pane(
+            Box::new(move |bytes: &[u8]| {
+                let _ = reads_tx.send(bytes.to_vec());
+                PtyReadResult {
+                    terminal_responses: vec![
+                        Bytes::from_static(b"\x1b[?62;22c"),
+                        Bytes::from_static(b"\x1b[1;1R"),
+                    ],
+                }
+            }),
+            Box::new(|_| {}),
+            Box::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("pane");
+        reads_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the replayed history was read");
+        pane.try_send_bytes(Bytes::from_static(b"k"))
+            .expect("typed");
+        std::thread::sleep(Duration::from_millis(200));
+        let typed: Vec<Vec<u8>> = stream_frames(&core)
+            .into_iter()
+            .filter(|(kind, _)| *kind == kind::AUTOMATIC_INPUT || *kind == kind::DATA)
+            .map(|(_, payload)| payload)
+            .collect();
+        assert_eq!(typed, [b"k".to_vec()], "only the person's key");
+        pane.shutdown();
     }
 
     // D6 Size: a path that takes no AUTOMATIC_INPUT makes the view read-only

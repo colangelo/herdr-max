@@ -5673,6 +5673,24 @@ mod tests {
         assert_eq!(local.cwd(), Some(here));
     }
 
+    // H1 (core-phase5 D6): a view's pane shows another Mac's terminal, its
+    // replayed history included, so its output is far data: inline Kitty
+    // graphics only, no clipboard write (OSC 52) and no folder of this Mac
+    // (OSC 7), as for a pane on a machine.
+    #[cfg(unix)]
+    #[test]
+    fn a_view_panes_output_is_far_data() {
+        let launch = PaneLaunch::ViewCore {
+            address: "view-far/t1".into(),
+        };
+        assert!(launch.far_output());
+        assert_eq!(launch.far_cwd(), None);
+        assert_eq!(
+            kitty_media(launch.far_output()),
+            crate::ghostty::KittyMedia::InlineOnly
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn process_cwd_does_not_require_traversing_the_directory_path() {
