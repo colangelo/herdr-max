@@ -1045,3 +1045,23 @@ fn the_lease_is_renewed_soon_after_a_sleep() {
     drop(keeper);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// #310: a name herdr did not add is an unknown selector at once: no
+/// `machine.list` call to core, even when core lists the name.
+#[test]
+fn a_name_herdr_did_not_add_costs_no_core_call() {
+    let core = FakeCore::start();
+    core.set_machine("loop", "connected");
+    let root = scratch("fleet-typo");
+    assert!(matches!(
+        open_at(
+            &CoreAt::at(&core.socket),
+            Ok(root.clone()),
+            &machine(),
+            false
+        ),
+        Lookup::NotCore
+    ));
+    assert!(core.methods().is_empty(), "{:?}", core.methods());
+    let _ = std::fs::remove_dir_all(&root);
+}

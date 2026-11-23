@@ -221,17 +221,11 @@ fn open_at(core: &CoreAt, root: io::Result<PathBuf>, name: &MachineName, dial: b
         }
     };
     let dir = MachineDir::at(&root, name);
+    // A name herdr did not add is no core machine of herdr's: refused as an
+    // unknown selector, whose message names `machine status --core`, with
+    // no core call, so a mistyped name costs no `machine.list` (#310).
     if !dir.target_path().exists() {
-        return match core.state(name) {
-            Ok(Some(_)) => refused(
-                2,
-                format!(
-                    "{name} is a Herdr Core machine herdr did not add, so herdr keeps no lease or gate for it; \
-                     --machine reaches the machines added with `herdr machine add --core`"
-                ),
-            ),
-            _ => Lookup::NotCore,
-        };
+        return Lookup::NotCore;
     }
     prepare(core, name, &dir, dial)
 }

@@ -149,7 +149,10 @@ fn core_route(
 ) -> Result<Route, io::Result<super::CommandOutcome>> {
     use crate::core_machine::fleet::{self, Lookup};
     match fleet::open(selector, dial) {
-        Lookup::NotCore => Err(usage_error(unknown)),
+        Lookup::NotCore => Err(usage_error(format!(
+            "{unknown}, or `herdr machine status --core` for the Herdr Core machines added with \
+             `herdr machine add --core`"
+        ))),
         Lookup::Refused { message, code } => {
             eprintln!("{}", refusal_line(&message));
             Err(Ok(super::CommandOutcome::Handled(code)))
