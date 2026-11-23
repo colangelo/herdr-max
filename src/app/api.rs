@@ -5,6 +5,8 @@ mod agents;
 mod application_scroll;
 mod env;
 mod guarded_panes;
+#[cfg(all(test, unix))]
+pub(crate) use guarded_panes::test_app_on_fake_core;
 mod integrations;
 mod layouts;
 mod panes;

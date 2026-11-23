@@ -155,12 +155,39 @@ impl App {
     }
 }
 
+/// An app whose `workspaces` have each of `panes` run a shell in the fake
+/// herdr-core `core`: the far herdr of the guarded-action tests.
+#[cfg(all(test, unix))]
+pub(crate) fn test_app_on_fake_core(
+    core: &crate::pane::FakeCore,
+    workspaces: Vec<crate::workspace::Workspace>,
+    panes: &[PaneId],
+) -> App {
+    std::env::set_var("HC_SOCKET", &core.socket);
+    let mut app = App::new(
+        &crate::config::Config::default(),
+        crate::app::AppPolicy::TEST,
+        None,
+        tokio::sync::mpsc::unbounded_channel().1,
+        crate::api::EventHub::default(),
+    );
+    app.state.workspaces = workspaces;
+    app.state.active = Some(0);
+    app.state.ensure_test_terminals();
+    app.state.default_shell = "/bin/cat".into();
+    app.program_start_token = |_| crate::platform::ProcessStart::table(None);
+    crate::pane::set_preferred_runtime(true);
+    for pane in panes {
+        assert!(app.respawn_pane_runtime(*pane, super::RespawnTarget::Shell));
+    }
+    app
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use serde_json::{json, Value};
 
     use crate::api::schema::{Method, Request};
-    use crate::app::api::RespawnTarget;
     use crate::app::App;
     use crate::layout::PaneId;
     use crate::pane::FakeCore;
@@ -184,29 +211,13 @@ mod tests {
 
     fn far() -> Far {
         let core = FakeCore::start();
-        std::env::set_var("HC_SOCKET", &core.socket);
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
-        );
         let mut split = crate::workspace::Workspace::test_new("far");
         let first = split.tabs[0].root_pane;
         let second = split.test_split(ratatui::layout::Direction::Horizontal);
         let alone = crate::workspace::Workspace::test_new("alone");
         let third = alone.tabs[0].root_pane;
-        app.state.workspaces = vec![split, alone];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-        app.state.default_shell = "/bin/cat".into();
-        app.program_start_token = |_| crate::platform::ProcessStart::table(None);
-        crate::pane::set_preferred_runtime(true);
         let panes = vec![first, second, third];
-        for pane in &panes {
-            assert!(app.respawn_pane_runtime(*pane, RespawnTarget::Shell));
-        }
+        let app = super::test_app_on_fake_core(&core, vec![split, alone], &panes);
         Far { app, core, panes }
     }
 

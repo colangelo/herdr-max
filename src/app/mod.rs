@@ -15,6 +15,8 @@ mod agents;
 mod pins;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+#[cfg(all(test, unix))]
+pub(crate) use api::test_app_on_fake_core;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;

@@ -3,6 +3,8 @@ use super::*;
 mod application_scroll;
 mod client_list;
 mod event_fairness;
+#[cfg(unix)]
+mod guarded_actions;
 mod hint_notifications;
 mod native_graphics;
 #[path = "pane_move.rs"]
