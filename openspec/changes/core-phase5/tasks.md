@@ -425,14 +425,74 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR E. Actions and the fleet CLI over the link
 
-- [ ] E.1 Remote herdr path and capability probe per link establishment (D7)
-- [ ] E.2 `--machine` through `machine.exec` with the `cli-<pid>` lease and the `env -u` wrapper; dormant refusal
+- [x] E.1 Remote herdr path and capability probe per link establishment (D7)
+  Built: `core_machine/fleet.rs` `far_herdr`. One `machine.exec` of the `env -u` wrapper, `/bin/sh -c` and a fixed
+  script (`PROBE_SCRIPT`) with the names as arguments, never as script text: the name this herdr runs as, then
+  `herdr`, on the far `PATH` and in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and linuxbrew; the first
+  that answers `remote-api-bridge --check` with `herdr-api-bridge-v1` is taken, with its `status client --json`
+  (version, protocol, endpoint capabilities). "Per link establishment" is the link's `dial.json` record (the ssh
+  pid and start time core-link writes for each dial): the answer is kept in the machine folder as
+  `far_herdr.json` with that record and used while it matches, so a redial probes again; a far herdr gone from its
+  path (exit 126 or 127) forgets it. `herdr machine status --core` reports it as `far_herdr`. Tests: units for the
+  script (finds the named herdr, skips one that fails the check, exit 2 when none), the answer's parse, the argv,
+  once per link against the fake core (no second exec on the same dial record, a new one probes), and the failure
+  naming what was looked for; loop: one probe for two calls over one link, status reports the path. Limits: mise
+  installs are not searched (the old remote's discovery also looks there); the capabilities are read and kept but
+  only `remote-api-bridge` is required (E.3's verbs will read the rest); the D9 notice for an old far hc is not here.
+- [x] E.2 `--machine` through `machine.exec` with the `cli-<pid>` lease and the `env -u` wrapper; dormant refusal
   (exit 75) and `--dial` through the dialer (D7); `truncated` and `timed_out` as errors, input over 8 MiB refused;
   no retry after send; V18, V19, V31 (exec part), V32, V37
+  Built: `cli/target.rs` `Route { Saved, Core }`: a selector that names a saved SSH machine (id or label) goes the
+  old way, unchanged (D8); any other is looked up as a core machine (`fleet::open`), which needs herdr's state
+  folder (a machine only core knows is refused, exit 2, as one herdr keeps no lease or gate for). `--dial` is a
+  prefix flag beside `--machine` (`herdr --machine m --dial pane list`), `HERDR_MACHINE_DIAL=1` the same. Connected:
+  the `cli-<pid>` lease (act 0, so it reopens nothing), the probe, then the requests. Not connected: without
+  `--dial`, D7's message and exit 75, no lease, no dial; with it, refused (exit 1) over `needs_check`,
+  `auth_stalled`, `auth_failed`, an unreadable gate or a `far_core_down` under 5 min, else the lease with the act
+  (it reopens `retry_spent`), a `CLI --dial` line in `link.log`, one `dial_once` (D3a's rules), and a refusal if the
+  machine is still not connected. The CLI reaches the far side through `FleetLink`, a 0600 socket in a 0700 folder
+  that speaks herdr's API, one request per connection: each request line is one `machine.exec {on, argv: wrapper +
+  [far herdr, --session S, remote-api-bridge], input, timeout}`, the reply's stdout goes back untouched. S, the far
+  herdr session, is the one whose primary core the machine was added with (`default` for core's default, `X` for
+  `herdr-X` or `herdrdev-X`; a core session no herdr session uses is refused). Timeout: the request's own
+  `timeout_ms` plus 10 s, 60 to 600 s. A request over 8 MiB, `unavailable`, any other core refusal, a lost answer
+  (it may have run; not sent again), `truncated`, `timed_out` or a far exit other than 0 record a failure and close
+  the connection with nothing written, so the CLI fails (exit 1) with that message through `remote_error`; the
+  status probe of a core route is never retried (`server_status`). The lease is written before the first exec,
+  again only when what is left would not cover the next call and a minute more, and removed when the CLI ends.
+  Supporting: `core_machines::call_running_at` and `CallError` (not sent, refused by kind, no answer), the fake
+  core's `machine.exec` (`exec_reply`) and `hang_up_on`. Tests: V19 (the fake core drops the connection on
+  `machine.exec`: one error saying it may have run, one exec), V37 (`truncated` and `timed_out` with exit code 0:
+  the CLI side gets no bytes and the message; a request over 8 MiB: no exec sent), the request's argv, input and
+  timeout, the lease's writes and removal, the gate's refusals, the session mapping, the prefix parse; loop
+  (`core_fleet_live_test.sh`, a far scratch core with the six fake `HERDR_*` variables and its own herdr server,
+  herdr's link and a fake ssh): V18 the same JSON as the far herdr's own `pane list` and as the old remote's
+  `--machine` to the same far herdr through the fake ssh; V31 a control `hc exec --on` lists the six names in the
+  far core, every far herdr run through `--machine` got none; V32 dormant: exit 75, D7's message, no lease, no ssh;
+  `--dial`: the lease line before the one dial's START, one ssh, the far JSON, the lease gone after; `--dial` over
+  `auth_failed`: exit 1 naming `herdr machine login`, nothing written or dialled. Limits: `[remote] prefer` and the
+  both-present notice are D.5 (PR D), so a name both kinds have always goes the old way; the lease lives for the
+  whole CLI call (its status probe and its request), not one exec; a core retry that lands between the `--dial`
+  lease and its connect can make core restart that dial (R4, D3a's accepted limit); the plan's `pane list --json`
+  is `pane list` (it prints JSON and takes no `--json`).
 - [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
-- [ ] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
+  Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
+  probe and `fleet.rs`'s `exec` and wrapper are what they will call.
+- [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
+  Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
+  fresh login, never starting the far core and the VM `nc` limit; Dormancy with each lease holder; Status and the
+  gate, a table of the seven gates and what reopens each; `--machine` to a core machine, connected, refused with
+  75, `--dial`, the far session, the probe, no retry, 8 MiB; Announce a connection first; `hc exec/run --on` and
+  `hc machine connect` on a dormant machine); `cli-reference.mdx` § Herdr Core machines (the verbs and `--dial`).
 - [ ] E.5 Check: `just check` 0, `just core-live-test` 0, CI green
+  Local, m4m, 2026-11-23, under the shared lock, on the code of this branch's head (only tasks.md changed after):
+  `just check` 0 (5821 + 158 tests; windows-lint skipped on macOS as the justfile says). `core_machine_live_test.sh`
+  with `CORE_MACHINE_PARTS="link fleet"` (the new part switch), a copied debug binary: V26, PR A/B's link part (V1,
+  V8, V27, V28, V31, V33, V34, V35, V36, M2) and the fleet part (E.1, V18, V31 exec part, V32, `--dial` over
+  `auth_failed`) passed; nothing left running or in the passwd-home state. Not run: the panes and lease parts
+  (V3, V38, V11 take 5, 10 and 15 min and nothing in them changed), `core_live_test.sh`, the default-session
+  script, the bench (no render, layout, PTY or detection work added) and CI (not pushed).
 
 ## R. Rollout (both Macs in one step)
 
