@@ -14,7 +14,8 @@
 # V30 (an idle view sends nothing but CREDIT for 60 s; when the far herdr
 # drops, core keeps the far size), V17 (closing a pane in the view and
 # stopping the view leave the far program and pane as they were), D4's
-# `--remote core:<machine>`.
+# `--remote core:<machine>`; M2 and L3.4 (one view per machine, a newer client
+# restarts it).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +36,7 @@ FRAMES="$BASE/frames.log"
 FAR_API="$BASE/fc/herdr-dev/sessions/far/herdr.sock"
 VIEW_SOCK="$BASE/c/herdr-dev/sessions/vw/herdr-view-loop.sock"
 VIEW_LOG="$BASE/c/herdr-dev/sessions/vw/herdr-view-loop.log"
+VIEW_LOCK="$BASE/c/herdr-dev/sessions/vw/herdr-view-loop.lock"
 FAR_LOG_DIR="$BASE/fc/herdr-dev/sessions/far"
 VIEW_PID=""
 PROXY_PID=""
@@ -51,10 +53,23 @@ hc_near() { near HC_SESSION="$NEAR_CORE" hc "$@"; }
 hc_far() { far HC_SESSION="$FAR_CORE" hc "$@"; }
 tm() { tmux -L "$TMUX_SOCK" -f /dev/null "$@"; }
 
+# The pid a running view wrote into its lock (a view a client started
+# through the daemon launcher), checked to be a herdr.
+lock_pid() {
+  python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$VIEW_LOCK" 2>/dev/null
+}
+stop_locked_view() {
+  local pid
+  pid="$(lock_pid)"
+  [[ -n "$pid" ]] && ps -o comm= -p "$pid" 2>/dev/null | grep -q herdr && kill "$pid" 2>/dev/null
+  return 0
+}
+
 cleanup() {
   set +e
   tm kill-server >/dev/null 2>&1
   [[ -n "$VIEW_PID" ]] && kill "$VIEW_PID" 2>/dev/null
+  stop_locked_view
   far "$HERDR_BIN" --session far server stop >/dev/null 2>&1
   [[ -n "$FAR_PID" ]] && kill "$FAR_PID" 2>/dev/null
   [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null
@@ -240,7 +255,7 @@ FAR_ADDR="$(api_far "{\"id\":\"v\",\"method\":\"pane.get\",\"params\":{\"pane_id
   | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["pane"]["core_address"])')"
 [[ "$FAR_ADDR" =~ ^t[0-9]+$ ]] || fail "the far pane is not a core terminal: $FAR_ADDR"
 # Every byte the far program reads goes to a file: raw, so each key counts.
-api_far "$(python3 -I -c 'import json,sys; print(json.dumps({"id":"v","method":"pane.send_input","params":{"pane_id":sys.argv[1],"text":"stty raw -echo; exec cat > "+sys.argv[2],"keys":["Enter"]}}))' "$PANE" "$BASE/far-input.log")" >/dev/null
+api_far "$(python3 -I -c 'import json,sys; print(json.dumps({"id":"v","method":"pane.send_input","params":{"pane_id":sys.argv[1],"text":"stty raw -echo; printf '"'"'\\033[c\\033[6n'"'"'; exec cat > "+sys.argv[2],"keys":["Enter"]}}))' "$PANE" "$BASE/far-input.log")" >/dev/null
 far_cat() { [[ -f "$BASE/far-input.log" ]]; }
 wait_until "the far program" far_cat
 FAR_PROGRAM="$(far_pid "$FAR_ADDR")"
@@ -300,6 +315,17 @@ echo "ok: V15 the view follows the far tab and split"
 # --- V14: the view never resizes the far side ----------------------------
 FAR_SIZE0="$(far_size "$FAR_ADDR")"
 sleep 1
+# H1 (review): the far pane printed a DA and a DSR query before the view
+# attached, so they are in the history the view replayed; the far herdr
+# answered them. The view answers nothing: no stream frame but CREDIT from
+# it before the first key typed in it.
+python3 -I - "$FRAMES" <<'PY' || fail "H1: the view sent input before anyone typed in it"
+import sys
+rows = [line.split() for line in open(sys.argv[1]).read().splitlines()]
+sent = [r for r in rows if r[1] != "0" and r[2] not in ("1", "3")]
+print(f"H1: frames from the view before any key, other than CREDIT and RESIZE: {len(sent)}")
+raise SystemExit(0 if not sent else 1)
+PY
 mark="$(frame_count)"
 tm send-keys -t view -l "$(printf 'a%.0s' $(seq 1 50))"
 tm set-buffer -b vb "pasted-text"
@@ -395,5 +421,44 @@ sleep 1
 api_far "{\"id\":\"v\",\"method\":\"pane.get\",\"params\":{\"pane_id\":\"$PANE\"}}" >/dev/null \
   || fail "V17: the far pane is gone after the view stopped"
 echo "ok: V17 closing a pane in the view and stopping the view left far program $FAR_PROGRAM and pane $PANE"
+
+# --- M2, L3.4 (review): one view per machine; a newer client restarts it --
+view_client() {
+  tm new-session -d -s "$1" -x 170 -y 55 \
+    "$(printf '%q ' env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION \
+       -u TMUX -u HC_SOCKET -u HC_SESSION XDG_CONFIG_HOME="$BASE/c" XDG_RUNTIME_DIR="$BASE/r" \
+       XDG_STATE_HOME="$BASE/s" TERM=xterm-256color HERDR_NO_MACHINE_LEASES=1 SHELL=/bin/sh \
+       "$HERDR_BIN" --session vw --remote core:loop) 2>$BASE/$1.err"
+}
+view_client m2a
+locked() { [[ -n "$(lock_pid)" ]] && kill -0 "$(lock_pid)" 2>/dev/null && [[ -S "$VIEW_SOCK" ]]; }
+WAIT_TRIES=600 wait_until "a view the client started" locked
+FIRST_VIEW="$(lock_pid)"
+log_bytes="$(wc -c < "$VIEW_LOG" | tr -d ' ')"
+code=0
+near "$HERDR_BIN" --session vw server --view loop >"$BASE/second.out" 2>&1 || code=$?
+[[ "$code" == 1 ]] && grep -q "already running" "$BASE/second.out" \
+  || fail "L3.4: a second view of loop gave $code: $(cat "$BASE/second.out")"
+[[ "$(lock_pid)" == "$FIRST_VIEW" ]] || fail "L3.4: the second start rewrote the lock"
+(( $(wc -c < "$VIEW_LOG" | tr -d ' ') >= log_bytes )) || fail "L3.4: the second start cut the view's log"
+echo "ok: L3.4 a second view of loop exited 1 and left the running view $FIRST_VIEW, its lock and its log"
+# The running view says it is an older build: the next client restarts it.
+printf '{"version":"0.0.1","pid":%s}' "$FIRST_VIEW" > "$VIEW_LOCK"
+view_client m2b
+restarted() { [[ -n "$(lock_pid)" && "$(lock_pid)" != "$FIRST_VIEW" ]] && ! kill -0 "$FIRST_VIEW" 2>/dev/null && [[ -S "$VIEW_SOCK" ]]; }
+WAIT_TRIES=600 wait_until "the newer client's restart of the view" restarted
+python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["version"] != "0.0.1" else 1)' "$VIEW_LOCK" \
+  || fail "M2: the restarted view did not record its build"
+second_view="$(lock_pid)"
+# A client of the same build uses the view as it is.
+view_client m2c
+sleep 3
+[[ "$(lock_pid)" == "$second_view" ]] && kill -0 "$second_view" 2>/dev/null \
+  || fail "M2: a client of the same build restarted the view"
+[[ "$(far_pid "$FAR_ADDR")" == "$FAR_PROGRAM" ]] || fail "M2: the restart ended the far program"
+echo "ok: M2 a newer client restarted view $FIRST_VIEW as $second_view; a client of its build kept it; far program $FAR_PROGRAM ran on"
+# m2a ran on the view that was restarted, so it may have ended already.
+for session in m2a m2b m2c; do tm kill-session -t "$session" 2>/dev/null || true; done
+stop_locked_view
 
 echo "core view live test: all checks passed"
