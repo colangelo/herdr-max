@@ -1034,7 +1034,15 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
     document: `closing the last pane of <workspace> on <m> is not done from a view; close it there`. Test:
     `the_last_pane_of_a_far_workspace_is_not_closed_from_a_view` (fails with either check reverted). Security M1
     (the far herdr checking the terminal under its own lock) is a next change, recorded in D7.
-  Gates: pending.
+  Gates, m4m, 2026-11-23, under the shared lock: targeted `view core_machine` tests green (306), the 12 revert
+  checks above each failing their test (R9's after the check's full 40 s sleep); `just check` 0 on 78bc24e3 (6009 +
+  158 tests; windows-lint skipped on macOS; only this tasks.md changed after); on a debug binary of 78bc24e3 copied
+  out of the shared target, `core_view_live_test.sh` (V30_IDLE_SECS=20; V17 refused with the notice, nothing typed
+  after `prefix x`) and `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (the M5 close, far pane w1:p2, t2,
+  passed the instance check over herdr's own link and ended its program; the other far panes as they were). Not
+  run: the panes, link and lease parts (nothing in them changed), the bench (no render, layout, PTY or detection
+  work added: the numbering and hold change runs once per far document, the aim check off the loop), CI (not
+  pushed).
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
