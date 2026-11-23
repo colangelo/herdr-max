@@ -964,13 +964,14 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
             // Input is gated until Local's active surface is ready, and that readiness can lag
             // the first rendered frame (the unavailable remote must not extend the wait). Retry
             // the write instead of assuming a single write lands, matching the recovered-Local
-            // path below.
+            // path below, with a line a fragment cannot break (see the note above
+            // REMOTE_READY_TIMEOUT).
             assert!(wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
-                if read_output(&output).contains("LOCAL_DIRECT_READY") {
+                if read_output(&output).contains("LOCAL_DIRECT-READY") {
                     return true;
                 }
                 input
-                    .write_all(b"printf 'LOCAL_%s\\n' DIRECT_READY\r")
+                    .write_all(b"echo LOCAL_DIRECT$herdr_test_unset-READY\r")
                     .unwrap();
                 false
             }), "Local must accept input without waiting for SSH (remote selected: {select_remote}): {}", read_output(&output));
@@ -987,6 +988,12 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
         cleanup_test_base(&base);
     }
 }
+
+// The input loops in these tests retype a line until its output appears. Keys are gated one at
+// a time while a surface is not ready, so a retry can reach the shell as a fragment of its line.
+// The lines therefore hold no quotes, braces or operators: a fragment of a quoted line leaves
+// the shell inside a continuation that no later full line closes, and every retry after it is
+// swallowed. `$herdr_test_unset` expands to nothing, so the output differs from the echoed line.
 
 /// CI runners are heavily loaded, and a saved remote can need several connection
 /// attempts plus activation retries (each activation phase has its own deadline)
@@ -1110,18 +1117,17 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         );
         assert!(
             wait_until(REMOTE_INPUT_TIMEOUT, Duration::from_millis(100), || {
-                if screen_text().contains(&format!("REMOTE_ALIVE_INPUT_{cycle}")) {
+                if screen_text().contains(&format!("REMOTE_ALIVE-INPUT-{cycle}")) {
                     return true;
                 }
-                write!(
-                    input,
-                    "printf 'REMOTE_%s_INPUT_{cycle}\\n' \"$reconnect_survivor\"\r"
-                )
-                .unwrap();
+                write!(input, "echo REMOTE_$reconnect_survivor-INPUT-{cycle}\r").unwrap();
                 false
             }),
-            "remote reconnect {cycle} must restore visible input and preserve the shell: {}",
-            screen_text()
+            "remote reconnect {cycle} must restore visible input and preserve the shell: {}\n\
+             remote pane history:\n{}\nssh commands:\n{}",
+            screen_text(),
+            remote_pane_history(&remote_api, remote_pane),
+            fs::read_to_string(&ssh_commands).unwrap_or_default()
         );
     }
 
@@ -1149,11 +1155,11 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     drop(local);
     assert!(
         wait_until(REMOTE_INPUT_TIMEOUT, Duration::from_millis(20), || {
-            if screen_text().contains("REMOTE_SURVIVED") {
+            if screen_text().contains("REMOTE-SURVIVED") {
                 return true;
             }
             input
-                .write_all(b"printf 'REMOTE_%s\\n' SURVIVED\r")
+                .write_all(b"echo REMOTE$herdr_test_unset-SURVIVED\r")
                 .unwrap();
             false
         }),
@@ -1221,11 +1227,11 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         );
         assert!(
             wait_until(Duration::from_secs(3), Duration::from_millis(100), || {
-                if screen_text().contains("LOCAL_INPUT_WHILE_REMOTE_STALLED") {
+                if screen_text().contains("LOCAL_INPUT-WHILE_REMOTE_STALLED") {
                     return true;
                 }
                 input
-                    .write_all(b"printf 'LOCAL_%s\\n' INPUT_WHILE_REMOTE_STALLED\r")
+                    .write_all(b"echo LOCAL_INPUT$herdr_test_unset-WHILE_REMOTE_STALLED\r")
                     .unwrap();
                 false
             }),
@@ -1275,11 +1281,11 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     // A coherent frame precedes the final host-effects fence; input stays gated until then.
     assert!(
         wait_until(REMOTE_INPUT_TIMEOUT, Duration::from_millis(100), || {
-            if screen_text().contains("LOCAL_INPUT_RECOVERED") {
+            if screen_text().contains("LOCAL_INPUT-RECOVERED") {
                 return true;
             }
             input
-                .write_all(b"printf 'LOCAL_%s\\n' INPUT_RECOVERED\r")
+                .write_all(b"echo LOCAL_INPUT$herdr_test_unset-RECOVERED\r")
                 .unwrap();
             false
         }),
@@ -1452,6 +1458,20 @@ fn wait_for_pane_terminal_title(socket_path: &PathBuf, pane_id: &str, expected: 
         thread::sleep(Duration::from_millis(20));
     }
     panic!("pane {pane_id} did not report terminal title {expected:?}");
+}
+
+/// The pane's recent lines as its own server holds them, for a failure message: the client's
+/// screen shows only the last rows, not the input that put the shell in its state.
+fn remote_pane_history(socket_path: &PathBuf, pane_id: &str) -> String {
+    let request = serde_json::json!({
+        "id": "pane-history",
+        "method": "pane.read",
+        "params": {"pane_id": pane_id, "source": "recent", "lines": 400},
+    });
+    let response = send_json_request(socket_path, &request.to_string());
+    response["result"]["read"]["text"]
+        .as_str()
+        .map_or_else(|| response.to_string(), str::to_string)
 }
 
 fn send_pane_shell_command(socket_path: &PathBuf, pane_id: &str, command: &str) {
