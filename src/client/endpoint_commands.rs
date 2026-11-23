@@ -9,7 +9,7 @@ use crate::protocol::ClientMessage;
 use super::endpoint::{ClientEndpointId, EndpointRegistry, EndpointSendOutcome};
 use super::shell::ClientShellEndpointError;
 
-const ENDPOINT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const ENDPOINT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RETIRED_REQUESTS_PER_ENDPOINT: usize = 128;
 
 struct QueuedCommand {

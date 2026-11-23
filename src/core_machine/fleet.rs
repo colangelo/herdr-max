@@ -753,6 +753,19 @@ fn far_herdr(
     session: &str,
     linked: &str,
 ) -> Result<FarHerdr, String> {
+    far_herdr_within(core, name, dir, session, linked, PROBE_SECS)
+}
+
+/// `far_herdr` with a probe that runs `probe_secs` at most (a view's
+/// action has a budget of its own, `fleet::view`).
+fn far_herdr_within(
+    core: &CoreAt,
+    name: &MachineName,
+    dir: &MachineDir,
+    session: &str,
+    linked: &str,
+    probe_secs: u64,
+) -> Result<FarHerdr, String> {
     let now = now_unix();
     let far = match cached_far_herdr(dir).filter(|cached| {
         cached.session == session
@@ -760,7 +773,7 @@ fn far_herdr(
             && (0.0..FAR_HERDR_TTL_SECS).contains(&(now - cached.probed_at))
     }) {
         Some(cached) => cached,
-        None => probe_far_herdr(core, name, dir, session)?,
+        None => probe_far_herdr(core, name, dir, session, probe_secs)?,
     };
     check_far_session(name, &far, linked)?;
     Ok(far)
@@ -771,6 +784,7 @@ fn probe_far_herdr(
     name: &MachineName,
     dir: &MachineDir,
     session: &str,
+    probe_secs: u64,
 ) -> Result<FarHerdr, String> {
     let link = dir.read_dial_record();
     let mut argv = core::machine_env_wrapper();
@@ -782,7 +796,7 @@ fn probe_far_herdr(
     argv.extend(binary_names());
     // The probe runs before the request is sent: none of its failures may
     // say that the request may have run (#310).
-    let done = exec(core, name, &argv, None, PROBE_SECS).map_err(|failure| {
+    let done = exec(core, name, &argv, None, probe_secs).map_err(|failure| {
         format!(
             "could not find the herdr on {name}: {}; the request was not sent",
             failure.message()

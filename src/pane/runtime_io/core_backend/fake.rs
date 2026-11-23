@@ -49,7 +49,15 @@ pub(crate) struct FakeConfig {
     pub exec_error: Option<Value>,
     /// `doc.get`'s `value`, whatever the name asked for.
     pub doc_value: Value,
+    /// When set, answers each `machine.exec` from its params (instead of
+    /// `exec_reply`), at the moment core gets it: a test sees what the
+    /// caller had written by then, and can answer each run its own way.
+    pub exec_handler: Option<ExecHandler>,
 }
+
+/// What a test's `machine.exec` handler is: the call's params in, core's
+/// `ExecResult` out.
+pub(crate) type ExecHandler = Arc<dyn Fn(&Value) -> Value + Send + Sync>;
 
 impl Default for FakeConfig {
     fn default() -> Self {
@@ -71,6 +79,7 @@ impl Default for FakeConfig {
             stall_on: Vec::new(),
             exec_error: None,
             doc_value: Value::Null,
+            exec_handler: None,
         }
     }
 }
@@ -437,6 +446,13 @@ fn answer(
         "machine.exec" if config.exec_error.is_some() => {
             (Err(config.exec_error.clone().unwrap_or_default()), None)
         }
+        "machine.exec" if config.exec_handler.is_some() => (
+            Ok(config
+                .exec_handler
+                .as_ref()
+                .map_or(Value::Null, |handler| handler(params))),
+            None,
+        ),
         "machine.exec" => (
             Ok(config.exec_reply.clone().unwrap_or_else(|| {
                 json!({"stdout": "", "stderr": "", "truncated": false, "timed_out": false,

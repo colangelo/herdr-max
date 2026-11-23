@@ -21,6 +21,8 @@ mod config_reload;
 mod direct_graphics;
 pub(crate) mod endpoint;
 mod endpoint_commands;
+#[cfg(unix)]
+pub(crate) use endpoint_commands::ENDPOINT_COMMAND_TIMEOUT;
 mod errors;
 mod events;
 mod frame_output;

@@ -1,7 +1,12 @@
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 use super::*;
 use crate::api::schema::{PaneTarget, SplitDirection};
+use crate::core_machine::fleet::view::tests::{added, far_ok, input_of};
+use crate::core_machine::fleet::view::ViewRoute;
+use crate::pane::FakeCore;
 
 fn app() -> App {
     let mut app = App::new(
@@ -371,4 +376,50 @@ fn a_primary_server_sends_nothing_far() {
         }))
         .expect_err("not a view");
     assert!(err.contains("not a view"), "{err}");
+}
+
+// Review M5, the seam: the view's close of a pane goes through its route
+// (a fake core here, herdr's state in a scratch folder), exactly to the
+// far pane named; the far reply is the client's answer.
+#[test]
+fn a_views_close_reaches_the_far_pane_it_aimed_at() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, dir) = added("view-forward");
+    let mut app = app();
+    app.view
+        .as_mut()
+        .unwrap()
+        .set_route(ViewRoute::at(&core.socket, root.clone()));
+    let (respond_to, rx) = std::sync::mpsc::channel();
+    app.forward_view_action(
+        Request {
+            id: "endpoint:1".into(),
+            method: Method::PaneClose(PaneCloseParams {
+                pane_id: "w3:p2".into(),
+                force: false,
+            }),
+        },
+        respond_to,
+    );
+    let answer = reply(
+        &rx.recv_timeout(std::time::Duration::from_secs(20))
+            .expect("an answer"),
+    );
+    assert_eq!(
+        answer,
+        json!({"id": "endpoint:1", "result": {"type": "ok"}})
+    );
+    let execs: Vec<Value> = core
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "machine.exec")
+        .collect();
+    assert_eq!(execs.len(), 1);
+    let sent = input_of(&execs[0]["params"]);
+    assert_eq!(sent["method"], "pane.close");
+    assert_eq!(sent["params"]["pane_id"], "w3:p2");
+    assert_ne!(sent["params"]["force"], true);
+    assert!(dir.leases().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }

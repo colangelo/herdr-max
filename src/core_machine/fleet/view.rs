@@ -11,58 +11,114 @@
 //! it is no dial: on a machine that is not connected it is refused at once,
 //! with nothing written, sent or dialled (D7's rule for a call without
 //! `--dial`); a key in one of the view's panes is what wakes it (D6). On a
-//! connected machine the view's own `cli-<pid>` keep lease holds the link
-//! for the call and admits no dial, so a drop during it is not redialled on
-//! its account. A refusal or a far error is the action's own answer: the
-//! client shows it as a notice and the view stays connected.
+//! connected one the view's own `cli-<pid>` keep lease holds the link for
+//! the call and admits no dial, so a drop during it is not redialled on its
+//! account. A refusal or a far error is the action's own answer: the client
+//! shows it as a notice and the view stays connected.
+//!
+//! Time (review M3): the client waits 60 s for an endpoint command, holding
+//! its command lane meanwhile (one command in flight per endpoint, by the
+//! lane's design), and a client that gave up could do the action again. So
+//! an action has one deadline, `VIEW_ACTION_BUDGET` (45 s) from the moment
+//! the view took it, and every step fits in it: no wait for another action
+//! (a second one at once is refused, nothing sent), core's `machine.list`
+//! (5 s), the far herdr probe when its answer is stale (12 s and core's 5),
+//! the check that the far pane is still the one aimed at (one `doc.get`,
+//! 5 s), and the request, whose run is what is left, 15 s at most and 5 s
+//! at least, else nothing is sent.
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
+use std::time::{Duration, Instant};
 
 use super::{
-    bridge_argv, check_request_line, far_herdr, far_herdr_session, lock, CoreAt, FarRoute,
+    bridge_argv, check_request_line, far_herdr_session, far_herdr_within, CoreAt, FarRoute,
+    CALL_MARGIN_SECS,
 };
 use crate::core_machine::state::{now_unix, passwd_machines_root, LeaseHolder, MachineDir};
 use crate::core_machine::MachineName;
 
-/// How long the far herdr gets for one action, so the far herdr probe
-/// (when its answer is stale) and the action both end within the client's
-/// own 60 s wait for an endpoint command.
-pub(crate) const VIEW_ACTION_SECS: u64 = 20;
+/// The whole of one view action, from the moment the view took it to its
+/// answer: well inside the client's own 60 s wait for an endpoint command.
+pub(crate) const VIEW_ACTION_BUDGET: Duration = Duration::from_secs(45);
+/// The far herdr probe's run, when its kept answer is stale.
+const VIEW_PROBE_SECS: u64 = 12;
+/// The far document's read for the aimed-at check (`view_link`'s call).
+const VIEW_CHECK_SECS: u64 = 5;
+/// The request's run: what the budget leaves, at most this.
+const VIEW_REQUEST_SECS: u64 = 15;
+/// Less than this left for the request: it is not sent.
+const VIEW_REQUEST_MIN_SECS: u64 = 5;
+
+// The view answers before the client gives up, with room for the client's
+// own queue and the socket (review M3).
+const _: () =
+    assert!(VIEW_ACTION_BUDGET.as_secs() + 10 <= crate::client::ENDPOINT_COMMAND_TIMEOUT.as_secs());
 
 /// The view's keep lease lives this long past each write: a CLI lease's
-/// 60 s, longer than the probe (30 s and core's 5 s) and the request (20 s
-/// and 5 s), before each of which it is written.
+/// 60 s, longer than the whole action.
 const VIEW_LEASE_SECS: f64 = super::LEASE_LIFE_SECS;
 
 /// One action at a time in a view process: they share its one lease file.
+/// A second is refused, never queued (review M3).
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// Sends one API request line (`{"id", "method", "params"}` and a newline)
-/// to the far herdr of `machine` and returns its one reply line, or why
-/// there is none: refused unsent, or failed after sending (then the message
-/// says that it may have run there).
-pub(crate) fn send(machine: &MachineName, line: &[u8]) -> Result<Vec<u8>, String> {
-    send_at(
-        &CoreAt::primary(),
-        passwd_machines_root(),
-        machine,
-        line,
-        &LeaseHolder::cli(std::process::id()),
-    )
+/// Where a view's actions go: the primary core, herdr's machine state and
+/// the view's lease holder. A test points them at a fake core and a
+/// scratch folder.
+#[derive(Clone)]
+pub(crate) struct ViewRoute {
+    core: CoreAt,
+    root: Result<PathBuf, String>,
+    holder: LeaseHolder,
 }
 
-pub(super) fn send_at(
-    core: &CoreAt,
-    root: io::Result<PathBuf>,
+impl ViewRoute {
+    pub(crate) fn primary() -> Self {
+        Self {
+            core: CoreAt::primary(),
+            root: passwd_machines_root().map_err(|err| err.to_string()),
+            holder: LeaseHolder::cli(std::process::id()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(socket: &std::path::Path, root: PathBuf) -> Self {
+        Self {
+            core: CoreAt::at(socket),
+            root: Ok(root),
+            holder: LeaseHolder::cli(std::process::id()),
+        }
+    }
+}
+
+/// Sends one API request line (`{"id", "method", "params"}` and a newline)
+/// to the far herdr of `name` and returns its one reply line, or why there
+/// is none: refused unsent, or failed after sending (then the message says
+/// that it may have run there). `check` runs just before the request: the
+/// far pane the person aimed at is still that one (review M2), else nothing
+/// is sent. Everything ends by `deadline`.
+pub(crate) fn send(
+    route: &ViewRoute,
     name: &MachineName,
     line: &[u8],
-    holder: &LeaseHolder,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<(), String>,
 ) -> Result<Vec<u8>, String> {
-    let _one = lock(&ONE_AT_A_TIME);
     let not_sent = |why: String| format!("{why}; nothing was sent to {name}");
-    let root = root.map_err(|err| not_sent(format!("cannot find herdr's machine state: {err}")))?;
+    let _one = match ONE_AT_A_TIME.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            let why = format!("another action on {name} from this view is still running");
+            return Err(not_sent(format!("{why}; do this again when it ends")));
+        }
+    };
+    let root = route
+        .root
+        .clone()
+        .map_err(|err| not_sent(format!("cannot find herdr's machine state: {err}")))?;
     let dir = MachineDir::at(&root, name);
     if !dir.target_path().exists() {
         return Err(not_sent(format!("herdr here did not add {name}")));
@@ -78,6 +134,7 @@ pub(super) fn send_at(
             target.session
         ))
     })?;
+    let core = &route.core;
     let record = match core.record(name) {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -103,13 +160,28 @@ pub(super) fn send_at(
         return Err(not_connected(name, state));
     }
     check_request_line(name, line)?;
-    let lease = KeepLease::write(&dir, holder)
+    let out_of_time = || not_sent(format!("{name} took too long to answer before the request"));
+    // The probe (when stale), the check and the shortest request must fit.
+    let before_probe = (VIEW_PROBE_SECS + CALL_MARGIN_SECS)
+        + VIEW_CHECK_SECS
+        + (VIEW_REQUEST_MIN_SECS + CALL_MARGIN_SECS);
+    if left(deadline) < Duration::from_secs(before_probe) {
+        return Err(out_of_time());
+    }
+    let lease = KeepLease::write(&dir, &route.holder)
         .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
-    let far = far_herdr(core, name, &dir, &session, &target.session)?;
-    // Written again for the request: a probe may have taken 35 s of it.
+    let far = far_herdr_within(core, name, &dir, &session, &target.session, VIEW_PROBE_SECS)?;
+    if left(deadline)
+        < Duration::from_secs(VIEW_CHECK_SECS + VIEW_REQUEST_MIN_SECS + CALL_MARGIN_SECS)
+    {
+        return Err(out_of_time());
+    }
+    check().map_err(not_sent)?;
+    // Written again for the request: the probe may have taken some of it.
     lease
         .write_again()
         .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
+    let run = request_secs(left(deadline)).ok_or_else(out_of_time)?;
     let argv = bridge_argv(&far, &session);
     FarRoute {
         core,
@@ -118,7 +190,21 @@ pub(super) fn send_at(
         argv: &argv,
         far_path: &far.path,
     }
-    .send(line, VIEW_ACTION_SECS)
+    .send(line, run)
+}
+
+fn left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// The request's run with `left` of the budget: what core's answer leaves,
+/// at most `VIEW_REQUEST_SECS`; `None` below `VIEW_REQUEST_MIN_SECS`.
+fn request_secs(left: Duration) -> Option<u64> {
+    let run = left
+        .as_secs()
+        .saturating_sub(CALL_MARGIN_SECS)
+        .min(VIEW_REQUEST_SECS);
+    (run >= VIEW_REQUEST_MIN_SECS).then_some(run)
 }
 
 /// Why an action on a machine that is not connected is refused: nothing
@@ -137,7 +223,7 @@ fn not_connected(name: &MachineName, state: &str) -> String {
 
 /// The view's `cli-<pid>` keep lease for one action: written before the
 /// probe and again before the request, removed when the action ends. No
-/// renewer runs: each part ends within its minute, and a view killed
+/// renewer runs: the whole action ends within its 45 s, and a view killed
 /// during one leaves a lease that keeps an up link a minute at most and
 /// admits no dial. No termination handler is put in the view server for it
 /// (the fleet CLI's would end the server on SIGHUP).
@@ -168,236 +254,4 @@ impl Drop for KeepLease<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use base64::Engine as _;
-    use serde_json::{json, Value};
-
-    use super::*;
-    use crate::core_machine::fleet::FarHerdr;
-    use crate::core_machine::state::{tests::scratch, write_atomic, DialRecord, Target};
-    use crate::pane::core_machines as core;
-    use crate::pane::FakeCore;
-
-    fn machine() -> MachineName {
-        MachineName::parse("loop").expect("name")
-    }
-
-    fn far() -> FarHerdr {
-        FarHerdr {
-            link_at: 100.5,
-            link_pid: 31,
-            probed_at: now_unix(),
-            session: "default".into(),
-            path: "/opt/homebrew/bin/herdr".into(),
-            version: Some("0.9.3".into()),
-            protocol: Some(30),
-            endpoint_capabilities: Vec::new(),
-            core_session: Some("default".into()),
-            request_bridge: true,
-        }
-    }
-
-    /// A machine herdr added, linked now, whose far herdr was probed on
-    /// this link (so the action is the only exec).
-    fn added(tag: &str) -> (PathBuf, MachineDir) {
-        let root = scratch(tag);
-        let dir = MachineDir::at(&root, &machine());
-        dir.create().expect("create");
-        dir.write_target(&Target {
-            target: "ac@loop".into(),
-            session: "default".into(),
-            ssh: "/usr/bin/ssh".into(),
-            ssh_config: None,
-            ssh_auth_sock: None,
-            via: None,
-        })
-        .expect("target");
-        dir.write_dial_record(&DialRecord { at: 100.5, pid: 31 })
-            .expect("dial");
-        write_atomic(
-            &dir.far_herdr_path(),
-            &serde_json::to_vec(&far()).expect("json"),
-        )
-        .expect("probe");
-        (root, dir)
-    }
-
-    fn b64(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
-    fn execs(core: &FakeCore) -> Vec<Value> {
-        core.requests()
-            .into_iter()
-            .filter(|request| request["method"] == "machine.exec")
-            .collect()
-    }
-
-    fn holder() -> LeaseHolder {
-        LeaseHolder::cli(std::process::id())
-    }
-
-    // V20 (D7, D11): a workspace named `$(touch x); w`, renamed from a
-    // view. The argv is the fixed wrapper and far bridge, with no shell in
-    // it and no element built from the name; the name is one JSON string of
-    // the request the bridge reads as its input, so nothing there parses it
-    // as script or as an option.
-    #[test]
-    fn v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line() {
-        let name = "$(touch x); w";
-        let request = json!({"id": "view:1", "method": "workspace.rename",
-                             "params": {"workspace_id": "w3", "label": name}});
-        let line = format!("{request}\n").into_bytes();
-        let far_reply = b"{\"id\":\"view:1\",\"result\":{\"type\":\"ok\"}}\n";
-        let core = FakeCore::start_with(|config| {
-            config.exec_reply = Some(json!({"stdout": b64(far_reply), "stderr": "",
-                "truncated": false, "timed_out": false, "ms": 3, "code": 0}))
-        });
-        core.set_machine("loop", "connected");
-        let (root, dir) = added("view-v20");
-
-        let reply = send_at(
-            &CoreAt::at(&core.socket),
-            Ok(root.clone()),
-            &machine(),
-            &line,
-            &holder(),
-        )
-        .expect("sent");
-        assert_eq!(reply, far_reply);
-
-        let sent = execs(&core);
-        assert_eq!(sent.len(), 1, "one exec, the action");
-        let params = &sent[0]["params"];
-        assert_eq!(params["on"], "loop");
-        assert_eq!(params["timeout"], VIEW_ACTION_SECS);
-        let argv: Vec<String> = serde_json::from_value(params["argv"].clone()).expect("argv");
-        let mut expected = core::machine_env_wrapper();
-        expected.extend(
-            [
-                "/opt/homebrew/bin/herdr",
-                "--session",
-                "default",
-                "remote-api-bridge",
-                "--request",
-            ]
-            .map(String::from),
-        );
-        assert_eq!(argv, expected);
-        assert!(
-            !argv.iter().any(|arg| arg == "sh"
-                || arg.ends_with("/sh")
-                || arg == "-c"
-                || arg.contains("touch")),
-            "no shell and no name in the argv: {argv:?}"
-        );
-        let input = base64::engine::general_purpose::STANDARD
-            .decode(params["input"].as_str().expect("input"))
-            .expect("base64");
-        assert_eq!(input, line, "the request line, byte for byte");
-        let sent_request: Value = serde_json::from_slice(&input).expect("json");
-        assert_eq!(sent_request["params"]["label"], name, "one string");
-
-        assert!(
-            !core
-                .methods()
-                .iter()
-                .any(|method| method == "machine.connect"),
-            "an action never dials"
-        );
-        assert!(dir.leases().is_empty(), "the action's lease is gone");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // D7, D3: an action on a machine that is not connected is refused at
-    // once: no lease, no exec, no dial; a key in a pane is what wakes it.
-    #[test]
-    fn an_action_on_a_dormant_machine_refuses_and_dials_nothing() {
-        let core = FakeCore::start();
-        core.set_machine("loop", "dormant");
-        let (root, dir) = added("view-dormant");
-        let line = b"{\"id\":\"view:2\",\"method\":\"tab.create\",\"params\":{\"focus\":false}}\n";
-        let err = send_at(
-            &CoreAt::at(&core.socket),
-            Ok(root.clone()),
-            &machine(),
-            line,
-            &holder(),
-        )
-        .expect_err("refused");
-        assert!(err.contains("loop is dormant: press a key"), "{err}");
-        assert!(
-            err.contains("nothing was sent and nothing dialled"),
-            "{err}"
-        );
-        assert!(execs(&core).is_empty());
-        assert!(!core
-            .methods()
-            .iter()
-            .any(|method| method == "machine.connect"));
-        assert!(dir.leases().is_empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // A far error is a reply like any other (the far herdr ran and said
-    // no): passed on whole, for the view to make it the action's notice.
-    #[test]
-    fn a_far_refusal_comes_back_as_the_reply() {
-        let far_reply =
-            b"{\"id\":\"view:3\",\"error\":{\"code\":\"unknown_method\",\"message\":\"unknown method: tab.create\"}}\n";
-        let core = FakeCore::start_with(|config| {
-            config.exec_reply = Some(json!({"stdout": b64(far_reply), "stderr": "",
-                "truncated": false, "timed_out": false, "ms": 3, "code": 0}))
-        });
-        core.set_machine("loop", "connected");
-        let (root, _dir) = added("view-far-error");
-        let line = b"{\"id\":\"view:3\",\"method\":\"tab.create\",\"params\":{\"focus\":false}}\n";
-        let reply = send_at(
-            &CoreAt::at(&core.socket),
-            Ok(root.clone()),
-            &machine(),
-            line,
-            &holder(),
-        )
-        .expect("a reply");
-        assert_eq!(reply, far_reply);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // The view's lease for an action keeps the link and admits no dial,
-    // and goes when the action ends.
-    #[test]
-    fn the_actions_lease_keeps_the_link_and_admits_no_dial() {
-        let (root, dir) = added("view-lease");
-        let holder = holder();
-        {
-            let _lease = KeepLease::write(&dir, &holder).expect("lease");
-            let leases = dir.leases();
-            assert_eq!(leases.len(), 1);
-            assert_eq!(leases[0].holder, holder);
-            assert!(!leases[0].dials, "a view action's lease admits a dial");
-        }
-        assert!(dir.leases().is_empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // A name herdr did not add, or a missing state folder, sends nothing.
-    #[test]
-    fn a_machine_herdr_did_not_add_gets_nothing() {
-        let core = FakeCore::start();
-        core.set_machine("loop", "connected");
-        let root = scratch("view-not-added");
-        let line = b"{\"id\":\"view:4\",\"method\":\"tab.create\",\"params\":{\"focus\":false}}\n";
-        let err = send_at(
-            &CoreAt::at(&core.socket),
-            Ok(root.clone()),
-            &machine(),
-            line,
-            &holder(),
-        )
-        .expect_err("refused");
-        assert!(err.contains("herdr here did not add loop"), "{err}");
-        assert!(execs(&core).is_empty());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-}
+pub(crate) mod tests;

@@ -59,6 +59,9 @@ pub(crate) struct ViewApp {
     /// one must reach neither, so such a pane takes none until a person
     /// clicks it or focuses it again.
     held: HashSet<PaneId>,
+    /// Where the view's structural actions go (E.3); the primary core and
+    /// herdr's own machine state unless a test points it elsewhere.
+    route: Option<crate::core_machine::fleet::view::ViewRoute>,
 }
 
 impl ViewApp {
@@ -76,6 +79,7 @@ impl ViewApp {
             notice: None,
             bound: HashMap::new(),
             held: HashSet::new(),
+            route: None,
         }
     }
 
@@ -83,6 +87,17 @@ impl ViewApp {
     /// the far document named it.
     pub(crate) fn far_pane(&self, pane_id: PaneId) -> Option<&str> {
         self.far_panes.get(&pane_id).map(String::as_str)
+    }
+
+    pub(crate) fn route(&self) -> crate::core_machine::fleet::view::ViewRoute {
+        self.route
+            .clone()
+            .unwrap_or_else(crate::core_machine::fleet::view::ViewRoute::primary)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_route(&mut self, route: crate::core_machine::fleet::view::ViewRoute) {
+        self.route = Some(route);
     }
 
     fn address(&self, terminal: &str) -> String {

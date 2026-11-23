@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use super::App;
 use crate::api::schema::{
@@ -17,6 +18,7 @@ use crate::api::schema::{
     PaneSplitParams, Request, ResponseResult, SuccessResponse, TabCreateParams, TabRenameParams,
     WorkspaceRenameParams,
 };
+use crate::core_machine::fleet::view::VIEW_ACTION_BUDGET;
 use crate::core_machine::MachineName;
 
 /// The code of an action the view could not send, the far side did not
@@ -141,16 +143,21 @@ impl App {
 
     /// Sends the structural action `request` of a view to the far herdr,
     /// off the loop (D7, E.3), and answers `respond_to` with the far reply
-    /// or why there is none. Never dials: a machine that is not connected
-    /// refuses at once.
+    /// or why there is none, within `VIEW_ACTION_BUDGET` of now (review
+    /// M3). Never dials: a machine that is not connected refuses at once.
     pub(crate) fn forward_view_action(
         &self,
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
+        let deadline = Instant::now() + VIEW_ACTION_BUDGET;
         let id = request.id.clone();
         let method_name = request.method.operation().name;
-        let Some(machine) = self.view.as_ref().map(|view| view.machine.clone()) else {
+        let Some((machine, route)) = self
+            .view
+            .as_ref()
+            .map(|view| (view.machine.clone(), view.route()))
+        else {
             let _ = respond_to.send(error_response(id, NOT_DONE, "this is not a view"));
             return;
         };
@@ -169,7 +176,13 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("herdr-view-action".into())
             .spawn(move || {
-                let reply = crate::core_machine::fleet::view::send(&machine, &line);
+                let reply = crate::core_machine::fleet::view::send(
+                    &route,
+                    &machine,
+                    &line,
+                    deadline,
+                    &|| Ok(()),
+                );
                 let _ = thread_respond.send(client_reply(&machine, method_name, thread_id, reply));
             });
         if let Err(err) = spawned {
