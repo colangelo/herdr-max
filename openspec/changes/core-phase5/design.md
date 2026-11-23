@@ -258,8 +258,9 @@ by being alive).
   keeps the id its own herdr gave it (`w1:p1`), scoped by the endpoint as today's saved machines are.
 - Pane JSON and `pane.get` gain two optional fields: `machine` (absent for this Mac) and `core_address` (the full
   address as this core names it). Nothing existing changes meaning.
-- A link is `core_terminal {session, address}` as today, with the address qualified (`ac-mbm5/t7`) and the session
-  the local primary that added the machine.
+- A link is `{session, address}` as today, with the address qualified (`ac-mbm5/t7`) and the session the local
+  primary that added the machine. A session save writes it as `core_machine_terminal` (with the folder there),
+  never as `core_terminal`, so a build from before D5 does not take it for a local link (D5).
 - **Local scans see only local terminals (F1).** Once a machine is added, every `terminal.list` and
   `events.subscribe` answer of the primary also lists the far core's terminals, with the far herdr's own labels
   (`herdr.session=herdr`, `herdr.pane_id=w1:p1`, the same values as ours) and the far pids, and nothing but the

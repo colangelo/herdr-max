@@ -252,15 +252,18 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `core_live_test.sh`, the default-session script, the PR A/B parts, the bench (no render, layout, PTY or
   detection work added) and CI. Still open for the tick: CI green, and a full `just core-live-test`.
 - [x] C.8 Review findings on PR C (independent read-only review, 2026-11-22): W1, C1-C6, C8-C10 fixed, C7 left as
-  a limit; a second read (2026-11-23) found N1-N4 and C10's rest, all fixed (below); C5's check is replaced
+  a limit; a second read (2026-11-23) found N1-N4 and C10's rest, all fixed (below); a third round (2026-11-23,
+  the downgrade check live on beta 212) moved a machine pane's saved link out of `core_terminal` (N3); C5's check
+  is replaced
   W1: `LaunchExtra::from` builds a literal per target (Windows has no `on`, so the rest pattern was a needless
   update under `-D warnings`). C1: a respawn starts on this Mac, so `pane.respawn` and `pane.respawn_agent`
   refuse a pane on a machine (live, waiting or ended) with `pane_on_machine`, and `prepare_respawn` and
   `respawn_pane_agent` refuse it for every other path (the exit-action shell, the resume queue, the move);
   carrying the `MachineTarget` through a respawn was not taken: it needs the far program's own end first, which
   pid 0 cannot confirm. C2: an ended pane keeps its link as `CoreWaitReason::MachineEnded` (`machine_ended`), so
-  every save writes `core_terminal` and a restore asks core about that terminal again and starts nothing. C3:
-  `pane.split`, `tab.create` and `workspace.create` with `on` arm the machine poll. C4: a probe carries `read`;
+  every save writes its link (`core_machine_terminal` since C.8's third round, N3) and a restore asks core about
+  that terminal again and starts nothing. C3: `pane.split`, `tab.create` and `workspace.create` with `on` arm
+  the machine poll. C4: a probe carries `read`;
   one whose `machine.list` failed changes neither the machine's mark nor its panes. C5: a `not_found`, a
   non-live record or a label mismatch for a machine's terminal is final only while core lists the machine
   `connected` before and after the question (restore, the waiting attach and a live pane's reattach loop);
@@ -296,11 +299,29 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   does not, and every poll asks again; the live reattach loop retries on anything but a live or finished
   record; a stream CLOSE ends a machine pane only with a finished record or a suspend cause. Whatever ends a
   machine pane's stream sets keep-on-drop, so no automatic end sends `terminal.kill`; only a person's close of
-  a pane with a runtime does. N3: a saved machine pane has `cwd` `/dev/null/herdr-pane-on-a-core-machine` and
-  its folder in `core_terminal.machine_cwd`; the previous beta (origin/master 7c273562) then holds it as
-  `DirectoryUnavailable` and, after its search, shows "Saved directory is unavailable", never starting it
-  (characterization test of that build's decision on the new save; the save this branch wrote before started
-  the pane fresh there). N4: `move_facts` gives `on_machine` before any other refusal and `move_pane` refuses
+  a pane with a runtime does. N3: a saved machine pane has `cwd` `/dev/null/herdr-pane-on-a-core-machine`, and
+  its link is saved only as `core_machine_terminal` (`{session, address, machine_cwd}`: the same
+  `PaneCoreTerminalSnapshot` with no pid fields, which are the machine's), never as `core_terminal`, so the
+  previous beta (beta 212, origin/master 1087d68d) sees no link at all: a plain "Saved directory is
+  unavailable" pane, with no hold, no probe, no label search and no attach. Found live on beta 212
+  (2026-11-23, /tmp/dg212-variantB.log): with the link in `core_terminal` that build held the pane as
+  `DirectoryUnavailable`, got `NotOurs` for `ac-mbm5/t7`, ran `find_pane_core_terminals(session,
+  public_pane_id)` and attached a terminal of this Mac labelled with this herdr session and the pane's id.
+  `PaneSnapshot::core_link` is the one reader (restore, the live handoff's restore and `program_cwd`): it takes
+  `core_terminal`, else a `core_machine_terminal` whose address names a machine; one that names none is no link,
+  never a terminal of this Mac. A pane on this Mac saves byte for byte what it saved before. Tests:
+  `a_machine_link_is_saved_apart_from_a_local_one`, `a_saved_machine_pane_restores_waiting_for_its_machine`
+  (twice through restore and save, a labelled terminal of this Mac present, no `terminal.list`),
+  `a_saved_machine_pane_is_never_started_by_the_previous_beta` (beta 212's restore decision on the new save,
+  parsed with that build's field set: unavailable, no hold; the link in `core_terminal` was held and searched
+  for; the real folder started the pane fresh) and `a_machine_link_without_a_machine_is_no_link`, each checked
+  failing with its fix reverted. Live (2026-11-23, a copy of the installed beta 212, throwaway herdr session
+  `dg300x` and core session `herdr-dg300x`, scratch XDG folders, a local terminal labelled `herdr.pane_id=w1:p1`,
+  saves written by this build's `capture`; log /tmp/dg300-live-212.log): with the link moved back to
+  `core_terminal` (control) 212 attached the terminal within 10 s (resized 200x120 to 119x40) and ended it at
+  its stop; with `core_machine_terminal` it showed the pane "Saved directory is unavailable", and the terminal
+  kept its pid and size, never attached, and ran on after the stop. N4: `move_facts` gives `on_machine` before
+  any other refusal and `move_pane` refuses
   before any kill; `prepare_resume` refuses a machine pane, which waits for its machine with its suspension's
   link. C10: a machine's first link starts not connected. `CoreTerminalLink::machine()` parses through
   `CoreAddress`. Found on the way: every stop but a restart ended all core programs, so `herdr server stop`
@@ -314,9 +335,9 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `unavailable` and `needs_framed`; a stream CLOSE carries the finished record (or nothing for a drop).
   Limits: a machine pane that core never lists again waits forever (a person closes it, which sends nothing);
   the live reattach loop checks state, not labels, so a far core whose state was wiped and reused the address
-  would be attached; after a downgrade to a build before PR C the old build drops the pane's link from its next
-  save (rule R.0); a far program whose pane a stop kept, and whose next server never comes, runs on as an
-  orphan there.
+  would be attached; after a downgrade to a build before PR C the old build drops the pane's link
+  (`core_machine_terminal`, a field it does not know) from its next save (rule R.0); a far program whose pane a
+  stop kept, and whose next server never comes, runs on as an orphan there.
 
 ## PR D. The view server
 
@@ -345,10 +366,12 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 ## R. Rollout (both Macs in one step)
 
 - [ ] R.0 Rule: before rolling a Mac back to a build without PR C (downgrade or live handoff to it), close the panes
-  on core machines or move them (start them again with `--on` after). Since C.8's second round such a build never
-  starts a saved machine pane here (its `cwd` is a folder no host has, so it holds the pane as "Saved directory is
-  unavailable"), but it drops the pane's link from its next save: back on PR C the pane cannot attach, and its
-  program on the machine runs on with no pane (never killed). Stated in `docs/next` (connecting-machines).
+  on core machines or move them (start them again with `--on` after). Since C.8's third round such a build never
+  starts a saved machine pane here and never attaches a terminal of this Mac to it: the link is saved as
+  `core_machine_terminal`, which it does not read, and the `cwd` is a folder no host has, so it shows the pane as
+  "Saved directory is unavailable" with no hold and no search. But it drops the link from its next save: back on
+  PR C the pane cannot attach, and its program on the machine runs on with no pane (never killed). Stated in
+  `docs/next` (connecting-machines).
 
 - [ ] R.1 Open question 1: ac-mbm5's herdr publishes its spaces to its `default` core (ask on the desk if a config
   change is needed there)
