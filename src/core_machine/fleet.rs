@@ -23,7 +23,7 @@
 //!   says that the request may have run.
 //! - The far herdr's path and capabilities are read once per link
 //!   establishment (the link's dial record), kept in `far_herdr.json` for at
-//!   most 5 min, and forgotten when the far herdr stops answering the bridge.
+//!   most 5 min, and forgotten when a request through it fails there.
 //!
 //! The CLI reaches this through a local socket that speaks herdr's JSON API,
 //! one request per connection as the API does, so every CLI verb that works
@@ -1050,6 +1050,7 @@ impl Bridge {
                 // API that closed first) may still have run the request
                 // (#310): a failure, never an empty success.
                 if let Err(why) = whole_reply(&ran.stdout) {
+                    forget_far_herdr(&self.dir);
                     self.fail(format!(
                         "herdr on {} ({}) {why}; {MAY_HAVE_RUN}",
                         self.name, self.far_path
@@ -1062,12 +1063,13 @@ impl Bridge {
                 }
             }
             Ok(ran) => {
-                // The path no longer runs there (moved, uninstalled: 126,
-                // 127), or what runs there has no `remote-api-bridge` (2):
-                // the next call probes again.
-                if matches!(ran.code, Some(2 | 126 | 127)) {
-                    forget_far_herdr(&self.dir);
-                }
+                // Any far exit but 0 forgets the probe, so the next call
+                // probes again: the path no longer runs there (moved,
+                // uninstalled: 126, 127), what runs there has no
+                // `remote-api-bridge` (2) or no `--request` (an older herdr
+                // answers that with its usage, exit 1, #310), or it failed
+                // for its own reason, which costs one probe.
+                forget_far_herdr(&self.dir);
                 let code = ran
                     .code
                     .map_or_else(|| "a signal".to_string(), |code| format!("exit {code}"));

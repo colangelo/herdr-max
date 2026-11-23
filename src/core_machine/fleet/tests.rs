@@ -516,17 +516,23 @@ fn a_far_herdr_gone_from_its_path_is_probed_again() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// 3.2, 7.2: a far herdr with no `remote-api-bridge` (exit 2) is forgotten,
-/// and any non-zero far exit says the request may have run; another exit
-/// keeps the probe.
+/// 3.2, 7.2, #310: every far exit but 0 says the request may have run and
+/// forgets the probe: a herdr with no `remote-api-bridge` (exit 2), one
+/// whose `remote-api-bridge` has no `--request` (its usage, exit 1, as a
+/// herdr before it prints), and any other failure.
 #[test]
-fn far_exits_say_it_may_have_run_and_exit_2_forgets_the_probe() {
-    for (code, forgets) in [(2, true), (1, false)] {
+fn far_exits_say_it_may_have_run_and_forget_the_probe() {
+    for (code, stderr) in [
+        (2, &b"error: unknown command\n"[..]),
+        (
+            1,
+            b"Error: Custom { kind: InvalidInput, error: \"usage: herdr remote-api-bridge [--check]\" }\n",
+        ),
+        (1, b"Error: failed to connect to remote Herdr API socket\n"),
+    ] {
         let core = FakeCore::start_with(|config| {
-            config.exec_reply = Some(
-                json!({"stdout": "", "stderr": b64(b"error: unknown command\n"),
-                "truncated": false, "timed_out": false, "ms": 1, "code": code}),
-            )
+            config.exec_reply = Some(json!({"stdout": "", "stderr": b64(stderr),
+                "truncated": false, "timed_out": false, "ms": 1, "code": code}))
         });
         let (root, dir) = machine_dir("fleet-exit");
         std::fs::write(dir.far_herdr_path(), b"{}").expect("cache");
@@ -537,7 +543,7 @@ fn far_exits_say_it_may_have_run_and_exit_2_forgets_the_probe() {
             failure.contains(&format!("ended with exit {code}")) && failure.ends_with(MAY_RUN),
             "{failure}"
         );
-        assert_eq!(!dir.far_herdr_path().exists(), forgets, "exit {code}");
+        assert!(!dir.far_herdr_path().exists(), "exit {code} kept the probe");
         drop(link);
         let _ = std::fs::remove_dir_all(&root);
     }
