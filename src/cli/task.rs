@@ -456,13 +456,14 @@ fn wait_for_outcome(write_id: &str, wait: Duration) -> std::io::Result<Option<Va
 }
 
 fn task_line(task: &Value) -> String {
+    use super::target::shown;
     let mut line = format!(
         "{}  {:<11}  {:<6}  {:<14}  {}",
-        task["key"].as_str().unwrap_or(""),
-        task["shown"].as_str().unwrap_or("?"),
-        task["priority"].as_str().unwrap_or("normal"),
-        task["owner"].as_str().unwrap_or("-"),
-        task["title"].as_str().unwrap_or("")
+        shown(task["key"].as_str().unwrap_or("")),
+        shown(task["shown"].as_str().unwrap_or("?")),
+        shown(task["priority"].as_str().unwrap_or("normal")),
+        shown(task["owner"].as_str().unwrap_or("-")),
+        shown(task["title"].as_str().unwrap_or(""))
     );
     if task["pending"].as_bool() == Some(true) {
         line.push_str("  [pending sync]");
@@ -474,34 +475,52 @@ fn task_line(task: &Value) -> String {
 }
 
 fn print_human(plan: &Plan, response: &Value, outcome: Option<&Value>, waited: bool) {
+    let (out, err) = human_text(plan, response, outcome, waited);
+    print!("{out}");
+    eprint!("{err}");
+}
+
+/// What `print_human` writes to stdout and to stderr. Far strings go through
+/// `target::shown`, so a remote target's task text cannot carry terminal
+/// controls to this terminal.
+fn human_text(
+    plan: &Plan,
+    response: &Value,
+    outcome: Option<&Value>,
+    waited: bool,
+) -> (String, String) {
+    use super::target::{shown, shown_lines};
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let mut err = String::new();
     let result = &response["result"];
     match plan.verb {
         "list" => {
             let Some(tasks) = result["tasks"].as_array().filter(|tasks| !tasks.is_empty()) else {
-                println!("no tasks");
-                return;
+                return ("no tasks\n".to_string(), err);
             };
             for task in tasks {
-                println!("{}", task_line(task));
+                let _ = writeln!(out, "{}", task_line(task));
             }
             let store = &result["store"];
             if store["state"]
                 .as_str()
                 .is_some_and(|state| state != "ready")
             {
-                println!(
+                let _ = writeln!(
+                    out,
                     "store: {}{}",
-                    store["state"].as_str().unwrap_or("?"),
+                    shown(store["state"].as_str().unwrap_or("?")),
                     store["detail"]
                         .as_str()
-                        .map(|detail| format!(" ({detail})"))
+                        .map(|detail| format!(" ({})", shown(detail)))
                         .unwrap_or_default()
                 );
             }
         }
         "show" => {
             let task = &result["task"];
-            println!("{}", task_line(task));
+            let _ = writeln!(out, "{}", task_line(task));
             for (label, field) in [
                 ("status", "status"),
                 ("rev", "rev"),
@@ -512,12 +531,16 @@ fn print_human(plan: &Plan, response: &Value, outcome: Option<&Value>, waited: b
             ] {
                 match &task[field] {
                     Value::Null => {}
-                    Value::String(value) => println!("  {label}: {value}"),
-                    other => println!("  {label}: {other}"),
+                    Value::String(value) => {
+                        let _ = writeln!(out, "  {label}: {}", shown(value));
+                    }
+                    other => {
+                        let _ = writeln!(out, "  {label}: {}", shown(&other.to_string()));
+                    }
                 }
             }
             if let Some(body) = task["body"].as_str() {
-                println!("\n{body}");
+                let _ = writeln!(out, "\n{}", shown_lines(body));
             }
         }
         verb => {
@@ -530,35 +553,49 @@ fn print_human(plan: &Plan, response: &Value, outcome: Option<&Value>, waited: b
                 "bind" => "bound",
                 _ => "updated",
             };
-            println!(
+            let _ = writeln!(
+                out,
                 "{past} task {}: {}",
-                task["key"].as_str().unwrap_or(""),
-                task["title"].as_str().unwrap_or("")
+                shown(task["key"].as_str().unwrap_or("")),
+                shown(task["title"].as_str().unwrap_or(""))
             );
             if !waited {
-                println!("pending sync");
-                return;
+                out.push_str("pending sync\n");
+                return (out, err);
             }
             match outcome {
                 Some(outcome) => match outcome["status"].as_str() {
                     Some("applied") => {
-                        println!("saved (revision {})", outcome["rev"].as_u64().unwrap_or(0))
+                        let _ = writeln!(
+                            out,
+                            "saved (revision {})",
+                            outcome["rev"].as_u64().unwrap_or(0)
+                        );
                     }
-                    Some("conflict" | "exists") => eprintln!(
-                        "conflict: the task changed under you; `herdr task show` it and try again"
-                    ),
-                    Some(other) => eprintln!(
-                        "{other}: {}",
-                        outcome["message"]
-                            .as_str()
-                            .unwrap_or("the write did not land")
-                    ),
+                    Some("conflict" | "exists") => {
+                        err.push_str(
+                            "conflict: the task changed under you; `herdr task show` it and try again\n",
+                        );
+                    }
+                    Some(other) => {
+                        let _ = writeln!(
+                            err,
+                            "{}: {}",
+                            shown(other),
+                            shown(
+                                outcome["message"]
+                                    .as_str()
+                                    .unwrap_or("the write did not land")
+                            )
+                        );
+                    }
                     None => {}
                 },
-                None => println!("pending sync"),
+                None => out.push_str("pending sync\n"),
             }
         }
     }
+    (out, err)
 }
 
 fn todo_priority(priority: Option<TaskPriorityInfo>) -> Option<TodoPriority> {
@@ -567,6 +604,16 @@ fn todo_priority(priority: Option<TaskPriorityInfo>) -> Option<TodoPriority> {
         TaskPriorityInfo::Low => Some(TodoPriority::Low),
         _ => Some(TodoPriority::Normal),
     }
+}
+
+fn fallback_todo_line(todo: &Value) -> String {
+    use super::target::shown;
+    format!(
+        "{} {:>4}  {}",
+        shown(todo["pane_id"].as_str().unwrap_or("")),
+        todo["id"].as_u64().unwrap_or(0),
+        shown(todo["text"].as_str().unwrap_or(""))
+    )
 }
 
 /// The server has no `task.*`: do what a todo can, and say so.
@@ -649,12 +696,7 @@ fn todo_fallback(plan: &Plan) -> std::io::Result<i32> {
             println!("no todos");
         }
         for todo in todos {
-            println!(
-                "{} {:>4}  {}",
-                todo["pane_id"].as_str().unwrap_or(""),
-                todo["id"].as_u64().unwrap_or(0),
-                todo["text"].as_str().unwrap_or("")
-            );
+            println!("{}", fallback_todo_line(todo));
         }
     } else {
         println!("{past} todo");

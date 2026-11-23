@@ -74,12 +74,16 @@ fn print_todo_mutation(
         return super::print_response(response);
     }
 
+    println!("{}", todo_mutation_line(response, verb));
+    Ok(0)
+}
+
+fn todo_mutation_line(response: &serde_json::Value, verb: &str) -> String {
     let todo = &response["result"]["todo"];
     let id = todo["id"].as_u64().unwrap_or(0);
-    let pane_id = todo["pane_id"].as_str().unwrap_or("");
-    let text = todo["text"].as_str().unwrap_or("");
-    println!("{verb} todo {id} on {pane_id}: {text}");
-    Ok(0)
+    let pane_id = super::target::shown(todo["pane_id"].as_str().unwrap_or(""));
+    let text = super::target::shown(todo["text"].as_str().unwrap_or(""));
+    format!("{verb} todo {id} on {pane_id}: {text}")
 }
 
 /// One rendered todo. `*` marks an outstanding todo, matching how
@@ -90,16 +94,16 @@ fn format_todo_line(todo: &serde_json::Value, show_pane: bool) -> String {
     let marker = if done { " " } else { "*" };
     let id = todo["id"].as_u64().unwrap_or(0);
     let priority = todo["priority"].as_str().unwrap_or("normal");
-    let text = todo["text"].as_str().unwrap_or("");
+    let text = super::target::shown(todo["text"].as_str().unwrap_or(""));
 
     let mut line = String::from(marker);
     if show_pane {
-        let pane_id = todo["pane_id"].as_str().unwrap_or("");
+        let pane_id = super::target::shown(todo["pane_id"].as_str().unwrap_or(""));
         line.push_str(&format!(" {pane_id:<12}"));
     }
     line.push_str(&format!(" {id:>4}  {priority:<6}  {text}"));
     if let Some(label) = todo["link_label"].as_str() {
-        line.push_str(&format!(" → {label}"));
+        line.push_str(&format!(" → {}", super::target::shown(label)));
         if !todo["link_alive"].as_bool().unwrap_or(false) {
             line.push_str(" (gone)");
         }
