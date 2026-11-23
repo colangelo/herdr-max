@@ -646,10 +646,40 @@ pub(crate) struct FarHerdr {
 /// The far herdr found over the machine's current link, if one was.
 pub(crate) fn cached_far_herdr(dir: &MachineDir) -> Option<FarHerdr> {
     let link = dir.read_dial_record()?;
-    let cached: FarHerdr =
-        serde_json::from_slice(&std::fs::read(dir.far_herdr_path()).ok()?).ok()?;
+    let cached: FarHerdr = serde_json::from_slice(&read_private(&dir.far_herdr_path())?).ok()?;
     (cached.link_at == link.at && cached.link_pid == link.pid && is_far_path(&cached.path))
         .then_some(cached)
+}
+
+/// The most a kept probe answer can be: a path of 4 KiB and its status.
+const FAR_HERDR_FILE_LIMIT: u64 = 64 * 1024;
+
+/// `path` as this account wrote it: a regular file, not a symlink, of this
+/// account, that no one else can read or write (0600, as `write_atomic`
+/// makes it), at most 64 KiB. `None` for anything else, so a file put
+/// there another way names no far program to run (security review
+/// 2026-11-23 M2).
+fn read_private(path: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    let private = meta.is_file()
+        && meta.uid() == crate::platform::core_link::uid()
+        && meta.mode() & 0o077 == 0
+        && meta.len() <= FAR_HERDR_FILE_LIMIT;
+    if !private {
+        tracing::warn!(path = %path.display(), "ignoring a far herdr record this account did not keep privately");
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(FAR_HERDR_FILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
 }
 
 /// The far herdr for `session`, read once per link establishment (D7) and

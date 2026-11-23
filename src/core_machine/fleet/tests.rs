@@ -1283,3 +1283,27 @@ fn a_tmpdir_others_can_write_is_passed_over_for_tmp() {
     forget_leftover(&folder);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// M2: a kept probe is used only from a 0600 regular file of this account;
+/// a symlink or a file others can read or write names nothing to run.
+#[test]
+fn a_kept_probe_counts_only_from_a_private_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (root, dir) = machine_dir("fleet-private-cache");
+    dir.write_dial_record(&DialRecord { at: 1.0, pid: 7 })
+        .expect("dial");
+    let record = serde_json::to_vec(&far()).expect("json");
+    write_atomic(&dir.far_herdr_path(), &record).expect("kept");
+    assert_eq!(cached_far_herdr(&dir), Some(far()));
+
+    std::fs::set_permissions(dir.far_herdr_path(), std::fs::Permissions::from_mode(0o644))
+        .expect("mode");
+    assert_eq!(cached_far_herdr(&dir), None, "a file others can read");
+
+    std::fs::remove_file(dir.far_herdr_path()).expect("remove");
+    let elsewhere = root.join("planted.json");
+    write_atomic(&elsewhere, &record).expect("planted");
+    std::os::unix::fs::symlink(&elsewhere, dir.far_herdr_path()).expect("symlink");
+    assert_eq!(cached_far_herdr(&dir), None, "a symlink");
+    let _ = std::fs::remove_dir_all(&root);
+}
