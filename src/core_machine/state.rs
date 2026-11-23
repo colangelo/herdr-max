@@ -578,13 +578,6 @@ impl LeaseHolder {
         rest.parse().ok()
     }
 
-    /// The pid of a `client-<pid>` or `cli-<pid>` holder; `None` for
-    /// `manual`, which no process holds.
-    pub(crate) fn pid(&self) -> Option<u32> {
-        self.client_pid()
-            .or_else(|| self.0.strip_prefix("cli-")?.parse().ok())
-    }
-
     /// Whether the holder can still hold its lease: `manual` always, a
     /// client or a CLI call while its process runs (review H7). A pid the
     /// system gave again to another process keeps the lease to its expiry,

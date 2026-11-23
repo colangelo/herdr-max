@@ -244,6 +244,7 @@ mod tests {
             ssh: "/usr/bin/ssh".into(),
             ssh_config: None,
             ssh_auth_sock: None,
+            via: None,
         })
         .expect("target");
         dir
