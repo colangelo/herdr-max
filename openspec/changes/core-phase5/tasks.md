@@ -430,7 +430,7 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   read, no program start (`spawn_command_builder` refuses `PaneLaunch::Command` in a view, so a split, tab or
   workspace made there fails with "this is a view of <m>"), no focus reports, close a detach (`keep_on_drop`,
   `kill()` and `end_program` answer `Live` without a call), input AUTOMATIC_INPUT only (D.3), wake only with a lease
-  (`MachineLink::dial` checks `dormant` in a view), lifetime (`view::lifetime::IdleExit`, 10 min after the last
+  (`MachineLink::dial`: since the rebase on master's M7 it checks the lease for every role), lifetime (`view::lifetime::IdleExit`, 10 min after the last
   client; `ViewPresence` tells the watcher the client count and the last input). `HeadlessServer::new_at` binds the
   view's socket; `serve_as_view` turns on the lifetime. Tests: `view::tests` (flag, socket and log per machine),
   `view::lifetime::tests` (exit 10 min after the last client; input window). Limits: the idle exit is a unit
@@ -448,8 +448,8 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `view/watch.rs` `Watcher<S: ViewSource>`: reads the layout at start, on its `doc` event, on `missed` and when
   the link comes up, sends only a changed layout, keeps the last good one on a refused document (one warning);
   forwards far sizes and 7501 status; the notice line (dormant, waking, needs login, not a machine, publishes no
-  spaces, far hc older than 0.1.21 with `hc machine update`) goes in the snapshot's `config_diagnostic` (no wire
-  change). `app/view_layout.rs`: the projection keeps each far pane's `PaneId` and terminal across documents,
+  spaces, far hc older than 0.1.21 with `hc machine update`) goes in the snapshot's `config_diagnostic`, joined to
+  the config diagnostic (D.7; no wire change). `app/view_layout.rs`: the projection keeps each far pane's `PaneId` and terminal across documents,
   attaches new terminals off the loop (`spawn_blocking`, `ViewEvent::Attached`), detaches gone ones, keeps the
   active workspace, tab, focus and zoom by far ids; pane, tab and workspace ids are the far side's (D4).
   `Workspace::for_view`. Tests: V16 unit (`view::doc::tests`: oversized, deep, wrong-typed, bad ids, counts;
@@ -463,7 +463,8 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   V14, V30 (before merge)
   Built: `StartedCore::view` and `view_far_size` (`pane_io.rs`): `terminal.get` just before, attach `resumed` at
   that size with the full history; `observe` when the path does not take AUTOMATIC_INPUT (read-only, refuses
-  input). `ViewIo` and `view_writer`: keys, pastes, mouse, submissions and replies as AUTOMATIC_INPUT; a resize
+  input). `ViewIo` and `view_writer`: keys, pastes, mouse and submissions as AUTOMATIC_INPUT, no terminal reply
+  (D.7, H1); a resize
   carries the far size and goes as RESIZE only when it differs from the last one sent; no FACTS, FOCUS or DATA.
   The view's `TerminalRuntime` keeps the far size whatever its rect (`resize` uses `view_size`), follows `size`
   events (`follow_view_size`, from the watcher's subscription), and drops focus reports; the server renders the
@@ -488,18 +489,67 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   every test client federated (caught by `tests/client_mode.rs` in `just check`). Live V17 below. Limits: core
   machines added after a client started appear in its sidebar after the client restarts (the catalog's file
   watch covers saved machines only); a TUI client starts a view server per listed machine as its endpoint
-  transport (no dial without a lease); the 10 min exit is a unit test.
+  transport (no dial without a lease); the 10 min exit is a unit test. A client of a newer build restarts the view
+  (D.7, M2).
 - [x] D.5 Both-present notice and `[remote] prefer`; V21, V22
   Built: `[remote] prefer = "ssh" | "core"` (`RemotePrefer`, default `ssh`, in the default config and
   `configuration.mdx`); `cli/target.rs` `route_machine`: a saved machine first, a name that is only a core machine
-  takes the core path, both: `prefer`. The core path refuses for now ("this build reaches it with herdr --remote
-  core:<m>"): `--machine` over `machine.exec` is PR E's E.2. The TUI shows "One Mac, two paths" once per run for a
+  takes the core path, both: `prefer`. Rebased on PR E (2026-11-23): `MachineRoute::Core` goes to E's `core_route`
+  (`fleet::open`, `--dial` as E has it), so `prefer = "core"` now sends a name both kinds share over the core link,
+  which lifts E.2's limit "a name both kinds have always goes the old way"; a name no saved machine and no
+  primary-listed core machine has still reaches `core_route` as on master (a machine added with `hc` alone). The TUI shows "One Mac, two paths" once per run for a
   saved machine and a core machine on one host (`core_machine::command::same_host_pairs`) and shows both. Tests:
   V22 unit (`prefer_decides_only_when_a_saved_and_a_core_machine_share_the_name`,
   `saved_and_core_machines_on_one_host_pair_up`); V21: the existing `src/remote` and endpoint suites (in `just
   check`) and `view::start::tests` (`--remote <host>` is never a core target, so the old path runs and no view
   starts). Plan change: the endpoint handshake carries no far core id, so the pair is found by the host of the two
   ssh destinations, not by core id.
+- [x] D.7 The independent review's findings, after the rebase on origin/master (PR 90's far output, M7's
+  lease-gated input wakes, the space-pin PR)
+  Built: H1 `view_writer` drops `WriteCmd::Reply` and a resize's reports, and the parser does not even queue a
+  view's replies (a history replayed at attach cannot fill the queue ahead of a key); `PaneLaunch::ViewCore` is
+  `far_output` (inline Kitty only, no OSC 52, no OSC 7 cwd here) with no `far_cwd`. H7 `presence::lease_pass`:
+  a client writes `client-<pid>` only into the folders of the machines its own primary core lists
+  (`linked_machines_in` + `listed_by_core`, one `machine.list` on the running primary, only when some machine is
+  linked); `HERDR_NO_MACHINE_LEASES` turns the writer off and is set by `tests/support`'s spawn helpers, every
+  direct client spawn in `tests/`, and every live script's herdr wrapper except the two lease-test clients of
+  `core_lease_live_test.sh`; `Lease::in_force` also needs a `client-`/`cli-` holder's process to run
+  (`LeaseHolder::alive`; pid reuse keeps a lease to its expiry, no later than before; it applies to PR E's keep
+  leases too, whose two unit tests now hold their lease with the test's own pid instead of 42). M3 no lease at a client's
+  start (`ClientPresence::start()` takes no `person_started`; the loop config field is gone); the view's watcher
+  wakes only for a new person's input in the view (`ViewPresence::inputs`, stamped on `ClientShellPaneInput` that
+  is not only a pointer motion, `lifetime::is_person_input`), once per input, with a lease in force, never on an
+  attach or a state read; a new input while away reads the state at once. M2 the view takes an exclusive `flock`
+  on `herdr-view-<m>.lock` before it logs and writes `{version, pid}` there; `ensure_running` restarts a running
+  view whose build `replaces` orders below the client's (SIGTERM, SIGKILL after 5 s, gone when the lock is free),
+  so two builds never restart a view in turn. L3.4 the same lock makes a racing second start exit before it
+  touches the log or the socket (the log was already append-only; a second process could rotate it away). M4.1
+  `execute_custom_command_binding` refuses every action in a view (`App::view_refusal`). L4.2 a reload clears the
+  pane history only when `policy.persist_session`. L4.3 `worktree.create` and `worktree.remove` refused in a
+  view. L5.1 `CoreClient::call_bounded`: a reply over its bound is refused from its id alone (`message_id`, no
+  `Value`); `layout_document` bounds `doc.get` at 1 MiB + 16 KiB; `doc::parse` no longer re-serializes to measure.
+  L5.2 `doc::unique_ids`: a tab, pane or terminal listed twice refuses the document. L5.3 a failed `doc.get`
+  waits 1 s, doubling to 30 s. V21 `EndpointCatalog::load()` reads files only; `load_with_core_machines()` (the
+  TUI client and the launch's federation check) adds the core machines, so `--remote <host>` and `herdr machine`
+  make no core call. Notice: the view's notice is `ViewApp::notice`, joined to the config diagnostic in the
+  client-shell snapshot (`view::with_notice`), never written over it. Tests (each failed with its fix reverted,
+  all at once, and passed with it): `pane_io` `a_view_pane_sends_no_reply_to_far_queries` and the updated
+  `a_view_pane_never_takes_the_far_terminals_size`, `pane` `a_view_panes_output_is_far_data`, `presence`
+  `a_client_leases_only_machines_its_primary_lists`, `state` `a_gone_holders_lease_is_not_in_force`, `watch`
+  `a_dormant_machine_is_woken_only_by_input_in_the_view` and `a_failing_layout_read_backs_off`, `view`
+  `one_view_holds_the_lock_and_records_its_build`, `start` `a_client_restarts_only_an_older_running_view` and
+  `a_newer_client_build_replaces_the_running_view`, `client` `a_bounded_call_refuses_a_reply_over_its_bound`,
+  `doc` `repeated_tab_pane_and_terminal_ids_are_refused`, `custom_commands` `a_view_runs_no_custom_command`, `app`
+  `a_views_reload_leaves_the_primarys_pane_history`, `worktrees` `a_view_makes_no_worktree`, `view_layout`
+  `a_far_size_reaches_the_pane_and_its_border`, `lifetime` `a_pointer_motion_is_no_persons_input`. Live:
+  `core_lease_live_test.sh` asserts no lease and no dial at the client's start, the lease at its first key, no
+  lease in a linked folder the scratch primary does not list (H7), and for V33 no dial at the view's start or
+  attach. Limits: V21 has no failing-before test (the old path's core call needs a linked folder under the real
+  passwd home to happen at all; the split is by construction); a key in any pane of the primary still leases
+  every machine its primary lists (D3 row 1), so typing locally allows, and through core's retry dials, every
+  linked machine; narrowing leases to the machine a person types to is a later decision. Two different builds
+  with the same order (`0.9.5-ac-beta.161-a` and `-b`) can still restart one view in turn; an older client uses a
+  newer view as it is.
 - [ ] D.6 Check: `just check` 0, `just core-live-test` 0, CI green
   Local, m4m, 2026-11-23, under the shared lock (the load gate lifted by manager-lab for scanner load), head
   2b439317 for the code (later commits are scripts and openspec only): `just check` 0 (5837 + 158 tests). Live,
@@ -520,6 +570,20 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   panes 266 us at 1 pane, 318 us at 15 (1.20x; C.7 had 1.19x); background workspaces 261 and 261 (1.00x); the
   render path gained one `Option` check per pane resize and the view's border label. Not run: the full-length
   V3, V38 and V11 waits, `core_live_test.sh` and the default-session script, CI (not pushed).
+  After D.7, rebased on origin/master 724bd1b4 (PR E), m4m, 2026-11-23, code head a2608dde (the openspec record
+  follows): `just check` 0 (5899 + 158 tests). Live, binary copied out of the shared target dir:
+  `core_view_live_test.sh` with V30_IDLE_SECS=20 (shortened) passed, with the new parts: H1 0 frames from the view
+  but CREDIT and RESIZE before a key, the far pane's DA and DSR in its replayed history; L3.4 a second view exited
+  1 and left the running one, its lock and its log; M2 a client restarted a view recorded as 0.0.1 under a new
+  pid, a client of its own build kept it, the far program ran on. `core_machine_live_test.sh` with V3_SECS=60,
+  V38_SECS=120, V11_SECS=60 (shortened) passed whole, PR E's fleet part included: B.2/B.5/M3/H7 no lease and no
+  dial at the client's start, its first key's lease before its dial, connected 4.59 s after the start, no lease
+  in the unlisted folder; V33/M3 the view's start and attach dialled nothing. Earlier runs on the way: one V3
+  failure (12 link-byte lines after dormancy) at 45ceddad that the next two runs did not repeat; a lease watcher
+  on the rerun saw only the script's own holders, so its cause is not found (D.6's runs saw it too); one failure
+  of PR E's `--dial` ordering check, a core retry's START counted as the dial's, fixed in the script (a2608dde).
+  `just bench-render-scale` (5-min load near 100): active panes 268 us at 1 pane, 326 at 15 (1.22x; 1.20x
+  before), background workspaces 259 and 266 (1.03x); D.7 adds one `Option` join per client snapshot.
 
 ## PR E. Actions and the fleet CLI over the link
 

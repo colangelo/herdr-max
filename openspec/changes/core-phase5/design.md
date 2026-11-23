@@ -203,27 +203,34 @@ Alternatives:
 
 A lease is a file `leases/<holder>` holding an expiry time. The link may be up while any lease is in force. Each
 holder writes only its own file (write to a temporary file of its own, then rename), so no two processes write one
-file. A crashed holder's lease ends by its expiry. A **keep lease** (`<expiry> 0 keep`, PR E review) keeps a link that
-is up and admits no dial: core-link's watcher counts it, its admission does not (D7).
+file. A lease is in force before its expiry and, for a `client-<pid>` or `cli-<pid>` holder, while that process
+runs: a client that quit or crashed, or a CLI call killed before it removed its file, allows the link no longer
+(review H7 of PR D). A pid the system gave again to another process keeps the lease to its expiry, no later than a
+time-only lease; `manual` has no process and ends by its expiry. A **keep lease** (`<expiry> 0 keep`, PR E review)
+keeps a link that is up and admits no dial: core-link's watcher counts it, its admission does not (D7).
 
 | Holder | Writes | Expiry |
 |---|---|---|
-| a TUI client (`client-<pid>`), for every core machine | on human input (#260's `InputClock` events: key, text, paste, mouse), at most once a minute | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
-| a TUI client started by a person's command (`herdr --remote core:<m>`, `herdr` from a terminal) | also at its start; a client re-created by a reconnect or a live handoff does not | start + 10 min |
+| a TUI client (`client-<pid>`), for every core machine its own primary core lists | on human input (#260's `InputClock` events: key, text, paste, mouse), at most once a minute; never at its start (review M3) | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
 | a fleet CLI call through the machine (`cli-<pid>`, D7) | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect |
 | `herdr machine add --core`, `herdr machine login` (`manual`) | before they call hc (F8: both dial at once) | 30 min |
 | `herdr machine wake <name> [--for D]` (`manual`) | before it calls `machine.connect` | the given duration, 30 min by default, at most 12 h |
 
-Not holders: a herdr server, a restore or a live handoff (a 3 a.m. beta install must not wake ac-mbm5), the
-phone, Herdr.app and agents' own `hc` calls. They see the machine `unreachable` while it is dormant, which the
-docs state. The first input after dormancy (any herdr server receiving input for a pane on that machine, or a view
-server getting a client, D6) also calls `machine.connect`, so wake does not wait for core's 30 s retry.
+Not holders: a herdr server, a restore or a live handoff (a 3 a.m. beta install must not wake ac-mbm5), a client's
+start (opening herdr, or `herdr --remote core:<m>`, dials no machine until a person types; review M3), a client
+whose environment sets `HERDR_NO_MACHINE_LEASES` (every test and live-script client that is not itself under a
+lease test, H7), the phone, Herdr.app and agents' own `hc` calls. A client writes into the folders of the
+machines its own primary core lists only, never every folder under the passwd home (another session's, a scratch
+core's or a test's machine is not its to allow, H7). They see the machine `unreachable` while it is dormant, which
+the docs state. The first input after dormancy (any herdr server receiving input for a pane on that machine, or a
+person's input in a view of it, D6) also calls `machine.connect`, so wake does not wait for core's 30 s retry.
 
 **A lease comes before every connect (F8).** No herdr code calls `machine.connect`, `hc machine add` or `hc
 machine login` without a lease in force for that machine, written by itself or checked: without one, core-link
 refuses (exit 75) and the caller would report a failure for a machine that is only dormant. The wake path is
 "input → the client writes its lease → the server or view server is told → D3a's dialer calls `machine.connect`";
-a view server whose first client has not written a lease shows "dormant, press a key to wake" and dials nothing.
+a view server whose clients have not written a lease shows "dormant, press a key to wake" and dials nothing; a
+client attaching to it writes none (review M3).
 
 ### D3a. `machine.connect` is a background job, one at a time (F3, F4)
 
@@ -357,9 +364,12 @@ The role is one type, `enum ServerRole { Primary, View(MachineName) }`, read at 
 | Persistence, orphan scan, spaces publisher, status mirror | yes | none |
 | JSON API socket | yes | none; the fleet uses `--machine` (D7) |
 | Close | ends the program | detaches; the program and the far side's pane stay |
-| Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below) |
-| Wake | — | only with a lease in force (D3); `machine.connect` through D3a's dialer |
-| Lifetime | as today | started on demand by the endpoint transport; exits 10 min after its last client; stateless, so a herdr update needs no handoff: a client reconnect with a new version restarts it |
+| Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below); no terminal replies at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, resize reports): the far herdr answers its own programs (review H1) |
+| Output | this Mac's | far data, as a pane on a machine (D5): inline Kitty graphics only, no OSC 52, OSC 7 never a folder here; replayed history included |
+| Local actions | as today | refused: custom commands and plugin actions (they would run here with the far ids), `worktree.create` and `worktree.remove`, a config reload's history clear |
+| Wake | — | only for a person's input in the view (a key, text, paste, click, drag or scroll; not a pointer motion), once per input, with a lease in force (D3); never on a client's attach or on a state read (review M3); `machine.connect` through D3a's dialer |
+| Notice | — | the view's own line, joined to the config diagnostic in the snapshot's `config_diagnostic`, never in its place |
+| Lifetime | as today | started on demand by the endpoint transport; exits 10 min after its last client; stateless, so a herdr update needs no handoff: a client of a newer build restarts it (the view's build and pid are in `herdr-view-<m>.lock`, which it holds with `flock` for its life; review M2); a racing second start finds the lock held and exits before it touches the log or the socket (L3.4) |
 
 **Size (F5).** Two herdr servers now view one terminal, and core gives the size to the active viewer. The
 roundtable measured the first draft's follow-size (attach at the far size, echo every `size` event) to fail three
@@ -664,7 +674,7 @@ in-process test server of core-backend. No test dials a real Mac.
 | V30 | an idle view sends nothing, and keeps the far size (F5) | loop: view attached 60 s with no input; then the far herdr detaches and reattaches | D6 size, R8 | 0 frames from the view in 60 s except CREDIT; after the far detach the far terminal has the last far size, not the view's |
 | V31 | remote programs and the link do not depend on who started the core (F6) | loop as V9; `machine.exec` of `env`; a far-side `herdr pane report-agent` with no target in a remote pane; `core-link` run with `HOME`, `XDG_STATE_HOME` and `SSH_AUTH_SOCK` pointing elsewhere | D2 state, D5 env | exec output has no `HERDR_*` name; the far CLI reports no pane; core-link uses the passwd-home state dir and target.json's `SSH_AUTH_SOCK`; ssh's environment has only the allowlisted names (names compared, never values) |
 | V32 | `--machine` on a dormant machine (F7) | loop: dormant; `herdr --machine loop pane list --json` without and with `--dial` | D7 | without: exit 75, the dial message, no lease, no ssh start; with: lease written before `machine.connect`, one dial, the far side's JSON, lease removed after |
-| V33 | a lease comes before every connect (F8) | loop: `herdr machine add --core`, `machine login` (pty), `machine wake`, and a view's first client, each from dormant | D3 | in each, the lease file's mtime precedes the first core-link START, and that START dials |
+| V33 | a lease comes before every connect (F8) | loop: `herdr machine add --core`, `machine login` (pty), `machine wake`, and a view's first client, each from dormant | D3 | in each, the lease file's mtime precedes the first core-link START, and that START dials; a client's start and a view's attach write no lease and dial nothing, its first key does (M3) |
 | V34 | nothing authenticated outlives the link (F9) | real OpenSSH to `probe/fix/sshd_fake.py` on 127.0.0.1; link up, then the lease ends | D10 options, R9 | no control socket ever exists; after the link ends no ssh process remains, and a new `core-link` authenticates again (server AUTH count + 1) |
 | V35 | a dial never starts the far core (F10) | loop: far core stopped; far core SIGKILLed (stale socket); lease held | D2 step 5, R5 | far socket stays absent or dead and no far core process starts; gate `far_core_down`; no further dial for 5 min; after the far core is started, `herdr machine wake` connects; a unit test pins core's POSIX line shape (`sh -c '...connect'`) |
 | V36 | a frozen link ends in bounded time (F11) | real OpenSSH to the loopback server, then SIGSTOP of the server | D10 keepalives, R9 | machine `unreachable` ≤ 30 s after the freeze; `terminal.list` latency on the primary recorded each 2 s in the test log |
