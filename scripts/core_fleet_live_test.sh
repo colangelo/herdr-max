@@ -115,6 +115,11 @@ fl_lease_is_keep() { [[ "$(awk '{print $3}' "$FL_DIR/leases/cli-$1" 2>/dev/null)
 fl_folders_of() { ls -d "${TMPDIR:-/tmp}"/herdr-fleet-"$1"-* /tmp/herdr-fleet-"$1"-* 2>/dev/null | wc -l | tr -d ' '; }
 fl_log_count() { grep -c " $1" "$FL_DIR/link.log" 2>/dev/null || true; }
 fl_more() { [[ "$(fl_log_count "$1")" -gt "$2" ]]; }
+# Core retries fast right after a link ends (about 0.4 s, then doubling);
+# a --dial connect that lands on one of them is restarted by core and
+# counts as a failed dial (R4, D3a's accepted limit). Five refused retries
+# after $1, the next is 8 s or more away.
+fl_retries_backed_off() { fl_wait "core's retries to back off" 70 fl_more "REFUSE Dormant" $(( $1 + 4 )); }
 fl_probes() { grep -c "args=remote-api-bridge --check" "$FL_FAR_LOG" 2>/dev/null || true; }
 # The same JSON, whitespace and key order aside.
 same_json() {
@@ -288,6 +293,7 @@ echo "ok: V18 --machine through the link equals the old remote's --machine (and 
 
 # --- V32: a dormant machine refuses without --dial, and --dial makes one dial
 ends="$(fl_log_count "LEASE END")"
+dormant_base="$(fl_log_count "REFUSE Dormant")"
 python3 -I -c 'import os,sys,time
 d = sys.argv[1]; tmp = os.path.join(d, "manual.new")
 open(tmp, "w").write(f"{time.time() - 1:.3f} {time.time() - 60:.3f}\n"); os.replace(tmp, os.path.join(d, "manual"))' "$FL_DIR/leases"
@@ -302,6 +308,7 @@ grep -q "$FT is dormant; reaching it opens ssh (a Touch ID or Tailscale check ca
 [[ "$(fl_cli_leases)" == 0 && "$(fl_ssh_starts)" == "$starts" ]] || fail "the refusal wrote a lease or started ssh"
 echo "ok: V32 a dormant machine refuses with exit 75 and D7's message; no lease, no ssh"
 
+fl_retries_backed_off "$dormant_base"
 dials="$(fl_log_count "CLI --dial")"
 starts_log="$(fl_log_count "START")"
 code=0; fleet_cli --machine "$FT" --dial pane list >"$BASE/fl-dial.json" 2>"$BASE/fl-dial.err" || code=$?
@@ -323,7 +330,9 @@ echo "ok: V32 --dial wrote its lease before the one dial, gave the far JSON, and
 # account: once connected the call's lease only keeps the link. A keep
 # lease of the test's own holds through the window, so core's retries meet
 # it, and only it.
+drop_base="$(fl_log_count "REFUSE Dormant")"
 fl_wait "$FT dormant before the drop" 20 fl_is unreachable
+fl_retries_backed_off "$drop_base"
 starts="$(fl_ssh_starts)"
 settled="$(fl_log_count "SETTLED")"
 fleet_cli_bg --machine "$FT" --dial pane wait-output "$FL_PANE" --match "never-printed-$$" --timeout 30000 \
