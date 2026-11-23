@@ -1411,13 +1411,40 @@ impl Drop for FleetLink {
 fn private_folder() -> io::Result<PathBuf> {
     let temp = std::env::temp_dir();
     let longest = format!("{FOLDER_PREFIX}4294967295-ffffffffffffffff");
-    let base = if temp.join(longest).join("api.sock").as_os_str().len() < 100 {
-        temp
-    } else {
-        PathBuf::from("/tmp")
-    };
+    let fits = |base: &Path| base.join(&longest).join(SOCKET_NAME).as_os_str().len() < 100;
+    // A temporary folder another account could replace is passed over
+    // for `/tmp` (security review 2026-11-23 E1).
+    let base = [temp, PathBuf::from("/tmp")]
+        .into_iter()
+        .find(|base| fits(base) && is_trusted_base(base))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "neither the temporary folder nor /tmp is safe from other accounts \
+                 for the fleet bridge's socket",
+            )
+        })?;
     remove_dead_folders(&base);
     private_folder_in(&base, unguessable_leaf)
+}
+
+/// Whether no other account can replace `base` or anything under it that
+/// this account makes: the folder and each folder above it (symlinks
+/// resolved) belong to this account or root, and one that others can
+/// write is sticky, so they cannot rename or remove what is not theirs.
+fn is_trusted_base(base: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(real) = base.canonicalize() else {
+        return false;
+    };
+    let uid = crate::platform::core_link::uid();
+    real.ancestors().all(|folder| {
+        std::fs::metadata(folder).is_ok_and(|meta| {
+            meta.is_dir()
+                && (meta.uid() == uid || meta.uid() == 0)
+                && (meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0)
+        })
+    })
 }
 
 const FOLDER_PREFIX: &str = "herdr-fleet-";

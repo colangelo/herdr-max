@@ -1229,3 +1229,57 @@ fn a_reply_must_answer_the_request_sent() {
     drop(link);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// E1: the bridge's folder goes only under a base no other account can
+/// replace: its own and every folder above it are this account's or
+/// root's, and one others can write is sticky.
+#[test]
+fn the_bridge_folder_needs_a_base_no_other_account_can_replace() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode")
+    };
+    let root = scratch("fleet-base");
+    let private = root.join("private");
+    std::fs::create_dir(&private).expect("private");
+    mode(&private, 0o700);
+    assert!(is_trusted_base(&private));
+    assert!(is_trusted_base(Path::new("/tmp")));
+    let shared = root.join("shared");
+    std::fs::create_dir(&shared).expect("shared");
+    mode(&shared, 0o777);
+    assert!(!is_trusted_base(&shared), "a folder anyone can write");
+    let below = shared.join("mine");
+    std::fs::create_dir(&below).expect("below");
+    mode(&below, 0o700);
+    assert!(!is_trusted_base(&below), "under a folder anyone can write");
+    mode(&shared, 0o1777);
+    assert!(is_trusted_base(&below), "under a sticky one");
+    std::os::unix::fs::symlink(&below, root.join("link")).expect("link");
+    mode(&shared, 0o777);
+    assert!(!is_trusted_base(&root.join("link")), "through a symlink");
+    assert!(!is_trusted_base(&root.join("missing")));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// E1: with a TMPDIR others can write, the bridge's folder goes to /tmp.
+#[test]
+fn a_tmpdir_others_can_write_is_passed_over_for_tmp() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = scratch("fleet-tmpdir");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).expect("mode");
+    // One test per process (nextest), so the variable is this test's.
+    std::env::set_var("TMPDIR", &root);
+    let folder = private_folder().expect("folder");
+    std::env::remove_var("TMPDIR");
+    assert_eq!(
+        folder.parent(),
+        Some(Path::new("/tmp")),
+        "{}",
+        folder.display()
+    );
+    assert_eq!(std::fs::read_dir(&root).expect("list").count(), 0);
+    remove_bridge_folder(&folder).expect("remove");
+    forget_leftover(&folder);
+    let _ = std::fs::remove_dir_all(&root);
+}
