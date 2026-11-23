@@ -1192,6 +1192,17 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   with the request a view would send: a view's own request travels through the far core being reset (its
   `machine.exec`), so it cannot be held across that reset; between the view's check and the request the far
   herdr's own check is E.3b's live part.
+  Gates, m4m, 2026-11-23, under the shared lock: targeted nextest runs green; each revert check above failed its
+  test (the live check off fails the two M1 tests, the revision check, the per-client hold, the lane rule, the
+  client's view member, the request-bound confirmation, the disconnect drop, the tab and alias checks, the hello
+  and write deadlines, the route's drop guard, the guarded close's workspace check and the one-write log line);
+  `just check` 0 on 0ac52076 (6047 + 158 tests; windows-lint skipped on macOS; only this tasks.md changed after);
+  on a debug binary of 0ac52076 copied out of the shared target, `core_view_live_test.sh` (V30_IDLE_SECS=20) 0 and
+  `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0, the reset part included (t5: 46530 -> 46851, refused).
+  The same fleet part on a binary with the far live check reverted failed there: the guarded close over the reused
+  address closed the pane (`{"type":"closed"}`). Two failed runs before were a copy made over a binary macOS had
+  run, killed on start for its stale signature (each run's binary now gets a fresh path). Not run: CI (not pushed),
+  so Windows clippy is unchecked; new whole items are `cfg(unix)`, or two cfg variants of one item.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
