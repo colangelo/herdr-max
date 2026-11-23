@@ -17,7 +17,7 @@ impl RemoteKeybindings {
         }
     }
 
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Server => "server",

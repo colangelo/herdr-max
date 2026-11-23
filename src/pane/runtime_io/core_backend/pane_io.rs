@@ -359,6 +359,23 @@ struct Shared {
     /// The latest status record to mirror, until the parser takes it: one
     /// slot, so a burst of changes never queues (core-status-mirror D3).
     mirror_slot: Mutex<Option<CoreStatusRecord>>,
+    /// Set for a view server's pane (core-phase5 D6): it never becomes the
+    /// terminal's active viewer, never ends its program.
+    view: Option<ViewIo>,
+}
+
+/// How a view's pane talks to its far terminal (core-phase5 D6 Size): the
+/// attach is `resumed` at the far size, input goes as AUTOMATIC_INPUT only
+/// (never DATA or FOCUS, either of which makes the view the active viewer
+/// and resizes the far terminal), and a RESIZE goes only for a far size
+/// different from the last one sent, so core records it without applying it
+/// and no new size event follows (R7, R8).
+struct ViewIo {
+    /// Core's attach path does not take AUTOMATIC_INPUT: the pane attached
+    /// `observe` and sends no input at all.
+    read_only: bool,
+    /// The size (rows, cols) last attached at or sent as RESIZE.
+    sent: Mutex<(u16, u16)>,
 }
 
 impl Shared {
@@ -838,9 +855,92 @@ impl StartedCore {
                         .flatten(),
                 ),
                 mirror_slot: Mutex::new(None),
+                view: None,
             }),
             events_rx,
             automatic_input,
+        })
+    }
+
+    /// Attaches a view server's pane to a far terminal (core-phase5 D6
+    /// Size) at the far size `(rows, cols)` read from `terminal.get` just
+    /// before (`view_far_size`), `resumed`, so the attach takes no size;
+    /// `observe` (read-only) when core's attach path does not take
+    /// AUTOMATIC_INPUT. Nothing is started, labelled or killed: the far herdr
+    /// owns the terminal.
+    pub(crate) fn view(
+        pane_id: PaneId,
+        session: String,
+        address: String,
+        (rows, cols): (u16, u16),
+        connector: Connector,
+    ) -> Result<Self, StartFailure> {
+        let parsed = CoreAddress::parse(&address).map_err(|err| {
+            StartFailure::NotStarted(CoreError::Rpc {
+                kind: "protocol".into(),
+                message: err.to_string(),
+            })
+        })?;
+        let Some(machine) = parsed.machine else {
+            return Err(StartFailure::NotStarted(CoreError::Unavailable(format!(
+                "{address} is not a terminal of a machine"
+            ))));
+        };
+        let client = connector().map_err(StartFailure::NotStarted)?;
+        let (events_tx, events_rx) = stream_channel();
+        let attach = |observe: bool| {
+            let mut params = json!({"terminal": address, "cols": cols, "rows": rows,
+                "history": FIRST_ATTACH_HISTORY_LINES, "resumed": true});
+            if observe {
+                params["observe"] = Value::Bool(true);
+            }
+            client.attach(params, events_tx.clone(), CALL_TIMEOUT)
+        };
+        let first = attach(false).map_err(StartFailure::NotStarted)?;
+        let mut channel = first["channel"].as_u64().unwrap_or(0) as u32;
+        let read_only = !(client.automatic_input() && first["automatic_input"] == true);
+        if read_only {
+            // Typing as DATA would make the view the active viewer and
+            // resize the far terminal (R7): watch only.
+            let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
+            client.forget_stream(channel);
+            let observed = attach(true).map_err(StartFailure::NotStarted)?;
+            channel = observed["channel"].as_u64().unwrap_or(0) as u32;
+            warn!(pane = pane_id.raw(), %address, "herdr-core's path to the machine takes no automatic input; the view is read-only");
+        }
+        let link = crate::core_machine::panes::link(&machine);
+        link.set_connected(true);
+        debug!(pane = pane_id.raw(), %address, rows, cols, read_only, "view attached");
+        Ok(Self {
+            shared: Arc::new(Shared {
+                pane_id,
+                session,
+                address,
+                host: Host::Machine(machine),
+                machine: Some(link),
+                // The far herdr labelled the terminal; the view checks none.
+                launch: None,
+                identity: None,
+                program: None,
+                policy: ReattachPolicy::default(),
+                connector,
+                client: Mutex::new(client),
+                channel: AtomicU32::new(channel),
+                sink: events_tx,
+                size: Mutex::new((rows, cols)),
+                closing: AtomicBool::new(false),
+                // The far herdr owns the program: nothing here ends it.
+                keep_on_drop: AtomicBool::new(true),
+                pid: 0,
+                terminal: Mutex::new(None),
+                mirror_slot: Mutex::new(None),
+                view: Some(ViewIo {
+                    read_only,
+                    sent: Mutex::new((rows, cols)),
+                }),
+            }),
+            events_rx,
+            automatic_input: !read_only,
         })
     }
 
@@ -924,10 +1024,30 @@ impl CorePaneIo {
         }
     }
 
+    /// A view's pane: the far size its grid keeps (rows, cols), whatever
+    /// the view's own pane rect is (core-phase5 D6).
+    pub(crate) fn view_size(&self) -> Option<(u16, u16)> {
+        self.shared.view.as_ref().map(|_| *lock(&self.shared.size))
+    }
+
+    /// A view's pane that sends no input (core's path takes no automatic
+    /// input).
+    pub(crate) fn view_read_only(&self) -> bool {
+        self.shared.view.as_ref().is_some_and(|view| view.read_only)
+    }
+
+    /// Whether this is a view server's pane.
+    pub(crate) fn is_view(&self) -> bool {
+        self.shared.view.is_some()
+    }
+
     pub(crate) fn try_send_bytes(
         &self,
         bytes: Bytes,
     ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if self.view_read_only() {
+            return Err(mpsc::error::TrySendError::Closed(bytes));
+        }
         if self.machine_away() {
             return Err(mpsc::error::TrySendError::Closed(bytes));
         }
@@ -1045,6 +1165,10 @@ impl CorePaneIo {
     /// (security review M2). Core has no kill bound to a label (hc 0.1.21),
     /// so the check and the kill are two calls.
     pub(crate) fn kill(&self) -> KillOutcome {
+        // A view's close is a detach: the far herdr owns the program (D6).
+        if self.is_view() {
+            return KillOutcome::Live;
+        }
         let client = self.shared.client();
         if self.shared.identity.is_some() {
             let record = match client.call(
@@ -1092,6 +1216,25 @@ impl CorePaneIo {
     }
 }
 
+/// A far terminal's size (rows, cols) for a view's pane, from
+/// `terminal.get`; refused unless it is live.
+pub(crate) fn view_far_size(connector: &Connector, address: &str) -> Result<(u16, u16), CoreError> {
+    let record = connector()?.call("terminal.get", json!({"terminal": address}), CALL_TIMEOUT)?;
+    if record["state"] != "live" {
+        return Err(CoreError::Rpc {
+            kind: "finished".into(),
+            message: format!("{address} is not live"),
+        });
+    }
+    let far = |key: &str| {
+        record[key]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+    };
+    Ok((far("rows").unwrap_or(24), far("cols").unwrap_or(80)))
+}
+
 /// Queues a finished terminal's last screen and its exit for the parser.
 fn queue_finished(client: &CoreClient, address: &str, events: &StreamSink) {
     let screen = client
@@ -1122,6 +1265,9 @@ fn spawn_writer(
             } else {
                 kind::DATA
             };
+            if let Some(view) = &shared.view {
+                return view_writer(&shared, view, rx);
+            }
             while let Some(cmd) = rx.blocking_recv() {
                 match cmd {
                     WriteCmd::User(bytes) => {
@@ -1167,6 +1313,64 @@ fn spawn_writer(
         })
         .map(|_| ())
         .map_err(|err| CoreError::Unavailable(format!("writer thread: {err}")))
+}
+
+/// A view's writer (core-phase5 D6 Size): keys, pastes, mouse reports and
+/// terminal replies go as AUTOMATIC_INPUT, which core delivers without
+/// making the view the active viewer; a read-only view sends none. A resize
+/// carries the far size (the grid keeps it) and goes as RESIZE only when it
+/// differs from the last one sent, so core records it and emits no event;
+/// no FACTS frame, no FOCUS frame, no DATA ever.
+fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>) {
+    let typed = |bytes: &Bytes| {
+        if !view.read_only {
+            let _ = shared.send(kind::AUTOMATIC_INPUT, bytes.to_vec());
+        }
+    };
+    while let Some(cmd) = rx.blocking_recv() {
+        match cmd {
+            WriteCmd::User(bytes) | WriteCmd::Reply(bytes) => typed(&bytes),
+            WriteCmd::Submit {
+                text,
+                enter,
+                delay,
+                reply,
+            } => {
+                let result = if view.read_only {
+                    Err(std::io::Error::other(
+                        "this view is read-only: herdr-core's path takes no automatic input",
+                    ))
+                } else {
+                    shared
+                        .send(kind::AUTOMATIC_INPUT, text.to_vec())
+                        .and_then(|()| {
+                            std::thread::sleep(delay);
+                            shared.send(kind::AUTOMATIC_INPUT, enter.to_vec())
+                        })
+                        .map_err(std::io::Error::other)
+                };
+                let _ = reply.send(result);
+            }
+            WriteCmd::Resize {
+                rows,
+                cols,
+                cell: _,
+                replies,
+            } => {
+                let changed = {
+                    let mut sent = lock(&view.sent);
+                    std::mem::replace(&mut *sent, (rows, cols)) != (rows, cols)
+                };
+                if changed {
+                    let channel = shared.channel.load(Ordering::Acquire);
+                    let _ = shared.client().send(&Frame::resize(channel, cols, rows));
+                }
+                for reply in replies {
+                    typed(&reply);
+                }
+            }
+        }
+    }
 }
 
 /// Bytes a pane consumed but has not credited back yet. Credit goes back in
@@ -1277,7 +1481,14 @@ fn spawn_parser(
                         }
                     }
                     StreamEvent::Close(reason) => {
-                        if let Some(exit) = close_exit(&shared, &reason) {
+                        // A view's pane ends only when its far program has
+                        // (D6); anything else is a stream to attach again.
+                        let exit = if shared.view.is_some() {
+                            finished(&reason).then(|| finished_exit(&reason))
+                        } else {
+                            close_exit(&shared, &reason)
+                        };
+                        if let Some(exit) = exit {
                             finish(exit, finished(&reason));
                             return;
                         }
@@ -1546,11 +1757,12 @@ fn machine_reattach_check(
 /// Attaches the pane's stream again, after core said its terminal is live.
 fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
     let (rows, cols) = *lock(&shared.size);
-    match client.attach(
-        json!({"terminal": shared.address, "cols": cols, "rows": rows, "resumed": true}),
-        shared.sink.clone(),
-        CALL_TIMEOUT,
-    ) {
+    let mut params =
+        json!({"terminal": shared.address, "cols": cols, "rows": rows, "resumed": true});
+    if shared.view.as_ref().is_some_and(|view| view.read_only) {
+        params["observe"] = Value::Bool(true);
+    }
+    match client.attach(params, shared.sink.clone(), CALL_TIMEOUT) {
         Ok(attach) if !shared.shows_identity(&attach["terminal"]) => {
             let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
             let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
@@ -1561,6 +1773,9 @@ fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
         Ok(attach) => {
             let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
             shared.channel.store(channel, Ordering::Release);
+            if let Some(view) = &shared.view {
+                *lock(&view.sent) = (rows, cols);
+            }
             debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "herdr-core stream reattached");
             ReattachOutcome::Reattached
         }
@@ -2703,5 +2918,156 @@ mod tests {
             exits.recv_timeout(Duration::from_secs(5)).ok(),
             Some(ChildExitReason::Suspended(SuspendCause::TerminalGone))
         );
+    }
+
+    fn view_pane(core: &FakeCore, machine: &str) -> CorePaneIo {
+        let address = format!("{machine}/t1");
+        core.add_terminal(
+            json!({"address": address, "state": "live", "cols": 100, "rows": 30,
+            "labels": {"herdr.session": "herdr", "herdr.pane_id": "w1:p1"}}),
+        );
+        let size = view_far_size(&connector_to(core), &address).expect("far size");
+        assert_eq!(size, (30, 100), "rows and cols from terminal.get");
+        ignore_pane(
+            StartedCore::view(
+                PaneId::from_raw(41),
+                "herdr".into(),
+                address,
+                size,
+                connector_to(core),
+            )
+            .expect("view"),
+        )
+    }
+
+    fn stream_frames(core: &FakeCore) -> Vec<(u8, Vec<u8>)> {
+        core.received()
+            .into_iter()
+            .filter(|frame| frame.channel != 0)
+            .map(|frame| (frame.kind, frame.payload))
+            .collect()
+    }
+
+    // V14's unit part (core-phase5 D6 Size, R7, R8): a view attaches
+    // `resumed` at the far size, types only AUTOMATIC_INPUT, sends a RESIZE
+    // only for a far size different from the last one it sent, and never
+    // DATA, FOCUS or FACTS; its close is a detach, never `terminal.kill`.
+    #[test]
+    fn a_view_pane_never_takes_the_far_terminals_size() {
+        let core = FakeCore::start();
+        let pane = view_pane(&core, "view-size");
+        let attach = core
+            .requests()
+            .into_iter()
+            .find(|request| request["method"] == "terminal.attach")
+            .expect("attached");
+        assert_eq!(attach["params"]["resumed"], true);
+        assert_eq!(
+            (
+                attach["params"]["cols"].as_u64(),
+                attach["params"]["rows"].as_u64()
+            ),
+            (Some(100), Some(30))
+        );
+        assert!(attach["params"]["observe"].is_null());
+        assert_eq!(pane.view_size(), Some((30, 100)));
+        assert!(!pane.view_read_only());
+        assert_eq!(pane.machine().map(MachineName::as_str), Some("view-size"));
+
+        pane.try_send_bytes(Bytes::from_static(b"k"))
+            .expect("typed");
+        pane.queue_user_input_submission(
+            Bytes::from_static(b"line"),
+            Bytes::from_static(b"\r"),
+            Duration::ZERO,
+        )
+        .expect("submitted")
+        .recv_timeout(Duration::from_secs(5))
+        .expect("answer")
+        .expect("sent");
+        pane.write_terminal_response(|| Some(Bytes::from_static(b"\x1b[0n")));
+        // The view's own rect is not the far size: the runtime resizes to the
+        // far size only, so a repeat of the attach size sends nothing.
+        pane.resize(30, 100, 8, 16, Vec::new());
+        pane.resize(25, 90, 8, 16, Vec::new());
+        pane.resize(25, 90, 8, 16, Vec::new());
+        std::thread::sleep(Duration::from_millis(200));
+        let frames = stream_frames(&core);
+        let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                kind::AUTOMATIC_INPUT,
+                kind::AUTOMATIC_INPUT,
+                kind::AUTOMATIC_INPUT,
+                kind::AUTOMATIC_INPUT,
+                kind::RESIZE
+            ],
+            "{frames:?}"
+        );
+        let resize = &frames[4].1;
+        assert_eq!(
+            (
+                u16::from_le_bytes([resize[0], resize[1]]),
+                u16::from_le_bytes([resize[2], resize[3]])
+            ),
+            (90, 25),
+            "one RESIZE, of the changed far size"
+        );
+        assert_eq!(pane.view_size(), Some((25, 90)));
+
+        assert!(!pane.kill().ended(), "a view's close kills nothing");
+        pane.shutdown();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            core.methods()
+        );
+        assert!(
+            pane.kept_on_drop(),
+            "dropping a view's pane leaves the far program"
+        );
+    }
+
+    // D6 Size: a path that takes no AUTOMATIC_INPUT makes the view read-only
+    // (observe), never a DATA typist.
+    #[test]
+    fn a_view_without_automatic_input_watches_only() {
+        let core = FakeCore::start_with(|config| {
+            config.features = vec!["framed", "attach", "events", "status"];
+        });
+        let pane = view_pane(&core, "view-observe");
+        let attaches: Vec<Value> = core
+            .requests()
+            .into_iter()
+            .filter(|request| request["method"] == "terminal.attach")
+            .collect();
+        assert_eq!(attaches.len(), 2);
+        assert_eq!(attaches[1]["params"]["observe"], true);
+        assert!(pane.view_read_only());
+        assert!(pane.try_send_bytes(Bytes::from_static(b"k")).is_err());
+        assert!(pane
+            .queue_user_input_submission(
+                Bytes::from_static(b"x"),
+                Bytes::from_static(b"\r"),
+                Duration::ZERO
+            )
+            .expect("queued")
+            .recv_timeout(Duration::from_secs(5))
+            .expect("answer")
+            .is_err());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            stream_frames(&core)
+                .iter()
+                .all(|(kind, _)| *kind == super::kind::CLOSE),
+            "only the first attach's detach: {:?}",
+            stream_frames(&core)
+        );
+        pane.shutdown();
     }
 }

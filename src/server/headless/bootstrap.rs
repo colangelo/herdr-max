@@ -20,8 +20,31 @@ pub fn run_server() -> io::Result<()> {
         });
     #[cfg(not(unix))]
     let handoff_user_context = false;
+    // `--view <machine>` after `server` (a `--session` may come first).
+    #[cfg(unix)]
+    let view = {
+        let after_server = args
+            .iter()
+            .position(|arg| arg == "server")
+            .map_or(&[][..], |at| &args[at + 1..]);
+        match crate::view::parse_view_flag(after_server) {
+            Ok(view) => view,
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+        }
+    };
     let process_context =
         crate::platform::prepare_server_process(handoff_import, handoff_user_context);
+    #[cfg(unix)]
+    match &view {
+        Some(machine) => {
+            crate::logging::init_file_logging(&crate::view::log_file_name(machine));
+        }
+        None => init_logging(),
+    }
+    #[cfg(not(unix))]
     init_logging();
     if let Some(warning) = launcher_warning {
         warn!("{warning}");
@@ -37,6 +60,11 @@ pub fn run_server() -> io::Result<()> {
         }
     }
     crate::platform::raise_server_nofile_limit();
+
+    #[cfg(unix)]
+    if let Some(machine) = view {
+        return run_view_server(machine);
+    }
 
     if handoff_import {
         let socket_path = args
@@ -119,6 +147,63 @@ pub fn run_server() -> io::Result<()> {
         })
     });
 
+    crate::logging::shutdown("server");
+    result
+}
+
+/// A view server (openspec/changes/core-phase5, D6): the far machine's
+/// layout and panes through the primary core, at its own client socket, with
+/// no JSON API socket, no session file, no publisher and no program of its
+/// own.
+#[cfg(unix)]
+fn run_view_server(machine: crate::core_machine::MachineName) -> io::Result<()> {
+    if !crate::view::set_role(crate::view::ServerRole::View(machine.clone())) {
+        return Err(io::Error::other("the server role was already set"));
+    }
+    let mut loaded_config = config::Config::load();
+    crate::view::view_config(&mut loaded_config.config);
+    let config = &loaded_config.config;
+    // No API socket: requests are never received; the fleet reaches the far
+    // side through `--machine` (D7).
+    let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_hub = api::EventHub::default();
+    let server_stop = crate::server::shutdown::ServerStop::default();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(io::Error::other)?;
+    let result = run_then_shut_down(rt, |rt| {
+        rt.block_on(async {
+            let mut app = app::App::try_new(
+                config,
+                app::AppPolicy::VIEW,
+                config::config_diagnostic_summary(&loaded_config.diagnostics),
+                api_rx,
+                event_hub,
+            )?;
+            let presence = std::sync::Arc::new(crate::view::lifetime::ViewPresence::default());
+            app.start_view(machine.clone(), std::sync::Arc::clone(&presence))?;
+            let socket = crate::view::socket_path(&machine);
+            let mut server = match HeadlessServer::new_at(
+                app,
+                &loaded_config.diagnostics,
+                None,
+                None,
+                server_stop,
+                socket.clone(),
+            ) {
+                Ok(server) => server,
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+                    eprintln!("error: a view of {machine} is already running");
+                    std::process::exit(1);
+                }
+                Err(err) => return Err(err),
+            };
+            server.serve_as_view(presence);
+            info!(%machine, client_socket = %socket.display(), "herdr view server started");
+            server.run().await
+        })
+    });
     crate::logging::shutdown("server");
     result
 }

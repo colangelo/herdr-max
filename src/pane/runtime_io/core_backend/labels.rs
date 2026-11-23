@@ -244,7 +244,7 @@ fn parse_event(line: &[u8]) -> Option<CoreFact> {
 /// Splits a stream's bytes into whole lines, keeping a cut line for the next
 /// frame.
 #[derive(Default)]
-struct Lines {
+pub(super) struct Lines {
     partial: Vec<u8>,
 }
 
@@ -253,7 +253,7 @@ impl Lines {
     /// dropped (a snapshot of 1000 terminals is well under this).
     const MAX: usize = 16 * 1024 * 1024;
 
-    fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+    pub(super) fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         self.partial.extend_from_slice(bytes);
         let mut lines = Vec::new();
         while let Some(at) = self.partial.iter().position(|byte| *byte == b'\n') {

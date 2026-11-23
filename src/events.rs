@@ -264,6 +264,9 @@ pub enum AppEvent {
     CoreMachines {
         probes: Vec<crate::core_machine::panes::Probe>,
     },
+    /// What a view server's watcher found of its machine (core-phase5 D6).
+    #[cfg(unix)]
+    View(crate::view::watch::ViewEvent),
     /// `[experimental] pane_jobs` is on but a pane started without its own
     /// launchd job (fork issue 288). Sent once per server.
     PaneJobsUnavailable { reason: String },

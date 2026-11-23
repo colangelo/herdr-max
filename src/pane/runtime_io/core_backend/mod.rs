@@ -15,6 +15,7 @@ mod sessions;
 pub(crate) mod spaces_doc;
 mod ssh_start;
 mod status_mirror;
+pub(crate) mod view_link;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -25,13 +26,13 @@ use tracing::warn;
 use client::CoreError;
 pub(crate) use machine_spawn::{machine_spawn_from, MachineProgram, MachineSpawn};
 pub(crate) use pane_io::{
-    Connector, CorePaneIo, CoreReattach, CoreSpawn, KillOutcome, ReattachError, StartFailure,
-    StartedCore,
+    view_far_size, Connector, CorePaneIo, CoreReattach, CoreSpawn, KillOutcome, ReattachError,
+    StartFailure, StartedCore,
 };
 
 pub(crate) use sessions::{
     core_session_name, existing_core_connector, existing_session_connector, herdr_session_label,
-    known_sessions, note_stopped_by_person, release_secondary, server_connector,
+    known_sessions, note_stopped_by_person, release_secondary, server_connector, view_connector,
 };
 
 use super::UnclaimedCoreTerminal;
@@ -441,6 +442,10 @@ fn end_program(
     child_wait_completed: Option<&AtomicBool>,
     sweep_unconfirmed: bool,
 ) -> KillOutcome {
+    // A view's close is a detach: the far herdr owns the program (D6).
+    if core.is_view() {
+        return KillOutcome::Live;
+    }
     // A pane on a machine: its pid is the far side's, so close is
     // `terminal.kill` only. Detached jobs of the program stay there, as
     // core's own kill leaves them (core-phase5 D5).

@@ -578,6 +578,38 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+/// A core machine herdr added and links (its state folder holds
+/// `target.json`), with its gate as `machine status` reports it (`open`,
+/// `dormant`, or a closed class), read from files only: no core call, no
+/// dial (core-phase5 D6, C.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkedMachine {
+    pub name: MachineName,
+    pub gate: String,
+}
+
+/// The core machines herdr links, by name; empty when the state root
+/// cannot be read.
+pub(crate) fn linked_machines() -> Vec<LinkedMachine> {
+    let Ok(root) = passwd_machines_root() else {
+        return Vec::new();
+    };
+    linked_machines_in(&root, now_unix())
+}
+
+fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
+    status_rows(root, None, now)
+        .into_iter()
+        .filter(|row| row.target.is_some())
+        .filter_map(|row| {
+            Some(LinkedMachine {
+                name: MachineName::parse(&row.name).ok()?,
+                gate: row.gate.unwrap_or_else(|| "open".into()),
+            })
+        })
+        .collect()
+}
+
 fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> {
     let mut names: Vec<MachineName> = std::fs::read_dir(root)
         .into_iter()

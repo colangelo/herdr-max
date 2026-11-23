@@ -1479,6 +1479,8 @@ impl AppState {
             // The app marks machines and attaches the panes waiting on them.
             #[cfg(unix)]
             AppEvent::CoreMachines { .. } => Vec::new(),
+            #[cfg(unix)]
+            AppEvent::View(_) => Vec::new(),
             // The app installs resumed panes and raises the guard's notice.
             AppEvent::PaneResumed { .. } => Vec::new(),
             #[cfg(unix)]

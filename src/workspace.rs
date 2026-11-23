@@ -290,6 +290,47 @@ impl Workspace {
         }
     }
 
+    /// A view server's workspace (core-phase5 D6): the far space's id,
+    /// name, folder and tabs. Its folder is the far Mac's, so no git or
+    /// folder fact of this Mac is read for it.
+    #[cfg(unix)]
+    // A view's workspace is the far space's every field, as restore builds one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_view(
+        id: String,
+        custom_name: Option<String>,
+        folder: PathBuf,
+        tabs: Vec<Tab>,
+        active_tab: usize,
+        public_pane_numbers: HashMap<PaneId, usize>,
+        next_public_pane_number: usize,
+        next_public_tab_number: usize,
+    ) -> Self {
+        Self {
+            id,
+            custom_name,
+            identity_cwd: folder.clone(),
+            cached_identity_cwd: folder.clone(),
+            cached_auto_label: fallback_label_from_cwd(&folder),
+            cached_git_status_key: folder,
+            cached_git_branch: None,
+            cached_git_detached_head: None,
+            cached_git_ahead_behind: None,
+            cached_git_space: None,
+            worktree_space: None,
+            pin_order: None,
+            metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            metadata_token_sequences: HashMap::new(),
+            public_pane_numbers,
+            next_public_pane_number,
+            next_public_tab_number,
+            active_tab: active_tab.min(tabs.len().saturating_sub(1)),
+            tabs,
+            #[cfg(test)]
+            test_runtimes: HashMap::new(),
+        }
+    }
+
     pub fn new(
         initial_cwd: PathBuf,
         rows: u16,

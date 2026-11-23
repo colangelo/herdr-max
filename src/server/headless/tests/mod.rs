@@ -151,6 +151,8 @@ fn test_headless_server_from_app(mut app: crate::app::App) -> HeadlessServer {
         server_stop,
         server_event_rx,
         server_event_tx,
+        #[cfg(unix)]
+        view: None,
     }
 }
 

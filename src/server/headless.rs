@@ -284,6 +284,17 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Set in a view server (core-phase5 D6): its clients and idle exit.
+    #[cfg(unix)]
+    view: Option<ViewServer>,
+}
+
+/// A view server's own lifetime (core-phase5 D6): it tells the watcher
+/// about its clients and input, and exits 10 min after its last client.
+#[cfg(unix)]
+struct ViewServer {
+    presence: Arc<crate::view::lifetime::ViewPresence>,
+    idle: crate::view::lifetime::IdleExit,
 }
 
 #[cfg(windows)]
@@ -348,8 +359,27 @@ impl HeadlessServer {
         api_server: Option<api::ServerHandle>,
         server_stop: ServerStop,
     ) -> io::Result<Self> {
+        Self::new_at(
+            app,
+            config_diagnostics,
+            api_tx,
+            api_server,
+            server_stop,
+            client_socket_path(),
+        )
+    }
+
+    /// As `new`, listening at `client_path`: a view server binds its own
+    /// (core-phase5 D6).
+    pub(crate) fn new_at(
+        app: app::App,
+        config_diagnostics: &[String],
+        api_tx: Option<api::ApiRequestSender>,
+        api_server: Option<api::ServerHandle>,
+        server_stop: ServerStop,
+        client_path: PathBuf,
+    ) -> io::Result<Self> {
         let should_quit = server_stop.flag().clone();
-        let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
 
         let listener = bind_local_listener(&client_path)?;
@@ -424,7 +454,34 @@ impl HeadlessServer {
             server_stop,
             server_event_rx,
             server_event_tx,
+            #[cfg(unix)]
+            view: None,
         })
+    }
+
+    /// Makes this the view server's loop (core-phase5 D6): `presence` is the
+    /// watcher's view of its clients.
+    #[cfg(unix)]
+    pub(crate) fn serve_as_view(&mut self, presence: Arc<crate::view::lifetime::ViewPresence>) {
+        self.view = Some(ViewServer {
+            presence,
+            idle: crate::view::lifetime::IdleExit::default(),
+        });
+    }
+
+    /// A view server tells its watcher how many clients it has, and stops
+    /// 10 min after the last one left (D6 Lifetime).
+    #[cfg(unix)]
+    fn tick_view(&mut self, now: Instant) {
+        let clients = self.clients.len();
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        view.presence.set_clients(clients);
+        if view.idle.due(clients, now) {
+            info!("view server has had no client for 10 min; stopping");
+            self.app.state.should_quit = true;
+        }
     }
 
     /// Runs the headless server event loop until shutdown.
@@ -525,6 +582,8 @@ impl HeadlessServer {
 
             // 4. Accept new client connections.
             self.accept_client_connections()?;
+            #[cfg(unix)]
+            self.tick_view(Instant::now());
 
             // 5. Drain server events from client threads.
             let client_events = self.drain_server_events();

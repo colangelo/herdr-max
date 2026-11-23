@@ -133,6 +133,45 @@ impl TerminalRuntime {
         self.0.core_terminal()
     }
 
+    /// A view server's pane on the far terminal `address` (core-phase5 D6).
+    #[cfg(unix)]
+    pub(crate) fn view_core(
+        pane_id: PaneId,
+        address: String,
+        scrollback_limit_bytes: usize,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::view_core(
+            pane_id,
+            address,
+            scrollback_limit_bytes,
+            events,
+            render_notify,
+            render_dirty,
+        )
+        .map(Self)
+    }
+
+    /// A view server's pane: the far size (rows, cols) its grid keeps.
+    #[cfg(unix)]
+    pub(crate) fn view_size(&self) -> Option<(u16, u16)> {
+        self.0.view_size()
+    }
+
+    /// A view server's pane that cannot type.
+    #[cfg(unix)]
+    pub(crate) fn view_read_only(&self) -> bool {
+        self.0.view_read_only()
+    }
+
+    /// A view server's pane follows the far terminal's new size (D6, R8).
+    #[cfg(unix)]
+    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) {
+        self.0.follow_view_size(rows, cols);
+    }
+
     /// The core machine this runtime's program runs on (core-phase5 D5).
     #[cfg(unix)]
     pub(crate) fn core_machine(&self) -> Option<&crate::core_machine::MachineName> {

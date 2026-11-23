@@ -31,6 +31,32 @@ fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<Str
     Some(format!(" {} ", truncate_end(label, max_label_width)))
 }
 
+/// A pane's border label; a view server's pane adds the far terminal's size
+/// when its own rect differs (it draws that grid cropped or padded), and
+/// says when it cannot type (core-phase5 D6). Other panes: as before.
+fn view_border_label(
+    terminal: &crate::terminal::TerminalState,
+    inner: Rect,
+    show_agent_labels: bool,
+) -> Option<String> {
+    let label = terminal.border_label(show_agent_labels);
+    let size = terminal
+        .view_far_size
+        .filter(|&(rows, cols)| (rows, cols) != (inner.height, inner.width))
+        .map(|(rows, cols)| format!("{cols}x{rows} there"));
+    let read_only = terminal.view_read_only.then_some("read-only");
+    if size.is_none() && read_only.is_none() {
+        return label;
+    }
+    let parts: Vec<&str> = label
+        .as_deref()
+        .into_iter()
+        .chain(size.as_deref())
+        .chain(read_only)
+        .collect();
+    Some(parts.join(" · "))
+}
+
 // Full view computation reaches this helper for active and background panes.
 // Keep terminal queries narrow, allocation-free, and short under the core lock.
 fn terminal_inner_rect(rt: &TerminalRuntime, pane_inner: Rect, pane_scrollbars: bool) -> Rect {
@@ -961,7 +987,13 @@ fn render_pane_border_titles(
             .as_ref()
             .map_or(0, |indicator| indicator.rect.width);
         if let Some(title) = terminal
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+            .and_then(|terminal| {
+                view_border_label(
+                    terminal,
+                    terminal_inner_rect_for(info.inner_rect, app.pane_scrollbars),
+                    app.show_agent_labels_on_pane_borders,
+                )
+            })
             .and_then(|label| {
                 pane_border_title(
                     &label,

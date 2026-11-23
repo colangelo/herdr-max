@@ -46,6 +46,8 @@ mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+#[cfg(unix)]
+pub(crate) mod view_layout;
 mod window_title;
 mod worktrees;
 
@@ -110,6 +112,17 @@ impl AppPolicy {
 
     #[cfg(test)]
     pub(crate) const TEST: Self = Self {
+        restore_session: false,
+        persist_session: false,
+        persist_plugin_registry: false,
+        background_updates: false,
+        defer_task_store: false,
+    };
+
+    /// A view server (core-phase5 D6): it restores, saves and publishes
+    /// nothing, and runs no background update.
+    #[cfg(unix)]
+    pub(crate) const VIEW: Self = Self {
         restore_session: false,
         persist_session: false,
         persist_plugin_registry: false,
@@ -219,6 +232,9 @@ pub struct App {
     /// (core-phase5 D5).
     #[cfg(unix)]
     core_machine_poll: core_machine_panes::MachinePoll,
+    /// Set in a view server (core-phase5 D6): the far layout's state.
+    #[cfg(unix)]
+    pub(crate) view: Option<view_layout::ViewApp>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
@@ -929,6 +945,8 @@ impl App {
             core_waiting_retry_at: None,
             #[cfg(unix)]
             core_machine_poll: core_machine_panes::MachinePoll::default(),
+            #[cfg(unix)]
+            view: None,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
             tab_bar_datetimes: Vec::new(),
@@ -1105,6 +1123,11 @@ impl App {
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
         if !self.state.workspaces.is_empty() {
+            return false;
+        }
+        // A view shows the far layout only; it starts no shell here (D6).
+        #[cfg(unix)]
+        if self.view.is_some() {
             return false;
         }
 
@@ -1341,11 +1364,16 @@ impl App {
             // (core-phase3 D3a).
             crate::pane::reset_core_loss_guard();
             crate::platform::set_pane_jobs(config.experimental.pane_jobs);
-            self.set_core_status_mirror(config.experimental.core_status_mirror);
-            self.set_core_spaces_doc(config.experimental.core_spaces_doc);
-            self.set_core_extras_doc(config.experimental.core_extras_doc);
+            // A view publishes nothing and mirrors nothing (core-phase5 D6).
             #[cfg(unix)]
-            self.set_core_label_sync(config.experimental.core_label_sync);
+            let publishes = self.view.is_none();
+            #[cfg(not(unix))]
+            let publishes = true;
+            self.set_core_status_mirror(publishes && config.experimental.core_status_mirror);
+            self.set_core_spaces_doc(publishes && config.experimental.core_spaces_doc);
+            self.set_core_extras_doc(publishes && config.experimental.core_extras_doc);
+            #[cfg(unix)]
+            self.set_core_label_sync(publishes && config.experimental.core_label_sync);
             self.persist_pane_history = config.experimental.pane_history;
             if !self.persist_pane_history {
                 crate::persist::clear_history();

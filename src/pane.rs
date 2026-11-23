@@ -48,6 +48,8 @@ pub(crate) use runtime_io::{publish_core_extras, publish_core_spaces};
 #[cfg(unix)]
 pub(crate) use runtime_io::{set_core_label_sync, write_core_label};
 #[cfg(unix)]
+pub(crate) use runtime_io::{view_connector, view_link, CoreConnector};
+#[cfg(unix)]
 pub(crate) use runtime_io::{CoreAddress, CoreFact, LabelWrite, Observed};
 pub(crate) use runtime_io::{CoreStatusApp, CoreStatusRecord, CoreStatusWord};
 
@@ -382,6 +384,9 @@ enum PaneLaunch {
         /// The pane's public id, which the terminal's labels must name.
         public_pane_id: Option<String>,
     },
+    /// A view server's pane on a far terminal (core-phase5 D6).
+    #[cfg(unix)]
+    ViewCore { address: String },
 }
 
 impl PaneLaunch {
@@ -395,6 +400,9 @@ impl PaneLaunch {
             match self {
                 PaneLaunch::Command { machine, .. } => machine.is_some(),
                 PaneLaunch::ReattachCore { link, .. } => link.machine().is_some(),
+                // A view's pane shows a far herdr's terminal, its replayed
+                // history included: all of it is far data (core-phase5 D6).
+                PaneLaunch::ViewCore { .. } => true,
             }
         }
         #[cfg(not(unix))]
@@ -415,6 +423,8 @@ impl PaneLaunch {
                     .and_then(|machine| machine.cwd.as_ref())
                     .map(std::path::PathBuf::from),
                 PaneLaunch::ReattachCore { link, .. } => link.machine_cwd.clone(),
+                // The far herdr saves its own pane's folder; a view saves none.
+                PaneLaunch::ViewCore { .. } => None,
             }
         }
         #[cfg(not(unix))]
@@ -3094,6 +3104,64 @@ impl PaneRuntime {
         )
     }
 
+    /// A view server's pane (core-phase5 D6): attached to the far terminal
+    /// `address` (`<machine>/t7`) at its far size, which the pane's grid
+    /// keeps whatever its rect; no agent detection (the far herdr's status
+    /// comes from core) and nothing that could end the far program.
+    #[cfg(unix)]
+    pub fn view_core(
+        pane_id: PaneId,
+        address: String,
+        scrollback_limit_bytes: usize,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<RenderSignal>,
+    ) -> std::io::Result<Self> {
+        let (rows, cols) = PaneIo::view_far_size(&address)?;
+        let runtime = Self::spawn_command_builder(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            events,
+            render_notify,
+            render_dirty,
+            PaneLaunch::ViewCore { address },
+            SpawnInitialState::default(),
+            AgentDetection::Disabled,
+        )?;
+        runtime.current_size.set((rows, cols, 0, 0));
+        Ok(runtime)
+    }
+
+    /// A view server's pane: the far terminal's size (rows, cols), which its
+    /// grid keeps (core-phase5 D6). `None` for every other pane.
+    #[cfg(unix)]
+    pub(crate) fn view_size(&self) -> Option<(u16, u16)> {
+        self.io.view_size()
+    }
+
+    /// A view server's pane that cannot type (core's path takes no
+    /// automatic input).
+    #[cfg(unix)]
+    pub(crate) fn view_read_only(&self) -> bool {
+        self.io.view_read_only()
+    }
+
+    /// A view server's pane learned the far terminal's new size from core
+    /// (core-phase5 D6, R8): its grid follows it, and the view echoes it
+    /// once as RESIZE when it differs from the last one it sent.
+    #[cfg(unix)]
+    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) {
+        if self.io.view_size().is_none() {
+            return;
+        }
+        let (_, _, cell_width_px, cell_height_px) = self.current_size.get();
+        self.resize_grid(rows, cols, cell_width_px, cell_height_px);
+    }
+
     /// The herdr-core terminal this pane shows, saved with the pane (D10).
     /// With the agent detection holds in it, so a save keeps both
     /// (security review M3, Sol H6).
@@ -3372,6 +3440,16 @@ impl PaneRuntime {
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
+        // A view server only shows the far side's programs (core-phase5 D6):
+        // a split, a tab or a workspace made in a view starts nothing here.
+        #[cfg(unix)]
+        if let (Some(machine), PaneLaunch::Command { .. }) =
+            (crate::view::viewed_machine(), &launch)
+        {
+            return Err(std::io::Error::other(format!(
+                "this is a view of {machine}: it starts no program here; act in {machine}'s own herdr"
+            )));
+        }
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
@@ -3396,7 +3474,7 @@ impl PaneRuntime {
             let tries_core = match &launch {
                 PaneLaunch::Command { runtime, .. } => runtime_io::starts_on_core(*runtime),
                 #[cfg(unix)]
-                PaneLaunch::ReattachCore { .. } => false,
+                PaneLaunch::ReattachCore { .. } | PaneLaunch::ViewCore { .. } => false,
             };
             if tries_core {
                 pane_terminal.push_screen_into_history();
@@ -3549,6 +3627,14 @@ impl PaneRuntime {
                     cols,
                     sink,
                     &spawn_child_pid,
+                    child_wait_completed.clone(),
+                )?,
+                #[cfg(unix)]
+                PaneLaunch::ViewCore { address } => PaneIo::view_core(
+                    pane_id,
+                    &address,
+                    (rows, cols),
+                    sink,
                     child_wait_completed.clone(),
                 )?,
             }
@@ -4149,8 +4235,16 @@ impl PaneRuntime {
         self.content_seq.load(Ordering::Acquire)
     }
 
-    /// Resize if the dimensions actually changed.
+    /// Resize if the dimensions actually changed. A view server's pane keeps
+    /// the far terminal's size whatever its rect (core-phase5 D6): the pane
+    /// draws that grid cropped or padded, and never resizes the far side.
     pub fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
+        #[cfg(unix)]
+        let (rows, cols) = self.io.view_size().unwrap_or((rows, cols));
+        self.resize_grid(rows, cols, cell_width_px, cell_height_px);
+    }
+
+    fn resize_grid(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(MIN_PANE_ROWS);
         let cols = cols.max(MIN_PANE_COLS);
         let size = (rows, cols, cell_width_px, cell_height_px);
@@ -4611,6 +4705,12 @@ impl PaneRuntime {
 
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
         if !self.focus_reporting_enabled() {
+            return false;
+        }
+        // A view sends no focus reports: the far herdr's focus is the
+        // program's (core-phase5 D6).
+        #[cfg(unix)]
+        if self.io.view_size().is_some() {
             return false;
         }
 

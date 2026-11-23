@@ -154,6 +154,12 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::View(event) = ev {
+            self.handle_view_event(event);
+            return Vec::new();
+        }
+
+        #[cfg(unix)]
         if let AppEvent::CoreMachines { probes } = ev {
             self.handle_core_machines(&probes, std::time::Instant::now());
             return Vec::new();

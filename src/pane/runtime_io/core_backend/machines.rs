@@ -102,6 +102,11 @@ pub(crate) fn machine_of_address(address: &str) -> Option<crate::core_machine::M
     super::address::CoreAddress::parse(address).ok()?.machine
 }
 
+/// An hc version string as `(major, minor, patch)`.
+pub(crate) fn parse_core_version(text: &str) -> Option<(u64, u64, u64)> {
+    client::parse_version(text)
+}
+
 /// Hands `event` to the server loop, when one runs in this process.
 pub(crate) fn tell_server(event: crate::events::AppEvent) {
     super::tell_server(event);

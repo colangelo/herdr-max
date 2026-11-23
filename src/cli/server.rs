@@ -17,6 +17,9 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
         "restart" => server_restart(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
+        // A view server (core-phase5 D6): run by `run_server`.
+        #[cfg(unix)]
+        "--view" => Ok(None),
         "status" => {
             eprintln!("{}", server_status_hint(&args[1..]));
             Ok(Some(2))

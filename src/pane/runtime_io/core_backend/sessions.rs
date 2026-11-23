@@ -118,6 +118,23 @@ pub(crate) fn existing_session_connector(session: &str) -> Connector {
     })
 }
 
+/// The view server's connector (core-phase5 D6): one shared connection to
+/// the primary core session, the one that has the viewed machine, which is
+/// never started. A view only reads what that core holds.
+pub(crate) fn view_connector() -> Connector {
+    static VIEW: Mutex<Option<CoreClient>> = Mutex::new(None);
+    Arc::new(|| {
+        let mut slot = lock(&VIEW);
+        if let Some(client) = slot.as_ref().filter(|client| !client.is_closed()) {
+            return Ok(client.clone());
+        }
+        let socket = client::primary_socket_path(&core_session_name());
+        let (client, _) = client::connect_at(&socket)?;
+        *slot = Some(client.clone());
+        Ok(client)
+    })
+}
+
 /// Drops the registry's connection to the secondary `session`; a pane that
 /// still holds it keeps it.
 pub(crate) fn release_secondary(session: &str) {

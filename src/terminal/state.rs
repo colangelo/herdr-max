@@ -266,6 +266,11 @@ pub struct TerminalState {
     /// When herdr-core stopped answering this core pane (unix ms), while it
     /// keeps retrying; the program keeps running (core-phase3 D1a).
     pub core_unreachable_since: Option<u64>,
+    /// A view server's pane (core-phase5 D6): the far terminal's size
+    /// (rows, cols), shown in the pane border when the pane's rect differs,
+    /// and whether the view can type into it.
+    pub view_far_size: Option<(u16, u16)>,
+    pub view_read_only: bool,
 }
 
 /// Why a pane without a runtime keeps its place (core-phase3 D1, D1b, D2).
@@ -438,6 +443,8 @@ impl TerminalState {
             restore_error: None,
             hold: None,
             core_unreachable_since: None,
+            view_far_size: None,
+            view_read_only: false,
         }
     }
 

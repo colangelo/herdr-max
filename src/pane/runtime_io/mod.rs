@@ -29,6 +29,10 @@ pub(crate) use core_backend::fake::FakeCore;
 #[cfg(unix)]
 pub(crate) use core_backend::machines as core_machines;
 #[cfg(unix)]
+pub(crate) use core_backend::view_link;
+#[cfg(unix)]
+pub(crate) use core_backend::{view_connector, Connector as CoreConnector};
+#[cfg(unix)]
 pub(crate) use core_backend::{MachineProgram, MachineSpawn};
 #[cfg(unix)]
 pub(crate) use core_labels::{CoreAddress, CoreFact, LabelWrite, Observed};
@@ -513,6 +517,64 @@ impl PaneIo {
             PaneIo::Core(core) => core.machine(),
             _ => None,
         }
+    }
+
+    /// The far size (rows, cols) of a terminal a view server attaches to
+    /// next (core-phase5 D6), read just before its attach.
+    #[cfg(unix)]
+    pub(in crate::pane) fn view_far_size(address: &str) -> std::io::Result<(u16, u16)> {
+        core_backend::view_far_size(&core_backend::view_connector(), address)
+            .map_err(|err| std::io::Error::other(format!("could not view {address}: {err}")))
+    }
+
+    /// A view server's pane (core-phase5 D6): the far size its grid keeps.
+    #[cfg(unix)]
+    pub(super) fn view_size(&self) -> Option<(u16, u16)> {
+        match self {
+            PaneIo::Core(core) => core.view_size(),
+            _ => None,
+        }
+    }
+
+    /// A view server's pane that sends no input.
+    #[cfg(unix)]
+    pub(super) fn view_read_only(&self) -> bool {
+        matches!(self, PaneIo::Core(core) if core.view_read_only())
+    }
+
+    /// Attaches a view server's pane to the far terminal `address`
+    /// (`<machine>/t7`) of the primary core, which is never started
+    /// (core-phase5 D6).
+    #[cfg(unix)]
+    pub(in crate::pane) fn view_core(
+        pane_id: crate::layout::PaneId,
+        address: &str,
+        size: (u16, u16),
+        sink: PaneIoSink,
+        child_wait_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::io::Result<Self> {
+        let started = core_backend::StartedCore::view(
+            pane_id,
+            core_backend::core_session_name(),
+            address.to_string(),
+            size,
+            core_backend::view_connector(),
+        )
+        .map_err(|failure| {
+            let err = match failure {
+                core_backend::StartFailure::NotStarted(err)
+                | core_backend::StartFailure::Unknown(err) => err,
+            };
+            std::io::Error::other(format!("could not view {address}: {err}"))
+        })?;
+        let PaneIoSink {
+            on_read,
+            on_exit,
+            on_core_unreachable,
+        } = sink;
+        started
+            .into_pane(on_read, on_exit, on_core_unreachable, child_wait_completed)
+            .map(PaneIo::Core)
     }
 
     /// Attaches to a program an earlier server left in herdr-core (D10

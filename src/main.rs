@@ -69,6 +69,8 @@ mod thread_spawn;
 mod ui;
 mod ulid;
 mod update;
+#[cfg(unix)]
+mod view;
 mod workspace;
 mod worktree;
 
@@ -1054,6 +1056,28 @@ fn main() -> io::Result<()> {
             eprintln!("run 'herdr --help' for usage");
             std::process::exit(2);
         }
+    }
+
+    // `--remote core:<machine>`: the view server through Herdr Core's
+    // machine link (core-phase5 D6, D8); any other target is the old remote.
+    #[cfg(unix)]
+    if let Some(machine) = remote_launch
+        .as_ref()
+        .and_then(|launch| view::start::core_target(&launch.target))
+    {
+        let keybindings = remote_launch
+            .as_ref()
+            .map_or(remote::RemoteKeybindings::Local, |launch| {
+                launch.keybindings
+            });
+        let result = machine
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+            .and_then(|machine| view::start::run_view_client(&machine, keybindings));
+        if let Err(err) = result {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     if let Some(remote_launch) = remote_launch {

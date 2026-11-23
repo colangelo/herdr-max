@@ -107,6 +107,11 @@ impl App {
     }
 
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {
+        // A view's folders are the far Mac's: no git read here (D6).
+        #[cfg(unix)]
+        if self.view.is_some() {
+            return;
+        }
         let Some(deadline) = self.git_refresh_deadline() else {
             return;
         };
