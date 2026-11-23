@@ -84,12 +84,20 @@ impl std::fmt::Display for Holder {
 /// Takes the lock at `path`, trying for at most `wait`; `Ok(None)` when
 /// another process holds it all that time.
 pub(crate) fn take_at(path: &Path, wait: Duration) -> io::Result<Option<ServerLock>> {
-    let file = crate::view::open_lock(path, true)?;
+    lock_and_record(crate::view::open_lock(path, true)?, path, wait)
+}
+
+/// Locks `file` and records this process in it. The record is a diagnostic:
+/// a lock whose pid cannot be written (a full disk) is kept all the same, so
+/// it still keeps every other server out.
+fn lock_and_record(file: File, path: &Path, wait: Duration) -> io::Result<Option<ServerLock>> {
     if !crate::platform::core_link::lock_exclusive_within(&file, wait)? {
         return Ok(None);
     }
     let lock = ServerLock { file };
-    lock.record_owner()?;
+    if let Err(err) = lock.record_owner() {
+        warn!(path = %path.display(), %err, "holding the session's server lock without recording this server in it");
+    }
     Ok(Some(lock))
 }
 
@@ -253,6 +261,28 @@ mod tests {
         );
         drop(first);
         assert_eq!(holder_at(&path), None, "a lock goes with its holder");
+        assert!(take_at(&path, Duration::ZERO).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pid that cannot be written leaves the lock held, not dropped.
+    #[test]
+    fn a_lock_whose_pid_cannot_be_written_is_kept() {
+        let dir = lock_dir("unrecorded");
+        let path = dir.join(LOCK_FILE);
+        std::fs::write(&path, b"").unwrap();
+        // Read-only, so the pid write fails after the flock succeeded.
+        let read_only = File::open(&path).unwrap();
+        let held = lock_and_record(read_only, &path, Duration::ZERO)
+            .unwrap()
+            .expect("the lock is kept");
+        assert!(
+            take_at(&path, Duration::from_millis(100))
+                .unwrap()
+                .is_none(),
+            "a second server is still kept out"
+        );
+        drop(held);
         assert!(take_at(&path, Duration::ZERO).unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
