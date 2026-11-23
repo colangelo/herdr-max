@@ -758,6 +758,33 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`, not 300 and 600): V26, the link part,
   the lease part and the fleet part with the new `--dial` line and grant checks; nothing left running or in the
   passwd home's state.
+  Round 3 on PR 95 (an independent read: six low findings; security ac/security 406215a: M5 and M6 again), each
+  with a test that fails with its fix reverted:
+  - Lease read: the 256-file cap counts holder-named files only (`.new` temporaries, strays and expired leases no
+    longer push a live lease out); the dialer's prune also removes expired `cli-<pid>` files whose pid is dead
+    (`LeaseHolder::pid`, was `client_pid`).
+  - Lease time caps clamp: an expiry beyond `now + max_life` is kept with its expiry set to `now + max_life` (a wall
+    clock stepped back after a wake no longer kills a 12 h wake or a keep lease); a future `input_at` is still
+    refused.
+  - Far text is escaped exactly once, where it is printed: `remote::far_line` / `far_text` (core route only) also
+    escape a literal backslash, so far text cannot spell `\x1b`; `visible_line` (unchanged for the local and the old
+    paths: a Windows pipe path keeps its backslashes) now also shows U+061C, U+200E and U+200F. The inner layers
+    (`check_far_session`, `stderr_tail`, `exec`'s failures) no longer escape; `refusal_line`, `remote_error` for a core
+    route (per line, real newlines kept, `\r` escaped) and core's state in `machine status --core` do. A saved-SSH
+    machine's `remote_error` is the master text, byte for byte (test: a 3-line ssh stderr with a CR).
+  - M5 route check: `target.json` records the `--via` command line `machine add` gave core (`Target.via`, new optional
+    field); core's record must carry exactly it (this herdr's path and `core-link <name>`). A target written before
+    has no `via` and is checked for the `core-link <name>` end only. Core's `machine.list` does send `session` (`hc
+    schema` MachineView: "the hc session there, null: its default"), so a record with no session is the default
+    session, and it must equal the target's session (before: a missing session matched any).
+  - M6: a request with no readable `id` is refused before it is sent, and no reply matches a request with no id
+    (`request_id`; before: any reply passed).
+  - The bridge folder is made under the canonical base that `is_trusted_base` checked (`trusted_base`), so a
+    symlinked TMPDIR is not followed after the check.
+  Gates, m4m, 2026-11-23, under the shared lock: targeted tests green, the 12 new or changed tests failing together
+  with their fixes reverted; `just check` 0 on 88af72b3 (5888 + 158 tests; windows-lint skipped on macOS);
+  `CORE_MACHINE_PARTS="link lease fleet" core_machine_live_test.sh` 0 on a debug binary built from 88af72b3 and
+  copied out of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`).
 - [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
   Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
   probe and `fleet.rs`'s `exec` and wrapper are what they will call.
