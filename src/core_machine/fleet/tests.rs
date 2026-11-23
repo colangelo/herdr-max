@@ -436,20 +436,21 @@ fn cut_and_timed_out_replies_are_failures_with_no_output() {
     }
 }
 
-/// V37: a request over 8 MiB raw is refused before anything is sent.
+/// V37, M6: a request over the far API's 1 MiB line limit is refused
+/// before anything is sent; `exec` refuses input over core's 8 MiB.
 #[test]
-fn a_request_over_8_mib_is_not_sent() {
+fn a_request_over_the_api_limit_is_not_sent() {
     let core = FakeCore::start();
     let (root, dir) = machine_dir("fleet-big");
     let link = link_to(&core, &dir);
     let big = Request {
-        id: "x".repeat(INPUT_LIMIT),
+        id: "x".repeat(REQUEST_LIMIT),
         method: Method::Ping(PingParams::default()),
     };
     assert!(client(&link).request_value(&big).is_err());
     assert_eq!(
         link.reported_failure().expect("failure").to_string(),
-        "the request is over 8 MiB, so it was not sent to loop"
+        "the request is over the Herdr API's 1 MiB line limit, so it was not sent to loop"
     );
     assert!(execs(&core).is_empty(), "{:?}", core.methods());
     assert!(exec(
@@ -1063,5 +1064,55 @@ fn a_name_herdr_did_not_add_costs_no_core_call() {
         Lookup::NotCore
     ));
     assert!(core.methods().is_empty(), "{:?}", core.methods());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// M6: a far reply for another request, or no API reply at all, is a
+/// failure that may have run; a request that is not one whole line is
+/// not sent.
+#[test]
+fn a_reply_must_answer_the_request_sent() {
+    for stdout in [
+        &b"{\"id\":\"someone-else\",\"result\":{}}\n"[..],
+        b"not json\n",
+    ] {
+        let core = FakeCore::start_with(|config| {
+            config.exec_reply = Some(exec_reply(stdout, false, false))
+        });
+        let (root, dir) = machine_dir("fleet-reply-id");
+        let link = link_to(&core, &dir);
+        assert!(client(&link).request_value(&ping()).is_err());
+        let failure = link.reported_failure().expect("failure").to_string();
+        assert!(
+            failure.starts_with("herdr on loop (/opt/homebrew/bin/herdr-beta) answered ")
+                && failure.ends_with(MAY_RUN),
+            "{failure}"
+        );
+        drop(link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    let core = FakeCore::start();
+    let (root, dir) = machine_dir("fleet-no-newline");
+    let link = link_to(&core, &dir);
+    {
+        use std::io::Write as _;
+        let mut stream = UnixStream::connect(link.socket_path()).expect("connect");
+        stream
+            .write_all(b"{\"id\":\"a\",\"method\":\"ping\"}")
+            .expect("write");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close");
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply);
+        assert!(reply.is_empty());
+    }
+    assert_eq!(
+        link.reported_failure().expect("failure").to_string(),
+        "the request is not one whole line, so it was not sent to loop"
+    );
+    assert!(execs(&core).is_empty());
+    drop(link);
     let _ = std::fs::remove_dir_all(&root);
 }

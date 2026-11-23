@@ -60,36 +60,49 @@ pub(crate) fn run_remote_api_bridge(args: &[String]) -> std::io::Result<()> {
 /// What `remote-api-bridge --request --check` prints.
 pub(crate) const API_REQUEST_BRIDGE: &str = "herdr-api-request-v1";
 
-/// The most `remote-api-bridge --request` reads as its request: 8 MiB,
-/// what a Herdr Core `machine.exec` takes as input.
-const API_REQUEST_LIMIT: u64 = 8 * 1024 * 1024;
+/// The longest reply `remote-api-bridge --request` passes on: 8 MiB, the
+/// most output a Herdr Core `machine.exec` returns whole.
+const API_REPLY_LIMIT: usize = 8 * 1024 * 1024;
 
-/// `remote-api-bridge --request`: the request on `input`, read to its end,
-/// goes to the API; the reply line goes to `output`. Unlike the stream
-/// bridge it never half-closes the API connection, which would end a
-/// request still waiting (`pane wait-output`, `events.wait`): a Herdr Core
+/// `remote-api-bridge --request`: one request line on `input`, at most the
+/// API's own line limit and nothing after it, goes to the API; its one
+/// reply line, at most 8 MiB, goes to `output`. Unlike the stream bridge
+/// it never half-closes the API connection, which would end a request
+/// still waiting (`pane wait-output`, `events.wait`): a Herdr Core
 /// `machine.exec` closes the program's stdin once the request is in
-/// (core-phase5 D7).
+/// (core-phase5 D7). Anything else is an error that passes nothing on
+/// (security review 2026-11-23 M6).
 fn forward_one_api_request(
     input: impl std::io::Read,
-    mut api: impl std::io::Read + std::io::Write,
+    api: impl std::io::Read + std::io::Write,
     mut output: impl std::io::Write,
 ) -> std::io::Result<()> {
     use std::io::{BufRead as _, Read as _};
+    let invalid =
+        |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_string());
+    let mut input = std::io::BufReader::new(input);
     let mut request = Vec::new();
-    input
-        .take(API_REQUEST_LIMIT + 1)
-        .read_to_end(&mut request)?;
-    if request.len() as u64 > API_REQUEST_LIMIT {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "the request is over 8 MiB",
+    (&mut input)
+        .take(crate::api::MAX_REQUEST_LINE as u64 + 2)
+        .read_until(b'\n', &mut request)?;
+    if request.len() > crate::api::MAX_REQUEST_LINE + 1 {
+        return Err(invalid(
+            "the request is over the Herdr API's 1 MiB line limit",
         ));
     }
+    if !request.ends_with(b"\n") {
+        return Err(invalid("the request is not one whole line"));
+    }
+    if !input.fill_buf()?.is_empty() {
+        return Err(invalid("more than one request line"));
+    }
+    let mut api = api;
     api.write_all(&request)?;
     api.flush()?;
     let mut reply = Vec::new();
-    std::io::BufReader::new(api).read_until(b'\n', &mut reply)?;
+    std::io::BufReader::new(api)
+        .take(API_REPLY_LIMIT as u64 + 1)
+        .read_until(b'\n', &mut reply)?;
     // An API that closed with no reply, or in the middle of one, may have
     // run the request: an error, so the caller says so (core-phase5 #310).
     if reply.is_empty() {
@@ -97,6 +110,9 @@ fn forward_one_api_request(
             std::io::ErrorKind::UnexpectedEof,
             "the Herdr API closed with no reply",
         ));
+    }
+    if reply.len() > API_REPLY_LIMIT {
+        return Err(std::io::Error::other("the Herdr API's reply is over 8 MiB"));
     }
     if !reply.ends_with(b"\n") {
         return Err(std::io::Error::new(
@@ -235,6 +251,64 @@ mod tests {
             assert!(error.to_string().contains(why), "{error}");
             assert!(output.is_empty());
         }
+    }
+
+    /// security review 2026-11-23 M6: one request line, at most the API's
+    /// limit, with nothing after it; anything else reaches no API.
+    #[test]
+    fn the_request_bridge_forwards_one_whole_request_line_only() {
+        struct NoApi;
+        impl std::io::Read for NoApi {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("the API was read")
+            }
+        }
+        impl std::io::Write for NoApi {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                panic!("the API was written")
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut over = vec![b'x'; crate::api::MAX_REQUEST_LINE + 1];
+        over.push(b'\n');
+        for (input, why) in [
+            (
+                b"{\"id\":\"a\"}\n{\"id\":\"b\"}\n".to_vec(),
+                "more than one",
+            ),
+            (b"{\"id\":\"a\"}\n\n".to_vec(), "more than one"),
+            (b"{\"id\":\"a\"}".to_vec(), "not one whole line"),
+            (over, "1 MiB"),
+        ] {
+            let mut output = Vec::new();
+            let error =
+                forward_one_api_request(&input[..], NoApi, &mut output).expect_err("refused");
+            assert!(error.to_string().contains(why), "{error}");
+            assert!(output.is_empty());
+        }
+    }
+
+    /// M6: a reply over 8 MiB is an error that passes nothing on.
+    #[cfg(unix)]
+    #[test]
+    fn the_request_bridge_bounds_the_reply() {
+        use std::io::{BufRead as _, Write as _};
+        let (bridge_end, mut api_end) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let server = std::thread::spawn(move || {
+            let mut line = Vec::new();
+            std::io::BufReader::new(api_end.try_clone().expect("clone"))
+                .read_until(b'\n', &mut line)
+                .expect("request");
+            let _ = api_end.write_all(&vec![b'x'; API_REPLY_LIMIT + 10]);
+        });
+        let mut output = Vec::new();
+        let error = forward_one_api_request(&b"{\"id\":\"a\"}\n"[..], bridge_end, &mut output)
+            .expect_err("too big");
+        assert!(error.to_string().contains("over 8 MiB"), "{error}");
+        assert!(output.is_empty());
+        let _ = server.join();
     }
 
     #[test]

@@ -17,10 +17,11 @@
 //!   SIGINT, SIGTERM and SIGHUP remove it and the bridge folder at once.
 //! - Every argv starts with D5's `env -u` wrapper (F6): the far core's own
 //!   environment may carry a herdr pane's `HERDR_SOCKET_PATH`.
-//! - A request is sent once (no retry after send); a reply cut at 8 MiB or
-//!   timed out is an error with none of its output printed (F12); a request
-//!   over 8 MiB is refused before it is sent. Every failure after sending
-//!   says that the request may have run.
+//! - A request is sent once (no retry after send); a reply cut at 8 MiB,
+//!   timed out, or not one whole reply line with the request's id is an
+//!   error with none of its output printed (F12); a request that is not one
+//!   line within the far API's 1 MiB limit is refused before it is sent.
+//!   Every failure after sending says that the request may have run.
 //! - The far herdr's path and capabilities are read once per link
 //!   establishment (the link's dial record), kept in `far_herdr.json` for at
 //!   most 5 min, and forgotten when a request through it fails there.
@@ -57,6 +58,9 @@ pub(crate) const EXIT_DORMANT: i32 = 75;
 /// "8 MB"; measured on hc 0.1.21, 8 388 608 bytes run and 8 388 609 are
 /// refused as `invalid_params`.
 pub(crate) const INPUT_LIMIT: usize = 8 * 1024 * 1024;
+/// The longest request line the bridge sends, its newline aside: the far
+/// API's own limit, so a longer one is refused here, unsent (M6).
+const REQUEST_LIMIT: usize = crate::api::MAX_REQUEST_LINE;
 /// `machine.exec`'s longest run: core ends a program after 600 s at most.
 const EXEC_MAX_SECS: u64 = 600;
 /// A request with its own `timeout_ms` runs that long and this much more,
@@ -998,12 +1002,25 @@ fn bridge_argv(far: &FarHerdr, session: &str) -> Vec<String> {
     argv
 }
 
-/// Whether a far bridge's output is one whole reply line.
-fn whole_reply(stdout: &[u8]) -> Result<(), &'static str> {
-    match stdout {
-        [] => Err("answered with no reply"),
-        [line @ .., b'\n'] if !line.contains(&b'\n') => Ok(()),
-        _ => Err("answered with no whole reply line"),
+/// Whether a far bridge's output is one whole reply line to `request`:
+/// JSON with the request's id (M6).
+fn whole_reply(request: &[u8], stdout: &[u8]) -> Result<(), &'static str> {
+    let line = match stdout {
+        [] => return Err("answered with no reply"),
+        [line @ .., b'\n'] if !line.contains(&b'\n') => line,
+        _ => return Err("answered with no whole reply line"),
+    };
+    let id = |bytes: &[u8]| {
+        serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .map(|value| value["id"].clone())
+    };
+    let Some(reply_id) = id(line) else {
+        return Err("answered with a line that is no API reply");
+    };
+    match id(request) {
+        Some(request_id) if request_id != reply_id => Err("answered another request"),
+        _ => Ok(()),
     }
 }
 
@@ -1035,20 +1052,29 @@ impl Bridge {
         };
         let mut line = Vec::new();
         let read = BufReader::new(reader)
-            .take(INPUT_LIMIT as u64 + 1)
+            .take(REQUEST_LIMIT as u64 + 2)
             .read_until(b'\n', &mut line);
         if let Err(err) = read {
             self.fail(format!("the request could not be read: {err}"));
             return;
         }
-        if line.len() > INPUT_LIMIT {
+        if line.is_empty() {
+            return;
+        }
+        // One whole request line at the far API's own limit, or nothing
+        // is sent (M6).
+        if line.len() > REQUEST_LIMIT + 1 {
             self.fail(format!(
-                "the request is over 8 MiB, so it was not sent to {}",
+                "the request is over the Herdr API's 1 MiB line limit, so it was not sent to {}",
                 self.name
             ));
             return;
         }
-        if line.is_empty() {
+        if !line.ends_with(b"\n") {
+            self.fail(format!(
+                "the request is not one whole line, so it was not sent to {}",
+                self.name
+            ));
             return;
         }
         let timeout = match exec_timeout(&line) {
@@ -1063,7 +1089,7 @@ impl Bridge {
                 // A far side that ended well with no whole reply line (an
                 // API that closed first) may still have run the request
                 // (#310): a failure, never an empty success.
-                if let Err(why) = whole_reply(&ran.stdout) {
+                if let Err(why) = whole_reply(&line, &ran.stdout) {
                     forget_far_herdr(&self.dir);
                     self.fail(format!(
                         "herdr on {} ({}) {why}; {MAY_HAVE_RUN}",
