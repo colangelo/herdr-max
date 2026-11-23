@@ -95,8 +95,8 @@ fn soon() -> Instant {
     Instant::now() + VIEW_ACTION_BUDGET
 }
 
-fn fine() -> Result<(), String> {
-    Ok(())
+fn fine() -> AimCheck {
+    Box::new(|| Ok(()))
 }
 
 fn tab_create(id: &str) -> Vec<u8> {
@@ -123,7 +123,7 @@ fn v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line() {
     core.set_machine("loop", "connected");
     let (root, dir) = added("view-v20");
 
-    let reply = send(&route(&core, &root), &machine(), &line, soon(), &fine).expect("sent");
+    let reply = send(&route(&core, &root), &machine(), &line, soon(), fine()).expect("sent");
     assert_eq!(reply, far_reply);
 
     let sent = execs(&core);
@@ -180,12 +180,13 @@ fn an_action_on_a_dormant_machine_refuses_and_dials_nothing() {
         &machine(),
         &tab_create("view:2"),
         soon(),
-        &fine,
+        fine(),
     )
     .expect_err("refused");
     assert!(err.contains("loop is dormant: press a key"), "{err}");
     assert!(
-        err.contains("nothing was sent and nothing dialled"),
+        err.contains("this action sent nothing and dialled nothing")
+            && err.contains("keys in this window may still let Herdr Core's own retry connect it"),
         "{err}"
     );
     assert!(execs(&core).is_empty());
@@ -211,7 +212,7 @@ fn a_far_refusal_comes_back_as_the_reply() {
         &machine(),
         &tab_create("view:3"),
         soon(),
-        &fine,
+        fine(),
     )
     .expect("a reply");
     assert_eq!(reply, far_reply);
@@ -252,7 +253,7 @@ fn the_request_runs_under_a_keep_lease_written_again_after_the_probe() {
         &machine(),
         &tab_create("view:5"),
         soon(),
-        &fine,
+        fine(),
     )
     .expect("sent");
     assert_eq!(execs(&core).len(), 2, "the probe and the request");
@@ -289,7 +290,7 @@ fn a_machine_herdr_did_not_add_gets_nothing() {
         &machine(),
         &tab_create("view:4"),
         soon(),
-        &fine,
+        fine(),
     )
     .expect_err("refused");
     assert!(err.contains("herdr here did not add loop"), "{err}");
@@ -304,16 +305,10 @@ fn a_second_action_while_one_runs_is_refused_at_once() {
     let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
     core.set_machine("loop", "connected");
     let (root, dir) = added("view-busy");
-    let running = ONE_AT_A_TIME.lock().expect("the first action");
+    let route = route(&core, &root);
+    let running = route.busy.lock().expect("the first action");
     let started = Instant::now();
-    let err = send(
-        &route(&core, &root),
-        &machine(),
-        &tab_create("view:6"),
-        soon(),
-        &fine,
-    )
-    .expect_err("refused");
+    let err = send(&route, &machine(), &tab_create("view:6"), soon(), fine()).expect_err("refused");
     assert!(started.elapsed() < Duration::from_secs(2), "no wait");
     assert!(
         err.contains("another action on loop from this view is still running")
@@ -338,7 +333,7 @@ fn an_action_ends_within_its_deadline() {
         &machine(),
         &tab_create("view:7"),
         Instant::now() + Duration::from_secs(20),
-        &fine,
+        fine(),
     )
     .expect_err("out of time");
     assert!(
@@ -371,11 +366,100 @@ fn a_failed_aim_check_sends_nothing() {
         &machine(),
         &tab_create("view:8"),
         soon(),
-        &|| Err("pane w3:p2 shows another terminal there now".into()),
+        Box::new(|| Err("pane w3:p2 shows another terminal there now".into())),
     )
     .expect_err("refused");
     assert!(
         err.contains("another terminal there now") && err.contains("nothing was sent to loop"),
+        "{err}"
+    );
+    assert!(execs(&core).is_empty() && dir.leases().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// E.3 review, item 8: the one-at-a-time lock is the view's own (its
+// route's, shared by its clones), not the process's: another view's
+// action, or another test's, is not refused for it.
+#[test]
+fn one_views_running_action_does_not_refuse_anothers() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, _dir) = added("view-busy-other");
+    let busy = route(&core, &root);
+    let _running = busy.busy.lock().expect("the first action");
+    send(
+        &route(&core, &root),
+        &machine(),
+        &tab_create("view:9"),
+        soon(),
+        fine(),
+    )
+    .expect("another view's route is free");
+    let err = send(&busy, &machine(), &tab_create("view:10"), soon(), fine())
+        .expect_err("the same view's is not");
+    assert!(err.contains("is still running"), "{err}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// E.3 review, item 6: a stale probe runs within the action's budget, 12 s,
+// not the fleet CLI's 30 s.
+#[test]
+fn the_probe_of_a_view_action_runs_within_its_budget() {
+    let (root, dir) = added("view-probe-budget");
+    std::fs::remove_file(dir.far_herdr_path()).expect("a stale probe");
+    let core = FakeCore::start_with(|config| {
+        config.exec_handler = Some(Arc::new(|params: &Value| {
+            if params["input"].is_null() {
+                return ran(b"herdr-probe-v1\n/opt/homebrew/bin/herdr\n{\"version\":\"0.9.3\",\"core_session\":\"default\"}\n");
+            }
+            far_ok(params)
+        }));
+    });
+    core.set_machine("loop", "connected");
+    send(
+        &route(&core, &root),
+        &machine(),
+        &tab_create("view:11"),
+        soon(),
+        fine(),
+    )
+    .expect("sent");
+    let sent = execs(&core);
+    assert_eq!(sent.len(), 2, "the probe and the request");
+    assert!(sent[0]["params"]["input"].is_null(), "the probe first");
+    assert_eq!(sent[0]["params"]["timeout"], VIEW_PROBE_SECS);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// E.3 review, item 7: an aim check that does not answer (its connection
+// to core waits on another, say) gets its own 10 s and no more: nothing is
+// sent, the lease is gone, and the action answers within its deadline.
+#[test]
+fn an_aim_check_that_does_not_answer_sends_nothing() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, dir) = added("view-aim-slow");
+    let started = Instant::now();
+    let err = send(
+        &route(&core, &root),
+        &machine(),
+        &tab_create("view:12"),
+        soon(),
+        Box::new(|| {
+            std::thread::sleep(Duration::from_secs(40));
+            Ok(())
+        }),
+    )
+    .expect_err("out of time");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_secs(VIEW_CHECK_SECS)
+            && took < Duration::from_secs(VIEW_CHECK_SECS + 3),
+        "{took:?}"
+    );
+    assert!(
+        err.contains("took too long to show the pane's terminal")
+            && err.contains("nothing was sent to loop"),
         "{err}"
     );
     assert!(execs(&core).is_empty() && dir.leases().is_empty());

@@ -173,6 +173,13 @@ impl TerminalRuntime {
         self.0.view_replaced()
     }
 
+    /// The far program a view server's pane is bound to (security review
+    /// M3).
+    #[cfg(unix)]
+    pub(crate) fn view_instance(&self) -> Option<crate::view::instance::FarInstance> {
+        self.0.view_instance()
+    }
+
     /// A view server's pane follows the far terminal's new size (D6, R8).
     /// False when the size is over the view's budget (review M4).
     #[cfg(unix)]

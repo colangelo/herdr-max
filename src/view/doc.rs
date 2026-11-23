@@ -90,6 +90,27 @@ impl ViewLayout {
             .filter_map(|tab| tab.root.as_ref())
             .find_map(|root| find(root, far_pane))
     }
+
+    /// The far space that shows the far pane `far_pane`, with the number of
+    /// panes it shows in all its tabs; `None` when no space shows it.
+    pub(crate) fn space_of(&self, far_pane: &str) -> Option<(&ViewSpace, usize)> {
+        fn panes<'a>(node: &'a ViewNode, out: &mut Vec<&'a str>) {
+            match node {
+                ViewNode::Pane { id, .. } => out.push(id),
+                ViewNode::Split { first, second, .. } => {
+                    panes(first, out);
+                    panes(second, out);
+                }
+            }
+        }
+        self.spaces.iter().find_map(|space| {
+            let mut ids = Vec::new();
+            for root in space.tabs.iter().filter_map(|tab| tab.root.as_ref()) {
+                panes(root, &mut ids);
+            }
+            ids.contains(&far_pane).then_some((space, ids.len()))
+        })
+    }
 }
 
 #[cfg(test)]

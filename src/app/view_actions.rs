@@ -8,16 +8,21 @@
 //! reply, or why there is none, is the client's answer: an error is a
 //! notice there, and the view stays connected.
 //!
-//! An action on a pane goes to the far terminal the person aimed at, or
-//! nowhere (review M2, M4): a pane the view holds (another terminal under
-//! its id, a far core reset, a public id that moved) is refused, so is a
-//! pane the far herdr has no number for, a forced close goes only to the
-//! pane and terminal whose close was asked for, and just before the request
-//! the far document is read again to see that the far pane still shows that
-//! terminal.
+//! An action on a pane goes to the far program the person aimed at, or
+//! nowhere (review M2, M4; E.3 review item 1): a pane the view holds
+//! (another terminal under its id, a far core reset, a public id that
+//! moved) is refused, so is a pane not attached (no far program bound
+//! yet) and one the far herdr has no number for; a forced close goes only
+//! to the pane, terminal and program whose close was asked for; and just
+//! before the request the far document is read again (the far pane still
+//! shows that terminal) and core is asked for the terminal (it is still the
+//! program the pane attached to). A view never closes the last pane of a
+//! far workspace: the far herdr would close the workspace, and a worktree
+//! group's parent with it (security review of E.3, M2 P2).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::App;
@@ -29,6 +34,7 @@ use crate::api::schema::{
 use crate::core_machine::fleet::view::{ViewRoute, VIEW_ACTION_BUDGET};
 use crate::core_machine::MachineName;
 use crate::layout::PaneId;
+use crate::view::instance::FarInstance;
 
 /// The code of an action the view could not send, the far side did not
 /// answer, or refused for a reason the client has no handling of its own
@@ -41,14 +47,65 @@ const NOT_DONE: &str = "view_action_failed";
 /// (review L2). Every other far code becomes `NOT_DONE`, shown.
 const PASSED_ON: &[&str] = &["confirmation_required"];
 
-/// The far pane and terminal a pane action aims at (review M2).
+/// The far pane, terminal and program a pane action aims at (review M2,
+/// E.3 review item 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Aimed {
     /// The far public pane id (`w3:p4`).
     pub(crate) far_pane: String,
     /// The far core's address of its terminal (`t7`).
     pub(crate) terminal: String,
+    /// The far program the pane attached to there.
+    pub(crate) instance: FarInstance,
     pane_id: PaneId,
+}
+
+/// The most closes waiting for a person's confirmation a view keeps.
+const MAX_CLOSE_ASKED: usize = 32;
+
+/// The closes the far herdr was asked for without `force`, by far pane
+/// (review M2). Shared with an action's thread: a forced close's record
+/// goes only once the far herdr answered it, so a send refused before it
+/// (busy, not connected, the aim check) leaves the person's confirmation
+/// in place (E.3 review, item 9).
+#[derive(Clone, Default)]
+pub(crate) struct CloseAsked(Arc<Mutex<HashMap<String, Aimed>>>);
+
+impl CloseAsked {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Aimed>> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The far herdr is asked to close `aimed` without `force`.
+    fn note(&self, aimed: &Aimed) {
+        let mut asked = self.map();
+        if asked.len() >= MAX_CLOSE_ASKED && !asked.contains_key(&aimed.far_pane) {
+            asked.clear();
+        }
+        asked.insert(aimed.far_pane.clone(), aimed.clone());
+    }
+
+    /// Whether the close of exactly `aimed` was asked for.
+    fn was_asked(&self, aimed: &Aimed) -> bool {
+        self.map().get(&aimed.far_pane) == Some(aimed)
+    }
+
+    /// The far herdr answered the forced close of `aimed`: its record is
+    /// spent.
+    fn spend(&self, aimed: &Aimed) {
+        let mut asked = self.map();
+        if asked.get(&aimed.far_pane) == Some(aimed) {
+            asked.remove(&aimed.far_pane);
+        }
+    }
+
+    /// Keeps the records of the panes in `live`.
+    pub(crate) fn retain(&self, live: &HashSet<PaneId>) {
+        self.map().retain(|_, aimed| live.contains(&aimed.pane_id));
+    }
 }
 
 /// A view's request for the far herdr, and the far pane it aims at.
@@ -114,9 +171,24 @@ impl App {
                 ));
             }
             let terminal = view.far_terminal(pane).ok_or_else(|| unknown("pane", id))?;
+            let not_attached = || {
+                format!(
+                    "pane {id} is not attached to its program on {machine} yet, so a view cannot tell which program it would reach; wait until it shows, then do this again"
+                )
+            };
+            let replaced = self
+                .state
+                .pane_terminal(pane)
+                .and_then(|state| self.terminal_runtimes.get(&state.id))
+                .is_some_and(crate::terminal::TerminalRuntime::view_replaced);
+            let instance = view
+                .far_instance(pane)
+                .filter(|instance| instance.is_known() && !replaced)
+                .ok_or_else(not_attached)?;
             Ok(Aimed {
                 far_pane: far.to_string(),
                 terminal: terminal.to_string(),
+                instance: instance.clone(),
                 pane_id: pane,
             })
         };
@@ -198,7 +270,19 @@ impl App {
                 }
             }
             Method::PaneClose(params) => {
-                let (_, aimed) = far_pane_id(&params.pane_id)?;
+                let (ws, aimed) = far_pane_id(&params.pane_id)?;
+                let workspace = &self.state.workspaces[ws];
+                let panes: usize = workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.layout.pane_count())
+                    .sum();
+                if panes <= 1 {
+                    return Err(last_pane_refusal(
+                        workspace.custom_name.as_deref().unwrap_or(&workspace.id),
+                        machine,
+                    ));
+                }
                 FarAction {
                     method: Method::PaneClose(PaneCloseParams {
                         pane_id: aimed.far_pane.clone(),
@@ -262,10 +346,10 @@ impl App {
         let deadline = Instant::now() + VIEW_ACTION_BUDGET;
         let id = request.id.clone();
         let method_name = request.method.operation().name;
-        let Some((machine, route)) = self
+        let Some((machine, route, close_asked)) = self
             .view
-            .as_ref()
-            .map(|view| (view.machine.clone(), view.route()))
+            .as_mut()
+            .map(|view| (view.machine.clone(), view.route(), view.close_asked.clone()))
         else {
             let _ = respond_to.send(error_response(id, NOT_DONE, "this is not a view"));
             return;
@@ -281,6 +365,10 @@ impl App {
                 return;
             }
         };
+        let closing = match &action.method {
+            Method::PaneClose(params) => Some(params.force),
+            _ => None,
+        };
         let line = match far_request_line(action.method) {
             Ok(line) => line,
             Err(why) => {
@@ -294,10 +382,21 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("herdr-view-action".into())
             .spawn(move || {
-                let check = || still_aimed(&route, &machine, aimed.as_ref());
+                let check = {
+                    let (route, machine, aimed) = (route.clone(), machine.clone(), aimed.clone());
+                    Box::new(move || {
+                        still_aimed(&route, &machine, aimed.as_ref(), closing.is_some())
+                    })
+                };
                 let reply = crate::core_machine::fleet::view::send(
-                    &route, &machine, &line, deadline, &check,
+                    &route, &machine, &line, deadline, check,
                 );
+                // The far herdr answered a forced close: the person's
+                // confirmation is spent. Refused before the request, it
+                // stays for the next try (E.3 review, item 9).
+                if let (Ok(_), Some(true), Some(aimed)) = (&reply, closing, aimed.as_ref()) {
+                    close_asked.spend(aimed);
+                }
                 let _ = thread_respond.send(client_reply(&machine, method_name, thread_id, reply));
             });
         if let Err(err) = spawned {
@@ -309,29 +408,28 @@ impl App {
         }
     }
 
-    /// A close without `force` is noted with the far pane and terminal it
-    /// aims at; a forced one (the person confirmed what the far herdr said
-    /// would be lost) goes only to that same pane and terminal (review M2).
+    /// A close without `force` is noted with the far pane, terminal and
+    /// program it aims at; a forced one (the person confirmed what the far
+    /// herdr said would be lost) goes only to that same one (review M2).
+    /// The record stays until the far herdr answers the forced close.
     fn confirmed_close(&mut self, action: FarAction) -> Result<FarAction, String> {
         let (Method::PaneClose(params), Some(aimed)) = (&action.method, &action.aimed) else {
             return Ok(action);
         };
-        let Some(view) = self.view.as_mut() else {
+        let Some(view) = self.view.as_ref() else {
             return Ok(action);
         };
         if !params.force {
-            view.note_close_asked(&aimed.far_pane, aimed.pane_id, &aimed.terminal);
+            view.close_asked.note(aimed);
             return Ok(action);
         }
-        match view.take_close_asked(&aimed.far_pane) {
-            Some((pane_id, terminal)) if pane_id == aimed.pane_id && terminal == aimed.terminal => {
-                Ok(action)
-            }
-            _ => Err(format!(
-                "the close you confirmed was for another pane than {} of {} shows now; close it again",
-                aimed.far_pane, view.machine
-            )),
+        if view.close_asked.was_asked(aimed) {
+            return Ok(action);
         }
+        Err(format!(
+            "the close you confirmed was for another pane or program than {} of {} shows now; close it again",
+            aimed.far_pane, view.machine
+        ))
     }
 }
 
@@ -342,13 +440,28 @@ fn far_numbered(far: &str) -> bool {
         .is_some_and(|(_, pane)| pane.starts_with('p'))
 }
 
-/// Just before the request (review M2): the far document still shows the
-/// aimed-at terminal under the aimed-at far pane. Nothing to check for an
-/// action that names no pane.
+/// Why a view does not close the last pane of the far workspace
+/// `workspace` (security review of E.3, M2 P2): the far herdr would close
+/// the workspace with it, and a worktree group's parent workspace closes
+/// its whole group, sibling workspaces' agents included.
+fn last_pane_refusal(workspace: &str, machine: &MachineName) -> String {
+    format!(
+        "closing the last pane of {workspace} on {machine} is not done from a view; close it there"
+    )
+}
+
+/// Just before the request (review M2, E.3 review item 1): the far
+/// document still shows the aimed-at terminal under the aimed-at far pane,
+/// and core still has the program the pane attached to at that terminal
+/// (a far core reset gives an address to another program, which the
+/// document cannot tell). For a close (`closing`), the pane is still not
+/// the last of its far workspace. Nothing to check for an action that
+/// names no pane.
 fn still_aimed(
     route: &ViewRoute,
     machine: &MachineName,
     aimed: Option<&Aimed>,
+    closing: bool,
 ) -> Result<(), String> {
     let Some(aimed) = aimed else {
         return Ok(());
@@ -361,14 +474,38 @@ fn still_aimed(
         format!("{machine}'s layout does not read ({err}), so pane {far_pane} could not be checked")
     })?;
     match layout.terminal_of(far_pane) {
-        Some(terminal) if terminal == aimed.terminal => Ok(()),
-        Some(_) => Err(format!(
-            "pane {far_pane} of {machine} shows another terminal now than the one you aimed at"
-        )),
-        None => Err(format!(
-            "pane {far_pane} is no longer in {machine}'s layout"
-        )),
+        Some(terminal) if terminal == aimed.terminal => {}
+        Some(_) => {
+            return Err(format!(
+                "pane {far_pane} of {machine} shows another terminal now than the one you aimed at"
+            ))
+        }
+        None => {
+            return Err(format!(
+                "pane {far_pane} is no longer in {machine}'s layout"
+            ))
+        }
     }
+    if closing {
+        if let Some((space, 0..=1)) = layout.space_of(far_pane) {
+            let name = if space.name.is_empty() {
+                &space.id
+            } else {
+                &space.name
+            };
+            return Err(last_pane_refusal(name, machine));
+        }
+    }
+    let address = format!("{machine}/{}", aimed.terminal);
+    let record = route.far_terminal(&address).map_err(|err| {
+        format!("could not ask Herdr Core which program pane {far_pane} of {machine} runs: {err}")
+    })?;
+    if record["state"] != "live" || !aimed.instance.matches(&record) {
+        return Err(format!(
+            "pane {far_pane} of {machine} runs another program now than the one you aimed at (its Herdr Core was reset, or the program ended)"
+        ));
+    }
+    Ok(())
 }
 
 /// One far API request line for `method`, with an id of its own.

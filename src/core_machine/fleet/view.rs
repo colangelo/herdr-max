@@ -8,13 +8,17 @@
 //! layout and republishes it; the view follows its document.
 //!
 //! A person's action in a view is a person's act on that machine (D3), but
-//! it is no dial: on a machine that is not connected it is refused at once,
-//! with nothing written, sent or dialled (D7's rule for a call without
-//! `--dial`); a key in one of the view's panes is what wakes it (D6). On a
-//! connected one the view's own `cli-<pid>` keep lease holds the link for
-//! the call and admits no dial, so a drop during it is not redialled on its
-//! account. A refusal or a far error is the action's own answer: the client
-//! shows it as a notice and the view stays connected.
+//! the action itself is no dial: on a machine that is not connected it is
+//! refused at once, with no lease written and nothing sent or dialled for
+//! it (D7's rule for a call without `--dial`); a key in one of the view's
+//! panes is what wakes it (D6). The chord's own keys are a person's input
+//! in a Herdr window like any other, so they renew that client's lease
+//! (B.2), and while it is in force Herdr Core's own retry may connect the
+//! machine (E.3 review, item 11). On a connected one the view's own
+//! `cli-<pid>` keep lease holds the link for the call and admits no dial,
+//! so a drop during it is not redialled on its account. A refusal or a far
+//! error is the action's own answer: the client shows it as a notice and
+//! the view stays connected.
 //!
 //! Time (review M3): the client waits 60 s for an endpoint command, holding
 //! its command lane meanwhile (one command in flight per endpoint, by the
@@ -23,13 +27,15 @@
 //! the view took it, and every step fits in it: no wait for another action
 //! (a second one at once is refused, nothing sent), core's `machine.list`
 //! (5 s), the far herdr probe when its answer is stale (12 s and core's 5),
-//! the check that the far pane is still the one aimed at (one `doc.get`,
-//! 5 s), and the request, whose run is what is left, 15 s at most and 5 s
-//! at least, else nothing is sent.
+//! the check that the far pane is still the one aimed at (a `doc.get` and a
+//! `terminal.get`: 10 s, however long its connection to core waits, and
+//! never past the deadline less the shortest request), and the request,
+//! whose run is what is left, 15 s at most and 5 s at least, else nothing
+//! is sent.
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{mpsc, Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -46,8 +52,9 @@ use crate::core_machine::MachineName;
 pub(crate) const VIEW_ACTION_BUDGET: Duration = Duration::from_secs(45);
 /// The far herdr probe's run, when its kept answer is stale.
 const VIEW_PROBE_SECS: u64 = 12;
-/// The far document's read for the aimed-at check (`view_link`'s call).
-const VIEW_CHECK_SECS: u64 = 5;
+/// The aimed-at check: the far document's read and the far terminal's
+/// (`view_link`'s calls, 5 s each).
+const VIEW_CHECK_SECS: u64 = 10;
 /// The request's run: what the budget leaves, at most this.
 const VIEW_REQUEST_SECS: u64 = 15;
 /// Less than this left for the request: it is not sent.
@@ -62,22 +69,28 @@ const _: () =
 /// 60 s, longer than the whole action.
 const VIEW_LEASE_SECS: f64 = super::LEASE_LIFE_SECS;
 
-/// One action at a time in a view process: they share its one lease file.
-/// A second is refused, never queued (review M3).
-static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-
 /// Reads the far `herdr-app` document (`doc.get {on}`), bounded.
 pub(crate) type LayoutReader = Arc<dyn Fn(&MachineName) -> Result<Value, String> + Send + Sync>;
+/// Reads core's record of a far terminal (`terminal.get` of
+/// `<machine>/t7`), bounded.
+pub(crate) type TerminalReader = Arc<dyn Fn(&str) -> Result<Value, String> + Send + Sync>;
+
+/// The check run just before the request (`send`).
+pub(crate) type AimCheck = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
 /// Where a view's actions go: the primary core, herdr's machine state, the
-/// view's lease holder and the far document's reader. A test points them
-/// at a fake core and a scratch folder.
+/// view's lease holder and the far document's and terminals' readers. A
+/// test points them at a fake core and a scratch folder. Clones share one
+/// lock: one action at a time per view, since they share its one lease
+/// file; a second is refused, never queued (review M3).
 #[derive(Clone)]
 pub(crate) struct ViewRoute {
     core: CoreAt,
     root: Result<PathBuf, String>,
     holder: LeaseHolder,
     layout: LayoutReader,
+    terminal: TerminalReader,
+    busy: Arc<Mutex<()>>,
 }
 
 impl ViewRoute {
@@ -90,9 +103,16 @@ impl ViewRoute {
                 crate::pane::view_link::layout_document(&crate::pane::view_connector(), machine)
                     .map_err(|err| err.to_string())
             }),
+            terminal: Arc::new(|address| {
+                crate::pane::view_link::terminal_record(&crate::pane::view_connector(), address)
+                    .map_err(|err| err.to_string())
+            }),
+            busy: Arc::default(),
         }
     }
 
+    /// A route to the core at `socket` and the machine state under `root`,
+    /// whose far terminals answer nothing until `with_terminal` says how.
     #[cfg(test)]
     pub(crate) fn at(socket: &std::path::Path, root: PathBuf, layout: LayoutReader) -> Self {
         Self {
@@ -100,12 +120,25 @@ impl ViewRoute {
             root: Ok(root),
             holder: LeaseHolder::cli(std::process::id()),
             layout,
+            terminal: Arc::new(|_| Err("no far terminal in this test".into())),
+            busy: Arc::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_terminal(mut self, terminal: TerminalReader) -> Self {
+        self.terminal = terminal;
+        self
     }
 
     /// The far document as core has it now.
     pub(crate) fn far_layout(&self, machine: &MachineName) -> Result<Value, String> {
         (self.layout)(machine)
+    }
+
+    /// Core's record of the far terminal `address` (`<machine>/t7`) now.
+    pub(crate) fn far_terminal(&self, address: &str) -> Result<Value, String> {
+        (self.terminal)(address)
     }
 }
 
@@ -114,16 +147,19 @@ impl ViewRoute {
 /// is none: refused unsent, or failed after sending (then the message says
 /// that it may have run there). `check` runs just before the request: the
 /// far pane the person aimed at is still that one (review M2), else nothing
-/// is sent. Everything ends by `deadline`.
+/// is sent; it gets `VIEW_CHECK_SECS`, never more than the deadline leaves
+/// less the shortest request, and one that has not answered by then sends
+/// nothing (E.3 review, item 7).
+/// Everything ends by `deadline`.
 pub(crate) fn send(
     route: &ViewRoute,
     name: &MachineName,
     line: &[u8],
     deadline: Instant,
-    check: &dyn Fn() -> Result<(), String>,
+    check: AimCheck,
 ) -> Result<Vec<u8>, String> {
     let not_sent = |why: String| format!("{why}; nothing was sent to {name}");
-    let _one = match ONE_AT_A_TIME.try_lock() {
+    let _one = match route.busy.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => {
@@ -192,7 +228,16 @@ pub(crate) fn send(
     {
         return Err(out_of_time());
     }
-    check().map_err(not_sent)?;
+    // The check gets its own share and never more than the deadline leaves
+    // the shortest request, however long its connection to core waits.
+    let request_room = Duration::from_secs(VIEW_REQUEST_MIN_SECS + CALL_MARGIN_SECS);
+    let check_room =
+        Duration::from_secs(VIEW_CHECK_SECS).min(left(deadline).saturating_sub(request_room));
+    within(check_room, check).map_err(|why| {
+        not_sent(why.unwrap_or_else(|| {
+            format!("Herdr Core took too long to show the pane's terminal on {name}")
+        }))
+    })?;
     // Written again for the request: the probe may have taken some of it.
     lease
         .write_again()
@@ -213,6 +258,23 @@ fn left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
 
+/// Runs `check` on a thread of its own and waits `wait` at most for it.
+/// `Err(None)` when it did not answer in time (it ends on its own calls'
+/// timeouts, unwaited), `Err(Some(why))` when it said no.
+fn within(wait: Duration, check: AimCheck) -> Result<(), Option<String>> {
+    let (done, answer) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("herdr-view-check".into())
+        .spawn(move || {
+            let _ = done.send(check());
+        })
+        .map_err(|err| Some(format!("could not start the check of the pane: {err}")))?;
+    match answer.recv_timeout(wait) {
+        Ok(result) => result.map_err(Some),
+        Err(_) => Err(None),
+    }
+}
+
 /// The request's run with `left` of the budget: what core's answer leaves,
 /// at most `VIEW_REQUEST_SECS`; `None` below `VIEW_REQUEST_MIN_SECS`.
 fn request_secs(left: Duration) -> Option<u64> {
@@ -223,8 +285,11 @@ fn request_secs(left: Duration) -> Option<u64> {
     (run >= VIEW_REQUEST_MIN_SECS).then_some(run)
 }
 
-/// Why an action on a machine that is not connected is refused: nothing
-/// was written, sent or dialled (D7, F7).
+/// Why an action on a machine that is not connected is refused: the action
+/// wrote no lease and sent or dialled nothing (D7, F7). The person's keys,
+/// the chord's included, renew their window's lease as any input does, so
+/// Herdr Core's own retry may connect the machine meanwhile (E.3 review,
+/// item 11): the notice says so rather than "nothing dialled".
 fn not_connected(name: &MachineName, state: &str) -> String {
     let what = match state {
         "needs_login" => format!("{name} needs a login (herdr machine login {name})"),
@@ -234,12 +299,15 @@ fn not_connected(name: &MachineName, state: &str) -> String {
         }
         other => format!("{name} is not connected ({other})"),
     };
-    format!("{what}, then do this again; nothing was sent and nothing dialled")
+    format!(
+        "{what}, then do this again; this action sent nothing and dialled nothing (keys in this window may still let Herdr Core's own retry connect it)"
+    )
 }
 
 /// The view's `cli-<pid>` keep lease for one action: written before the
 /// probe and again before the request, removed when the action ends. No
-/// renewer runs: the whole action ends within its 45 s, and a view killed
+/// renewer runs: the whole action ends within its 45 s (an aim check
+/// unwaited past its share ends on its own 5 s calls), and a view killed
 /// during one leaves a lease that keeps an up link a minute at most and
 /// admits no dial. No termination handler is put in the view server for it
 /// (the fleet CLI's would end the server on SIGHUP).

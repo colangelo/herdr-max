@@ -553,6 +553,15 @@ impl PaneIo {
         matches!(self, PaneIo::Core(core) if core.view_replaced())
     }
 
+    /// The far program a view server's pane is bound to (review M3).
+    #[cfg(unix)]
+    pub(super) fn view_instance(&self) -> Option<crate::view::instance::FarInstance> {
+        match self {
+            PaneIo::Core(core) => core.view_instance(),
+            _ => None,
+        }
+    }
+
     /// A view server's pane that sends no input.
     #[cfg(unix)]
     pub(super) fn view_read_only(&self) -> bool {

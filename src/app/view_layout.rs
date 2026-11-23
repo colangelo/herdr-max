@@ -12,12 +12,14 @@ use std::sync::Arc;
 
 use ratatui::layout::Direction;
 
+use super::view_actions::CloseAsked;
 use super::App;
 use crate::core_machine::MachineName;
 use crate::layout::{Node, PaneId, TileLayout};
 use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalState};
 use crate::view::doc::{ViewLayout, ViewNode, ViewSpace};
+use crate::view::instance::FarInstance;
 use crate::view::lifetime::ViewPresence;
 use crate::view::watch::ViewEvent;
 use crate::workspace::{public_pane_id_for_number, public_tab_id_for_number, Tab, Workspace};
@@ -64,17 +66,32 @@ pub(crate) struct ViewApp {
     held: HashSet<PaneId>,
     /// Each pane's public id in the last projection.
     public_ids: HashMap<PaneId, String>,
+    /// The far program each attached address showed at its first attach
+    /// (security review M3): a structural action on a pane is sent only
+    /// while core still shows that one there (E.3 review, item 1).
+    instances: HashMap<String, FarInstance>,
+    /// The numbers the view gave panes the far herdr numbers none for
+    /// (`w3:x12`), each kept for the pane's life (E.3 review, items 4, 5):
+    /// from `VIEW_NUMBER_BASE` up, past any number a far herdr gives, and
+    /// never given twice in a workspace (`next_view_number`), so a far pane
+    /// numbered later never takes one a client still holds.
+    view_numbers: HashMap<PaneId, usize>,
+    next_view_number: HashMap<String, usize>,
     /// The far panes whose close the far herdr was asked for without
-    /// `force`, with the pane and far terminal it was: a forced close (the
-    /// person confirmed) goes only to that same one (review M2).
-    close_asked: HashMap<String, (PaneId, String)>,
-    /// Where the view's structural actions go (E.3); the primary core and
-    /// herdr's own machine state unless a test points it elsewhere.
+    /// `force`: a forced close (the person confirmed) goes only to that
+    /// same pane, terminal and program (review M2).
+    pub(crate) close_asked: CloseAsked,
+    /// Where the view's structural actions go (E.3): the primary core and
+    /// herdr's own machine state unless a test points it elsewhere. Kept
+    /// for the view's life: its one-at-a-time lock is this route's.
     route: Option<crate::core_machine::fleet::view::ViewRoute>,
 }
 
-/// The most closes waiting for a person's confirmation the view keeps.
-const MAX_CLOSE_ASKED: usize = 32;
+/// The first number the view gives a pane the far herdr numbers none for:
+/// a far herdr numbers a workspace's panes from 1 up and never reuses one,
+/// so its numbers do not reach this; one that did would be held as a moved
+/// id (`hold_moved_public_ids`).
+pub(crate) const VIEW_NUMBER_BASE: usize = 1 << 16;
 
 impl ViewApp {
     pub(crate) fn new(machine: MachineName) -> Self {
@@ -92,7 +109,10 @@ impl ViewApp {
             bound: HashMap::new(),
             held: HashSet::new(),
             public_ids: HashMap::new(),
-            close_asked: HashMap::new(),
+            instances: HashMap::new(),
+            view_numbers: HashMap::new(),
+            next_view_number: HashMap::new(),
+            close_asked: CloseAsked::default(),
             route: None,
         }
     }
@@ -118,10 +138,22 @@ impl ViewApp {
         self.held.contains(&pane_id)
     }
 
-    pub(crate) fn route(&self) -> crate::core_machine::fleet::view::ViewRoute {
+    /// The far program `pane_id`'s terminal attached to, `None` while it
+    /// is not attached (or attaching again after a rebind).
+    pub(crate) fn far_instance(&self, pane_id: PaneId) -> Option<&FarInstance> {
+        self.instances.get(self.bound.get(&pane_id)?)
+    }
+
+    /// Records the far program `address` attached to, as an attach does.
+    #[cfg(test)]
+    pub(crate) fn bind_instance_for_test(&mut self, address: &str, instance: FarInstance) {
+        self.instances.insert(address.to_string(), instance);
+    }
+
+    pub(crate) fn route(&mut self) -> crate::core_machine::fleet::view::ViewRoute {
         self.route
+            .get_or_insert_with(crate::core_machine::fleet::view::ViewRoute::primary)
             .clone()
-            .unwrap_or_else(crate::core_machine::fleet::view::ViewRoute::primary)
     }
 
     #[cfg(test)]
@@ -129,24 +161,37 @@ impl ViewApp {
         self.route = Some(route);
     }
 
-    /// The far herdr was asked to close `far_pane` (the view's `pane_id`,
-    /// on far terminal `terminal`) without `force`.
-    pub(crate) fn note_close_asked(&mut self, far_pane: &str, pane_id: PaneId, terminal: &str) {
-        if self.close_asked.len() >= MAX_CLOSE_ASKED && !self.close_asked.contains_key(far_pane) {
-            self.close_asked.clear();
-        }
-        self.close_asked
-            .insert(far_pane.to_string(), (pane_id, terminal.to_string()));
-    }
-
-    /// The pane and far terminal whose close of `far_pane` was asked for,
-    /// once.
-    pub(crate) fn take_close_asked(&mut self, far_pane: &str) -> Option<(PaneId, String)> {
-        self.close_asked.remove(far_pane)
-    }
-
     fn address(&self, terminal: &str) -> String {
         format!("{}/{terminal}", self.machine)
+    }
+
+    /// The view's number for `pane_id` in workspace `ws`, a pane the far
+    /// herdr numbers none for: the one it had, unless a far pane has that
+    /// number now, else the workspace's next, never given before.
+    fn view_number(&mut self, ws: &str, pane_id: PaneId, far_numbers: &HashSet<usize>) -> usize {
+        if let Some(&number) = self.view_numbers.get(&pane_id) {
+            if !far_numbers.contains(&number) {
+                return number;
+            }
+        }
+        let next = self
+            .next_view_number
+            .entry(ws.to_string())
+            .or_insert(VIEW_NUMBER_BASE);
+        while far_numbers.contains(next) {
+            *next += 1;
+        }
+        let number = *next;
+        *next += 1;
+        self.view_numbers.insert(pane_id, number);
+        number
+    }
+
+    /// Whether the view gave `number` to some pane of `ws` in its life.
+    fn gave_number(&self, ws: &str, number: usize) -> bool {
+        self.next_view_number
+            .get(ws)
+            .is_some_and(|next| (VIEW_NUMBER_BASE..*next).contains(&number))
     }
 
     fn pane_id(&mut self, far: &str) -> PaneId {
@@ -423,6 +468,7 @@ impl App {
         for (address, terminal_id) in gone {
             view.terminals.remove(&address);
             view.attaching.remove(&address);
+            view.instances.remove(&address);
             self.state.terminals.remove(&terminal_id);
             if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
                 runtime.shutdown();
@@ -439,8 +485,9 @@ impl App {
             .retain(|_, pane_id| far_panes.contains_key(pane_id));
         view.bound.retain(|pane_id, _| live_panes.contains(pane_id));
         view.held.retain(|pane_id| live_panes.contains(pane_id));
-        view.close_asked
-            .retain(|_, (pane_id, _)| live_panes.contains(pane_id));
+        view.close_asked.retain(&live_panes);
+        view.view_numbers
+            .retain(|pane_id, _| live_panes.contains(pane_id));
 
         let find = |id: &Option<String>| {
             id.as_ref()
@@ -559,6 +606,10 @@ impl App {
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
             runtime.shutdown();
         }
+        if let Some(address) = &address {
+            // Bound afresh at the next attach: no action meanwhile.
+            view.instances.remove(address);
+        }
         if let (Some(address), Some(state)) = (address, self.state.terminals.get_mut(&terminal_id))
         {
             state.restore_error = Some(format!(
@@ -676,6 +727,10 @@ impl App {
         if let Some(&(rows, cols)) = view.far_sizes.get(&address) {
             runtime.follow_view_size(rows, cols);
         }
+        match runtime.view_instance() {
+            Some(instance) => view.instances.insert(address, instance),
+            None => view.instances.remove(&address),
+        };
         state.restore_error = None;
         state.view_far_size = runtime.view_size();
         state.view_read_only = runtime.view_read_only();
@@ -744,21 +799,24 @@ impl App {
 }
 
 /// Holds each pane whose public id changed, or that took an id another
-/// pane had (review M4): a number the view gave a far pane that has none
-/// moves when the far herdr numbers another pane, and a client that still
-/// holds the old id must reach neither.
+/// pane had (review M4): a client that still holds the old id must reach
+/// neither. The view's own numbers stay with their pane (`view_number`),
+/// so this is a far renumbering, or a far pane that took a number the view
+/// gave earlier, even one whose pane went projections ago (E.3 review,
+/// item 4).
 fn hold_moved_public_ids(view: &mut ViewApp, workspaces: &[Workspace]) {
-    let public: HashMap<PaneId, String> = workspaces
+    let public: HashMap<PaneId, (String, usize)> = workspaces
         .iter()
         .flat_map(|ws| {
             ws.tabs.iter().flat_map(move |tab| {
                 tab.layout.pane_ids().into_iter().filter_map(move |pane| {
                     ws.public_pane_number(pane)
-                        .map(|number| (pane, public_pane_id_for_number(&ws.id, number)))
+                        .map(|number| (pane, (ws.id.clone(), number)))
                 })
             })
         })
         .collect();
+    let id_of = |(ws, number): &(String, usize)| public_pane_id_for_number(ws, *number);
     let owner_before: HashMap<&str, PaneId> = view
         .public_ids
         .iter()
@@ -766,18 +824,21 @@ fn hold_moved_public_ids(view: &mut ViewApp, workspaces: &[Workspace]) {
         .collect();
     let moved: Vec<PaneId> = public
         .iter()
-        .filter(|(pane, id)| {
-            view.public_ids
-                .get(*pane)
-                .is_some_and(|before| before != *id)
+        .filter(|(pane, at)| {
+            let id = id_of(at);
+            let before = view.public_ids.get(*pane);
+            before.is_some_and(|before| *before != id)
                 || owner_before
                     .get(id.as_str())
-                    .is_some_and(|before| before != *pane)
+                    .is_some_and(|owner| owner != *pane)
+                || (before.is_none()
+                    && !view.view_numbers.contains_key(*pane)
+                    && view.gave_number(&at.0, at.1))
         })
         .map(|(pane, _)| *pane)
         .collect();
     view.held.extend(moved);
-    view.public_ids = public;
+    view.public_ids = public.iter().map(|(pane, at)| (*pane, id_of(at))).collect();
 }
 
 /// The channels a tab is built with.
@@ -833,14 +894,19 @@ fn view_workspace(
             render_dirty: wiring.render_dirty.clone(),
         });
     }
-    // Panes the far herdr numbers none for get numbers past its own.
+    // Panes the far herdr numbers none for keep the view's own number for
+    // their life, past the far ones (E.3 review, items 4, 5): a far pane
+    // numbered later moves no other pane's id.
+    let far_numbers: HashSet<usize> = public_pane_numbers.values().copied().collect();
     for tab in &tabs {
         for pane_id in tab.layout.pane_ids() {
-            public_pane_numbers.entry(pane_id).or_insert_with(|| {
-                let number = next_pane;
-                next_pane += 1;
-                number
-            });
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                public_pane_numbers.entry(pane_id)
+            {
+                let number = build.view.view_number(&space.id, pane_id, &far_numbers);
+                next_pane = next_pane.max(number + 1);
+                entry.insert(number);
+            }
         }
     }
     (!tabs.is_empty()).then(|| {

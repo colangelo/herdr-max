@@ -219,6 +219,22 @@ pub(crate) fn layout_document(
     Ok(reply["value"].take())
 }
 
+/// Core's record of the far terminal `address` (`<machine>/t7`): its
+/// state, pid and labels, which tell the program there (E.3 review, item
+/// 1). Bounded as the document is: the far core is not trusted to keep a
+/// record small.
+pub(crate) fn terminal_record(connector: &Connector, address: &str) -> Result<Value, CoreError> {
+    connector()?.call_bounded(
+        "terminal.get",
+        json!({"terminal": address}),
+        CALL_TIMEOUT,
+        TERMINAL_RECORD_BYTES,
+    )
+}
+
+/// The largest `terminal.get` reply the aim check reads.
+const TERMINAL_RECORD_BYTES: usize = 64 * 1024;
+
 /// The machine's state and hc version in the primary core's `machine.list`;
 /// `None` when core does not list it.
 pub(crate) fn machine_record(

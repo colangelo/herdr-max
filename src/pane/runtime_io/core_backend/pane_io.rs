@@ -1066,6 +1066,12 @@ impl CorePaneIo {
             .is_some_and(|view| view.replaced.load(Ordering::Acquire))
     }
 
+    /// The far program a view's pane is bound to (security review M3),
+    /// `None` for any other pane.
+    pub(crate) fn view_instance(&self) -> Option<FarInstance> {
+        self.shared.view.as_ref().map(|view| view.instance.clone())
+    }
+
     /// Whether this is a view server's pane.
     pub(crate) fn is_view(&self) -> bool {
         self.shared.view.is_some()

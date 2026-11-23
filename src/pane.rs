@@ -3157,6 +3157,13 @@ impl PaneRuntime {
         self.io.view_replaced()
     }
 
+    /// The far program a view server's pane is bound to (security review
+    /// M3). `None` for every other pane.
+    #[cfg(unix)]
+    pub(crate) fn view_instance(&self) -> Option<crate::view::instance::FarInstance> {
+        self.io.view_instance()
+    }
+
     /// A view server's pane learned the far terminal's new size from core
     /// (core-phase5 D6, R8): its grid follows it, and the view echoes it
     /// once as RESIZE when it differs from the last one it sent.
