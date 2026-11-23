@@ -762,6 +762,39 @@ mod tests {
         assert!(error.error.message.contains("view of loop"), "{response}");
         assert!(!worktree_root.exists(), "no worktree folder");
         assert_eq!(app.state.workspaces.len(), 1);
+
+        // M1: a list or an open would run git here at the far folder and
+        // show this Mac's checkouts and branches: both refused too, with no
+        // git read started (an answer at once, no completion event).
+        let workspace_id = app.state.workspaces[0].id.clone();
+        for method in [
+            crate::api::schema::Method::WorktreeList(WorktreeListParams {
+                workspace_id: Some(workspace_id.clone()),
+                ..WorktreeListParams::default()
+            }),
+            crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
+                workspace_id: Some(workspace_id.clone()),
+                path: Some(repo.display().to_string()),
+                ..crate::api::schema::WorktreeOpenParams::default()
+            }),
+        ] {
+            let (respond_to, response_rx) = response_channel();
+            assert!(app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "req".into(),
+                    method,
+                },
+                respond_to,
+                false,
+            ));
+            let response = response_rx
+                .try_recv()
+                .expect("refused at once, before any git read");
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert!(error.error.message.contains("view of loop"), "{response}");
+            assert!(app.event_rx.try_recv().is_err(), "no git read ran");
+        }
+        assert_eq!(app.state.workspaces.len(), 1);
         let _ = std::fs::remove_dir_all(repo);
     }
 

@@ -1121,6 +1121,18 @@ impl App {
         self.tasks.quiesce_for_handoff(timeout)
     }
 
+    /// Whether this server is a view of another Mac (core-phase5 D6).
+    pub(crate) fn is_view(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.view.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
         if !self.state.workspaces.is_empty() {
             return false;
@@ -1681,6 +1693,45 @@ mod tests {
             generation.wrapping_add(1),
             Some("stale"),
         )));
+    }
+
+    // M1 (core-phase5 D6): a view's folders are the far Mac's. A tab-bar
+    // status command would run here with one as its cwd and
+    // `HERDR_ACTIVE_PANE_CWD`: in a view none runs, and none is due, so the
+    // loop does not wake for one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_view_runs_no_tab_bar_status_command() {
+        if !crate::platform::status_commands_supported() {
+            return;
+        }
+        let marker = std::path::PathBuf::from(format!(
+            "/var/tmp/herdr-view-status-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let mut app = test_app();
+        app.view = Some(crate::app::view_layout::ViewApp::new(
+            crate::core_machine::MachineName::parse("loop").unwrap(),
+        ));
+        let mut far = Workspace::test_new("far");
+        far.identity_cwd = std::env::temp_dir();
+        app.state.workspaces.push(far);
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.configure_tab_bar_status(
+            &[crate::config::TabBarRightEntryConfig::Command {
+                command: format!("printf ran > {}", marker.display()),
+                interval_seconds: 1,
+                timeout_seconds: 2,
+            }],
+            " ",
+        );
+        assert_eq!(app.next_tab_bar_status_deadline(), None, "none is due");
+        app.handle_tab_bar_status_tasks(Instant::now() + Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!marker.exists(), "a status command ran in a view");
     }
 
     #[test]

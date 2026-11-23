@@ -143,6 +143,11 @@ impl App {
             self.next_tab_bar_datetime_refresh = Some(now + DATETIME_REFRESH_INTERVAL);
         }
 
+        // A view's folders are the far Mac's: a status command would run
+        // here with one as its cwd and `HERDR_ACTIVE_PANE_CWD` (review M1).
+        if self.is_view() {
+            return changed;
+        }
         let command_due = self
             .tab_bar_commands
             .iter()
@@ -173,9 +178,10 @@ impl App {
     }
 
     pub(crate) fn next_tab_bar_status_deadline(&self) -> Option<std::time::Instant> {
+        let view = self.is_view();
         self.tab_bar_commands
             .iter()
-            .filter(|runtime| runtime.task.is_none())
+            .filter(|runtime| !view && runtime.task.is_none())
             .map(|runtime| runtime.next_run_at)
             .chain(self.next_tab_bar_datetime_refresh)
             .min()
