@@ -1,7 +1,9 @@
 use super::*;
 
-/// Run the headless server. This is the entry point called from main.rs.
-pub fn run_server() -> io::Result<()> {
+/// Run the headless server. This is the entry point called from main.rs,
+/// with the arguments as main parsed them (`--session` taken out, so a
+/// session's name is never read as a word of the server's command).
+pub fn run_server(parsed_args: &[String]) -> io::Result<()> {
     let launcher_warning = crate::platform::leave_launcher_job();
     crate::platform::ignore_server_hangup();
     let args: Vec<String> = std::env::args().collect();
@@ -20,21 +22,19 @@ pub fn run_server() -> io::Result<()> {
         });
     #[cfg(not(unix))]
     let handoff_user_context = false;
-    // `--view <machine>` after `server` (a `--session` may come first).
+    // `--view <machine>` after `server`, read from the parsed arguments: a
+    // session named `server` is not the word (review M6). A malformed flag
+    // exits here, before any startup side effect.
     #[cfg(unix)]
-    let view = {
-        let after_server = args
-            .iter()
-            .position(|arg| arg == "server")
-            .map_or(&[][..], |at| &args[at + 1..]);
-        match crate::view::parse_view_flag(after_server) {
-            Ok(view) => view,
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(2);
-            }
+    let view = match crate::view::requested_view(parsed_args) {
+        Ok(view) => view,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
         }
     };
+    #[cfg(not(unix))]
+    let _ = parsed_args;
     let process_context =
         crate::platform::prepare_server_process(handoff_import, handoff_user_context);
     #[cfg(unix)]

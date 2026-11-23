@@ -833,7 +833,7 @@ fn main() -> io::Result<()> {
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("server") {
-        return server::headless::run_server();
+        return server::headless::run_server(&args);
     }
 
     // Hidden client mode: connect to an existing server's client socket.

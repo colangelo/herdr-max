@@ -182,6 +182,17 @@ pub(crate) fn view_config(config: &mut crate::config::Config) {
     experimental.core_label_sync = false;
 }
 
+/// The machine `herdr server --view <machine>` asks for, from the arguments
+/// as main parsed them (`herdr server ...`, `--session` already taken out:
+/// review M6, a session named `server` is never the server's word).
+/// `Ok(None)` for a primary server.
+pub(crate) fn requested_view(parsed_args: &[String]) -> Result<Option<MachineName>, String> {
+    match parsed_args.get(1).map(String::as_str) {
+        Some("server") => parse_view_flag(&parsed_args[2..]),
+        _ => Ok(None),
+    }
+}
+
 /// `--view <machine>` after `server`: the machine, `Ok(None)` without the
 /// flag.
 pub(crate) fn parse_view_flag(args: &[String]) -> Result<Option<MachineName>, String> {
@@ -212,6 +223,31 @@ mod tests {
         assert_eq!(parse_view_flag(&args(&["--handoff-import"])).unwrap(), None);
         assert!(parse_view_flag(&args(&["--view"])).is_err());
         assert!(parse_view_flag(&args(&["--view", "../x"])).is_err());
+    }
+
+    // M6 (security review): a view in a session named `server` is still a
+    // view, and that session's primary is still a primary: the role comes
+    // from the arguments as main parsed them, the session's name taken out.
+    #[test]
+    fn a_session_named_server_does_not_change_the_role() {
+        let parsed = |raw: &[&str]| crate::session::configure_from_args(&args(raw)).unwrap();
+        assert_eq!(
+            requested_view(&parsed(&["herdr", "--session", "server", "server", "--view", "loop"]))
+                .unwrap(),
+            Some(MachineName::parse("loop").unwrap())
+        );
+        assert_eq!(
+            requested_view(&parsed(&["herdr", "--session=server", "server", "--view", "loop"]))
+                .unwrap(),
+            Some(MachineName::parse("loop").unwrap())
+        );
+        assert_eq!(
+            requested_view(&parsed(&["herdr", "--session", "server", "server"])).unwrap(),
+            None
+        );
+        assert!(requested_view(&parsed(&["herdr", "--session", "server", "server", "--view"]))
+            .is_err());
+        assert_eq!(requested_view(&args(&["herdr", "client"])).unwrap(), None);
     }
 
     // L3.4, M2: one view per machine holds the lock; a second start gets
