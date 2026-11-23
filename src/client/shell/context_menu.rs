@@ -4,7 +4,10 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: label.into(),
+            action,
+        };
         let mut items = match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -55,6 +58,7 @@ impl ClientContextMenuOverlay {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
+                machines,
                 ..
             } => {
                 let mut items = vec![item("Rename pane", Action::RenamePane)];
@@ -67,6 +71,14 @@ impl ClientContextMenuOverlay {
                 items.extend([
                     item("Split right", Action::SplitRight),
                     item("Split down", Action::SplitDown),
+                ]);
+                items.extend(machines.iter().enumerate().map(|(index, (name, gate))| {
+                    ClientContextMenuItem {
+                        label: format!("Split right on {name} · {gate}").into(),
+                        action: Action::SplitOnMachine(index),
+                    }
+                }));
+                items.extend([
                     item("Zoom", Action::Zoom),
                     item(
                         if *right_click_passthrough {
@@ -242,11 +254,49 @@ impl ClientShellState {
                 source_pane_id,
                 has_manual_label: pane.label.is_some(),
                 right_click_passthrough: pane.right_click_passthrough,
+                machines: self.split_machines(),
             },
             x,
             y,
             highlighted: 0,
         }));
+    }
+
+    /// The core machines a split from this endpoint may start on: the Local
+    /// endpoint's linked machines, only while Local advertises
+    /// `spawn_on_machine` (an older server would ignore `on` and start the
+    /// pane on its own host). Other endpoints offer none: their machines are
+    /// the far side's (core-phase5 C.5).
+    pub(super) fn split_machines(&self) -> Vec<(String, String)> {
+        let local = &ClientEndpointId::Local;
+        if &self.active_endpoint_id != local || !self.spawn_on_machine_endpoints.contains(local) {
+            return Vec::new();
+        }
+        self.local_core_machines.clone()
+    }
+
+    fn split_on_machine(
+        &mut self,
+        pane_id: String,
+        workspace_id: String,
+        machine: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        use crate::api::schema::{Method, PaneSplitParams, SplitDirection};
+        self.push_endpoint_method(
+            Method::PaneSplit(PaneSplitParams {
+                workspace_id: Some(workspace_id),
+                target_pane_id: Some(pane_id),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: true,
+                right_click: Default::default(),
+                env: Default::default(),
+                on: Some(machine),
+            }),
+            outcome,
+        );
     }
 
     /// Fork issue 276: whether the connected endpoint advertises `pane.mark_seen`.
@@ -339,6 +389,19 @@ impl ClientShellState {
                 tab_id,
                 workspace_id,
             } => self.activate_tab_context_action(tab_id, workspace_id, action, outcome),
+            ClientContextMenuTarget::Pane {
+                pane_id,
+                workspace_id,
+                machines,
+                ..
+            } if matches!(action, ClientContextMenuAction::SplitOnMachine(_)) => {
+                let ClientContextMenuAction::SplitOnMachine(index) = action else {
+                    return;
+                };
+                if let Some((machine, _)) = machines.get(index) {
+                    self.split_on_machine(pane_id, workspace_id, machine.clone(), outcome);
+                }
+            }
             ClientContextMenuTarget::Pane {
                 pane_id,
                 workspace_id,

@@ -273,6 +273,8 @@ mod chrome_context;
 mod close_pane;
 mod close_tab;
 mod copy;
+#[cfg(unix)]
+mod core_machine_split;
 mod endpoint_requests;
 mod endpoints;
 mod force_confirm;

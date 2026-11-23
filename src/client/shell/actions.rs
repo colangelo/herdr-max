@@ -543,6 +543,24 @@ impl ClientShellState {
         )
     }
 
+    /// A saved herdr machine and a Herdr Core machine reach one Mac
+    /// (core-phase5 D8): both are shown, and this says so once per run.
+    #[cfg(unix)]
+    pub(crate) fn notice_machine_on_two_paths(
+        &mut self,
+        saved_label: &str,
+        core_machine: &crate::core_machine::MachineName,
+    ) -> bool {
+        self.push_endpoint_notice(
+            ClientEndpointNoticeKind::Unavailable,
+            format!("two-paths:{saved_label}:{core_machine}"),
+            "One Mac, two paths",
+            format!(
+                "{saved_label} (saved machine, herdr's ssh) and {core_machine} (Herdr Core machine) reach the same Mac; both are shown. [remote] prefer decides herdr --machine."
+            ),
+        )
+    }
+
     pub(crate) fn receive_endpoint_unavailable(&mut self, message: String) -> bool {
         self.push_endpoint_notice(
             ClientEndpointNoticeKind::Unavailable,

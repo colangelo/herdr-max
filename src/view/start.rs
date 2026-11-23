@@ -103,3 +103,29 @@ pub(crate) fn ensure_running(machine: &MachineName) -> io::Result<PathBuf> {
     crate::server::autodetect::wait_for_server_socket(&socket, START_TIMEOUT)?;
     Ok(socket)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // V21's routing part (D8): only `core:<machine>` is a view; every other
+    // `--remote` target is the old remote's, unchanged, and starts no view.
+    #[test]
+    fn only_a_core_target_is_a_view() {
+        assert_eq!(
+            core_target("core:ac-mbm5"),
+            Some(Ok(MachineName::parse("ac-mbm5").unwrap()))
+        );
+        assert!(matches!(core_target("core:../x"), Some(Err(_))));
+        assert!(matches!(core_target("core:"), Some(Err(_))));
+        for old in [
+            "ac-mbm5",
+            "ac@ac-mbm5",
+            "core",
+            "ssh://core:22",
+            "ac@core:x",
+        ] {
+            assert_eq!(core_target(old), None, "{old}");
+        }
+    }
+}

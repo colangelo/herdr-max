@@ -30,6 +30,11 @@ pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
+/// The server starts a pane on a Herdr Core machine when a create method
+/// carries `on` (fork, core-phase5 D5): without it an older server would
+/// ignore `on` and start the pane on its own host, so a client offers a
+/// machine choice only when this is advertised.
+pub const SPAWN_ON_MACHINE_CAPABILITY: &str = "spawn_on_machine";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 
 /// Optional clipboard provenance; the published Clipboard payload remains unchanged.

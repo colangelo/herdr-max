@@ -216,6 +216,25 @@ impl ClientShellState {
         }
     }
 
+    /// Whether `endpoint_id` advertised `spawn_on_machine` (core-phase5 C.5).
+    pub(crate) fn set_endpoint_spawn_on_machine(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        supported: bool,
+    ) {
+        if supported {
+            self.spawn_on_machine_endpoints.insert(endpoint_id.clone());
+        } else {
+            self.spawn_on_machine_endpoints.remove(endpoint_id);
+        }
+    }
+
+    /// This Mac's linked core machines and their gates (core-phase5 C.5).
+    #[cfg(unix)]
+    pub(crate) fn set_local_core_machines(&mut self, machines: Vec<(String, String)>) {
+        self.local_core_machines = machines;
+    }
+
     pub(crate) fn set_endpoint_agent_view_projection_supported(
         &mut self,
         endpoint_id: &ClientEndpointId,

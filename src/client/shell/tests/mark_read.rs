@@ -76,11 +76,13 @@ fn menu_actions(state: &ClientShellState) -> Vec<ClientContextMenuAction> {
     }
 }
 
-fn menu_labels(state: &ClientShellState) -> Vec<&'static str> {
+fn menu_labels(state: &ClientShellState) -> Vec<String> {
     match state.overlay.as_ref() {
-        Some(ClientShellOverlay::ContextMenu(menu)) => {
-            menu.items().iter().map(|item| item.label).collect()
-        }
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .map(|item| item.label.to_string())
+            .collect(),
         other => panic!("expected a context menu, got {other:?}"),
     }
 }
@@ -102,7 +104,7 @@ fn space_menu_offers_both_items_when_its_space_is_unread() {
     state.open_workspace_context_menu("ws_2".into(), 5, 3);
     let labels = menu_labels(&state);
     assert!(
-        labels.ends_with(&["Mark space read", "Mark all read"]),
+        labels.ends_with(&["Mark space read".to_string(), "Mark all read".to_string()]),
         "{labels:?}"
     );
     // It renders as real rows.
@@ -136,7 +138,7 @@ fn menus_offer_nothing_when_no_agent_is_unread() {
 fn agent_menu_offers_mark_all_read_only_when_something_is_unread() {
     let mut state = state_with("working", "done", advertised());
     state.open_agent_context_menu("w1:p1".into(), 5, 3);
-    assert!(menu_labels(&state).ends_with(&["Mark all read"]));
+    assert!(menu_labels(&state).ends_with(&["Mark all read".to_string()]));
     assert!(!menu_actions(&state).contains(&ClientContextMenuAction::MarkSpaceRead));
 }
 

@@ -556,8 +556,32 @@ async fn run_client_loop(
         shell.set_host_erase_byte(crate::platform::terminal_erase_byte());
         shell.set_graphics_cell_size(initial_cell_width_px, initial_cell_height_px);
         shell.set_endpoint_catalog(&endpoint_catalog.ssh);
+        shell.set_endpoint_spawn_on_machine(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.endpoint_capabilities.as_ref())
+                .is_some_and(|capabilities| {
+                    capabilities.iter().any(|capability| {
+                        capability == crate::protocol::endpoint::SPAWN_ON_MACHINE_CAPABILITY
+                    })
+                }),
+        );
         #[cfg(unix)]
-        shell.set_core_endpoints(&endpoint_catalog.core);
+        {
+            shell.set_core_endpoints(&endpoint_catalog.core_names());
+            shell.set_local_core_machines(
+                endpoint_catalog
+                    .core
+                    .iter()
+                    .map(|machine| (machine.name.to_string(), machine.gate.clone()))
+                    .collect(),
+            );
+            // D8: one notice per run for a Mac reached both ways; both stay.
+            for (label, machine) in endpoint_catalog.machines_on_two_paths() {
+                shell.notice_machine_on_two_paths(&label, &machine);
+            }
+        }
         shell.set_endpoint_server_version(
             &endpoint::ClientEndpointId::Local,
             initial
@@ -709,7 +733,7 @@ async fn run_client_loop(
     let mut supervisors =
         endpoint::EndpointSupervisors::new(&endpoint_catalog.ssh, std::time::Instant::now());
     #[cfg(unix)]
-    supervisors.reconcile_core(&endpoint_catalog.core, std::time::Instant::now());
+    supervisors.reconcile_core(&endpoint_catalog.core_names(), std::time::Instant::now());
     // `herdr --remote` runs this client over a forwarded socket: its local
     // endpoint reaches the remote machine (fork issue 260).
     supervisors.set_local_is_remote(is_remote_client);
@@ -1504,7 +1528,11 @@ async fn run_client_loop(
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
+                    let spawn_on_machine = negotiation.supports_capability(
+                        crate::protocol::endpoint::SPAWN_ON_MACHINE_CAPABILITY,
+                    );
                     let frame = state.shell.as_mut().and_then(|shell| {
+                        shell.set_endpoint_spawn_on_machine(&endpoint_id, spawn_on_machine);
                         shell.set_endpoint_server_version(
                             &endpoint_id,
                             negotiation.server_version().map(str::to_owned),

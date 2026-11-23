@@ -828,12 +828,21 @@ pub(crate) fn handle_client_handshake(
         RenderEncoding::TerminalAnsi
     };
     let welcome = if shell_options.is_some() {
-        let welcome = EndpointServerWelcome::compatible(
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut welcome = EndpointServerWelcome::compatible(
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
                 .map(|method| (*method).to_owned())
                 .collect(),
         );
+        // A primary on Unix starts panes on core machines; a view starts no
+        // program at all (core-phase5 D5, D6).
+        #[cfg(unix)]
+        if crate::view::viewed_machine().is_none() {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::SPAWN_ON_MACHINE_CAPABILITY.into());
+        }
         ServerMessage::EndpointControl {
             kind: ENDPOINT_WELCOME_KIND.into(),
             data: serde_json::to_string(&welcome).map_err(io::Error::other)?,

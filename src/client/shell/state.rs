@@ -621,6 +621,9 @@ pub(super) enum ClientContextMenuAction {
     ClosePane,
     MarkSpaceRead,
     MarkAllRead,
+    /// Split right with the new pane on the n-th core machine of the
+    /// target's list (core-phase5 C.5).
+    SplitOnMachine(usize),
 }
 
 #[derive(Debug)]
@@ -655,6 +658,10 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        /// Core machines a split may start on, with their gate (`open`,
+        /// `dormant`, a closed class): the Local endpoint's, when it
+        /// advertises `spawn_on_machine` (core-phase5 C.5).
+        machines: Vec<(String, String)>,
     },
 }
 
@@ -667,7 +674,7 @@ pub(super) struct ClientContextMenuOverlay {
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 
@@ -1053,6 +1060,12 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    /// The core machines of this Mac's Herdr Core that herdr links, with
+    /// their gates, offered for a split when Local advertises
+    /// `spawn_on_machine` (core-phase5 C.5).
+    pub(super) local_core_machines: Vec<(String, String)>,
+    /// Endpoints that advertised `spawn_on_machine`.
+    pub(super) spawn_on_machine_endpoints: HashSet<ClientEndpointId>,
     /// Ephemeral presentation cursor for the next-layout action; presets mutate server state.
     pub(super) layout_cycle_index: usize,
     pub(super) application_scroll: Option<super::application_scroll::ClientApplicationScroll>,
@@ -1307,6 +1320,8 @@ impl ClientShellState {
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],
             active_endpoint_id: ClientEndpointId::Local,
+            local_core_machines: Vec::new(),
+            spawn_on_machine_endpoints: HashSet::new(),
             collapsed_endpoints: HashSet::new(),
             mode: ClientShellMode::Terminal,
             navigate_workspace_id: None,

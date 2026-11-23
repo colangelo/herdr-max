@@ -586,6 +586,40 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
 pub(crate) struct LinkedMachine {
     pub name: MachineName,
     pub gate: String,
+    /// The ssh destination it was added with (`ac@ac-mbm5`).
+    pub target: Option<String>,
+}
+
+/// The host of an ssh destination (`ac@ac-mbm5` → `ac-mbm5`), lowercased.
+fn destination_host(destination: &str) -> String {
+    destination
+        .rsplit('@')
+        .next()
+        .unwrap_or(destination)
+        .to_ascii_lowercase()
+}
+
+/// Saved herdr machines and core machines that reach the same host, as
+/// (saved label, core machine) pairs (D8: both are shown, with one notice).
+/// The endpoint handshake carries no far core id, so the hosts of their ssh
+/// destinations are compared.
+pub(crate) fn same_host_pairs(
+    saved: &[(String, String)],
+    core: &[LinkedMachine],
+) -> Vec<(String, MachineName)> {
+    let mut pairs = Vec::new();
+    for machine in core {
+        let Some(target) = machine.target.as_deref() else {
+            continue;
+        };
+        let host = destination_host(target);
+        for (label, destination) in saved {
+            if destination_host(destination) == host {
+                pairs.push((label.clone(), machine.name.clone()));
+            }
+        }
+    }
+    pairs
 }
 
 /// The core machines herdr links, by name; empty when the state root
@@ -605,6 +639,7 @@ fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
             Some(LinkedMachine {
                 name: MachineName::parse(&row.name).ok()?,
                 gate: row.gate.unwrap_or_else(|| "open".into()),
+                target: row.target,
             })
         })
         .collect()
@@ -764,6 +799,33 @@ mod tests {
         );
         assert_eq!(sh_quote("/Apps/My herdr/herdr"), "'/Apps/My herdr/herdr'");
         assert_eq!(sh_quote("/a'b"), r"'/a'\''b'");
+    }
+
+    // V22's notice part (D8): a saved machine and a core machine on one host
+    // are one pair; other hosts are not.
+    #[test]
+    fn saved_and_core_machines_on_one_host_pair_up() {
+        let core = |name: &str, target: Option<&str>| LinkedMachine {
+            name: MachineName::parse(name).unwrap(),
+            gate: "open".into(),
+            target: target.map(str::to_string),
+        };
+        let saved = vec![
+            ("mbm5".to_string(), "ac@AC-MBM5".to_string()),
+            ("vm".to_string(), "vm1".to_string()),
+        ];
+        let pairs = same_host_pairs(
+            &saved,
+            &[
+                core("ac-mbm5", Some("ac-mbm5")),
+                core("lab", Some("ac@lab")),
+                core("byhand", None),
+            ],
+        );
+        assert_eq!(
+            pairs,
+            [("mbm5".to_string(), MachineName::parse("ac-mbm5").unwrap())]
+        );
     }
 
     #[test]

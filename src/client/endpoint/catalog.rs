@@ -83,7 +83,7 @@ pub(crate) struct EndpointCatalog {
     /// D6). Read from their state folders at load, never saved here.
     #[cfg(unix)]
     #[serde(skip)]
-    pub(crate) core: Vec<crate::core_machine::MachineName>,
+    pub(crate) core: Vec<crate::core_machine::command::LinkedMachine>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,10 +111,7 @@ impl EndpointCatalog {
         let mut catalog = Self::load_from_paths(&catalog_path(), &selection_path())?;
         #[cfg(unix)]
         {
-            catalog.core = crate::core_machine::command::linked_machines()
-                .into_iter()
-                .map(|machine| machine.name)
-                .collect();
+            catalog.core = crate::core_machine::command::linked_machines();
         }
         Ok(catalog)
     }
@@ -244,6 +241,27 @@ impl EndpointCatalog {
 
     pub(crate) fn has_enabled_ssh(&self) -> bool {
         self.ssh.iter().any(|profile| profile.enabled)
+    }
+
+    /// The core machines' names, the view endpoints (core-phase5 D6).
+    #[cfg(unix)]
+    pub(crate) fn core_names(&self) -> Vec<crate::core_machine::MachineName> {
+        self.core
+            .iter()
+            .map(|machine| machine.name.clone())
+            .collect()
+    }
+
+    /// Saved machines and core machines that reach one host (D8).
+    #[cfg(unix)]
+    pub(crate) fn machines_on_two_paths(&self) -> Vec<(String, crate::core_machine::MachineName)> {
+        let saved: Vec<(String, String)> = self
+            .ssh
+            .iter()
+            .filter(|profile| profile.enabled)
+            .map(|profile| (profile.label.clone(), profile.target.clone()))
+            .collect();
+        crate::core_machine::command::same_host_pairs(&saved, &self.core)
     }
 
     /// Whether this client shows other machines: a saved machine, or a core
