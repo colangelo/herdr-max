@@ -678,10 +678,23 @@ pub fn detach_server_daemon_command(command: &mut std::process::Command) {
 /// The fallback replacement is still responsible for itself, so privacy
 /// prompts from its panes name its own binary rather than the server it
 /// replaces (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/240).
+///
+/// `user_context_requested` is the handoff's caller asking the replacement
+/// to take the per-user macOS context (fork issue 226); a replacement that
+/// will hold it leaves the SSH login of its source behind (fork issue 319).
 #[cfg(unix)]
-pub(crate) fn spawn_handoff_server(command: &mut std::process::Command) -> std::io::Result<u32> {
+pub(crate) fn spawn_handoff_server(
+    command: &mut std::process::Command,
+    user_context_requested: bool,
+) -> std::io::Result<u32> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = user_context_requested;
     #[cfg(target_os = "macos")]
     {
+        macos::leave_ssh_login_for_user_context(
+            command,
+            user_context_requested || macos::holds_user_context(),
+        );
         // Behind `[experimental] pane_jobs` with the pane jobs it belongs to
         // (fork issue 288): alone it moves the server, not the panes.
         if macos::pane_job::enabled() {
@@ -1377,7 +1390,8 @@ mod tests {
         std::env::set_var("SSH_CONNECTION", "192.0.2.1 22 192.0.2.2 22");
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", "exit 0", "sh", "--handoff-import"]);
-        let pid = spawn_handoff_server(&mut command).expect("spawn the stand-in replacement");
+        let pid =
+            spawn_handoff_server(&mut command, false).expect("spawn the stand-in replacement");
         std::env::remove_var("SSH_CONNECTION");
 
         assert_ne!(pid, 0, "not started through launchd");

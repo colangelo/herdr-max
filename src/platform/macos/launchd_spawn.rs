@@ -43,14 +43,14 @@ pub(crate) fn spawn_launchd_job(command: &Command) -> io::Result<String> {
             "the command cleared its environment, which a launchd job cannot carry",
         ));
     }
-    let domain = gui_domain()?;
+    let mut env = resolved_environment(command);
+    let domain = gui_domain_for(&env)?;
     let now = since_epoch()?;
     let label = format!(
         "{SERVER_LABEL_PREFIX}{}.{}",
         std::process::id(),
         now.as_nanos()
     );
-    let mut env = resolved_environment(command);
     env.push((DETACH_ENV.into(), "1".into()));
     env.extend(removed_environment(command));
     remove_stale_jobs(&domain, now, SERVER_LABEL_PREFIX);
@@ -101,13 +101,35 @@ pub(crate) fn gui_domain_exists() -> bool {
 
 /// The caller's GUI launchd domain, unless it was started over SSH.
 fn gui_domain() -> io::Result<String> {
-    if std::env::var_os("SSH_CONNECTION").is_some() {
-        // SSH logins already run outside any terminal app; keep them out of
-        // the desktop session too.
-        return Err(io::Error::other("started over SSH"));
+    if std::env::var_os(SSH_LOGIN_MARKER).is_some() {
+        return Err(started_over_ssh());
     }
+    Ok(own_gui_domain())
+}
+
+/// The GUI launchd domain for a job with environment `env`, unless that
+/// environment is an SSH login's. Judged by the job's environment, not ours:
+/// a handoff into the per-user context leaves the login's variables behind,
+/// so a server started over SSH stops being one there (fork issue 319).
+fn gui_domain_for(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> io::Result<String> {
+    if env.iter().any(|(key, _)| key == SSH_LOGIN_MARKER) {
+        return Err(started_over_ssh());
+    }
+    Ok(own_gui_domain())
+}
+
+/// The variable whose presence makes a process an SSH login's.
+const SSH_LOGIN_MARKER: &str = "SSH_CONNECTION";
+
+fn started_over_ssh() -> io::Error {
+    // SSH logins already run outside any terminal app; keep them out of the
+    // desktop session too.
+    io::Error::other("started over SSH")
+}
+
+fn own_gui_domain() -> String {
     // SAFETY: getuid has no preconditions.
-    Ok(format!("gui/{}", unsafe { libc::getuid() }))
+    format!("gui/{}", unsafe { libc::getuid() })
 }
 
 fn since_epoch() -> io::Result<Duration> {
@@ -407,6 +429,22 @@ fn push_escaped(plist: &mut String, value: &OsStr) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
+
+    /// Fork issue 319: a job's own environment says whether it is an SSH
+    /// login's, so a command that left the login behind goes through launchd
+    /// even from a server started over SSH.
+    #[test]
+    fn a_job_is_kept_out_of_the_gui_domain_only_with_an_ssh_login_environment() {
+        let ssh = [("SSH_CONNECTION".into(), "192.0.2.1 22 192.0.2.2 22".into())];
+        assert_eq!(
+            gui_domain_for(&ssh).unwrap_err().to_string(),
+            "started over SSH"
+        );
+        assert!(gui_domain_for(&[]).is_ok());
+        let mut left = Command::new("herdr");
+        left.env_remove("SSH_CONNECTION");
+        assert!(gui_domain_for(&resolved_environment(&left)).is_ok());
+    }
 
     #[test]
     fn only_old_finished_herdr_jobs_are_stale() {

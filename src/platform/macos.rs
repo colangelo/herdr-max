@@ -25,8 +25,8 @@ pub(crate) use super::unix_common::{
 
 mod bootstrap;
 pub(crate) use bootstrap::{
-    configure_server_daemon_context, keep_server_context_through_launchd, macos_services,
-    prepare_server_process,
+    configure_server_daemon_context, holds_user_context, keep_server_context_through_launchd,
+    leave_ssh_login_for_user_context, macos_services, prepare_server_process,
 };
 
 mod shutdown;

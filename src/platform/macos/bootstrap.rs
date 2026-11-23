@@ -6,6 +6,8 @@ use libc::{c_char, c_int, c_void, mach_port_t, uid_t};
 
 const SERVER_CONTEXT_ENV: &str = "HERDR_MACOS_SERVER_CONTEXT";
 const USER_CONTEXT: &str = "user";
+/// The variables an SSH login gives the processes started from it.
+const SSH_LOGIN_ENV: [&str; 3] = ["SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"];
 const TASK_BOOTSTRAP_PORT: c_int = 4;
 /// The libinfo service behind user, group, host and process-name lookups
 /// (getpwuid, getaddrinfo, pgrep). It is the first thing a process loses with
@@ -39,12 +41,29 @@ pub(crate) fn configure_server_daemon_context(command: &mut Command) {
 /// bootstrap instead of inheriting ours, so it is asked to take the per-user
 /// one whenever this server holds it (fork issues 226 and 228).
 pub(crate) fn keep_server_context_through_launchd(command: &mut Command) {
-    let holds_user_context = macos_services()
-        .is_some_and(|services| services.context == crate::platform::MacosServiceContext::User);
-    if holds_user_context {
+    if holds_user_context() {
         command.env(SERVER_CONTEXT_ENV, USER_CONTEXT);
     } else {
         command.env_remove(SERVER_CONTEXT_ENV);
+    }
+}
+
+/// Whether this server holds the per-user context (fork issue 228).
+pub(crate) fn holds_user_context() -> bool {
+    macos_services()
+        .is_some_and(|services| services.context == crate::platform::MacosServiceContext::User)
+}
+
+/// A handoff replacement that takes the per-user context, or keeps it, is no
+/// process of the SSH login its handoff chain was started from: it leaves the
+/// login's variables behind, so neither its panes nor its own later handoffs
+/// read as started over SSH. `user_context` is the handoff's caller asking
+/// for it, or this server holding it (fork issue 319).
+pub(crate) fn leave_ssh_login_for_user_context(command: &mut Command, user_context: bool) {
+    if user_context {
+        for name in SSH_LOGIN_ENV {
+            command.env_remove(name);
+        }
     }
 }
 
@@ -546,6 +565,25 @@ mod tests {
         assert!(command
             .get_envs()
             .any(|(key, value)| key == SERVER_CONTEXT_ENV && value.is_none()));
+    }
+
+    /// Fork issue 319: a replacement in the per-user context does not inherit
+    /// the SSH login of the server it replaces; one outside it keeps its
+    /// environment as before.
+    #[test]
+    fn a_replacement_in_the_user_context_leaves_the_ssh_login_behind() {
+        let mut user = Command::new("herdr");
+        leave_ssh_login_for_user_context(&mut user, true);
+        for name in SSH_LOGIN_ENV {
+            assert!(
+                user.get_envs()
+                    .any(|(key, value)| key == name && value.is_none()),
+                "{name} is removed"
+            );
+        }
+        let mut session = Command::new("herdr");
+        leave_ssh_login_for_user_context(&mut session, false);
+        assert_eq!(session.get_envs().count(), 0);
     }
 
     #[test]

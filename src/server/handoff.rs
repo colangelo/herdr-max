@@ -384,7 +384,7 @@ pub(crate) fn spawn_handoff_import(
         &fallback_exe
     };
     let mut command = handoff_import_command(exe, socket_path, token, target.token_in_env);
-    crate::platform::spawn_handoff_server(&mut command)
+    crate::platform::spawn_handoff_server(&mut command, user_context_request_pending(socket_path))
         .map(ImportServer::from_spawn)
         .map_err(|err| {
             io::Error::new(
@@ -995,14 +995,28 @@ pub(crate) fn take_user_context_request(socket_path: &Path) -> bool {
         return false;
     };
     let path = user_context_request_path(dir);
-    let fresh = std::fs::metadata(&path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-        .is_some_and(|age| age <= USER_CONTEXT_REQUEST_MAX_AGE);
+    let fresh = user_context_request_is_fresh(&path);
     // A stale request is removed too, so it cannot apply to a later handoff.
     let removed = std::fs::remove_file(&path).is_ok();
     fresh && removed
+}
+
+/// Whether a fresh request waits beside `socket_path` for the importer the
+/// old server starts there; it stays for the importer to take.
+#[cfg(unix)]
+pub(crate) fn user_context_request_pending(socket_path: &Path) -> bool {
+    socket_path
+        .parent()
+        .is_some_and(|dir| user_context_request_is_fresh(&user_context_request_path(dir)))
+}
+
+#[cfg(unix)]
+fn user_context_request_is_fresh(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age <= USER_CONTEXT_REQUEST_MAX_AGE)
 }
 
 #[cfg(all(test, unix))]
@@ -1209,9 +1223,13 @@ mod tests {
         let dir = request_dir("once");
         let socket = dir.join("herdr-handoff-123.sock");
         assert!(!take_user_context_request(&socket), "no request yet");
+        assert!(!user_context_request_pending(&socket));
         request_user_context(&dir).unwrap();
+        // The old server sees it without taking it from the importer.
+        assert!(user_context_request_pending(&socket));
         assert!(take_user_context_request(&socket));
         assert!(!take_user_context_request(&socket), "consumed");
+        assert!(!user_context_request_pending(&socket));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
