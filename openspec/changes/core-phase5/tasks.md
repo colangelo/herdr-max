@@ -522,6 +522,17 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   - 7.1 `far_herdr.json` is trusted 5 min on the same link (`probed_at`), then probed again, so a far herdr upgraded
     in place is read within 5 min; 7.2 a far exit 2 (no `remote-api-bridge`) forgets it, as 126/127 do; 7.4
     `write_atomic` writes a temporary file of its own process and write (`create_new`), never another writer's.
+  - Found by the new live checks (the SIGTERM call ended by itself): through `machine.exec` every wait ended at
+    once with an empty reply. `remote-api-bridge` half-closes the API connection when stdin ends, the API then ends
+    a waiting request, and `machine.exec` closes stdin once the request is in (reproduced with a scratch herdr
+    server: `pane.wait_for_output` with stdin closed returned nothing in 0 s; with stdin open it timed out as asked).
+    New `remote-api-bridge --request` (reads the request to EOF, never half-closes, passes one reply line;
+    `--request --check` prints `herdr-api-request-v1`); the probe takes only a herdr that answers it, every request
+    runs it. Tests: a unit test that the API side sees no half-close while the request waits; the probe script skips
+    a herdr without it; loop: the SIGTERM and drop checks wait on the far side as they should.
+  - The live V35 stale-socket check failed three runs in a row under load, with the base binary too: core's own
+    retry dial started as the test opened the gate, the test's connect made core end it (R4), so the stale-socket
+    dial recorded `retry_spent (far_core_down)`. The check now accepts that line; failures print the run's link logs.
   Limits: the keep lease needs core-link from this build to count (an older one ends such a link when the other
   leases end); `--dial`'s keep switch comes after core answered `connected`, so a drop within that instant is still
   admitted by the dialling lease; a request refused for its timeout is reported through `remote_error` like any

@@ -408,7 +408,10 @@ Alternatives:
 - `herdr --machine <name> <cmd>` resolves a saved herdr machine first, unchanged. When the name is a core machine
   only (or `[remote] prefer = "core"`, D8), the request goes through `machine.exec {on, argv: [<remote herdr>,
   "remote-api-bridge", "--session", S], input}`: the same request bytes `remote-api-bridge` reads from ssh today,
-  the same reply, so the output is the far side's own, with its pane ids. The command list of `target.rs` 291-320
+  the same reply, so the output is the far side's own, with its pane ids. As built, the argv ends in
+  `remote-api-bridge --request` (PR E review): the stream bridge half-closes the API connection when its stdin ends,
+  and `machine.exec` closes stdin once the input is in, so the API ended every waiting request at once; the
+  one-request mode sends the request, keeps the connection open and passes on the one reply line. The command list of `target.rs` 291-320
   is unchanged. A request is never retried once sent, as today. `exec`'s timeout is the call's own (default 60 s,
   at most 600 s); streaming verbs stay unavailable as today. The argv carries D5's `env -u` wrapper (F6).
 - **`machine.exec` never dials (F7).** On a machine that is not `connected` it fails at once (`unavailable`, R10),
