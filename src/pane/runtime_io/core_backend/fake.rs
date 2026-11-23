@@ -36,6 +36,12 @@ pub(crate) struct FakeConfig {
     /// After a `terminal.kill` that finished, ends this stream with the
     /// finished record, as core ends the streams attached to the terminal.
     pub kill_closes_stream: Option<u32>,
+    /// What `machine.exec` answers (core's `ExecResult`); an empty run
+    /// with exit code 0 when unset.
+    pub exec_reply: Option<Value>,
+    /// These calls are recorded and then the connection drops before any
+    /// answer, as a link lost after the request was sent.
+    pub hang_up_on: Vec<&'static str>,
 }
 
 impl Default for FakeConfig {
@@ -53,6 +59,8 @@ impl Default for FakeConfig {
             failing: Vec::new(),
             kill_leaves_live: false,
             kill_closes_stream: None,
+            exec_reply: None,
+            hang_up_on: Vec::new(),
         }
     }
 }
@@ -306,6 +314,10 @@ fn answer(
     let id = request["id"].clone();
     let method = request["method"].as_str().unwrap_or_default();
     let params = &request["params"];
+    if config.hang_up_on.contains(&method) {
+        let _ = out.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     let (result, then): (Result<Value, Value>, Option<Frame>) = match method {
         _ if config.failing.contains(&method) => (
             Err(
@@ -400,6 +412,13 @@ fn answer(
             terminals.sort_by_key(|record| record["address"].to_string());
             (Ok(json!({"terminals": terminals})), None)
         }
+        "machine.exec" => (
+            Ok(config.exec_reply.clone().unwrap_or_else(|| {
+                json!({"stdout": "", "stderr": "", "truncated": false, "timed_out": false,
+                       "ms": 0, "code": 0})
+            })),
+            None,
+        ),
         "machine.list" => {
             let machines: Vec<Value> = lock(shared)
                 .machines
