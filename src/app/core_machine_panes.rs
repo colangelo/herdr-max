@@ -973,7 +973,12 @@ mod tests {
                 crate::terminal::state::Suspension::new(crate::platform::SuspendCause::HolderLost);
             suspension.core_link = Some(link_on("loop/t3"));
             app.state.suspend_pane(pane, Instant::now(), suspension);
+            let _ = app.render_dirty.take();
             assert!(!app.queue_resume(pane, Default::default()), "agent {agent}");
+            assert!(
+                app.render_dirty.take().generic,
+                "the machine wait is drawn (third read, finding 7)"
+            );
             assert!(!app.resume_queue.busy(), "nothing queued");
             assert!(!has_runtime(&app, pane));
             let terminal = app.state.pane_terminal(pane).expect("terminal");

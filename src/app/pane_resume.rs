@@ -360,6 +360,10 @@ impl App {
         self.state.mark_session_dirty();
         #[cfg(unix)]
         self.schedule_core_machine_poll(std::time::Instant::now());
+        // The pane now shows the machine wait, not the suspension (third
+        // read, finding 7).
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
     }
 
     fn prepare_resume(&mut self, pane_id: PaneId, ready: ResumeReady) -> Prepare {
