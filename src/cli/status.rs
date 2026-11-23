@@ -301,9 +301,12 @@ struct ClientStatusJson {
     remote_bridge_idle_timeout: bool,
     binary: String,
     session: Option<String>,
-    /// The Herdr Core session this herdr session's panes run in, so a fleet
-    /// CLI on another Mac can check that it reaches the herdr whose core it
-    /// was linked to (core-phase5 D7). Absent without a core backend.
+    /// The Herdr Core session this herdr session's panes run in when they
+    /// run in core (core-phase3 D5), from this process's session and build,
+    /// so a fleet CLI on another Mac can check that it reaches the herdr
+    /// whose core it was linked to (core-phase5 D7). Reported whether or not
+    /// the server uses core; absent only on a platform without a core
+    /// backend (Windows).
     #[serde(skip_serializing_if = "Option::is_none")]
     core_session: Option<String>,
 }
