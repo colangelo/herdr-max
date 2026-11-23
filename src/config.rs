@@ -14,7 +14,7 @@ mod write;
 
 pub(crate) use self::io::{home_env, path_env};
 pub(crate) use self::model::{
-    HerdrToastConfig, PaletteBusyPolicy, PaletteSendMode, TasksBackend, TasksConfig,
+    HerdrToastConfig, PaletteBusyPolicy, PaletteSendMode, RemotePrefer, TasksBackend, TasksConfig,
 };
 
 pub use self::{

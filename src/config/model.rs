@@ -1720,12 +1720,26 @@ pub struct RemoteConfig {
     /// Use a generated ssh config with private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Which path `herdr --machine <name>` takes when a saved herdr machine and a Herdr Core machine share the name: `ssh` (the saved machine) or `core`. Default: ssh.
+    pub prefer: RemotePrefer,
+}
+
+/// `[remote] prefer` (openspec/changes/core-phase5, D8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemotePrefer {
+    /// herdr's own ssh to the saved machine, as before.
+    #[default]
+    Ssh,
+    /// The Herdr Core machine link.
+    Core,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            prefer: RemotePrefer::Ssh,
         }
     }
 }

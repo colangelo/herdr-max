@@ -92,13 +92,30 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
             return Ok(super::CommandOutcome::Handled(0));
         }
         let profiles = EndpointCatalog::load_profiles().map_err(io::Error::other)?;
-        // A saved herdr machine first, unchanged (core-phase5 D8); a name
-        // no saved machine has may be a Herdr Core machine (D7).
-        let route = match resolve_machine(&profiles, &selector) {
-            Ok(profile) => Route::Saved {
+        #[cfg(unix)]
+        let core_machines: Vec<String> = crate::core_machine::command::linked_machines()
+            .into_iter()
+            .map(|machine| machine.name.to_string())
+            .collect();
+        #[cfg(not(unix))]
+        let core_machines: Vec<String> = Vec::new();
+        let prefer = crate::config::Config::load().config.remote.prefer;
+        // A saved herdr machine first, unchanged (core-phase5 D8), unless a
+        // Herdr Core machine shares its name and `[remote] prefer` says
+        // core; a name no saved machine has may be a Herdr Core machine
+        // (D7).
+        let route = match route_machine(&profiles, &core_machines, &selector, prefer) {
+            Ok(MachineRoute::Saved(profile)) => Route::Saved {
                 profile: profile.clone(),
                 bridge: None,
             },
+            Ok(MachineRoute::Core(name)) => {
+                let unknown = format!("unknown machine '{name}'; use `herdr machine list`");
+                match core_route(&selector, dial, unknown) {
+                    Ok(route) => route,
+                    Err(outcome) => return outcome,
+                }
+            }
             Err(error) if names_a_saved_machine(&profiles, &selector) => return usage_error(error),
             Err(error) => match core_route(&selector, dial, error) {
                 Ok(route) => route,
@@ -397,6 +414,36 @@ fn parse_machine_prefix(args: &[String]) -> Result<Option<MachinePrefix>, String
     }))
 }
 
+/// Which path `--machine <selector>` takes (core-phase5 D7, D8).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MachineRoute<'a> {
+    /// A saved herdr machine, through herdr's own ssh (the old remote).
+    Saved(&'a SavedSshEndpoint),
+    /// A Herdr Core machine, through the primary core's link.
+    Core(String),
+}
+
+/// A saved herdr machine is resolved first, unchanged; a name that is only
+/// a core machine goes through the core link; when both share the name,
+/// `[remote] prefer` decides (D8).
+pub(super) fn route_machine<'a>(
+    profiles: &'a [SavedSshEndpoint],
+    core_machines: &[String],
+    selector: &str,
+    prefer: crate::config::RemotePrefer,
+) -> Result<MachineRoute<'a>, String> {
+    let core = core_machines.iter().any(|name| name == selector);
+    match (resolve_machine(profiles, selector), core, prefer) {
+        (Ok(profile), false, _) | (Ok(profile), true, crate::config::RemotePrefer::Ssh) => {
+            Ok(MachineRoute::Saved(profile))
+        }
+        (Ok(_), true, crate::config::RemotePrefer::Core) | (Err(_), true, _) => {
+            Ok(MachineRoute::Core(selector.to_string()))
+        }
+        (Err(error), false, _) => Err(error),
+    }
+}
+
 pub(super) fn resolve_machine<'a>(
     profiles: &'a [SavedSshEndpoint],
     selector: &str,
@@ -492,6 +539,48 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+
+    // V22 (core-phase5 D8): a saved machine first, unchanged; a name that is
+    // only a core machine goes through the core link; both: `prefer` says.
+    #[test]
+    fn prefer_decides_only_when_a_saved_and_a_core_machine_share_the_name() {
+        use crate::config::RemotePrefer::{Core, Ssh};
+        let saved = SavedSshEndpoint::new("ac-mbm5", "ac@ac-mbm5", "default").unwrap();
+        let other = SavedSshEndpoint::new("vm1", "ac@vm1", "default").unwrap();
+        let profiles = vec![saved.clone(), other.clone()];
+        let core = vec!["ac-mbm5".to_string(), "lab".to_string()];
+        assert_eq!(
+            route_machine(&profiles, &core, "ac-mbm5", Ssh),
+            Ok(MachineRoute::Saved(&profiles[0])),
+            "the default keeps the old remote"
+        );
+        assert_eq!(
+            route_machine(&profiles, &core, "ac-mbm5", Core),
+            Ok(MachineRoute::Core("ac-mbm5".into()))
+        );
+        for prefer in [Ssh, Core] {
+            assert_eq!(
+                route_machine(&profiles, &core, "vm1", prefer),
+                Ok(MachineRoute::Saved(&profiles[1])),
+                "a saved machine only"
+            );
+            assert_eq!(
+                route_machine(&profiles, &core, "lab", prefer),
+                Ok(MachineRoute::Core("lab".into())),
+                "a core machine only"
+            );
+            assert!(route_machine(&profiles, &core, "nowhere", prefer).is_err());
+        }
+        assert_eq!(
+            route_machine(&profiles, &core, saved.id.as_str(), Core),
+            Ok(MachineRoute::Saved(&profiles[0])),
+            "a profile id is no core machine's name"
+        );
+        assert_eq!(crate::config::Config::default().remote.prefer, Ssh);
+        let config: crate::config::Config =
+            toml::from_str("[remote]\nprefer = \"core\"\n").unwrap();
+        assert_eq!(config.remote.prefer, Core);
     }
 
     #[test]

@@ -664,6 +664,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Set false to run plain ssh against your ssh config unchanged — this does not
 # force multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
+# Which path `herdr --machine <name>` takes when a saved herdr machine and a
+# Herdr Core machine (`herdr machine add --core`) share the name: "ssh" (the
+# saved machine) or "core" (the Herdr Core machine link).
+# prefer = "ssh"
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
