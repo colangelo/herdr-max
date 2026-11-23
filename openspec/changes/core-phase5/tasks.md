@@ -482,9 +482,13 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   launcher when none listens) and connects to the view's socket; reconnects follow #260's dormancy as any
   machine's. `herdr --remote core:<m>` (`main.rs`, `view::start::run_view_client`): ensures the view and runs
   `herdr client` on its socket with the remote-client environment. Any machine core lists can be viewed this
-  way (one added by hand too). Live V17 below. Limits: core machines added after a client started appear in its
-  sidebar after the client restarts (the catalog's file watch covers saved machines only); the 10 min exit is a
-  unit test.
+  way (one added by hand too). The endpoints are the linked machines that this session's running primary core
+  lists (`linked_machines_of_primary`: one `machine.list`, 1 s at most, never a start): the state folders under
+  the passwd home are shared by every herdr-dev session and scratch core of the account, and a folder alone made
+  every test client federated (caught by `tests/client_mode.rs` in `just check`). Live V17 below. Limits: core
+  machines added after a client started appear in its sidebar after the client restarts (the catalog's file
+  watch covers saved machines only); a TUI client starts a view server per listed machine as its endpoint
+  transport (no dial without a lease); the 10 min exit is a unit test.
 - [x] D.5 Both-present notice and `[remote] prefer`; V21, V22
   Built: `[remote] prefer = "ssh" | "core"` (`RemotePrefer`, default `ssh`, in the default config and
   `configuration.mdx`); `cli/target.rs` `route_machine`: a saved machine first, a name that is only a core machine
@@ -497,6 +501,25 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   starts). Plan change: the endpoint handshake carries no far core id, so the pair is found by the host of the two
   ssh destinations, not by core id.
 - [ ] D.6 Check: `just check` 0, `just core-live-test` 0, CI green
+  Local, m4m, 2026-11-23, under the shared lock (the load gate lifted by manager-lab for scanner load), head
+  2b439317 for the code (later commits are scripts and openspec only): `just check` 0 (5837 + 158 tests). Live,
+  with the binary copied out of the shared target dir: `core_view_live_test.sh` (new, in `just core-live-test`)
+  passed at its full 60 s idle: V15 new tab in the view 0.60 s and new split 0.62 s after the far change; V14 50
+  keys, a paste, an SGR click and focus in/out reached the far program and the far terminal kept 103x34, then
+  after a far viewer took 90x25 it stayed 90x25 while the view typed; frames from the view on streams: 61
+  AUTOMATIC_INPUT, 1 CREDIT, 1 RESIZE (90x25), no DATA, FOCUS or FACTS; V30 4 frames in 60 s idle, all CREDIT;
+  the far viewer gone, core kept 90x25 (the view's recorded size, not its attach size 103x34), and after a
+  SIGKILL of the far herdr it stayed so with the far program's pid unchanged; V17 closing a pane in the view and
+  stopping the view left the far program and pane. `core_machine_live_test.sh` with V3_SECS=60, V38_SECS=120,
+  V11_SECS=60 passed whole on the last run, including V33's new view part (no dial before the view client's
+  lease, one after, connected 0.68 s after the client started). Two earlier runs failed once each in older
+  cases, V3 (link bytes after dormancy) and B.5 (the client's lease after a dial), and passed on the next run
+  unchanged; not proven, the likely cause is another herdr-dev client of the account writing its lease into every
+  machine folder (B.2, as designed) while other builders' live tests ran. One V35 failure was the check's own
+  race (retry_spent with no GATE far_core_down line), fixed in the script. `just bench-render-scale`: active
+  panes 266 us at 1 pane, 318 us at 15 (1.20x; C.7 had 1.19x); background workspaces 261 and 261 (1.00x); the
+  render path gained one `Option` check per pane resize and the view's border label. Not run: the full-length
+  V3, V38 and V11 waits, `core_live_test.sh` and the default-session script, CI (not pushed).
 
 ## PR E. Actions and the fleet CLI over the link
 
