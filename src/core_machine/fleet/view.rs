@@ -153,6 +153,13 @@ impl ViewRoute {
         }
     }
 
+    /// A guard that ends this route when it drops (fork issue 317 M7): the
+    /// view server holds one while it runs, so a panic that unwinds past its
+    /// graceful end removes the running actions' leases too.
+    pub(crate) fn ended_on_drop(&self) -> RouteEnd {
+        RouteEnd(self.clone())
+    }
+
     /// The far document as core has it now.
     pub(crate) fn far_layout(&self, machine: &MachineName) -> Result<Value, String> {
         (self.layout)(machine)
@@ -282,6 +289,16 @@ pub(crate) fn send(
     .send(line, run)
 }
 
+/// Ends its route when it drops: at the view server's end, graceful or
+/// unwinding (`ViewRoute::ended_on_drop`).
+pub(crate) struct RouteEnd(ViewRoute);
+
+impl Drop for RouteEnd {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 fn left(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
 }
@@ -333,9 +350,10 @@ fn not_connected(name: &MachineName, state: &str) -> String {
 }
 
 /// The view's `cli-<pid>` keep lease for one action: written before the
-/// probe and again before the request, removed when the action ends, and
-/// by the view server's graceful end while an action still runs
-/// (`ViewRoute::end`, fork issue 316 M7). No renewer runs: the
+/// probe and again before the request, removed when the action ends (its
+/// drop, which an action thread's panic runs too, fork issue 317 M7), and
+/// by the view server's end while an action still runs (`ViewRoute::end`,
+/// fork issue 316 M7; from a drop guard, so an unwinding server too). No renewer runs: the
 /// whole action ends within its 45 s (an aim check unwaited past its share
 /// ends on its own 5 s calls), and a view killed during one leaves a lease
 /// that keeps an up link a minute at most and admits no dial. No
@@ -374,16 +392,20 @@ impl<'a> KeepLease<'a> {
         holder: &'a LeaseHolder,
         leases: &'a RunningLeases,
     ) -> io::Result<Self> {
+        // Closed to writes once the server ended, under the lock its end
+        // takes (fork issue 317 M7): nothing is listed or written after it.
+        {
+            let mut book = leases.book();
+            if book.ended {
+                return Err(io::Error::other("the view server is ending"));
+            }
+            book.running.push((dir.clone(), holder.clone()));
+        }
         let lease = Self {
             dir,
             holder,
             leases,
         };
-        lease
-            .leases
-            .book()
-            .running
-            .push((dir.clone(), holder.clone()));
         lease.write_again()?;
         Ok(lease)
     }

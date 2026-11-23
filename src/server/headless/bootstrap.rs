@@ -223,13 +223,16 @@ fn run_view_server(machine: crate::core_machine::MachineName) -> io::Result<()> 
             };
             server.serve_as_view(presence);
             info!(%machine, client_socket = %socket.display(), "herdr view server started");
-            let result = server.run().await;
-            // An action still running has a lease its thread will not
-            // remove now, and writes none again (fork issue 316, M7).
-            if let Some(view) = server.app.view.as_mut() {
-                view.route().end();
-            }
-            result
+            // An action still running at the end has a lease its thread
+            // will not remove now, and writes none again (fork issue 316,
+            // M7): the guard ends the route's leases when the server ends,
+            // also when it unwinds from a panic (fork issue 317 M7).
+            let _route_end = server
+                .app
+                .view
+                .as_mut()
+                .map(|view| view.route().ended_on_drop());
+            server.run().await
         })
     });
     crate::logging::shutdown("server");

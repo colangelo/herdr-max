@@ -593,6 +593,77 @@ fn the_view_servers_end_removes_a_running_actions_lease() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// Fork issue 317 M7: the view server ends its route from a drop guard, so a
+// server that unwinds from a panic removes a running action's lease as its
+// graceful end does; and an action thread that panics after its lease was
+// written removes its own as it unwinds. After the end, no lease is listed
+// or written again.
+#[test]
+fn a_panic_leaves_no_lease_behind() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, dir) = added("view-panic-lease");
+    let route = route(&core, &root);
+    let panicking = route.clone();
+    let action = std::thread::spawn(move || {
+        send(
+            &panicking,
+            &machine(),
+            &tab_create("view:26"),
+            soon(),
+            fine(),
+            Box::new(|| panic!("an action thread panics after its lease")),
+        )
+    });
+    let _ = action.join();
+    assert!(
+        dir.leases().is_empty(),
+        "the panicking thread's lease is gone"
+    );
+
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let running_route = route.clone();
+    let running = std::thread::spawn(move || {
+        send(
+            &running_route,
+            &machine(),
+            &tab_create("view:27"),
+            soon(),
+            Box::new(move || {
+                let _ = held.recv();
+                Err("the view ended".into())
+            }),
+            spent(),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir.leases().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(dir.leases().len(), 1, "the running action's lease");
+    let server = route.clone();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _end = server.ended_on_drop();
+        panic!("the view server panics");
+    }));
+    assert!(unwound.is_err());
+    assert!(dir.leases().is_empty(), "removed as the server unwound");
+    let _ = release.send(());
+    let _ = running.join();
+    let err = send(
+        &route,
+        &machine(),
+        &tab_create("view:28"),
+        soon(),
+        fine(),
+        spent(),
+    )
+    .expect_err("ended");
+    assert!(err.contains("could not write the lease"), "{err}");
+    assert!(dir.leases().is_empty() && execs(&core).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // Fork issue 316, review item 5: an action thread still running after the
 // server's end must not write its lease again: nothing is sent, no lease is
 // left, and nothing is spent.
