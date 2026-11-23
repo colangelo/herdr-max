@@ -77,12 +77,34 @@ pub(crate) fn prepare_server_process(
     let requested = std::env::var_os(SERVER_CONTEXT_ENV);
     // This is a one-shot launch request, not environment for panes or plugins.
     std::env::remove_var(SERVER_CONTEXT_ENV);
-    if !needs_user_context(requested.as_deref(), handoff_import, handoff_user_context) {
-        return Ok(false);
+    let adopted = if needs_user_context(requested.as_deref(), handoff_import, handoff_user_context)
+    {
+        BootstrapApi::load()
+            .and_then(|api| api.adopt_user_context())
+            .map(|()| true)
+    } else {
+        Ok(false)
+    };
+    // An older server started over SSH passes its login's variables on
+    // whatever it is asked: the importer drops them itself, before any pane
+    // or job starts, once it takes or holds the user context (fork issue 319).
+    if leaves_ssh_login(
+        handoff_import,
+        matches!(adopted, Ok(true)) || holds_user_context(),
+    ) {
+        for name in SSH_LOGIN_ENV {
+            std::env::remove_var(name);
+        }
     }
-    let api = BootstrapApi::load()?;
-    api.adopt_user_context()?;
-    Ok(true)
+    adopted
+}
+
+/// Whether this server drops the SSH login's variables it inherited: a
+/// handoff replacement in the per-user context is no process of that login.
+/// A server started directly keeps them, so a server started over SSH still
+/// reads as one.
+fn leaves_ssh_login(handoff_import: bool, in_user_context: bool) -> bool {
+    handoff_import && in_user_context
 }
 
 fn needs_user_context(
@@ -584,6 +606,19 @@ mod tests {
         let mut session = Command::new("herdr");
         leave_ssh_login_for_user_context(&mut session, false);
         assert_eq!(session.get_envs().count(), 0);
+    }
+
+    /// Fork issue 319: an older exporter started over SSH leaves its
+    /// login's variables to the importer, which drops them itself once it
+    /// takes or holds the user context.
+    #[test]
+    fn an_importer_in_the_user_context_drops_the_ssh_login_it_inherited() {
+        assert!(leaves_ssh_login(true, true));
+        assert!(!leaves_ssh_login(true, false), "outside it, as before");
+        assert!(
+            !leaves_ssh_login(false, true),
+            "a server started directly keeps them"
+        );
     }
 
     #[test]
