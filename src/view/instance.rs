@@ -66,15 +66,19 @@ impl FarInstance {
     /// (`pane.close_if_terminal` and the others, fork issue 316): the far
     /// core's address of the terminal, the pid and the launch label. `None`
     /// unless both parts are known.
+    /// `tab` is the far herdr's id of the tab the pane is in (fork issue 317
+    /// M4).
     pub(crate) fn expectation(
         &self,
         terminal: &str,
+        tab: &str,
     ) -> Option<crate::api::schema::PaneTerminalExpectation> {
         let launch = self.launch.as_str().filter(|_| self.pid != 0)?;
         Some(crate::api::schema::PaneTerminalExpectation {
             terminal: terminal.to_string(),
             pid: self.pid,
             launch: launch.to_string(),
+            tab: tab.to_string(),
         })
     }
 }
@@ -103,8 +107,8 @@ mod tests {
         assert_eq!(unknown, FarInstance::unknown());
         assert!(!unknown.is_known(), "it would match any program");
         assert!(unknown.matches(&json!({"pid": 5})));
-        assert_eq!(unknown.expectation("t1"), None);
-        let expect = first.expectation("t7").expect("both parts");
+        assert_eq!(unknown.expectation("t1", "w3:t1"), None);
+        let expect = first.expectation("t7", "w3:t1").expect("both parts");
         assert_eq!(
             (expect.terminal.as_str(), expect.pid, expect.launch.as_str()),
             ("t7", 100, "l1")
@@ -122,7 +126,7 @@ mod tests {
         let not_a_label = FarInstance::of(&json!({"pid": 100, "labels": {LAUNCH_LABEL: 7}}));
         for one_sided in [label_only, pid_only, not_a_label] {
             assert!(!one_sided.is_known(), "{one_sided:?}");
-            assert_eq!(one_sided.expectation("t1"), None, "{one_sided:?}");
+            assert_eq!(one_sided.expectation("t1", "w3:t1"), None, "{one_sided:?}");
         }
     }
 }

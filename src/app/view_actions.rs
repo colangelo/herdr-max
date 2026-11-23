@@ -335,7 +335,15 @@ impl App {
                 .far_instance(pane)
                 .filter(|instance| instance.is_known() && !replaced)
                 .ok_or_else(not_attached)?;
-            let expect = instance.expectation(terminal).ok_or_else(not_attached)?;
+            // M4 of fork issue 317: the far herdr's own id of the tab the
+            // window shows the pane in, as its document named it.
+            let far_tab = client_tab
+                .and_then(|(_, shown_tab)| self.public_tab_id(ws, shown_tab))
+                .and_then(|tab_id| view.far_tab(&tab_id))
+                .ok_or_else(|| unknown("pane", id))?;
+            let expect = instance
+                .expectation(terminal, far_tab)
+                .ok_or_else(not_attached)?;
             let Some(seen) = sender.binding else {
                 return Err(format!(
                     "this window's Herdr does not say which program of {machine} it showed in pane {id}, so a view does not act on it; update Herdr here"

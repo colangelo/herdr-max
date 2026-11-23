@@ -72,7 +72,7 @@ impl GuardedFar {
             .nth(nth)
             .expect("a run");
         json!({"terminal": format!("t{}", nth + 1), "pid": 4242,
-               "launch": run["params"]["labels"]["herdr.launch"]})
+               "launch": run["params"]["labels"]["herdr.launch"], "tab": self.tab_ids[nth]})
     }
 
     fn public(&mut self, method: &str, params: Value) -> Value {

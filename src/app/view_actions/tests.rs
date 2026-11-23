@@ -220,7 +220,7 @@ fn each_action_names_the_far_targets_and_nothing_of_this_mac() {
     assert_eq!(
         split["params"],
         json!({"pane_id": "w3:p2", "direction": "down", "ratio": 0.25,
-               "expect": {"terminal": "t2", "pid": 102, "launch": "launch-t2"}})
+               "expect": {"terminal": "t2", "pid": 102, "launch": "launch-t2", "tab": "w3:t1"}})
     );
 
     let close = far_in(&app, close("w3:p3", true), Some((0, 1)));
@@ -228,7 +228,7 @@ fn each_action_names_the_far_targets_and_nothing_of_this_mac() {
     assert_eq!(
         close["params"],
         json!({"pane_id": "w3:p3", "force": true,
-               "expect": {"terminal": "t3", "pid": 102, "launch": "launch-t3"}})
+               "expect": {"terminal": "t3", "pid": 102, "launch": "launch-t3", "tab": "w3:t2"}})
     );
 
     let tab_rename = far(
@@ -249,7 +249,7 @@ fn each_action_names_the_far_targets_and_nothing_of_this_mac() {
     assert_eq!(
         pane_rename["params"],
         json!({"pane_id": "w3:p1", "label": "server",
-               "expect": {"terminal": "t1", "pid": 102, "launch": "launch-t1"}})
+               "expect": {"terminal": "t1", "pid": 102, "launch": "launch-t1", "tab": "w3:t1"}})
     );
 }
 
@@ -1120,7 +1120,7 @@ fn a_views_close_reaches_the_far_pane_it_aimed_at() {
     assert_eq!(sent["params"]["pane_id"], "w3:p2");
     assert_eq!(
         sent["params"]["expect"],
-        json!({"terminal": "t2", "pid": 102, "launch": "launch-t2"})
+        json!({"terminal": "t2", "pid": 102, "launch": "launch-t2", "tab": "w3:t1"})
     );
     assert_ne!(sent["params"]["force"], true);
     assert_eq!(
@@ -1305,7 +1305,9 @@ fn a_pane_action_goes_only_for_a_pane_of_the_clients_tab() {
             .view_far_action(&method, &from_tab(None))
             .expect_err("no tab");
         assert!(err.contains("is not in the tab this window shows"), "{err}");
-        assert!(app.view_far_action(&method, &from_tab(Some((0, 1)))).is_ok());
+        assert!(app
+            .view_far_action(&method, &from_tab(Some((0, 1))))
+            .is_ok());
     }
 }
 

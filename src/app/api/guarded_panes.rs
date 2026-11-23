@@ -151,6 +151,19 @@ impl App {
                 format!("pane {pane_ref} {what}; nothing was done"),
             ))
         };
+        // Fork issue 317 M4: the pane's own id now, never one a workspace
+        // left behind as an alias, and the tab the caller saw it in: a pane
+        // moved to another tab since is refused, so a close cannot remove
+        // the tab it moved to.
+        if self.public_pane_id(ws_idx, pane_id).as_deref() != Some(pane_ref) {
+            return mismatch("is not this pane's id now");
+        }
+        let tab = self.state.workspaces[ws_idx]
+            .find_tab_index_for_pane(pane_id)
+            .and_then(|tab_idx| self.public_tab_id(ws_idx, tab_idx));
+        if tab.as_deref() != Some(expect.tab.as_str()) {
+            return mismatch(&format!("is not in tab {}", expect.tab));
+        }
         let Some(runtime) = self
             .state
             .workspaces
@@ -317,7 +330,17 @@ mod tests {
                 .nth(nth)
                 .expect("a run");
             json!({"terminal": format!("t{}", nth + 1), "pid": 4242,
-                   "launch": run["params"]["labels"]["herdr.launch"]})
+                   "launch": run["params"]["labels"]["herdr.launch"],
+                   "tab": self.tab(nth)})
+        }
+
+        /// The public id of the tab the `nth` pane is in now.
+        fn tab(&self, nth: usize) -> String {
+            let (ws, _) = self.app.find_pane(self.panes[nth]).expect("a pane");
+            let tab = self.app.state.workspaces[ws]
+                .find_tab_index_for_pane(self.panes[nth])
+                .expect("a tab");
+            self.app.public_tab_id(ws, tab).expect("a tab id")
         }
 
         fn call(&mut self, method: &str, params: Value) -> Value {
@@ -331,6 +354,14 @@ mod tests {
                     | Method::PaneRenameIfTerminal(_)
                     | Method::PaneClose(_)
             ));
+            serde_json::from_str(&self.app.handle_api_request(request)).expect("json")
+        }
+
+        /// Any API call, as another caller of the far herdr would make it.
+        fn raw(&mut self, method: &str, params: Value) -> Value {
+            let request: Request =
+                serde_json::from_value(json!({"id": "far:2", "method": method, "params": params}))
+                    .expect("a request");
             serde_json::from_str(&self.app.handle_api_request(request)).expect("json")
         }
 
@@ -468,6 +499,76 @@ mod tests {
         );
         assert!(closed["result"].is_object(), "{closed}");
         assert_eq!(far.panes_of(0), 1);
+    }
+
+    // Fork issue 317 M4: the guard names the tab the view saw the pane in.
+    // A pane moved to another tab of its workspace since is refused, and so
+    // its close cannot remove the tab it moved to; a pane moved to another
+    // workspace leaves its old id behind as an alias, which names no pane
+    // for a guarded action. Both tabs and the pane stay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pane_moved_to_another_tab_is_refused() {
+        let mut far = far();
+        let second = far.id(1);
+        let aimed = far.expect(1);
+        let moved = far.raw(
+            "pane.move",
+            json!({"pane_id": second, "destination": {"type": "new_tab"}}),
+        );
+        assert!(moved["result"].is_object(), "{moved}");
+        assert_ne!(far.tab(1), aimed["tab"].as_str().unwrap_or_default());
+        let tabs = far.app.state.workspaces[0].tabs.len();
+        assert_eq!(tabs, 2);
+        for (method, params) in [
+            ("pane.rename_if_terminal", json!({"label": "server"})),
+            ("pane.split_if_terminal", json!({"direction": "right"})),
+            ("pane.close_if_terminal", json!({"force": true})),
+        ] {
+            let mut params = params;
+            params["pane_id"] = json!(far.id(1));
+            params["expect"] = aimed.clone();
+            let refused = far.call(method, params);
+            assert_eq!(refused["error"]["code"], "terminal_mismatch", "{refused}");
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("is not in tab")),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            far.app.state.workspaces[0].tabs.len(),
+            tabs,
+            "both tabs stay"
+        );
+        assert_eq!(far.label(1), None);
+
+        let alone = far.app.public_workspace_id(1);
+        let before = far.id(1);
+        let moved = far.raw(
+            "pane.move",
+            json!({"pane_id": before, "destination": {"type": "new_tab", "workspace_id": alone}}),
+        );
+        assert!(moved["result"].is_object(), "{moved}");
+        assert_ne!(far.id(1), before, "a new id in its new workspace");
+        let mut aimed = far.expect(1);
+        let refused = far.call(
+            "pane.close_if_terminal",
+            json!({"pane_id": before, "expect": aimed.clone()}),
+        );
+        assert_eq!(refused["error"]["code"], "terminal_mismatch", "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("not this pane's id now")),
+            "{refused}"
+        );
+        aimed["tab"] = json!(far.tab(1));
+        let closed = far.call(
+            "pane.rename_if_terminal",
+            json!({"pane_id": far.id(1), "label": "here", "expect": aimed}),
+        );
+        assert!(closed["result"].is_object(), "its own id and tab: {closed}");
     }
 
     // Fork issue 316, M2: a guarded close is a close of one pane. The last

@@ -88,14 +88,16 @@ pub struct PaneRespawnIfIdleParams {
 /// The program a guarded pane action is for (core-phase5 D7, fork issue
 /// 316): the pane's terminal in the server's primary herdr-core session, as
 /// the `herdr-app` document names it (`t7`), the pid core reported for its
-/// program, and the `herdr.launch` label of the run that started it. The
-/// server compares all three with the pane it resolves, in the same turn as
-/// the action.
+/// program, and the `herdr.launch` label of the run that started it; and
+/// the tab the caller saw the pane in, by the server's public tab id
+/// (`w3:t2`, fork issue 317 M4). The server compares them all with the pane
+/// it resolves, in the same turn as the action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneTerminalExpectation {
     pub terminal: String,
     pub pid: u32,
     pub launch: String,
+    pub tab: String,
 }
 
 /// `pane.close_if_terminal`: `pane.close` of a pane that still shows the
