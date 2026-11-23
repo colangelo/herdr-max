@@ -634,6 +634,43 @@ fn plugin_command_carries_client_owned_selection_coordinates() {
     );
 }
 
+// #312 follow-up: in a view, an action the view does not advertise is one
+// a view does not take, not one an update would bring: the notice says so
+// and names the machine, never "Update and restart it".
+#[cfg(unix)]
+#[test]
+fn an_action_a_view_refuses_says_so_not_update() {
+    use crate::client::endpoint::{ClientEndpointId, ClientEndpointStatus};
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let machine = crate::core_machine::MachineName::parse("loop").unwrap();
+    let view = ClientEndpointId::Core(machine.clone());
+    state.set_core_endpoints(std::slice::from_ref(&machine));
+    state.set_endpoint_status(&view, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&view, Box::new(snapshot()));
+    assert!(state.activate_endpoint_projection(&view));
+    state.set_endpoint_methods(Some(vec!["pane.focus".into()]));
+    let mut outcome = ClientShellInput::default();
+    state.push_endpoint_method(
+        crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
+            workspace_id: "missing".into(),
+        }),
+        &mut outcome,
+    );
+    assert!(outcome.actions.is_empty());
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("unsupported action notice");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Unsupported);
+    assert!(
+        notice.body.contains("not available in a view of loop"),
+        "{}",
+        notice.body
+    );
+    assert!(!notice.body.contains("Update"), "{}", notice.body);
+}
+
 #[test]
 fn unavailable_endpoint_method_is_disabled_without_disconnect() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

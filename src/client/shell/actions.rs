@@ -487,9 +487,7 @@ impl ClientShellState {
                 ClientEndpointNoticeKind::Unsupported,
                 method_name.clone(),
                 "Action unavailable",
-                format!(
-                    "This server does not support {method_name} yet. Update and restart it to enable this action."
-                ),
+                unsupported_action_text(&self.active_endpoint_id, &method_name),
             );
             return false;
         }
@@ -1380,4 +1378,32 @@ impl ClientShellState {
             _ => None,
         }
     }
+}
+
+/// Why the active endpoint refuses `method_name`: a view takes only what a
+/// view does, whatever its build, so updating it would change nothing
+/// (core-phase5 D6, #312 follow-up); any other server is an older one.
+#[cfg(unix)]
+fn unsupported_action_text(
+    endpoint_id: &crate::client::endpoint::ClientEndpointId,
+    method_name: &str,
+) -> String {
+    if let crate::client::endpoint::ClientEndpointId::Core(machine) = endpoint_id {
+        return format!("{method_name} is not available in a view of {machine}.");
+    }
+    older_server_text(method_name)
+}
+
+#[cfg(not(unix))]
+fn unsupported_action_text(
+    _endpoint_id: &crate::client::endpoint::ClientEndpointId,
+    method_name: &str,
+) -> String {
+    older_server_text(method_name)
+}
+
+fn older_server_text(method_name: &str) -> String {
+    format!(
+        "This server does not support {method_name} yet. Update and restart it to enable this action."
+    )
 }
