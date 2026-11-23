@@ -132,11 +132,16 @@ pub(crate) fn refusal(machine: &crate::core_machine::MachineName, name: &str) ->
         ViewMethod::FarLayout => format!("{machine}'s herdr owns its layout; do this there"),
         ViewMethod::Local => format!("it would run or write on this Mac, not on {machine}"),
     };
-    Some(format!("this is a view of {machine}: {name} is refused ({why})"))
+    Some(format!(
+        "this is a view of {machine}: {name} is refused ({why})"
+    ))
 }
 
 /// The refusal of a method no one has classified yet.
-pub(crate) fn unclassified_refusal(machine: &crate::core_machine::MachineName, name: &str) -> String {
+pub(crate) fn unclassified_refusal(
+    machine: &crate::core_machine::MachineName,
+    name: &str,
+) -> String {
     format!("this is a view of {machine}: {name} is not one a view takes")
 }
 
@@ -228,14 +233,15 @@ mod tests {
         assert_eq!(primary.len(), all().len());
         let view = advertised(all(), true);
         assert!(view.iter().all(|name| allows(name)), "{view:?}");
-        assert_eq!(
-            view.len(),
-            all().iter().filter(|name| allows(name)).count()
-        );
+        assert_eq!(view.len(), all().iter().filter(|name| allows(name)).count());
         assert!(!view.iter().any(|name| name == "agent.message"));
         let machine = crate::core_machine::MachineName::parse("loop").unwrap();
         for name in all() {
-            assert_eq!(refusal(&machine, name).is_none(), view.iter().any(|m| m == name), "{name}");
+            assert_eq!(
+                refusal(&machine, name).is_none(),
+                view.iter().any(|m| m == name),
+                "{name}"
+            );
         }
     }
 }

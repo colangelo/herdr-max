@@ -968,7 +968,10 @@ mod tests {
         let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
         assert!(panes.iter().all(|pane| !app.view_input_held(*pane)));
         app.apply_view_layout(&doc("t2", "t1", "t3"));
-        let held: Vec<bool> = panes.iter().map(|pane| app.view_input_held(*pane)).collect();
+        let held: Vec<bool> = panes
+            .iter()
+            .map(|pane| app.view_input_held(*pane))
+            .collect();
         assert_eq!(held, [true, true, false], "the two swapped panes only");
         let marked = |app: &App, pane: PaneId| {
             app.state
@@ -1006,7 +1009,11 @@ mod tests {
                 cols,
             });
         }
-        assert_eq!(size(&app), Some((30, 100)), "over the budget: the last size");
+        assert_eq!(
+            size(&app),
+            Some((30, 100)),
+            "over the budget: the last size"
+        );
         for n in 0..500 {
             app.handle_view_event(ViewEvent::FarSize {
                 address: format!("loop/t{}", 100 + n),
@@ -1075,7 +1082,11 @@ mod tests {
             runtime: Box::new(runtime),
         });
         drop(entered);
-        assert_eq!(app.terminal_runtimes.len(), 0, "an obsolete attach is never shown");
+        assert_eq!(
+            app.terminal_runtimes.len(),
+            0,
+            "an obsolete attach is never shown"
+        );
         assert_eq!(
             app.view.as_ref().unwrap().attaching.get(&address),
             Some(&generation),

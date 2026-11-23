@@ -381,7 +381,12 @@ mod tests {
         std::fs::write(dir.target_path(), b"{}").expect("target");
         let every = Duration::from_millis(20);
         let started = Instant::now();
-        assert!(!lease_within(&root, &machine, Duration::from_millis(200), every));
+        assert!(!lease_within(
+            &root,
+            &machine,
+            Duration::from_millis(200),
+            every
+        ));
         assert!(started.elapsed() >= Duration::from_millis(200), "it waited");
         let writer = {
             let dir = MachineDir::at(&root, &machine);

@@ -343,7 +343,10 @@ mod tests {
         assert!(writes_leases(false, None));
         assert!(writes_leases(false, Some("core:ac-mbm5")));
         assert!(!writes_leases(false, Some("ac@ac-mbm5")));
-        assert!(!writes_leases(false, Some("")), "a remote client of no known target");
+        assert!(
+            !writes_leases(false, Some("")),
+            "a remote client of no known target"
+        );
         assert!(!writes_leases(true, None));
         assert!(!writes_leases(true, Some("core:ac-mbm5")));
     }

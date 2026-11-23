@@ -800,8 +800,15 @@ mod tests {
         for step in 1..=40u32 {
             watch.source.doc = space_doc(&format!("v{step}"));
             watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
-            let events = watch.tick(start + Duration::from_millis(u64::from(step) * 25), Duration::ZERO);
-            last.extend(layouts(&events).into_iter().map(|layout| layout.spaces[0].name.clone()));
+            let events = watch.tick(
+                start + Duration::from_millis(u64::from(step) * 25),
+                Duration::ZERO,
+            );
+            last.extend(
+                layouts(&events)
+                    .into_iter()
+                    .map(|layout| layout.spaces[0].name.clone()),
+            );
         }
         assert!(
             watch.source.layout_reads <= 3,
@@ -809,8 +816,16 @@ mod tests {
             watch.source.layout_reads
         );
         let settled = watch.tick(start + Duration::from_secs(2), Duration::ZERO);
-        last.extend(layouts(&settled).into_iter().map(|layout| layout.spaces[0].name.clone()));
-        assert_eq!(last.last().map(String::as_str), Some("v40"), "the last document arrives");
+        last.extend(
+            layouts(&settled)
+                .into_iter()
+                .map(|layout| layout.spaces[0].name.clone()),
+        );
+        assert_eq!(
+            last.last().map(String::as_str),
+            Some("v40"),
+            "the last document arrives"
+        );
 
         watch.source.facts.push_back(
             (0..100u16)
@@ -834,7 +849,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sizes, [("loop/t1".to_string(), 20 + 99 % 7), ("loop/t2".to_string(), 10)]);
+        assert_eq!(
+            sizes,
+            [
+                ("loop/t1".to_string(), 20 + 99 % 7),
+                ("loop/t2".to_string(), 10)
+            ]
+        );
     }
 
     #[test]

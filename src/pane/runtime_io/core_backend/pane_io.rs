@@ -1843,11 +1843,9 @@ fn machine_reattach_check(
         // A view takes only the far terminal it first attached to: another
         // at the address ends this stream, and the view binds the pane
         // afresh with its input held (security review M3).
-        Ok(record) if record["state"] == "live" && view_replaced(shared, &record) => {
-            Some(ReattachOutcome::Gone(ChildExitReason::Suspended(
-                SuspendCause::TerminalGone,
-            )))
-        }
+        Ok(record) if record["state"] == "live" && view_replaced(shared, &record) => Some(
+            ReattachOutcome::Gone(ChildExitReason::Suspended(SuspendCause::TerminalGone)),
+        ),
         // Only the pane's own terminal, shown by its launch label, is
         // attached or ended; any other at the address is waited out
         // (security review M2, third read 1).
@@ -1909,7 +1907,9 @@ fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
             debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "the attached terminal is not labelled for the pane's launch; detached, retrying");
             ReattachOutcome::Unreachable
         }
-        Ok(attach) if attach["terminal"].is_object() && view_replaced(shared, &attach["terminal"]) => {
+        Ok(attach)
+            if attach["terminal"].is_object() && view_replaced(shared, &attach["terminal"]) =>
+        {
             let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
             let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
             client.forget_stream(channel);
@@ -3197,8 +3197,10 @@ mod tests {
     fn a_view_reattaches_only_the_far_terminal_it_attached_to() {
         let core = FakeCore::start();
         let address = "view-bound/t1".to_string();
-        core.add_terminal(json!({"address": address, "state": "live", "cols": 80, "rows": 24,
-            "pid": 100, "labels": {"herdr.launch": "launch-1"}}));
+        core.add_terminal(
+            json!({"address": address, "state": "live", "cols": 80, "rows": 24,
+            "pid": 100, "labels": {"herdr.launch": "launch-1"}}),
+        );
         let (exit_tx, exits) = std_mpsc::channel();
         let pane = StartedCore::view(
             PaneId::from_raw(42),
@@ -3236,8 +3238,10 @@ mod tests {
         assert!(!pane.view_replaced());
 
         // Another program at the address: the stream ends, nothing attaches.
-        core.add_terminal(json!({"address": address, "state": "live", "cols": 80, "rows": 24,
-            "pid": 200, "labels": {"herdr.launch": "launch-2"}}));
+        core.add_terminal(
+            json!({"address": address, "state": "live", "cols": 80, "rows": 24,
+            "pid": 200, "labels": {"herdr.launch": "launch-2"}}),
+        );
         core.close_stream(2, b"");
         assert_eq!(
             exits.recv_timeout(Duration::from_secs(5)).ok(),
@@ -3268,14 +3272,18 @@ mod tests {
         let core = FakeCore::start();
         for (rows, cols) in [(65_535, 65_535), (1001, 80), (24, 1001), (600, 600)] {
             let address = format!("view-huge/t{rows}x{cols}");
-            core.add_terminal(json!({"address": address, "state": "live", "cols": cols, "rows": rows}));
+            core.add_terminal(
+                json!({"address": address, "state": "live", "cols": cols, "rows": rows}),
+            );
             let refused = view_far_size(&connector_to(&core), &address);
             assert!(
                 matches!(&refused, Err(CoreError::Rpc { kind, .. }) if kind == "too_large"),
                 "{rows}x{cols}: {refused:?}"
             );
         }
-        core.add_terminal(json!({"address": "view-huge/t1000x300", "state": "live", "cols": 1000, "rows": 300}));
+        core.add_terminal(
+            json!({"address": "view-huge/t1000x300", "state": "live", "cols": 1000, "rows": 300}),
+        );
         assert_eq!(
             view_far_size(&connector_to(&core), "view-huge/t1000x300").expect("in budget"),
             (300, 1000)

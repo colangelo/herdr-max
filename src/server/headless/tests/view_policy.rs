@@ -33,7 +33,11 @@ fn view_server() -> (HeadlessServer, std::sync::mpsc::Receiver<Vec<u8>>, u64) {
 
 fn error_code(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> String {
     loop {
-        let message = read_server_message(control_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("a response"));
+        let message = read_server_message(
+            control_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("a response"),
+        );
         if let ServerMessage::ClientShellEndpointResponseChunk { data, .. } = message {
             return serde_json::from_slice::<api::schema::ErrorResponse>(&data)
                 .expect("an error response")
@@ -50,16 +54,34 @@ fn error_code(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> String {
 #[tokio::test]
 async fn a_view_refuses_every_method_outside_its_allowlist_before_dispatch() {
     let (mut server, control_rx, client_id) = view_server();
-    let pane_id = server.app.public_pane_id(0, server.app.state.workspaces[0].tabs[0].root_pane).unwrap();
+    let pane_id = server
+        .app
+        .public_pane_id(0, server.app.state.workspaces[0].tabs[0].root_pane)
+        .unwrap();
     let refused: Vec<Method> = [
-        ("agent.message", serde_json::json!({"target": pane_id, "text": "hi"})),
-        ("integration.install", serde_json::json!({"target": "claude"})),
-        ("pane.edit_scrollback", serde_json::json!({"pane_id": pane_id})),
+        (
+            "agent.message",
+            serde_json::json!({"target": pane_id, "text": "hi"}),
+        ),
+        (
+            "integration.install",
+            serde_json::json!({"target": "claude"}),
+        ),
+        (
+            "pane.edit_scrollback",
+            serde_json::json!({"pane_id": pane_id}),
+        ),
         ("command.invoke", serde_json::json!({"command_id": "x"})),
         ("worktree.list", serde_json::json!({})),
         ("worktree.open", serde_json::json!({"path": "/tmp"})),
-        ("release_notes.dismiss", serde_json::json!({"version": "0.0.1"})),
-        ("pane.split", serde_json::json!({"target_pane_id": pane_id, "direction": "right"})),
+        (
+            "release_notes.dismiss",
+            serde_json::json!({"version": "0.0.1"}),
+        ),
+        (
+            "pane.split",
+            serde_json::json!({"target_pane_id": pane_id, "direction": "right"}),
+        ),
     ]
     .into_iter()
     .map(|(method, params)| {
@@ -120,9 +142,11 @@ async fn a_view_stages_no_clipboard_image() {
         })
     );
     let refusal = loop {
-        if let ServerMessage::ClientShellError { message } =
-            read_server_message(control_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("a message"))
-        {
+        if let ServerMessage::ClientShellError { message } = read_server_message(
+            control_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("a message"),
+        ) {
             break message;
         }
     };

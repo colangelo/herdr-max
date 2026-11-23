@@ -29,7 +29,10 @@ impl HeadlessServer {
         // (core-phase5 D6, security review M2): a client that sends any
         // other method is refused before dispatch.
         #[cfg(unix)]
-        if let Some(refusal) = self.app.view_method_refusal(request.method.operation().name) {
+        if let Some(refusal) = self
+            .app
+            .view_method_refusal(request.method.operation().name)
+        {
             let message = crate::server::client_commands::error_message(
                 boot_id,
                 request_id,

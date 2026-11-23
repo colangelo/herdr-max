@@ -2690,15 +2690,21 @@ mod person_act_tests {
             mouse(MouseEventKind::Moved),
             mouse(MouseEventKind::Moved)
         ]));
-        assert!(events_are_person_acts(&[mouse(MouseEventKind::Down(MouseButton::Left))]));
-        assert!(events_are_person_acts(&[mouse(MouseEventKind::Drag(MouseButton::Left))]));
+        assert!(events_are_person_acts(&[mouse(MouseEventKind::Down(
+            MouseButton::Left
+        ))]));
+        assert!(events_are_person_acts(&[mouse(MouseEventKind::Drag(
+            MouseButton::Left
+        ))]));
         assert!(events_are_person_acts(&[mouse(MouseEventKind::ScrollUp)]));
         assert!(events_are_person_acts(&[RawInputEvent::Paste("x".into())]));
         assert!(!events_are_person_acts(&[RawInputEvent::OuterFocusGained]));
         // SGR pixel reports: 35 is a motion with no button, 32 a left drag,
         // 0 a press, 64 a wheel.
         assert!(!sgr_mouse_is_person_act(b"\x1b[<35;120;40M"));
-        assert!(!sgr_mouse_is_person_act(b"\x1b[<35;120;40M\x1b[<35;121;40M"));
+        assert!(!sgr_mouse_is_person_act(
+            b"\x1b[<35;120;40M\x1b[<35;121;40M"
+        ));
         assert!(sgr_mouse_is_person_act(b"\x1b[<32;120;40M"));
         assert!(sgr_mouse_is_person_act(b"\x1b[<0;120;40M"));
         assert!(sgr_mouse_is_person_act(b"\x1b[<64;120;40M"));

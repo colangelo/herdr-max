@@ -357,13 +357,26 @@ mod tests {
             })
         };
         assert_eq!(
-            requested_view(&parsed(&["herdr", "--session", "server", "server", "--view", "loop"]))
-                .unwrap(),
+            requested_view(&parsed(&[
+                "herdr",
+                "--session",
+                "server",
+                "server",
+                "--view",
+                "loop"
+            ]))
+            .unwrap(),
             view(false)
         );
         assert_eq!(
-            requested_view(&parsed(&["herdr", "--session=server", "server", "--view", "loop"]))
-                .unwrap(),
+            requested_view(&parsed(&[
+                "herdr",
+                "--session=server",
+                "server",
+                "--view",
+                "loop"
+            ]))
+            .unwrap(),
             view(false)
         );
         assert_eq!(
@@ -375,8 +388,14 @@ mod tests {
             requested_view(&parsed(&["herdr", "--session", "server", "server"])).unwrap(),
             None
         );
-        assert!(requested_view(&parsed(&["herdr", "--session", "server", "server", "--view"]))
-            .is_err());
+        assert!(requested_view(&parsed(&[
+            "herdr",
+            "--session",
+            "server",
+            "server",
+            "--view"
+        ]))
+        .is_err());
         assert_eq!(requested_view(&args(&["herdr", "client"])).unwrap(), None);
     }
 
@@ -401,7 +420,10 @@ mod tests {
         );
         let running = running_view_at(&path).expect("a view runs");
         assert_eq!(running, ViewRecord::own());
-        assert!(running.start.is_some(), "the record names its process start");
+        assert!(
+            running.start.is_some(),
+            "the record names its process start"
+        );
         assert!(running.names_its_process());
         drop(held);
         assert_eq!(running_view_at(&path), None, "released: no view runs");
