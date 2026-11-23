@@ -1117,14 +1117,37 @@ fn session_report_notice(response: &serde_json::Value) -> Option<String> {
     Some(match reason {
         Some("kept_existing_session") => "kept existing session".to_string(),
         Some("stale_report") => "ignored stale report".to_string(),
-        Some(other) => format!("report not applied: {other}"),
+        Some(other) => format!("report not applied: {}", super::target::shown(other)),
         None => "report not applied".to_string(),
     })
 }
 
 #[cfg(test)]
-mod fork_regression_tests {
+pub(in crate::cli) mod fork_regression_tests {
     use super::*;
+
+    fn unknown_reason_response() -> serde_json::Value {
+        serde_json::json!({
+            "id": "cli:request",
+            "result": {"type": "report_not_applied", "reason": crate::cli::target::FAR_CONTROLS}
+        })
+    }
+
+    /// `pane report-agent-session`'s notice for an unknown far reason, for
+    /// the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        format!(
+            "{}\n",
+            session_report_notice(&unknown_reason_response()).unwrap()
+        )
+    }
+
+    #[test]
+    fn a_remote_unknown_report_reason_prints_escaped_and_a_local_one_raw() {
+        use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+        assert_escaped(&as_remote(walk_text));
+        assert!(walk_text().contains(FAR_CONTROLS));
+    }
     #[test]
     fn session_report_notice_names_a_report_that_changed_nothing() {
         let kept = serde_json::json!({
