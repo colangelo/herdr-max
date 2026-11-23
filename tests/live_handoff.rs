@@ -2114,6 +2114,120 @@ fn wait_for_task_store_lock_held(config_home: &Path, timeout: Duration) {
     }
 }
 
+/// Whether some process holds the session's server lock (fork issue 319).
+fn server_lock_held(config_home: &Path) -> bool {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(config_home.join("herdr-dev/herdr-server.lock"))
+        .map(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)))
+        .unwrap_or(false)
+}
+
+/// Starts a second plain server on `config_home`'s session, at sockets of
+/// its own so no socket check can stop it, and returns once it exited: it
+/// must refuse because the session's lock is held (fork issue 319).
+fn assert_second_server_refuses(config_home: &Path, base: &Path) {
+    let runtime_dir = base.join("second-runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let mut second = spawn_server(config_home, &runtime_dir, &api_socket);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = second.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a second server on the session did not exit"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        !status.success(),
+        "a second server on the session must refuse to start"
+    );
+    assert!(
+        !api_socket.exists() && !runtime_dir.join("herdr-client.sock").exists(),
+        "a refused server binds no socket"
+    );
+}
+
+/// Fork issue 319: two servers on one session both save its session file. A
+/// second plain start on the same data directory exits while the first runs.
+#[test]
+fn a_second_server_on_the_same_session_refuses_while_one_runs() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket);
+    register_runtime_dir(&runtime_dir);
+    assert!(server_lock_held(&config_home), "the server holds the lock");
+
+    assert_second_server_refuses(&config_home, &base);
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:ping","method":"ping","params":{}}),
+    ));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+/// Fork issue 319: a live handoff passes the session lock to the replacement,
+/// which keeps it once the old server is gone, so a server a client started
+/// in the meantime still refuses.
+#[test]
+fn a_live_handoff_passes_the_session_lock_to_the_replacement() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket);
+    register_runtime_dir(&runtime_dir);
+    let old_pid = spawned.child.process_id().expect("old server pid");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    assert!(
+        server_lock_held(&config_home),
+        "the replacement holds the lock"
+    );
+    let owner = fs::read_to_string(config_home.join("herdr-dev/herdr-server.lock")).unwrap();
+    assert_eq!(
+        owner.trim(),
+        replacement_pid.to_string(),
+        "the lock names its owner"
+    );
+
+    assert_second_server_refuses(&config_home, &base);
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:ping","method":"ping","params":{}}),
+    ));
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
 fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     live_handoff_failure_rolls_back_old_server("HERDR_TEST_HANDOFF_IMPORT_FAIL", failure_point);
 }
@@ -2178,6 +2292,8 @@ fn live_handoff_failure_rolls_back_old_server(env_name: &str, failure_point: &st
     // The old server has its task store: it let go before it tried to commit
     // and took it back when the commit failed.
     wait_for_task_store_lock_held(&config_home, Duration::from_secs(10));
+    // It kept the session's server lock all through (fork issue 319).
+    assert!(server_lock_held(&config_home));
 
     assert_ok(request(
         &api_socket,

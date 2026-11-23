@@ -148,7 +148,7 @@ impl HeadlessServer {
             .iter()
             .map(|(_, runtime)| runtime.clone())
             .collect();
-        let manifest = crate::server::handoff::manifest_for(
+        let mut manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
             params.expected_protocol,
@@ -157,6 +157,10 @@ impl HeadlessServer {
             Some(export_size),
             self.host_shutdown_intent.get(),
         );
+        // The session lock goes to the importer with the panes, so it is
+        // held all through the handoff (fork issue 319).
+        let server_lock = crate::server::instance_lock::held_fd();
+        manifest.server_lock = server_lock.is_some();
         let mut import_server = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             import_target,
@@ -190,7 +194,7 @@ impl HeadlessServer {
             return Err(err);
         }
 
-        let (mut stream, fd_transport) = match crate::server::handoff::accept_and_validate_on(
+        let (mut stream, validated) = match crate::server::handoff::accept_and_validate_on(
             listener,
             &socket_path,
             &token,
@@ -213,8 +217,12 @@ impl HeadlessServer {
             }
         };
 
-        let send_result =
-            crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds, fd_transport);
+        let send_result = crate::server::handoff::send_fds_and_wait_restored(
+            &mut stream,
+            &fds,
+            validated.transport,
+            server_lock.filter(|_| validated.takes_server_lock),
+        );
         for fd in fds {
             let _ = unsafe { libc::close(fd) };
         }

@@ -146,7 +146,8 @@ impl ViewRecord {
 /// The most of a lock record read (a version and two numbers).
 const RECORD_MAX: u64 = 4096;
 
-/// Opens the view's lock file at `path`, never through a symlink, and
+/// Opens a lock file at `path` (the view's, or the session's server lock
+/// of `server::instance_lock`), never through a symlink, and
 /// only as a regular file of this account in a folder of this account that
 /// not everyone can write (review M8): a planted link cannot point the
 /// lock, or its truncation, at another file. The folder is checked, and the
@@ -154,7 +155,7 @@ const RECORD_MAX: u64 = 4096;
 /// target's; a group-writable one (umask 002) is this account's still. The
 /// open never waits (`O_NONBLOCK`): a FIFO planted as the lock is refused,
 /// not waited on.
-fn open_lock(path: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_lock(path: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let uid = unsafe { libc::getuid() };
     let not_ours = |what: &std::path::Path, why: &str| {

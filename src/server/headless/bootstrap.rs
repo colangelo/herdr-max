@@ -98,6 +98,11 @@ pub fn run_server(parsed_args: &[String]) -> io::Result<()> {
         return run_handoff_import_server(&socket_path, &token);
     }
 
+    // One server per session: the lock first, before either socket is bound
+    // or a stale one unlinked (fork issue 319).
+    #[cfg(unix)]
+    hold_session_lock_or_exit();
+
     let loaded_config = config::Config::load();
     #[cfg(windows)]
     if loaded_config.config.server.allow_unelevated_clients {
@@ -306,6 +311,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
     let loaded_config = config::Config::load();
     let mut received = crate::server::handoff::receive(socket_path, token)?;
     crate::server::handoff::log_import_result(received.manifest.panes.len());
+    // The old server's lock, passed with the panes, or this session's lock
+    // taken now when an older build passed none. Failing here, before
+    // "restored", rolls the handoff back to the old server (fork issue 319).
+    match received.server_lock.take() {
+        Some(lock) => crate::server::instance_lock::adopt_passed(lock)?,
+        None => crate::server::instance_lock::hold_for_import()?,
+    }
 
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
@@ -371,6 +383,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             server.effective_size = server.detached_size();
             crate::server::handoff::report_ready(&mut received.stream)?;
             crate::server::handoff::wait_committed(&mut received.stream)?;
+            crate::server::instance_lock::record_owner();
             server.app.assume_handoff_ownership();
             server.app.unpause_handoff_readers();
             server.begin_handoff_detection_sweep();
@@ -386,6 +399,28 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
 
     crate::logging::shutdown("server");
     result
+}
+
+/// Takes the session's server lock for this process's life, or exits when
+/// another server holds it, before this one binds or unlinks any socket: a
+/// client that found no answering socket (a live handoff between its two
+/// servers) must not start a second server on the session (fork issue 319).
+#[cfg(unix)]
+fn hold_session_lock_or_exit() {
+    use crate::server::instance_lock::{hold_for_start, lock_path, Start};
+    match hold_for_start() {
+        Start::Held => {}
+        Start::Busy(holder) => {
+            let lock = lock_path();
+            warn!(%holder, lock = %lock.display(), "another herdr server runs on this session; this one exits");
+            eprintln!("error: {holder} already runs on this session");
+            eprintln!("lock: {}", lock.display());
+            std::process::exit(1);
+        }
+        Start::Unavailable(err) => {
+            warn!(%err, "running without the session's server lock");
+        }
+    }
 }
 
 #[cfg(not(unix))]

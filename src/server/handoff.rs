@@ -33,6 +33,11 @@ const FDS_PER_MESSAGE: usize = 64;
 // reads them all with a single recvmsg; its version tells them apart.
 #[cfg(unix)]
 const FD_BATCHES_CAPABILITY: &str = "fd-batches";
+// An importer that announces this capability takes the old server's session
+// lock descriptor after the pane descriptors (fork issue 319). It announces it
+// only when the manifest offers the lock, and an older exporter offers none.
+#[cfg(unix)]
+const SERVER_LOCK_CAPABILITY: &str = "server-lock";
 // The first release whose importer reads descriptors in batches (d66c39d5).
 #[cfg(unix)]
 const FIRST_BATCHING_VERSION: (u64, u64, u64) = (0, 9, 1);
@@ -99,6 +104,12 @@ pub(crate) struct HandoffManifest {
     /// committed. Absent from manifests written before this field existed.
     #[serde(default)]
     pub host_shutdown_intent: Option<crate::platform::HostShutdownIntent>,
+    /// The exporter holds the session's server lock and passes it to an
+    /// importer that announces [`SERVER_LOCK_CAPABILITY`], so the lock is
+    /// never free while the handoff runs (fork issue 319). Absent from
+    /// manifests written before this field existed.
+    #[serde(default)]
+    pub server_lock: bool,
 }
 
 /// How the exporter sends descriptors to the importer it validated with.
@@ -224,11 +235,28 @@ fn fd_transport_for(
 /// What the importer answers once the manifest checks out.
 #[cfg(unix)]
 fn validated_line(manifest: &HandoffManifest) -> String {
-    if manifest.announce_capabilities {
+    if importer_takes_server_lock(manifest) {
+        format!("validated {FD_BATCHES_CAPABILITY} {SERVER_LOCK_CAPABILITY}\n")
+    } else if manifest.announce_capabilities {
         format!("validated {FD_BATCHES_CAPABILITY}\n")
     } else {
         "validated\n".to_owned()
     }
+}
+
+/// Whether this importer takes the lock `manifest` offers.
+#[cfg(unix)]
+fn importer_takes_server_lock(manifest: &HandoffManifest) -> bool {
+    manifest.announce_capabilities && manifest.server_lock
+}
+
+/// How the exporter goes on with the importer it validated with.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Validated {
+    pub(crate) transport: FdTransport,
+    /// The importer takes the session lock descriptor after the panes'.
+    pub(crate) takes_server_lock: bool,
 }
 
 #[cfg(unix)]
@@ -236,6 +264,8 @@ pub(crate) struct ReceivedHandoff {
     pub manifest: HandoffManifest,
     pub fds: Vec<RawFd>,
     pub stream: UnixStream,
+    /// The old server's session lock, the same open file it holds.
+    pub server_lock: Option<std::os::fd::OwnedFd>,
 }
 
 #[cfg(unix)]
@@ -477,7 +507,7 @@ pub(crate) fn accept_and_validate_on(
     token: &str,
     manifest: &HandoffManifest,
     importer_batches: bool,
-) -> io::Result<(UnixStream, FdTransport)> {
+) -> io::Result<(UnixStream, Validated)> {
     // SAFETY: getuid has no preconditions.
     let our_uid = unsafe { libc::getuid() };
     accept_and_validate_as(
@@ -501,7 +531,7 @@ fn accept_and_validate_as(
     manifest: &HandoffManifest,
     importer_batches: bool,
     our_uid: u32,
-) -> io::Result<(UnixStream, FdTransport)> {
+) -> io::Result<(UnixStream, Validated)> {
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     if !crate::platform::unix_stream_peer_is(&stream, our_uid) {
         return Err(io::Error::new(
@@ -527,17 +557,34 @@ fn accept_and_validate_as(
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let validated = read_line_unbuffered(&mut stream)?;
     let transport = fd_transport_for(&validated, manifest.panes.len(), importer_batches)?;
+    let takes_server_lock = manifest.server_lock
+        && validated
+            .split_whitespace()
+            .any(|capability| capability == SERVER_LOCK_CAPABILITY);
     let _ = std::fs::remove_file(socket_path);
-    Ok((stream, transport))
+    Ok((
+        stream,
+        Validated {
+            transport,
+            takes_server_lock,
+        },
+    ))
 }
 
+/// Sends the pane descriptors, then `server_lock` (the session lock's
+/// descriptor, for an importer that takes it) in a message of its own, and
+/// waits for the importer to restore the panes.
 #[cfg(unix)]
 pub(crate) fn send_fds_and_wait_restored(
     stream: &mut UnixStream,
     fds: &[RawFd],
     transport: FdTransport,
+    server_lock: Option<RawFd>,
 ) -> io::Result<()> {
     send_fds(stream, fds, transport)?;
+    if let Some(lock) = server_lock {
+        send_fd_batch(stream, &[lock])?;
+    }
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let restored = read_line_unbuffered(&mut *stream)?;
@@ -625,11 +672,37 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     stream.write_all(validated_line(&manifest).as_bytes())?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
+    let server_lock = if importer_takes_server_lock(&manifest) {
+        match recv_server_lock(&stream) {
+            Ok(lock) => Some(lock),
+            Err(err) => {
+                close_raw_fds(&fds);
+                return Err(err);
+            }
+        }
+    } else {
+        None
+    };
     Ok(ReceivedHandoff {
         manifest,
         fds,
         stream,
+        server_lock,
     })
+}
+
+/// The session lock's descriptor, the one after the panes', made
+/// close-on-exec at once so no pane program inherits it.
+#[cfg(unix)]
+fn recv_server_lock(stream: &UnixStream) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
+    let fd = recv_fds(stream, 1)?
+        .pop()
+        .ok_or_else(|| io::Error::other("handoff sent no server lock descriptor"))?;
+    // SAFETY: recvmsg just installed this descriptor; nothing else owns it.
+    let lock = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    crate::server::instance_lock::set_cloexec(fd)?;
+    Ok(lock)
 }
 
 #[cfg(unix)]
@@ -682,6 +755,7 @@ pub(crate) fn manifest_for(
         client_size,
         announce_capabilities: true,
         host_shutdown_intent,
+        server_lock: false,
     }
 }
 
@@ -1375,6 +1449,104 @@ mod tests {
         assert!(fd_transport_for("ready\n", 1, true).is_err());
     }
 
+    /// Fork issue 319: the importer takes the session lock only when the
+    /// manifest offers it, and an exporter from before the field offers none.
+    #[test]
+    fn the_importer_takes_the_server_lock_only_when_it_is_offered() {
+        let mut manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None, None, None);
+        assert!(!manifest.server_lock);
+        manifest.server_lock = true;
+        assert_eq!(
+            validated_line(&manifest),
+            "validated fd-batches server-lock\n"
+        );
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value.as_object_mut().unwrap().remove("server_lock");
+        let older: HandoffManifest = serde_json::from_value(value).unwrap();
+        assert!(!older.server_lock);
+        assert_eq!(validated_line(&older), "validated fd-batches\n");
+    }
+
+    /// Fork issue 319: the handshake passes the old server's session lock to
+    /// the importer after the panes, as the same open file, so the lock stays
+    /// held when the old server's descriptor closes (a commit) and when the
+    /// importer's does (a rollback), with no moment in which a third server
+    /// could take it.
+    #[test]
+    fn a_live_handoff_passes_the_session_lock_with_the_panes() {
+        use std::os::fd::AsRawFd as _;
+        // Short: the handoff socket's path must fit in a sockaddr_un.
+        let dir = PathBuf::from(format!("/tmp/hh319-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("herdr-server.lock");
+        let old_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        old_lock.try_lock().expect("the old server takes the lock");
+
+        let socket = dir.join("handoff.sock");
+        let listener = bind_listener(&socket).unwrap();
+        let mut manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None, None, None);
+        let pane: crate::handoff_runtime::HandoffRuntimeState = serde_json::from_value(
+            serde_json::json!({"pane_id": 1, "child_pid": 0, "rows": 24, "cols": 80,
+                "cell_width_px": 0, "cell_height_px": 0}),
+        )
+        .unwrap();
+        manifest.panes = vec![pane; 2];
+        manifest.server_lock = true;
+        let importer_socket = socket.clone();
+        let importer = std::thread::spawn(move || {
+            let mut received = receive(&importer_socket, "token").unwrap();
+            report_restored(&mut received.stream).unwrap();
+            let pane_fds = received.fds.len();
+            close_raw_fds(&received.fds);
+            (pane_fds, received.server_lock)
+        });
+        let (mut stream, validated) =
+            accept_and_validate_on(listener, &socket, "token", &manifest, true).unwrap();
+        assert!(validated.takes_server_lock);
+        let panes = dev_null_fds(2);
+        send_fds_and_wait_restored(
+            &mut stream,
+            &panes,
+            validated.transport,
+            Some(old_lock.as_raw_fd()),
+        )
+        .unwrap();
+        close_raw_fds(&panes);
+        let (pane_fds, passed) = importer.join().unwrap();
+        assert_eq!(pane_fds, 2, "the panes arrive as before");
+        let passed = passed.expect("the importer has the lock");
+        // SAFETY: fcntl on a descriptor this test owns.
+        let flags = unsafe { libc::fcntl(passed.as_raw_fd(), libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "no pane program inherits the lock"
+        );
+
+        let third_server = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&lock_path)
+                .unwrap()
+                .try_lock()
+                .is_ok()
+        };
+        drop(old_lock);
+        assert!(
+            !third_server(),
+            "the importer holds it once the old server is gone"
+        );
+        drop(passed);
+        assert!(third_server(), "the lock goes with its last holder");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The handoff socket is owner-only from the moment it exists, whatever
     /// the server's umask, as the pane-job socket is.
     #[test]
@@ -1449,11 +1621,11 @@ mod tests {
                     Ok(0)
                 }
             });
-            let (_stream, transport) =
+            let (_stream, validated) =
                 accept_and_validate_on(listener, &socket, "token", &manifest, version_batches)
                     .unwrap();
             assert_eq!(
-                transport, expected,
+                validated.transport, expected,
                 "announcing_importer={announcing_importer} version_batches={version_batches}"
             );
             assert_eq!(importer.join().unwrap().unwrap(), 0);
