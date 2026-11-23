@@ -20,6 +20,34 @@ use support::{
     SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
 
+/// Polls `agent.get` until `done` accepts the reply. It is a liveness bound
+/// (`APPEARS_TIMEOUT`), not a speed assertion: process detection and alias
+/// updates run on the server's own cadence, so a loaded machine only delays
+/// them (fork issue 313: failed at 7.2 s under load 94, passed on rerun).
+fn wait_for_agent(
+    api_socket: &Path,
+    target: &str,
+    what: &str,
+    done: impl Fn(&serde_json::Value) -> bool,
+) {
+    let deadline = Instant::now() + support::APPEARS_TIMEOUT;
+    loop {
+        let response = request(
+            api_socket,
+            serde_json::json!({
+                "id": "test:agent:wait",
+                "method": "agent.get",
+                "params": {"target": target}
+            }),
+        );
+        if done(&response) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what}: {response}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 struct SpawnedHerdr {
     _master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -1556,25 +1584,11 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             }
         }),
     ));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let response = request(
-            &api_socket,
-            serde_json::json!({
-                "id": "test:agent:wait-for-process",
-                "method": "agent.get",
-                "params": {"target": pane_id}
-            }),
-        );
-        if response.get("result").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "agent process was not detected: {response}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
+    // `agent_not_found` is the answer until process detection has seen the
+    // agent; it is retried, not final (fork issue 313).
+    wait_for_agent(&api_socket, &pane_id, "agent process was not detected", |r| {
+        r.get("result").is_some()
+    });
     assert_ok(request(
         &api_socket,
         serde_json::json!({
@@ -1606,25 +1620,12 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             }
         }),
     ));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let old_name = request(
-            &api_socket,
-            serde_json::json!({
-                "id": "test:agent:get-old-name",
-                "method": "agent.get",
-                "params": {"target": "reviewer"}
-            }),
-        );
-        if old_name["error"]["code"] == "agent_not_found" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "old session alias was not cleared: {old_name}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
+    wait_for_agent(
+        &api_socket,
+        "reviewer",
+        "old session alias was not cleared",
+        |r| r["error"]["code"] == "agent_not_found",
+    );
 
     let _ = request(
         &api_socket,
