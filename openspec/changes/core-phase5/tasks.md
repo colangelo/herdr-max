@@ -889,41 +889,67 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `CORE_MACHINE_PARTS="link lease fleet" core_machine_live_test.sh` 0 on a debug binary built from 88af72b3 and
   copied out of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`).
 - [x] E.3 View actions (new tab, split, close pane, rename) through `machine.exec`, names as JSON data, never argv or a shell line; V20
-  Built (design call: the far herdr's API through the fleet CLI's reviewed path, not its CLI verbs; D7 as built):
-  `view::policy` gains `Far` for `tab.create`, `pane.split`, `pane.close`, `workspace.rename`, `tab.rename` and
-  `pane.rename`, advertised and, in `server/headless/endpoint_requests.rs` (`take_view_action`), not dispatched:
-  `app/view_actions.rs` turns the client's ids into the far ones through the view's layout (`ViewApp::far_pane`,
-  the far workspace and tab ids), drops cwd, env, `on` and focus, and sends the request line off the loop through
-  `core_machine/fleet/view.rs` `send`: the route check (M5), not connected → refused with nothing written, sent or
-  dialled, the view's `cli-<pid>` keep lease (before the probe and again before the request, removed after; no
-  renewer or signal handler in the view server), `far_herdr`, then `FarRoute::send` with the far bridge argv
-  (`fleet.rs` refactor: `check_request_line` and `FarRoute` out of the bridge's handler, unchanged). One action at a
-  time per view, 20 s each. The far reply is the client's answer (a result this build reads, else `ok`; a far error
-  with its code, so a close's `confirmation_required` still asks; far text escaped); `unknown_method` from an older
-  far herdr becomes `<m>'s herdr does not take <method>; update Herdr there`. A pane's close in a view is now the
-  far close (D5), tab and workspace closes still detach. `agent.start` is no client method, so a view has none to
-  send (an agent starts by typing in a far pane, or `herdr --machine <m> agent start`).
-  Tests: units `v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line` (V20: the exec's argv is exactly the
-  wrapper and far bridge, no shell, no element with the name; the input is the line byte for byte, its label the
-  name as one string; no `machine.connect`; no lease left), `an_action_on_a_dormant_machine_refuses_and_dials_nothing`,
-  `a_far_refusal_comes_back_as_the_reply`, `the_actions_lease_keeps_the_link_and_admits_no_dial`,
-  `a_machine_herdr_did_not_add_gets_nothing` (fleet::view); `v20_a_name_goes_far_as_one_json_string`,
-  `each_action_names_the_far_targets_and_nothing_of_this_mac` (all five actions' far requests),
-  `a_split_with_no_target_splits_the_focused_far_pane`, `a_target_the_view_does_not_show_is_refused_unsent`,
-  `a_missing_far_verb_is_the_actions_refusal`, `far_answers_become_the_clients`, `a_primary_server_sends_nothing_far`
-  (app::view_actions); `only_d7s_structural_actions_go_to_the_far_herdr` and the pinned allowlist (view::policy);
-  `a_views_structural_action_is_never_done_here` (headless: a split in a view is sent on, not refused or done, and
-  an unknown target comes back `view_action_failed`); `a_far_refusal_in_a_view_is_a_notice_and_the_view_stays`
-  (client: `unknown_method` is the action's notice, the view online and shown). Live: `core_fleet_live_test.sh`
-  gains E.3/V20: over herdr's own link (the far herdr now on the core runtime with the spaces document), a TUI
-  client of `--remote core:<m>` types `prefix c` and `$(touch x); w` into the view's new-tab prompt: the far herdr
-  has that one new tab with that exact label, the request went through the far bridge, the view's layout follows,
-  no file `x` appears, no lease is left. `core_view_live_test.sh` V17: that loop is `hc machine add --via`, which
-  herdr's link does not reach, so the view's pane close is refused with the notice and the far program and pane
-  stay. Limits: the view does not move to a new tab or pane (focus stays where it was; the far screen keeps its
-  own); a missing verb is asked again on each try (one exec each, so an update there shows at once); tab and
-  workspace closes in a view still detach; a request answered by a far herdr that is not this build gets an `ok`
-  for a result this build does not read; `prefix x` in a view now ends the far program (D6).
+  Built, as it stands after both reviews (design call: the far herdr's API through the fleet CLI's reviewed path,
+  not its CLI verbs; D7 as built): `view::policy` gains `Far` for `tab.create`, `pane.split`, `pane.close`,
+  `workspace.rename`, `tab.rename` and `pane.rename`, advertised and, in `server/headless/endpoint_requests.rs`
+  (`take_view_action`), not dispatched: `app/view_actions.rs` turns the client's ids into the far ones through the
+  view's layout (`ViewApp::far_pane`, the far workspace and tab ids; ids left out resolve against the sending
+  client's own tab), refuses a request that names a folder, an environment or a machine (`cwd`, `env`, `on`) and
+  sends no far focus, and sends the request line off the loop through `core_machine/fleet/view.rs` `send`, over the
+  view's `ViewRoute` (core, machine state, lease holder, far document and terminal readers, and the view's own
+  one-at-a-time lock): a second action while one runs is refused at once; the route check (M5); not connected →
+  refused, the action writing no lease and sending or dialling nothing; the view's `cli-<pid>` keep lease (before
+  the probe and again before the request, removed after; no renewer or signal handler in the view server); the far
+  herdr probe within 12 s; the aim check (below) within 10 s; then `FarRoute::send` with the far bridge argv, the
+  request running what is left of the action's one 45 s deadline, 15 s at most, not sent under 5 s (`fleet.rs`
+  refactor: `check_request_line` and `FarRoute` out of the bridge's handler, unchanged). An action on a pane goes
+  only to the far program the person aimed at: held panes, unnumbered far panes (`w3:x<n>`) and panes not attached
+  are refused; a forced close goes only to the pane, terminal and program whose unforced close was asked to
+  confirm, and that record stays until the far herdr answers it; the aim check re-reads the far document (the far
+  pane still shows that terminal) and asks core for the terminal (live, and the program the pane bound). The last
+  pane of a far workspace is never closed from a view. The far reply is the client's answer: a result this build
+  reads, else `ok`; of the far error codes only `confirmation_required` passes on (so a close still asks), every
+  other is `view_action_failed` with the far message, escaped and without a parser's method list; a reply with
+  neither result nor error is `view_action_failed`, "it may have run there"; a far herdr without the method
+  (`invalid_request` naming it, or `unknown_method`) is `<m>'s herdr does not take <method>; update Herdr there`. A
+  pane's close in a view is now the far close (D5), tab and workspace closes still detach. `agent.start` is no
+  client method, so a view has none to send (an agent starts by typing in a far pane, or `herdr --machine <m>
+  agent start`).
+  Tests, as they stand: fleet::view `v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line` (V20: the exec's
+  argv is exactly the wrapper and far bridge, no shell, no element with the name; the input is the line byte for
+  byte, its label the name as one string; the 15 s run; no `machine.connect`; no lease left),
+  `an_action_on_a_dormant_machine_refuses_and_dials_nothing`, `a_far_refusal_comes_back_as_the_reply`,
+  `the_request_runs_under_a_keep_lease_written_again_after_the_probe`, `a_machine_herdr_did_not_add_gets_nothing`,
+  `a_second_action_while_one_runs_is_refused_at_once`, `one_views_running_action_does_not_refuse_anothers`,
+  `an_action_ends_within_its_deadline`, `the_probe_of_a_view_action_runs_within_its_budget`,
+  `a_failed_aim_check_sends_nothing`, `an_aim_check_that_does_not_answer_sends_nothing`; app::view_actions
+  `v20_a_name_goes_far_as_one_json_string`, `each_action_names_the_far_targets_and_nothing_of_this_mac`,
+  `a_folder_an_environment_or_a_machine_is_refused_not_dropped`, `ids_left_out_resolve_against_the_clients_own_tab`,
+  `a_target_the_view_does_not_show_is_refused_unsent`, `an_action_on_a_held_pane_is_refused`,
+  `a_pane_not_attached_takes_no_action`, `a_confirmed_close_reaches_only_the_pane_it_was_asked_for`,
+  `a_pane_number_the_view_gave_never_reaches_another_far_pane`, `the_far_pane_is_checked_again_before_the_request`,
+  `another_program_at_the_aimed_address_is_refused`, `the_last_pane_of_a_far_workspace_is_not_closed_from_a_view`,
+  `a_missing_far_verb_is_the_actions_refusal`, `far_answers_become_the_clients`, `a_primary_server_sends_nothing_far`,
+  `a_views_close_reaches_the_far_pane_it_aimed_at`, `a_view_action_is_refused_when_the_far_layout_changed_under_it`,
+  `a_refused_forced_close_keeps_the_persons_confirmation`; view::instance `an_instance_is_its_launch_label_and_pid`;
+  view::policy `only_d7s_structural_actions_go_to_the_far_herdr` and the pinned allowlist; headless
+  `a_views_structural_action_is_never_done_here` (a split in a view is sent on, not refused or done, and an unknown
+  target comes back `view_action_failed`), `a_view_action_resolves_left_out_ids_against_the_clients_own_tab`; client
+  `a_far_refusal_in_a_view_is_a_notice_and_the_view_stays` (`unknown_method` is the action's notice, the view online
+  and shown).
+  Live: `core_fleet_live_test.sh` gains E.3/V20: over herdr's own link (the far herdr now on the core runtime with
+  the spaces document), a TUI client of `--remote core:<m>` types `prefix c` and `$(touch x); w` into the view's
+  new-tab prompt: the far herdr has that one new tab with that exact label, the request went through the far
+  bridge, the view's layout follows, no file `x` appears, no lease is left; then `prefix x` in that new tab closes
+  exactly that far pane and ends its program. `core_view_live_test.sh` V17: that loop is `hc machine add --via`,
+  which herdr's link does not reach, so the view's pane close is refused with the notice and the far program and
+  pane stay.
+  Limits: the view does not move to a new tab or pane (focus stays where it was; the far screen keeps its own); a
+  missing verb is asked again on each try (one exec each, so an update there shows at once); tab and workspace
+  closes in a view still detach; a request answered by a far herdr that is not this build gets an `ok` for a
+  result this build does not read; `prefix x` in a view now ends the far program (D6); a far rebind of the aimed
+  pane between the check and the far handling (D7 "Left") needs the far-side check of security review M1, a next
+  change.
   First gates (before the review): `just check` 0 on 1c456e75; the live parts below 0 on its debug binary.
   Review fixes (independent review of E.3, 2026-11-23; commits 2d3c93dc, 59004533, 4c96d2d2, c758b75c, 0a0fda3d):
   - M1: an older far herdr answers a method it lacks with `invalid_request` ("unknown variant `<method>`, expected
@@ -934,7 +960,7 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
     whose unforced close the far herdr asked to confirm (`ViewApp::note_close_asked`), so a confirmation opened
     before a hold reaches nothing else; just before the request the far document is read again and must show the
     same terminal under that far pane id (`still_aimed`). Left: a far change between that read and the far
-    herdr's handling (milliseconds); the far API has no check by terminal.
+    herdr's handling; corrected in round 2 (item 2): 0.5 to 2 s, not milliseconds, see D7.
   - M4: every pane whose public id moved, or that took an id another pane had, is held (`hold_moved_public_ids`),
     and a pane the far herdr has no number for (`w3:x<n>`) is refused.
   - M3: one deadline, 45 s from the moment the view takes the action (`VIEW_ACTION_BUDGET`, a compile-time check
@@ -967,6 +993,48 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (with the M5 close: far pane w1:p2, t2, its program ended,
   the other far panes as they were), nothing left in the passwd home's state. Not run: the panes, link and lease
   parts (nothing in them changed), the bench (no render, layout, PTY or detection work added), CI (not pushed).
+  Review fixes, round 2 (a second independent review of 64731085, and security's two-vendor review, ac/security
+  e4327f6, docs/reviews/2026-11-23-herdr-view-actions.md), each with a test that fails with its fix reverted:
+  - 1 (M2 after a far core reset): the address alone named no program. A pane is bound at its first attach to its
+    far program (`view::instance::FarInstance`, the launch label and pid; moved out of `pane_io.rs`, where the
+    reattach check uses it unchanged, and kept per address in `ViewApp::instances`); a pane not attached, or
+    attaching again after a rebind, takes no action; the aim check also asks core for the terminal
+    (`view_link::terminal_record`, bounded to 64 KiB), which must be live and that program; the confirmation record
+    of a close carries the program too. Tests: `a_pane_not_attached_takes_no_action`,
+    `another_program_at_the_aimed_address_is_refused`, `a_confirmed_close_reaches_only_the_pane_it_was_asked_for`.
+  - 2 (doc): the window left is 0.5 to 2 s, not milliseconds (the far document's 500 ms debounce, the link, the far
+    bridge's start through `machine.exec`); what can slip through is a far rebind of the same pane, since far pane
+    numbers are never reused; the instance check closes it up to the check. D7 "Left".
+  - 3 (doc): the Built paragraph above is one as-built entry (45 s deadline with a 15 s request, `cwd`/`env`/`on`
+    refused, only `confirmation_required` passes on, the M1 wording, the tests that exist).
+  - 4, 5: the view's numbers for panes the far herdr numbers none for start at 65 536 (`VIEW_NUMBER_BASE`), stay with
+    their pane and are never given twice in a workspace; a far pane that later takes one is held, however many
+    projections later. So a far split no longer shifts an unnumbered pane's number and holds no pane under
+    "another terminal now". Test: `a_pane_number_the_view_gave_never_reaches_another_far_pane` (rewritten).
+  - 6: tests for the probe's 12 s (`the_probe_of_a_view_action_runs_within_its_budget`) and for the wiring of the
+    re-read (`a_view_action_is_refused_when_the_far_layout_changed_under_it`, through `forward_view_action`).
+  - 7: the aim check runs on a thread of its own and is waited for 10 s at most (`VIEW_CHECK_SECS`, its `doc.get` and
+    `terminal.get`), never past the deadline less the shortest request, however long the shared view connection
+    waits. Test: `an_aim_check_that_does_not_answer_sends_nothing`.
+  - 8: the one-at-a-time lock is the view's `ViewRoute`'s (shared by its clones; `ViewApp` keeps its route for the
+    view's life), not a process static, so plain `cargo test` threads no longer refuse each other's sends. Test:
+    `one_views_running_action_does_not_refuse_anothers`; `cargo test --bin herdr -- core_machine::fleet::view
+    app::view_actions` 29 passed on the default threads.
+  - 9: a forced close's confirmation stays until the far herdr answered it (`CloseAsked`, shared with the
+    action's thread); a send refused before its request keeps it. Test:
+    `a_refused_forced_close_keeps_the_persons_confirmation`.
+  - 10: `core_view_live_test.sh` V17 no longer types `y` after `prefix x` (no dialog appears; it typed into the far
+    program).
+  - 11: design call, D7: the chord's keys stay a person's input (the client's lease is the window's, written on
+    input before key bindings are read), so they may let Herdr Core's own retry connect a dormant machine; the
+    notice and docs/next say so instead of "nothing dials". Test: `an_action_on_a_dormant_machine_refuses_and_dials_nothing`
+    asserts the new notice.
+  - Security M2 P2: a view never closes the last pane of a far workspace (with the far `confirm_close` off, a
+    worktree group parent's last pane closes the whole group there), from its own layout and from the re-read
+    document: `closing the last pane of <workspace> on <m> is not done from a view; close it there`. Test:
+    `the_last_pane_of_a_far_workspace_is_not_closed_from_a_view` (fails with either check reverted). Security M1
+    (the far herdr checking the terminal under its own lock) is a next change, recorded in D7.
+  Gates: pending.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
