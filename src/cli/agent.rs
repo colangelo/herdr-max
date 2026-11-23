@@ -139,96 +139,125 @@ fn agent_explain(params: bindings::Explain) -> std::io::Result<i32> {
 }
 
 fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
-    println!("agent: {}", explain["agent"].as_str().unwrap_or("unknown"));
-    println!("state: {}", explain["state"].as_str().unwrap_or("unknown"));
-    println!(
+    print!("{}", agent_explain_text(explain, verbose));
+}
+
+/// The text form of an explain. Far strings go through `target::shown`, so
+/// a remote target's agent, rule and reason text cannot carry terminal
+/// controls to this terminal. Debug-formatted fields (`{:?}`) are escaped
+/// by Rust already.
+fn agent_explain_text(explain: &serde_json::Value, verbose: bool) -> String {
+    use super::target::shown;
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "agent: {}",
+        shown(explain["agent"].as_str().unwrap_or("unknown"))
+    );
+    let _ = writeln!(
+        out,
+        "state: {}",
+        shown(explain["state"].as_str().unwrap_or("unknown"))
+    );
+    let _ = writeln!(
+        out,
         "manifest: {} {}",
-        explain["manifest_source"].as_str().unwrap_or("none"),
-        explain["manifest_version"].as_str().unwrap_or("unknown")
+        shown(explain["manifest_source"].as_str().unwrap_or("none")),
+        shown(explain["manifest_version"].as_str().unwrap_or("unknown"))
     );
     if let Some(rule) = explain["matched_rule"].as_object() {
         let rule_id = rule
             .get("id")
             .and_then(|value| value.as_str())
             .unwrap_or("-");
-        println!(
+        let rule_id_shown = shown(rule_id);
+        let _ = writeln!(
+            out,
             "rule: {} (region={} priority={})",
-            rule_id,
-            rule.get("region")
-                .and_then(|value| value.as_str())
-                .unwrap_or("-"),
+            rule_id_shown,
+            shown(
+                rule.get("region")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("-")
+            ),
             rule.get("priority")
                 .and_then(|value| value.as_i64())
                 .unwrap_or(0),
         );
         if let Some(preview) = matched_rule_region_preview(explain, rule_id) {
-            println!("evidence: {preview:?}");
+            let _ = writeln!(out, "evidence: {preview:?}");
         }
     } else {
-        println!("rule: none");
+        let _ = writeln!(out, "rule: none");
     }
     if let Some(reason) = explain["fallback_reason"].as_str() {
-        println!("fallback_reason: {reason}");
+        let _ = writeln!(out, "fallback_reason: {}", shown(reason));
     }
     if let Some(reason) = explain["screen_detection_skip_reason"].as_str() {
-        println!("screen_detection_skip_reason: {reason}");
+        let _ = writeln!(out, "screen_detection_skip_reason: {}", shown(reason));
     }
     if let Some(reason) = explain["blocked_reason"].as_str() {
-        println!("blocked_reason: {reason}");
+        let _ = writeln!(out, "blocked_reason: {}", shown(reason));
     }
     if let Some(reason) = explain["skipped_update_reason"].as_str() {
-        println!("skipped_update_reason: {reason}");
+        let _ = writeln!(out, "skipped_update_reason: {}", shown(reason));
     }
     if let Some(warning) = explain["warning"].as_str() {
-        println!("warning: {warning}");
+        let _ = writeln!(out, "warning: {}", shown(warning));
     }
 
     if !verbose {
-        return;
+        return out;
     }
 
-    println!(
+    let _ = writeln!(
+        out,
         "visible: idle={} blocker={} working={}",
         explain["visible_idle"].as_bool().unwrap_or(false),
         explain["visible_blocker"].as_bool().unwrap_or(false),
         explain["visible_working"].as_bool().unwrap_or(false)
     );
-    println!(
+    let _ = writeln!(
+        out,
         "cached_remote_version: {}",
-        explain["cached_remote_version"].as_str().unwrap_or("none")
+        shown(explain["cached_remote_version"].as_str().unwrap_or("none"))
     );
-    println!(
+    let _ = writeln!(
+        out,
         "local_override_shadowing_remote: {}",
         explain["local_override_shadowing_remote"]
             .as_bool()
             .unwrap_or(false)
     );
     if let Some(status) = explain["remote_update_status"].as_str() {
-        println!("remote_update_status: {status}");
+        let _ = writeln!(out, "remote_update_status: {}", shown(status));
     }
     if let Some(error) = explain["remote_update_error"].as_str() {
-        println!("remote_update_error: {error}");
+        let _ = writeln!(out, "remote_update_error: {}", shown(error));
     }
     if let Some(evaluated_rules) = explain["evaluated_rules"]
         .as_array()
         .filter(|rules| !rules.is_empty())
     {
-        println!("evaluated_rules:");
+        let _ = writeln!(out, "evaluated_rules:");
         for rule in evaluated_rules {
-            println!(
+            let _ = writeln!(
+                out,
                 "  {} {} priority={} region={} state={}",
                 if rule["matched"].as_bool().unwrap_or(false) {
                     "✓"
                 } else {
                     "✗"
                 },
-                rule["id"].as_str().unwrap_or("-"),
+                shown(rule["id"].as_str().unwrap_or("-")),
                 rule["priority"].as_i64().unwrap_or(0),
-                rule["region"].as_str().unwrap_or("-"),
-                rule["state"].as_str().unwrap_or("unknown")
+                shown(rule["region"].as_str().unwrap_or("-")),
+                shown(rule["state"].as_str().unwrap_or("unknown"))
             );
             let evidence = &rule["evidence"];
-            println!(
+            let _ = writeln!(
+                out,
                 "    matchers: contains={:?} regex={:?} line_regex={:?} all={} any={} not={}",
                 evidence["contains"],
                 evidence["regex"],
@@ -237,13 +266,15 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
                 evidence["any_count"].as_u64().unwrap_or(0),
                 evidence["not_count"].as_u64().unwrap_or(0)
             );
-            println!(
+            let _ = writeln!(
+                out,
                 "    region: bytes={} preview={:?}",
                 evidence["region_bytes"].as_u64().unwrap_or(0),
                 evidence["region_preview"].as_str().unwrap_or("")
             );
         }
     }
+    out
 }
 
 fn matched_rule_region_preview<'a>(

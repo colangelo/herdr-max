@@ -196,6 +196,22 @@ pub(super) fn is_remote() -> bool {
     TARGET.with(|target| target.borrow().is_some())
 }
 
+/// A far string as printed by a human-readable command: escaped when the
+/// target is remote (`--machine`), untouched otherwise. JSON output and
+/// explicit pane reads do not go through this.
+pub(super) fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    if is_remote() {
+        crate::remote::visible_line(text)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// `shown` for a multi-line far string: each line escaped, real newlines kept.
+pub(super) fn shown_lines(text: &str) -> String {
+    text.split('\n').map(shown).collect::<Vec<_>>().join("\n")
+}
+
 pub(super) fn api_client() -> io::Result<ApiClient> {
     TARGET.with(|target| {
         let mut target = target.borrow_mut();

@@ -31,12 +31,20 @@ pub(super) fn run_notification_command(args: &[String]) -> std::io::Result<i32> 
 }
 
 fn print_list(response: &serde_json::Value) -> std::io::Result<i32> {
-    let result = &response["result"];
-    let notifications = result["notifications"].as_array();
-    let Some(notifications) = notifications.filter(|list| !list.is_empty()) else {
+    let Some(text) = list_text(response) else {
         println!("no notifications");
         return Ok(0);
     };
+    print!("{text}");
+    Ok(0)
+}
+
+/// The list as printed, or `None` when there is nothing to list.
+fn list_text(response: &serde_json::Value) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let result = &response["result"];
+    let notifications = result["notifications"].as_array();
+    let notifications = notifications.filter(|list| !list.is_empty())?;
 
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -50,18 +58,18 @@ fn print_list(response: &serde_json::Value) -> std::io::Result<i32> {
             now_unix,
             notification["posted_at_unix"].as_u64().unwrap_or(now_unix),
         );
-        let kind = notification["kind"].as_str().unwrap_or("unknown");
-        let title = notification["title"].as_str().unwrap_or("");
-        let context = notification["context"].as_str().unwrap_or("");
+        let kind = super::target::shown(notification["kind"].as_str().unwrap_or("unknown"));
+        let title = super::target::shown(notification["title"].as_str().unwrap_or(""));
+        let context = super::target::shown(notification["context"].as_str().unwrap_or(""));
         let mut line = format!("{marker} {id:>4}  {age:>4}  {kind:<16}  {title}");
         if !context.is_empty() {
             line.push_str(&format!(" — {context}"));
         }
-        println!("{line}");
+        lines.push(line);
     }
     let unread = result["unread_count"].as_u64().unwrap_or(0);
     if unread > 0 {
-        println!("{unread} unread");
+        lines.push(format!("{unread} unread"));
     }
-    Ok(0)
+    Some(lines.iter().map(|line| format!("{line}\n")).collect())
 }
