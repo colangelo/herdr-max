@@ -16,7 +16,10 @@
 # exactly that far pane, ending its program and no other (review M5), as
 # the guarded `pane.close_if_terminal`; and a far pane whose program is
 # respawned between the view's own check and the request is refused by the
-# far herdr (`terminal_mismatch`) and stays (fork issue 316, M1).
+# far herdr (`terminal_mismatch`) and stays (fork issue 316, M1); last, a far
+# core that comes back without its state gives a pane's address to another
+# program, which the far herdr's pane attaches to, and a guarded close naming
+# the program it showed is refused (fork issue 317, M1).
 #
 # The far side is a scratch core on this Mac with its own herdr server,
 # reached through herdr's own link command and a fake `ssh` that runs the
@@ -108,6 +111,9 @@ link_cleanup() {
   set +e
   fl_tm kill-server >/dev/null 2>&1
   fl_stop_view
+  # The #317 reuse part's old far programs, which outlive their holder.
+  local old
+  for old in ${FL_REUSE_OLD:-}; do ps -o comm= -p "$old" 2>/dev/null | grep -q sleep && kill -9 "$old" 2>/dev/null; done
   [[ -S "$FL_FAR_API" ]] && far_fl_herdr server stop >/dev/null 2>&1
   [[ -S "$FL_LOCAL_SOCK" ]] && hc_scratch machine rm "$FT" >/dev/null 2>&1
   local pid
@@ -526,7 +532,20 @@ same_json "$BASE/fl-core.json" "$BASE/fl-dial.json" || fail "--dial gave other J
 [[ "$(fl_ssh_starts)" == $((starts + 1)) ]] || fail "--dial started $(( $(fl_ssh_starts) - starts )) ssh, not 1"
 python3 -I - "$FL_DIR/link.log" "$dials" "$starts_log" <<'PY' || fail "the --dial lease did not come before the dial: $(tail -n 8 "$FL_DIR/link.log")"
 import sys
-rows = [line.split(" ", 3) for line in open(sys.argv[1]) if line.count(" ") >= 2]
+# Each writer appends whole lines (fork issue 318); a row is read only as
+# "<time> pid=<n> <KIND> ...", so nothing else is taken for one.
+def row(line):
+    fields = line.split(" ", 3)
+    if len(fields) < 3 or not fields[1].startswith("pid="):
+        return None
+    try:
+        float(fields[0])
+    except ValueError:
+        return None
+    return fields
+rows = [r for r in map(row, open(sys.argv[1])) if r]
+bad = [line for line in open(sys.argv[1]) if line.strip() and not row(line)]
+assert not bad, ("lines that are no whole row", bad[:3])
 dial = [r for r in rows if r[2] == "CLI"][int(sys.argv[2])]
 # The STARTs since the call began. Core's own retries keep coming, refused
 # for no lease; one can land just before the call's dial, so the dial is the
@@ -592,6 +611,94 @@ code=0; fleet_cli --machine "$FT" --dial pane list >/dev/null 2>"$BASE/fl-gate.e
 [[ "$(fl_cli_leases)" == 0 && "$(fl_ssh_starts)" == "$starts" ]] || fail "--dial over a closed gate wrote a lease or dialled"
 rm -f "$FL_DIR/gate.json"
 echo "ok: --dial over auth_failed refuses, names machine login, writes nothing and dials nothing"
+
+# --- #317 M1 live: a far core that comes back without its state gives a
+# pane's address to another program, and the far herdr's pane, whose
+# connection to core was lost (no CLOSE), attaches to it as its own: the pid
+# and launch label it cached at the first attach still match what the view
+# saw. A guarded close naming that program is refused (`terminal_mismatch`):
+# the far herdr reads the live program on the connection the kill would use.
+# Last of the part: the reset also ends the link, which nothing after needs.
+# The far API is called directly with the request a view would send: a
+# view's own request travels through the far core being reset (its
+# machine.exec), so it cannot also be held across that reset.
+fl_far_api workspace.create "{\"cwd\":\"$BASE\",\"label\":\"reuse-317\",\"focus\":false}" >"$BASE/fl-reuse-ws.json" \
+  || fail "#317: could not make the far workspace"
+FL_REUSE_PANE="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["root_pane"]["pane_id"])' "$BASE/fl-reuse-ws.json")" \
+  || fail "#317: no pane in $(cat "$BASE/fl-reuse-ws.json")"
+fl_reuse_ws="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["workspace"]["workspace_id"])' "$BASE/fl-reuse-ws.json")"
+fl_far_api pane.split "{\"target_pane_id\":\"$FL_REUSE_PANE\",\"direction\":\"right\",\"focus\":false}" >/dev/null \
+  || fail "#317: could not split the far pane"
+fl_reuse_row() { fl_far_panes | awk -v pane="$FL_REUSE_PANE" '$1 == pane {print $2, $3}'; }
+fl_reuse_panes() { far_fl_herdr pane list 2>/dev/null | python3 -I -c 'import json,sys
+for p in json.load(sys.stdin)["result"]["panes"]:
+    if p["workspace_id"] == sys.argv[1]: print(p["pane_id"], p.get("core_address") or "-")' "$fl_reuse_ws"; }
+fl_two_in_core() { [[ "$(fl_reuse_panes | awk '$2 ~ /^t[0-9]+$/' | wc -l | tr -d ' ')" == 2 ]]; }
+fl_wait "both far reuse panes in core" 20 fl_two_in_core
+read -r FL_REUSE_TAB FL_REUSE_ADDR < <(fl_reuse_row)
+# Both programs ignore SIGHUP, so they outlive their holder: the far herdr
+# then waits for them instead of ending the panes, as for a core that is
+# only briefly away, and the workspace keeps both panes.
+FL_REUSE_OLD=""
+while read -r pane address; do
+  fl_far_api pane.send_input "{\"pane_id\":\"$pane\",\"text\":\"trap '' HUP; exec sleep 600\",\"keys\":[\"Enter\"]}" >/dev/null \
+    || fail "#317: could not type into $pane"
+  FL_REUSE_OLD="$FL_REUSE_OLD $(fl_term_pid "$address")"
+done < <(fl_reuse_panes)
+fl_sleeping() { local pid; for pid in $FL_REUSE_OLD; do [[ "$(ps -o comm= -p "$pid" 2>/dev/null)" == *sleep ]] || return 1; done; }
+fl_wait "the far reuse programs to ignore SIGHUP" 15 fl_sleeping
+FL_REUSE_PID="$(fl_term_pid "$FL_REUSE_ADDR")"
+FL_REUSE_LAUNCH="$(fl_far_rpc terminal.get "{\"terminal\":\"$FL_REUSE_ADDR\"}" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["labels"]["herdr.launch"])')" \
+  || fail "#317: no launch label on $FL_REUSE_ADDR"
+# The far core and its holders end at once (no CLOSE reaches the far
+# herdr), its state goes, and it starts again: addresses count from t1.
+fl_far_rpc server.status '{}' >"$BASE/fl-reuse-status.json" || fail "#317: no far core status"
+fl_core_pids="$(python3 -I -c 'import json,sys
+s = json.load(open(sys.argv[1]))
+print(" ".join(str(p) for p in [s["pid"]] + [h["pid"] for h in s.get("holders", [])]))' "$BASE/fl-reuse-status.json")"
+for pid in $fl_core_pids; do
+  ps -o comm= -p "$pid" 2>/dev/null | grep -q -e herdr-core -e /hc && kill -9 "$pid"
+done
+case "$FL_CORE" in herdrdev-fl[0-9]*) rm -rf "${F3S:?}/herdr-core/$FL_CORE" ;; esac
+for pid in $FL_REUSE_OLD; do ps -o pid= -p "$pid" >/dev/null 2>&1 || fail "#317: the old far program $pid did not outlive its holder"; done
+hc_fl server start >/dev/null 2>&1 || fail "#317: could not start the far core again"
+fl_wait "the far core's socket again" 10 test -S "$F3_SOCK"
+python3 -I - "$F3_SOCK" "$FL_REUSE_ADDR" >"$BASE/fl-reuse-new.json" <<'PY' || fail "#317: the far core did not give $FL_REUSE_ADDR again: $(cat "$BASE/fl-reuse-new.json")"
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); f = s.makefile("rb")
+def call(i, method, params):
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n").encode())
+    while True:
+        reply = json.loads(f.readline())
+        if reply.get("id") == i:
+            return reply
+call(0, "hello", {})
+want = int(sys.argv[2][1:])
+for i in range(1, want + 3):
+    run = call(i, "terminal.run", {"argv": ["/bin/sleep", "600"], "labels": {"herdr.launch": "reuse-317"}})["result"]
+    if run["address"] == sys.argv[2]:
+        print(json.dumps(run)); break
+else:
+    sys.exit(1)
+PY
+FL_REUSE_NEW="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$BASE/fl-reuse-new.json")"
+[[ "$FL_REUSE_NEW" != "$FL_REUSE_PID" ]] || fail "#317: the reused address kept its pid"
+# The far herdr's pane reattaches to the program now at its address: what
+# it types shows on that terminal's screen.
+fl_reattached() {
+  fl_far_api pane.send_input "{\"pane_id\":\"$FL_REUSE_PANE\",\"text\":\"R317\"}" >/dev/null 2>&1 || return 1
+  fl_far_rpc terminal.read "{\"terminal\":\"$FL_REUSE_ADDR\"}" 2>/dev/null | grep -q R317
+}
+fl_wait "the far pane attached to the program at its reused address" 30 fl_reattached
+fl_far_api pane.close_if_terminal "{\"pane_id\":\"$FL_REUSE_PANE\",\"force\":true,\"expect\":{\"terminal\":\"$FL_REUSE_ADDR\",\"pid\":$FL_REUSE_PID,\"launch\":\"$FL_REUSE_LAUNCH\",\"tab\":\"$FL_REUSE_TAB\"}}" \
+  >"$BASE/fl-reuse-close.json" || fail "#317: the guarded close got no reply"
+grep -q '"code": *"terminal_mismatch"' "$BASE/fl-reuse-close.json" \
+  || fail "#317 M1: the guarded close over a reused address was not refused: $(cat "$BASE/fl-reuse-close.json")"
+[[ -n "$(fl_reuse_row)" ]] || fail "#317 M1: the far pane $FL_REUSE_PANE was closed"
+[[ "$(fl_term_pid "$FL_REUSE_ADDR")" == "$FL_REUSE_NEW" ]] \
+  || fail "#317 M1: the program now at $FL_REUSE_ADDR ($FL_REUSE_NEW) did not stay"
+for pid in $FL_REUSE_OLD; do ps -o comm= -p "$pid" 2>/dev/null | grep -q sleep && kill -9 "$pid"; done
+echo "ok: #317 M1 a far core back without its state gave $FL_REUSE_ADDR to another program ($FL_REUSE_PID -> $FL_REUSE_NEW); the far pane attached to it, and a guarded close naming the program it showed was refused (terminal_mismatch), the new program kept"
 
 far_fl_herdr server stop >/dev/null 2>&1
 fleet_cli machine rm --core "$FT" >/dev/null 2>&1 || fail "machine rm --core $FT failed"
