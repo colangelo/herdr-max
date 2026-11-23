@@ -512,8 +512,8 @@ fn a_forced_close_answers_only_the_prompt_it_names() {
     app.confirmed_close(forced(&app), &second)
         .expect("the prompt answered");
     assert!(
-        !app.confirmed_close(forced(&app), &sender(CLIENT, "c:5", None))
-            .is_ok(),
+        app.confirmed_close(forced(&app), &sender(CLIENT, "c:5", None))
+            .is_err(),
         "a forced close that names none"
     );
 }
