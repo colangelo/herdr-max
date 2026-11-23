@@ -295,6 +295,14 @@ impl ProcessStart {
 /// How a probe answers for `pid` now. Tests pass a fake process table.
 pub(crate) type StartTokenLookup = fn(u32) -> ProcessStart;
 
+/// When a process started, in unix seconds: unknown where the process table
+/// is not read.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn process_started_at(_pid: u32) -> Option<f64> {
+    None
+}
+
 /// Where the process table cannot tell a missing process from a failed
 /// probe, no probe proves a program gone.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

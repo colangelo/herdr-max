@@ -1044,6 +1044,13 @@ pub fn live_pane_process_group(shell_pid: u32, pid: u32, start_token: u64) -> Op
         .then_some(process.pbi_pgid)
 }
 
+/// When `pid` started, in unix seconds; `None` when it does not run or the
+/// probe fails.
+pub fn process_started_at(pid: u32) -> Option<f64> {
+    let info = process_bsdinfo(pid)?;
+    Some(info.pbi_start_tvsec as f64 + info.pbi_start_tvusec as f64 / 1_000_000.0)
+}
+
 fn bsdinfo_start_token(info: &libc::proc_bsdinfo) -> u64 {
     info.pbi_start_tvsec
         .saturating_mul(1_000_000)

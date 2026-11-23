@@ -800,6 +800,23 @@ fn process_job_stat(pid: u32) -> Option<ProcessJobStat> {
     process_job_stat_from_stat(&stat)
 }
 
+/// When `pid` started, in unix seconds: its start in clock ticks after
+/// boot, plus the boot time; `None` when it does not run or a read fails.
+pub fn process_started_at(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks = process_job_stat_from_stat(&stat)?.start_time;
+    let boot: f64 = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    // SAFETY: sysconf reads a constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (hz > 0).then(|| boot + ticks as f64 / hz as f64)
+}
+
 fn process_job_stat_from_stat(stat: &str) -> Option<ProcessJobStat> {
     let rest = stat.get(stat.rfind(')')? + 2..)?;
     let fields: Vec<&str> = rest.split_whitespace().collect();

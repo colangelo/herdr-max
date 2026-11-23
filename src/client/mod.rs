@@ -95,10 +95,46 @@ fn events_are_user_input(events: &[crate::raw_input::RawInputEvent]) -> bool {
     })
 }
 
+/// A person's act among the events, for a core machine lease (core-phase5
+/// D3, review M7): a key, text, a paste, a click, a drag or a scroll; a bare
+/// pointer motion is none (mouse capture reports it whenever the pointer
+/// crosses the window).
+#[cfg(unix)]
+fn events_are_person_acts(events: &[crate::raw_input::RawInputEvent]) -> bool {
+    events.iter().any(|event| match event {
+        crate::raw_input::RawInputEvent::Key(_)
+        | crate::raw_input::RawInputEvent::Text(_)
+        | crate::raw_input::RawInputEvent::Paste(_) => true,
+        crate::raw_input::RawInputEvent::Mouse(mouse) => {
+            mouse.kind != crossterm::event::MouseEventKind::Moved
+        }
+        _ => false,
+    })
+}
+
+/// Whether SGR mouse reports (`ESC [ < b ; x ; y M`) hold a person's act:
+/// any report but a bare motion (motion bit 32 with no button, b & 3 == 3,
+/// and no wheel bit 64). Bytes that are no such report count as an act.
+#[cfg(unix)]
+fn sgr_mouse_is_person_act(data: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(data);
+    let reports: Vec<&str> = text.split("\x1b[<").skip(1).collect();
+    if reports.is_empty() {
+        return true;
+    }
+    reports.iter().any(|report| {
+        match report.split(';').next().and_then(|b| b.parse::<u32>().ok()) {
+            Some(b) => !(b & 32 != 0 && b & 3 == 3 && b & 64 == 0),
+            None => true,
+        }
+    })
+}
+
 /// User input restarts the dormancy wait; the first input after dormancy probes
-/// live remotes and retries waiting reconnects at once (fork issue 260). The
-/// same input renews this client's core machine lease, at most once a minute
-/// and off this thread (core-phase5 D3).
+/// live remotes and retries waiting reconnects at once (fork issue 260). A
+/// person's act in it (`person`: not a bare pointer motion, review M7) renews
+/// this client's core machine lease, at most once a minute and off this
+/// thread (core-phase5 D3).
 #[cfg(unix)]
 fn wake_remotes_on_input(
     input_clock: &mut endpoint::InputClock,
@@ -106,8 +142,11 @@ fn wake_remotes_on_input(
     supervisors: &mut endpoint::EndpointSupervisors,
     write_stream: &mut endpoint::EndpointRegistry,
     now: std::time::Instant,
+    person: bool,
 ) {
-    presence.input(now);
+    if person {
+        presence.input(now);
+    }
     if input_clock.input(now) == endpoint::Dormancy::Woke {
         info!("input after dormancy: probing remote endpoints and retrying reconnects");
         supervisors.set_remotes_dormant(false, now);
@@ -1006,6 +1045,7 @@ async fn run_client_loop(
                             &mut supervisors,
                             &mut write_stream,
                             now,
+                            events_are_person_acts(&events),
                         );
                     }
                     if crate::raw_input::events_require_host_mode_refresh(&events) {
@@ -1095,6 +1135,7 @@ async fn run_client_loop(
                             &mut supervisors,
                             &mut write_stream,
                             now,
+                            events_are_person_acts(&events),
                         );
                     }
                     if crate::raw_input::events_require_host_surface_redraw(
@@ -1227,6 +1268,7 @@ async fn run_client_loop(
                         &mut supervisors,
                         &mut write_stream,
                         now,
+                        sgr_mouse_is_person_act(&data),
                     );
                     let (outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
@@ -2570,3 +2612,42 @@ async fn run_client_loop(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod person_act_tests {
+    use super::{events_are_person_acts, sgr_mouse_is_person_act};
+    use crate::raw_input::RawInputEvent;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    fn mouse(kind: MouseEventKind) -> RawInputEvent {
+        RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    // M7 (core-phase5 D3): a bare pointer motion over the window renews no
+    // core machine lease; a click, a drag, a scroll or a paste does.
+    #[test]
+    fn a_pointer_motion_is_no_persons_act_for_a_lease() {
+        assert!(!events_are_person_acts(&[mouse(MouseEventKind::Moved)]));
+        assert!(!events_are_person_acts(&[
+            mouse(MouseEventKind::Moved),
+            mouse(MouseEventKind::Moved)
+        ]));
+        assert!(events_are_person_acts(&[mouse(MouseEventKind::Down(MouseButton::Left))]));
+        assert!(events_are_person_acts(&[mouse(MouseEventKind::Drag(MouseButton::Left))]));
+        assert!(events_are_person_acts(&[mouse(MouseEventKind::ScrollUp)]));
+        assert!(events_are_person_acts(&[RawInputEvent::Paste("x".into())]));
+        assert!(!events_are_person_acts(&[RawInputEvent::OuterFocusGained]));
+        // SGR pixel reports: 35 is a motion with no button, 32 a left drag,
+        // 0 a press, 64 a wheel.
+        assert!(!sgr_mouse_is_person_act(b"\x1b[<35;120;40M"));
+        assert!(!sgr_mouse_is_person_act(b"\x1b[<35;120;40M\x1b[<35;121;40M"));
+        assert!(sgr_mouse_is_person_act(b"\x1b[<32;120;40M"));
+        assert!(sgr_mouse_is_person_act(b"\x1b[<0;120;40M"));
+        assert!(sgr_mouse_is_person_act(b"\x1b[<64;120;40M"));
+    }
+}

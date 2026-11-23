@@ -27,6 +27,12 @@ const WAKE_EVERY: Duration = Duration::from_secs(5);
 /// Wakes waiting for the wake thread; a full queue drops one, as a wake
 /// for that machine is already on its way within `WAKE_EVERY`.
 const WAKE_QUEUE: usize = 16;
+/// How long a wake waits for the person's lease (PR D's second read, item
+/// 1): the person's client writes it for the same input that reached the
+/// pane, off its own thread and after one `machine.list` of at most 1 s, so
+/// the wake can arrive first. Input that no person's client leases (an
+/// agent's, the API's) still dials nothing.
+const LEASE_GRACE: Duration = Duration::from_secs(3);
 
 /// One machine as this process sees it.
 pub(crate) struct MachineLink {
@@ -134,7 +140,7 @@ impl MachineLink {
         let Some(root) = root else {
             return;
         };
-        if !leased(Some(root), &self.name) {
+        if !lease_within(root, &self.name, LEASE_GRACE, Duration::from_millis(100)) {
             tracing::debug!(machine = %self.name, "no lease for the machine: input does not wake it");
             return;
         }
@@ -229,6 +235,26 @@ pub(crate) fn leased(root: Option<&std::path::Path>, machine: &MachineName) -> b
     }
     let now = now_unix();
     dir.leases().iter().any(|lease| lease.in_force(now))
+}
+
+/// Whether a lease allows `machine`'s link now or within `grace`, read
+/// every `every`.
+fn lease_within(
+    root: &std::path::Path,
+    machine: &MachineName,
+    grace: Duration,
+    every: Duration,
+) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        if leased(Some(root), machine) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(every);
+    }
 }
 
 /// Whether `machine` is dormant: herdr links it and no lease allows its
@@ -339,6 +365,35 @@ mod tests {
         dir.write_lease(&LeaseHolder::client(1), now + 60.0, now)
             .expect("in force");
         assert!(leased(Some(&root), &machine));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Item 1 of PR D's second read: a lease write wakes nothing, so input in
+    // a pane on the machine wakes it, and that wake can come before the
+    // person's client wrote the lease for the same input. It waits a short
+    // grace for that lease; input no client leases (an agent's) never dials.
+    #[test]
+    fn a_wake_waits_briefly_for_the_persons_lease() {
+        let root = crate::core_machine::state::tests::scratch("panes-grace");
+        let machine = name("loop");
+        let dir = MachineDir::at(&root, &machine);
+        dir.create().expect("create");
+        std::fs::write(dir.target_path(), b"{}").expect("target");
+        let every = Duration::from_millis(20);
+        let started = Instant::now();
+        assert!(!lease_within(&root, &machine, Duration::from_millis(200), every));
+        assert!(started.elapsed() >= Duration::from_millis(200), "it waited");
+        let writer = {
+            let dir = MachineDir::at(&root, &machine);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                let now = now_unix();
+                dir.write_lease(&LeaseHolder::client(1), now + 60.0, now)
+                    .expect("lease");
+            })
+        };
+        assert!(lease_within(&root, &machine, Duration::from_secs(3), every));
+        writer.join().expect("writer");
         let _ = std::fs::remove_dir_all(&root);
     }
 

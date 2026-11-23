@@ -72,6 +72,9 @@ pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
     };
     target.validate()?;
     dir.write_target(&target)?;
+    // Which core session's machine this folder is (item 5 of PR D's second
+    // read): a client of another session leases it not.
+    dir.write_primary(&core::primary_session())?;
     dir.clear_gate()?;
     // D3, F8: the lease comes before hc dials (twice, P1).
     let now = now_unix();
@@ -115,6 +118,7 @@ fn undo_add(dir: &MachineDir, created: bool) {
     let result = if created {
         std::fs::remove_dir_all(dir.path())
     } else {
+        let _ = std::fs::remove_file(dir.primary_path());
         std::fs::remove_file(dir.target_path())
     };
     if let Err(err) = result {
@@ -543,17 +547,40 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
             return Ok(1);
         }
     }
+    let leases_off = std::env::var_os(super::presence::NO_LEASES_ENV).is_some();
     if json_out {
         println!(
             "{}",
             serde_json::to_string_pretty(&rows).map_err(std::io::Error::other)?
         );
+        if let Some(note) = leases_off_note(leases_off) {
+            eprintln!("{note}");
+        }
         return Ok(0);
     }
+    print!("{}", status_text(&rows, leases_off));
+    Ok(0)
+}
+
+/// What `machine status` says when its environment sets
+/// `HERDR_NO_MACHINE_LEASES` (review M7, C2): a client started from it
+/// writes no lease, so its typing wakes no machine; said, not silent.
+fn leases_off_note(leases_off: bool) -> Option<String> {
+    leases_off.then(|| {
+        format!(
+            "leases off here: {} is set, so a herdr client started from this environment writes no lease and its typing wakes no machine",
+            super::presence::NO_LEASES_ENV
+        )
+    })
+}
+
+/// `machine status`'s text: one line per machine, then the leases-off note.
+fn status_text(rows: &[StatusRow], leases_off: bool) -> String {
+    let mut out = String::new();
     if rows.is_empty() {
-        println!("No core machines.");
+        out.push_str("No core machines.\n");
     }
-    for row in &rows {
+    for row in rows {
         let leases: Vec<String> = row
             .leases
             .iter()
@@ -568,8 +595,8 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
             .collect();
         // Core's state string is printed as it says it: shown with its
         // controls escaped (security review 2026-11-23 M1).
-        println!(
-            "{}\t{}\tgate {}\tleases {}",
+        out.push_str(&format!(
+            "{}\t{}\tgate {}\tleases {}\n",
             row.name,
             crate::remote::far_line(&row.state),
             row.gate.as_deref().unwrap_or("-"),
@@ -578,9 +605,13 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
             } else {
                 leases.join(",")
             }
-        );
+        ));
     }
-    Ok(0)
+    if let Some(note) = leases_off_note(leases_off) {
+        out.push_str(&note);
+        out.push('\n');
+    }
+    out
 }
 
 /// A core machine herdr added and links (its state folder holds
@@ -785,6 +816,16 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
 
 #[cfg(test)]
 mod tests {
+    // M7 (security review, C2): with HERDR_NO_MACHINE_LEASES set, `machine
+    // status` says leases are off and why, never silently.
+    #[test]
+    fn machine_status_names_the_lease_opt_out() {
+        let text = super::status_text(&[], true);
+        assert!(text.contains("leases off"), "{text}");
+        assert!(text.contains("HERDR_NO_MACHINE_LEASES"), "{text}");
+        assert!(!super::status_text(&[], false).contains("leases off"));
+    }
+
     use super::*;
     use crate::core_machine::state::{tests::scratch, GateClass};
 

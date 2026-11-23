@@ -1,23 +1,22 @@
 //! A TUI client's lease on its primary's core machines (core-phase5 D3,
-//! task B.2): human input keeps the machines' links allowed for 10 min.
-//! The client loop only stamps the time of each input; at most once a
+//! task B.2): a person's input keeps the machines' links allowed for 10
+//! min. The client loop only stamps the time of each input; at most once a
 //! minute that stamp goes to a writer thread, which writes
 //! `leases/client-<pid>` in the folder of each machine this client's
-//! primary core lists and then posts a wake to that machine's dialer
-//! (D3a), so the lease always comes before the connect. Starting a client
+//! primary core lists and added. A lease write dials nothing (PR D's second
+//! read, item 1): input in a pane on a machine, or in a view of one, wakes
+//! that one machine, through the process that got it. Starting a client
 //! writes nothing: opening herdr dials no machine (D3). Nothing here runs
 //! on the input, render or PTY path but an `Instant` comparison and a
 //! `try_send`.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
-use super::command::{linked_machines_in, listed_by_core};
-use super::dialer::{self, Dialer, PrimaryCore};
+use super::command::{linked_machines_in, listed_by_core, runs_herdr_link};
 use super::name::MachineName;
-use super::state::{now_unix, passwd_machines_root, LeaseHolder, MachineDir};
+use super::state::{now_unix, passwd_machines_root, LeaseHolder, MachineDir, Target};
 
 /// A client's lease lasts this long after the input that wrote it: #260's
 /// `REMOTE_DORMANT_AFTER`, so the link sleeps when the client does.
@@ -62,10 +61,14 @@ impl ClientPresence {
     /// a person's command included, is no input, so opening herdr leaves
     /// every dormant machine dormant (D3, review M3).
     pub(crate) fn start() -> Self {
-        // Unit tests that run a client loop, and every client whose
-        // environment opts out, write no lease into the account's machine
-        // folders.
-        if cfg!(test) || std::env::var_os(NO_LEASES_ENV).is_some() {
+        // Unit tests that run a client loop, every client whose environment
+        // opts out, and the old remote's local client write no lease into
+        // the account's machine folders.
+        let opted_out = std::env::var_os(NO_LEASES_ENV).is_some();
+        if opted_out {
+            tracing::info!("{NO_LEASES_ENV} is set: this client writes no core machine lease");
+        }
+        if cfg!(test) || !writes_leases(opted_out, remote_target().as_deref()) {
             return Self {
                 clock: LeaseClock::default(),
                 writes: None,
@@ -99,38 +102,37 @@ impl ClientPresence {
     }
 }
 
-/// The writer thread: one pass over the machines per input stamp.
+/// The `--remote` target of a remote client process (`ac@host`, or
+/// `core:<machine>` for a view), `None` for a client of this Mac's own
+/// server.
+fn remote_target() -> Option<String> {
+    std::env::var_os(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR)?;
+    let preferences = std::env::var(crate::remote::REMOTE_PREFERENCES_ENV_VAR).unwrap_or_default();
+    let (target, _session): (String, String) =
+        serde_json::from_str(&preferences).unwrap_or_default();
+    Some(target)
+}
+
+/// Whether a client writes leases: not when its environment opts out, and
+/// not as the old remote's local client (`herdr --remote <host>`, D8,
+/// PR D's second read, item 2), which reaches another Mac through herdr's
+/// own ssh and has no core machine to allow. A view's client (`--remote
+/// core:<machine>`) and a client of this Mac's server do.
+pub(crate) fn writes_leases(opted_out: bool, remote_target: Option<&str>) -> bool {
+    !opted_out && remote_target.is_none_or(|target| target.starts_with("core:"))
+}
+
+/// The writer thread: one pass over the machines per input stamp. It dials
+/// nothing (item 1): a key in a pane of this Mac allows every linked
+/// machine for 10 min (D3) but wakes none of them.
 fn write_leases(requests: Receiver<f64>, pid: u32) {
     let holder = LeaseHolder::client(pid);
-    let mut dialers: HashMap<MachineName, Dialer> = HashMap::new();
+    let own_core = crate::pane::core_machines::primary_session();
     while let Ok(input_at) = requests.recv() {
         let Ok(root) = passwd_machines_root() else {
             continue;
         };
-        for name in lease_pass(&root, primary_listing, &holder, input_at) {
-            let dir = MachineDir::at(&root, &name);
-            let dialer = match dialers.entry(name.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    match Dialer::spawn(
-                        name.clone(),
-                        dir.connect_lock_path(),
-                        PrimaryCore,
-                        dialer::Timing::default(),
-                        |machine, outcome| {
-                            tracing::info!(%machine, ?outcome, "core machine wake");
-                        },
-                    ) {
-                        Ok(dialer) => entry.insert(dialer),
-                        Err(err) => {
-                            tracing::warn!(machine = %name, %err, "no dialer");
-                            continue;
-                        }
-                    }
-                }
-            };
-            dialer.wake();
-        }
+        let _ = lease_pass(&root, primary_listing, &own_core, &holder, input_at);
     }
 }
 
@@ -147,13 +149,16 @@ fn primary_listing() -> Option<serde_json::Value> {
 }
 
 /// Writes `holder`'s lease into the folder of each machine herdr links
-/// under `root` that this client's own primary core lists (`listing`, asked
-/// only when some machine is linked), and returns the ones written, to be
-/// woken. A folder of another session's core, a scratch core's or a test's
-/// is not this client's to allow (review H7).
+/// under `root` that this client's own primary core (`own_core`) lists as a
+/// herdr-managed link (`listing`, asked only when some machine is linked)
+/// and added, and returns the ones written. A folder of another session's
+/// core, a scratch core's or a test's is not this client's to allow (review
+/// H7, M7, item 5): a same-named machine that core lists with another link,
+/// or a folder another core session added, gets nothing.
 fn lease_pass(
     root: &Path,
     listing: impl FnOnce() -> Option<serde_json::Value>,
+    own_core: &str,
     holder: &LeaseHolder,
     input_at: f64,
 ) -> Vec<MachineName> {
@@ -172,6 +177,17 @@ fn lease_pass(
         if dir.check().is_err() || !dir.target_path().is_file() {
             continue;
         }
+        let Ok(target) = dir.read_target() else {
+            continue;
+        };
+        if !managed_by_herdr(&listed, &machine.name, &target) {
+            tracing::debug!(machine = %machine.name, "the primary lists this name with another link; no lease");
+            continue;
+        }
+        if dir.read_primary().is_some_and(|core| core != own_core) {
+            tracing::debug!(machine = %machine.name, "another core session added this machine; no lease");
+            continue;
+        }
         if let Err(err) = dir.write_lease(holder, input_at + CLIENT_LEASE_SECS, input_at) {
             tracing::warn!(machine = %machine.name, %err, "could not write the client's machine lease");
             continue;
@@ -182,9 +198,25 @@ fn lease_pass(
     written
 }
 
-/// Removes the expired lease files (`client-` and `cli-`) of processes that no longer run, so the
-/// folder does not fill with them. A live client's file is never touched:
-/// only its own process writes it (D3).
+/// Whether `listed` (a primary's `machine.list`) has `name` as the link
+/// herdr's `machine add --core` made (review M7, Sol D-08): core's record
+/// carries the `via` and session `target` (`target.json`) recorded, as
+/// `machine status` and the fleet bridge check it (`runs_herdr_link`, #310),
+/// not a direct or scratch machine of the same name.
+fn managed_by_herdr(listed: &serde_json::Value, name: &MachineName, target: &Target) -> bool {
+    listed["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|record| record["name"] == name.as_str())
+        .any(|record| runs_herdr_link(record, name, target))
+}
+
+/// Removes the expired lease files (`client-` and `cli-`) of processes that
+/// no longer run, and the files of pids the system gave again to a later
+/// process (review M7: such a lease is no one's), so the folder does not
+/// fill with them. A live holder's file is never touched: only its own
+/// process writes it (D3).
 fn prune_dead_clients(dir: &MachineDir, own_pid: u32) {
     let now = now_unix();
     for lease in dir.leases() {
@@ -194,6 +226,11 @@ fn prune_dead_clients(dir: &MachineDir, own_pid: u32) {
         if pid != own_pid && !lease.in_force(now) && !crate::platform::core_link::process_alive(pid)
         {
             let _ = dir.remove_lease(&lease.holder);
+        }
+    }
+    for holder in dir.reused_pid_holders() {
+        if holder.pid() != Some(own_pid) {
+            let _ = dir.remove_lease(&holder);
         }
     }
 }
@@ -250,6 +287,67 @@ mod tests {
         dir
     }
 
+    const OWN_CORE: &str = "herdrdev-presence-test";
+
+    /// A primary's record of a machine herdr links (`via` its core-link).
+    fn managed(name: &str) -> serde_json::Value {
+        json!({"name": name, "state": "connected", "via": true,
+            "target": format!("/opt/herdr core-link {name}"), "session": "far"})
+    }
+
+    // M7 and item 5 of PR D's second read: a name the primary lists with
+    // another link (a direct or scratch machine of the same name), and a
+    // folder another core session added, get no lease; a folder this
+    // session's primary added, or one an older build added (no record of
+    // its core), does.
+    #[test]
+    fn a_client_leases_only_its_own_primarys_herdr_links() {
+        let root = crate::core_machine::state::tests::scratch("own-links");
+        let direct = linked(&root, "direct");
+        let theirs = linked(&root, "theirs");
+        theirs.write_primary("herdrdev-another").expect("primary");
+        let ours = linked(&root, "ours");
+        ours.write_primary(OWN_CORE).expect("primary");
+        let older = linked(&root, "older");
+        // Core's record of herdr's link in another hc session than the one
+        // `target.json` linked (#310's `runs_herdr_link`).
+        let elsewhere = linked(&root, "elsewhere");
+        let mut other_session = managed("elsewhere");
+        other_session["session"] = json!("other");
+        let primary = json!({"machines": [
+            {"name": "direct", "state": "connected", "via": false, "target": "direct"},
+            managed("theirs"), managed("ours"), managed("older"), other_session,
+        ]});
+        let holder = LeaseHolder::client(std::process::id());
+        let mut written = lease_pass(&root, || Some(primary), OWN_CORE, &holder, now_unix());
+        written.sort();
+        assert_eq!(
+            written,
+            [
+                MachineName::parse("older").expect("name"),
+                MachineName::parse("ours").expect("name")
+            ]
+        );
+        assert!(direct.leases().is_empty() && theirs.leases().is_empty());
+        assert!(elsewhere.leases().is_empty());
+        let _ = (ours, older);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Item 2 of PR D's second read: the old remote's local client (`herdr
+    // --remote <host>`) writes no lease, so its keys never reach core; a
+    // view's client (`--remote core:<machine>`) and a local client do,
+    // unless the environment opts out.
+    #[test]
+    fn only_local_and_view_clients_write_leases() {
+        assert!(writes_leases(false, None));
+        assert!(writes_leases(false, Some("core:ac-mbm5")));
+        assert!(!writes_leases(false, Some("ac@ac-mbm5")));
+        assert!(!writes_leases(false, Some("")), "a remote client of no known target");
+        assert!(!writes_leases(true, None));
+        assert!(!writes_leases(true, Some("core:ac-mbm5")));
+    }
+
     // H7: a client writes its lease only into the folders of the machines
     // its own primary core lists. A folder herdr links that the primary
     // does not list (another session's core, a scratch or test core's)
@@ -259,9 +357,9 @@ mod tests {
         let root = crate::core_machine::state::tests::scratch("primary-only");
         let listed = linked(&root, "listed");
         let other = linked(&root, "other-session");
-        let primary = json!({"machines": [{"name": "listed", "state": "connected"}]});
+        let primary = json!({"machines": [managed("listed")]});
         let holder = LeaseHolder::client(std::process::id());
-        let written = lease_pass(&root, || Some(primary), &holder, now_unix());
+        let written = lease_pass(&root, || Some(primary), OWN_CORE, &holder, now_unix());
         assert_eq!(
             written,
             [MachineName::parse("listed").expect("name")],
@@ -277,8 +375,8 @@ mod tests {
         assert!(holders(&other).is_empty(), "{:?}", holders(&other));
         // No primary core answering lists nothing: no lease anywhere.
         let _ = listed.remove_lease(&holder);
-        assert!(lease_pass(&root, || None, &holder, now_unix()).is_empty());
-        assert!(lease_pass(&root, || Some(json!({})), &holder, now_unix()).is_empty());
+        assert!(lease_pass(&root, || None, OWN_CORE, &holder, now_unix()).is_empty());
+        assert!(lease_pass(&root, || Some(json!({})), OWN_CORE, &holder, now_unix()).is_empty());
         assert!(holders(&listed).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -300,7 +398,20 @@ mod tests {
             .expect("own");
         dir.write_lease(&LeaseHolder::cli(dead), 1.0, 0.0)
             .expect("cli");
+        // M7: a live pid's file written before that process started is a
+        // reused pid's, no one's lease: pruned, in force or not.
+        dir.write_lease(&LeaseHolder::cli(parent), now_unix() + 30.0, now_unix())
+            .expect("reused");
+        let reused = dir.leases_dir().join(format!("cli-{parent}"));
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&reused)
+            .expect("open");
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_000_000))
+            .expect("mtime");
+        drop(file);
         prune_dead_clients(&dir, me);
+        assert!(!reused.exists(), "a reused pid's file is pruned");
         let left: Vec<String> = dir
             .leases()
             .into_iter()

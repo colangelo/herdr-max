@@ -149,6 +149,30 @@ impl MachineDir {
         write_atomic(&self.target_path(), &to_json(target)?)
     }
 
+    /// The file naming the herdr core session that added this machine:
+    /// machine folders are keyed by name under the passwd home and shared
+    /// by every core session of the account, so a client leases only the
+    /// folders its own primary added (PR D's second read, item 5). A file
+    /// of its own, so `target.json` keeps its fields for older builds.
+    pub(crate) fn primary_path(&self) -> PathBuf {
+        self.path.join("primary.json")
+    }
+
+    /// The core session that added this machine; `None` for a folder an
+    /// older build added, or one whose file is unreadable.
+    pub(crate) fn read_primary(&self) -> Option<String> {
+        let bytes = fs::read(self.primary_path()).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        value["core"].as_str().map(str::to_string)
+    }
+
+    pub(crate) fn write_primary(&self, core: &str) -> io::Result<()> {
+        write_atomic(
+            &self.primary_path(),
+            serde_json::json!({"core": core}).to_string().as_bytes(),
+        )
+    }
+
     /// The gate as recorded, `None` when no failure is recorded.
     pub(crate) fn read_gate(&self) -> io::Result<Option<Gate>> {
         match fs::read(self.gate_path()) {
@@ -232,6 +256,34 @@ impl MachineDir {
         }
     }
 
+    /// The holders of lease files whose pid now runs a process that started
+    /// after the file was last written (review M7): `leases` lists them not,
+    /// as they are no one's, so the client's prune finds them here. Read
+    /// under the same cap as `leases`.
+    pub(crate) fn reused_pid_holders(&self) -> Vec<LeaseHolder> {
+        let Ok(entries) = fs::read_dir(self.leases_dir()) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let holder = LeaseHolder::parse(entry.file_name().to_str()?).ok()?;
+                Some((entry, holder))
+            })
+            .take(LEASE_FILES_READ)
+            .filter(|(entry, holder)| {
+                let modified = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+                    .map(|at| at.as_secs_f64());
+                holder.reused_since(modified)
+            })
+            .map(|(_, holder)| holder)
+            .collect()
+    }
+
     /// Every lease file that parses, in force or not; `.new` files are
     /// writes in progress, and a file that does not parse, or is not one
     /// of its holder's (`Lease::parse`), is no lease. At most
@@ -271,6 +323,12 @@ impl MachineDir {
                         .ok()
                         .map(|at| at.as_secs_f64())
                 };
+                // A pid the system gave again to a process that started after
+                // the lease was last written is not its holder (review M7):
+                // that lease is no one's.
+                if holder.reused_since(modified()) {
+                    return None;
+                }
                 Lease::parse(holder, &text, modified, now)
             })
             .collect();
@@ -535,11 +593,14 @@ impl LeaseHolder {
     }
 
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
+        // A positive `pid_t`: digits that overflow it are no holder, never a
+        // pid-less one (review M7).
         let pid = |rest: &str| {
             !rest.is_empty()
                 && rest.len() <= 10
                 && rest.bytes().all(|byte| byte.is_ascii_digit())
                 && !rest.starts_with('0')
+                && rest.parse::<i32>().is_ok_and(|pid| pid > 0)
         };
         let ok = raw == "manual"
             || raw.strip_prefix("client-").is_some_and(pid)
@@ -585,6 +646,18 @@ impl LeaseHolder {
     fn alive(&self) -> bool {
         self.pid()
             .is_none_or(crate::platform::core_link::process_alive)
+    }
+
+    /// Whether this holder's pid now runs a process that started after the
+    /// lease was last written (`written_at`, unix seconds), so the pid was
+    /// given again and the lease is not that process's (review M7). False
+    /// for `manual`, a pid that runs nothing, or a start time that cannot be
+    /// read; a second of slack covers the file time's granularity.
+    pub(crate) fn reused_since(&self, written_at: Option<f64>) -> bool {
+        let (Some(pid), Some(written_at)) = (self.pid(), written_at) else {
+            return false;
+        };
+        crate::platform::process_started_at(pid).is_some_and(|started| started > written_at + 1.0)
     }
 }
 
@@ -1140,9 +1213,15 @@ pub(crate) mod tests {
             "manual-1",
             "other",
             "client-1.new",
+            // M7: digits a pid_t cannot hold are no holder, not a pid-less
+            // one that would hold its lease as `manual` does.
+            "client-4294967296",
+            "cli-9999999999",
+            "client-2147483648",
         ] {
             assert!(LeaseHolder::parse(bad).is_err(), "{bad}");
         }
+        assert!(LeaseHolder::parse("client-2147483647").is_ok());
         assert_eq!(LeaseHolder::client(7).pid(), Some(7));
         assert_eq!(LeaseHolder::cli(7).pid(), Some(7));
         assert_eq!(LeaseHolder::manual().pid(), None);
@@ -1214,6 +1293,31 @@ pub(crate) mod tests {
             assert_eq!(lease.expires_at, lease.input_at + 600.0);
         }
         assert_eq!(newest_act(&leases, 3_199.0 + 600.0), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // M7: a lease whose pid now runs a process that started after the lease
+    // was last written is not that process's: the pid was given again, and
+    // the lease is not listed (so not in force). A lease this process wrote
+    // after it started is.
+    #[test]
+    fn a_reused_pids_lease_is_no_ones() {
+        let root = scratch("lease-reused");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let me = std::process::id();
+        dir.write_lease(&LeaseHolder::client(me), now_unix() + 600.0, now_unix())
+            .expect("write");
+        assert_eq!(dir.leases().len(), 1, "written by this process");
+        // As if written long before this process started.
+        let file = fs::File::options()
+            .write(true)
+            .open(dir.leases_dir().join(format!("client-{me}")))
+            .expect("open");
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .expect("mtime");
+        drop(file);
+        assert!(dir.leases().is_empty(), "{:?}", dir.leases());
         let _ = fs::remove_dir_all(&root);
     }
 
