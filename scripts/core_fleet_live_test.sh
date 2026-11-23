@@ -329,7 +329,11 @@ assert len(dialled) == 1, (dial, dialled)
 assert float(dial[0]) <= float(dialled[0][0]), (dial, dialled)
 PY
 [[ "$(fl_cli_leases)" == 0 ]] || fail "the --dial lease outlived the call"
-echo "ok: V32 --dial wrote its lease before the one dial, gave the far JSON, and removed the lease"
+# E.2b M7: the announcement at run time; M4: the dial used the grant up.
+grep -q "herdr: --dial: opening ssh to $FT now" "$BASE/fl-dial.err" \
+  || fail "--dial did not announce its dial on stderr: $(cat "$BASE/fl-dial.err")"
+[[ "$(fl_log_count "GRANT used")" -gt 0 ]] || fail "core-link did not use the --dial grant: $(tail -n 8 "$FL_DIR/link.log")"
+echo "ok: V32 --dial announced and wrote its lease before the one dial, which used it up, gave the far JSON, and removed the lease"
 
 # --- 2.2: a link dropped during a --dial call is not redialled on its
 # account: once connected the call's lease only keeps the link. A keep
