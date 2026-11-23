@@ -106,6 +106,101 @@ pub(crate) fn lock_path(machine: &MachineName) -> PathBuf {
 pub(crate) struct ViewRecord {
     pub version: String,
     pub pid: u32,
+    /// The view process's start token (`platform::process_start`), so a
+    /// restart signals that process and no other that got its pid (review
+    /// M8). `None` in a record of an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
+}
+
+impl ViewRecord {
+    /// This process's record.
+    fn own() -> Self {
+        let pid = std::process::id();
+        Self {
+            version: crate::build_info::version(),
+            pid,
+            start: match crate::platform::process_start(pid) {
+                crate::platform::ProcessStart::Started(token) => Some(token),
+                _ => None,
+            },
+        }
+    }
+
+    /// Whether `pid` is still the process that wrote this record (review
+    /// M8): its start token matches. A record of an older build has none,
+    /// and only its lock, held, speaks for it.
+    pub(crate) fn names_its_process(&self) -> bool {
+        match self.start {
+            Some(token) => {
+                crate::platform::process_start(self.pid)
+                    == crate::platform::ProcessStart::Started(token)
+            }
+            None => crate::platform::core_link::process_alive(self.pid),
+        }
+    }
+}
+
+/// The most of a lock record read (a version and two numbers).
+const RECORD_MAX: u64 = 4096;
+
+/// Opens the view's lock file at `path`, never through a symlink, and
+/// only as a regular file of this account in a folder no one else writes
+/// (review M8): a planted link cannot point the lock, or its truncation,
+/// at another file.
+fn open_lock(path: &std::path::Path, create: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    let uid = unsafe { libc::getuid() };
+    if let Some(dir) = path.parent() {
+        if create {
+            std::fs::create_dir_all(dir)?;
+        }
+        let meta = std::fs::symlink_metadata(dir)?;
+        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{} is not a private folder of this account", dir.display()),
+            ));
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(create)
+        .create(create)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not a regular file of this account", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+/// Takes the exclusive lock on `file` now; an `flock` the filesystem does
+/// not support fails at once and says so (PR D's second read, item 6).
+fn lock_now(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<bool> {
+    crate::platform::core_link::lock_exclusive_within(file, std::time::Duration::ZERO).map_err(
+        |err| {
+            if err.raw_os_error() == Some(libc::ENOTSUP)
+                || err.raw_os_error() == Some(libc::EOPNOTSUPP)
+            {
+                std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "{} is on a filesystem without flock, so a view cannot hold its lock there: {err}",
+                        path.display()
+                    ),
+                )
+            } else {
+                err
+            }
+        },
+    )
 }
 
 /// The lock a view server holds while it runs; dropped with the process.
@@ -122,24 +217,11 @@ static HELD: OnceLock<ViewLock> = OnceLock::new();
 /// it. The record is written once the lock is taken.
 pub(crate) fn take_lock_at(path: &std::path::Path) -> std::io::Result<Option<ViewLock>> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
-    if !crate::platform::core_link::lock_exclusive_within(&file, std::time::Duration::ZERO)? {
+    let mut file = open_lock(path, true)?;
+    if !lock_now(&file, path)? {
         return Ok(None);
     }
-    let record = ViewRecord {
-        version: crate::build_info::version(),
-        pid: std::process::id(),
-    };
+    let record = ViewRecord::own();
     file.set_len(0)?;
     file.write_all(
         serde_json::to_string(&record)
@@ -158,16 +240,32 @@ pub(crate) fn hold_lock(machine: &MachineName) -> std::io::Result<bool> {
     }
 }
 
-/// The record of the view whose lock is at `path`, while one holds it.
+/// The record of the view whose lock is at `path`, while one holds it,
+/// read from the inode it locks (review M8), at most `RECORD_MAX` bytes.
+/// `None` when no view holds it, or the lock cannot be probed (said once in
+/// the log: a filesystem without flock, a file that is no private regular
+/// file).
 pub(crate) fn running_view_at(path: &std::path::Path) -> Option<ViewRecord> {
-    let file = std::fs::File::open(path).ok()?;
-    if crate::platform::core_link::lock_exclusive_within(&file, std::time::Duration::ZERO)
-        .unwrap_or(false)
-    {
+    use std::io::Read as _;
+    let file = match open_lock(path, false) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "cannot read the view's lock");
+            return None;
+        }
+    };
+    match lock_now(&file, path) {
         // Nobody holds it: no view runs (the lock goes with the file).
-        return None;
+        Ok(true) => return None,
+        Ok(false) => {}
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "cannot probe the view's lock");
+            return None;
+        }
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let mut text = String::new();
+    (&file).take(RECORD_MAX).read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -186,11 +284,32 @@ pub(crate) fn view_config(config: &mut crate::config::Config) {
 /// as main parsed them (`herdr server ...`, `--session` already taken out:
 /// review M6, a session named `server` is never the server's word).
 /// `Ok(None)` for a primary server.
-pub(crate) fn requested_view(parsed_args: &[String]) -> Result<Option<MachineName>, String> {
+pub(crate) fn requested_view(parsed_args: &[String]) -> Result<Option<ViewRequest>, String> {
     match parsed_args.get(1).map(String::as_str) {
-        Some("server") => parse_view_flag(&parsed_args[2..]),
+        Some("server") => {
+            let rest = &parsed_args[2..];
+            let Some(machine) = parse_view_flag(rest)? else {
+                return Ok(None);
+            };
+            let restart = match &rest[2..] {
+                [] => false,
+                [flag] if flag == "--restart" => true,
+                _ => return Err("usage: herdr server --view <machine> [--restart]".into()),
+            };
+            Ok(Some(ViewRequest { machine, restart }))
+        }
         _ => Ok(None),
     }
+}
+
+/// `herdr server --view <machine> [--restart]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewRequest {
+    pub machine: MachineName,
+    /// Stop a view of the machine that runs, whatever its build, and take
+    /// its place (PR D's second read, item 4: after a rollback, a newer
+    /// view is never restarted by an older client).
+    pub restart: bool,
 }
 
 /// `--view <machine>` after `server`: the machine, `Ok(None)` without the
@@ -231,16 +350,27 @@ mod tests {
     #[test]
     fn a_session_named_server_does_not_change_the_role() {
         let parsed = |raw: &[&str]| crate::session::configure_from_args(&args(raw)).unwrap();
+        let view = |restart| {
+            Some(ViewRequest {
+                machine: MachineName::parse("loop").unwrap(),
+                restart,
+            })
+        };
         assert_eq!(
             requested_view(&parsed(&["herdr", "--session", "server", "server", "--view", "loop"]))
                 .unwrap(),
-            Some(MachineName::parse("loop").unwrap())
+            view(false)
         );
         assert_eq!(
             requested_view(&parsed(&["herdr", "--session=server", "server", "--view", "loop"]))
                 .unwrap(),
-            Some(MachineName::parse("loop").unwrap())
+            view(false)
         );
+        assert_eq!(
+            requested_view(&parsed(&["herdr", "server", "--view", "loop", "--restart"])).unwrap(),
+            view(true)
+        );
+        assert!(requested_view(&parsed(&["herdr", "server", "--view", "loop", "--x"])).is_err());
         assert_eq!(
             requested_view(&parsed(&["herdr", "--session", "server", "server"])).unwrap(),
             None
@@ -269,17 +399,62 @@ mod tests {
             take_lock_at(&path).expect("lock").is_none(),
             "a racing second start gets no lock"
         );
-        assert_eq!(
-            running_view_at(&path),
-            Some(ViewRecord {
-                version: crate::build_info::version(),
-                pid: std::process::id(),
-            })
-        );
+        let running = running_view_at(&path).expect("a view runs");
+        assert_eq!(running, ViewRecord::own());
+        assert!(running.start.is_some(), "the record names its process start");
+        assert!(running.names_its_process());
         drop(held);
         assert_eq!(running_view_at(&path), None, "released: no view runs");
         assert!(take_lock_at(&path).expect("lock").is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // M8 (security review): the lock is never opened through a symlink: a
+    // planted link is refused and its target is left as it was; a lock in
+    // a folder others can write to is refused too.
+    #[test]
+    fn a_symlinked_or_shared_lock_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-view-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("precious");
+        std::fs::write(&target, "keep me").unwrap();
+        let lock = dir.join("herdr-view-loop.lock");
+        std::os::unix::fs::symlink(&target, &lock).unwrap();
+        assert!(take_lock_at(&lock).is_err(), "a symlinked lock is refused");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert_eq!(running_view_at(&lock), None);
+        std::fs::remove_file(&lock).unwrap();
+
+        let shared = dir.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(take_lock_at(&shared.join("herdr-view-loop.lock")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // M8: a record whose pid now runs another process (its start differs)
+    // does not name that process, so a restart signals nothing.
+    #[test]
+    fn a_record_names_only_the_process_that_wrote_it() {
+        let own = ViewRecord::own();
+        assert!(own.names_its_process());
+        let reused = ViewRecord {
+            start: own.start.map(|token| token.wrapping_add(1)),
+            ..own.clone()
+        };
+        assert!(!reused.names_its_process());
+        let gone = ViewRecord {
+            pid: 4_000_000,
+            ..own
+        };
+        assert!(!gone.names_its_process());
     }
 
     #[test]

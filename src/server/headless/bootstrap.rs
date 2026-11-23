@@ -39,7 +39,15 @@ pub fn run_server(parsed_args: &[String]) -> io::Result<()> {
         crate::platform::prepare_server_process(handoff_import, handoff_user_context);
     #[cfg(unix)]
     match &view {
-        Some(machine) => {
+        Some(crate::view::ViewRequest { machine, restart }) => {
+            // `--restart`: the running view of the machine ends first,
+            // whatever its build (PR D's second read, item 4).
+            if *restart {
+                if let Err(err) = crate::view::start::stop_running(machine) {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
+            }
             // The view's lock first: a second view of the machine, started
             // in a race, leaves before it touches the log or the socket
             // (review L3.4).
@@ -76,8 +84,8 @@ pub fn run_server(parsed_args: &[String]) -> io::Result<()> {
     crate::platform::raise_server_nofile_limit();
 
     #[cfg(unix)]
-    if let Some(machine) = view {
-        return run_view_server(machine);
+    if let Some(view) = view {
+        return run_view_server(view.machine);
     }
 
     if handoff_import {

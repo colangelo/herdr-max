@@ -155,12 +155,34 @@ fn version_key(version: &str) -> Option<((u64, u64, u64), u64)> {
     Some((base, build))
 }
 
-/// Ends the view whose lock is at `lock` (it holds it, so `pid` is that
-/// view's): SIGTERM, then SIGKILL after 5 s; it is gone when the lock is
-/// free. A view's end detaches its panes and changes nothing on the
-/// machine (D6).
+/// `herdr server --view <machine> --restart` (PR D's second read, item 4):
+/// ends the view of `machine` that runs, of any build, before this process
+/// takes its place. Nothing to do when none runs.
+pub(crate) fn stop_running(machine: &MachineName) -> io::Result<()> {
+    let lock = super::lock_path(machine);
+    match super::running_view_at(&lock) {
+        Some(running) => stop_view(&lock, &running),
+        None => Ok(()),
+    }
+}
+
+/// Ends the view whose lock is at `lock`: SIGTERM, then SIGKILL after 5 s;
+/// it is gone when the lock is free. Each signal goes only while the record
+/// still names the process that wrote it (review M8: its start token), so
+/// a pid the system gave again is never signalled. A view's end detaches
+/// its panes and changes nothing on the machine (D6).
 fn stop_view(lock: &std::path::Path, running: &super::ViewRecord) -> io::Result<()> {
     use crate::platform::core_link::{signal, Signal};
+    let still_it = || {
+        super::running_view_at(lock).is_some_and(|now| now.pid == running.pid)
+            && running.names_its_process()
+    };
+    if !still_it() {
+        return Err(io::Error::other(format!(
+            "the view server recorded as pid {} is not that process any more; nothing was signalled",
+            running.pid
+        )));
+    }
     let gone_within = |wait: std::time::Duration| {
         let deadline = std::time::Instant::now() + wait;
         loop {
@@ -177,7 +199,7 @@ fn stop_view(lock: &std::path::Path, running: &super::ViewRecord) -> io::Result<
     if gone_within(std::time::Duration::from_secs(5)) {
         return Ok(());
     }
-    if super::running_view_at(lock).is_some_and(|still| still.pid == running.pid) {
+    if still_it() {
         signal(running.pid, Signal::Kill);
     }
     if gone_within(std::time::Duration::from_secs(2)) {
@@ -237,6 +259,40 @@ mod tests {
         );
         drop(held);
         assert_eq!(stale_view(&lock, &mine), None, "it ended");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // M8 (security review): a restart signals the view's pid only while
+    // that pid is still the process that wrote the record (its start
+    // token). A record whose pid now runs another process is refused, and
+    // that process is never signalled.
+    #[test]
+    fn a_restart_never_signals_a_process_that_reused_the_views_pid() {
+        let dir = std::env::temp_dir().join(format!("herdr-view-signal-{}", std::process::id()));
+        let lock = dir.join("herdr-view-loop.lock");
+        let held = super::super::take_lock_at(&lock)
+            .expect("lock")
+            .expect("held");
+        let mut bystander = Command::new("/bin/sleep").arg("30").spawn().expect("sleep");
+        let started = match crate::platform::process_start(bystander.id()) {
+            crate::platform::ProcessStart::Started(token) => token,
+            other => panic!("no start token: {other:?}"),
+        };
+        let reused = super::super::ViewRecord {
+            version: "0.0.1".into(),
+            pid: bystander.id(),
+            start: Some(started.wrapping_add(1)),
+        };
+        std::fs::write(&lock, serde_json::to_string(&reused).unwrap()).expect("record");
+        assert!(stop_view(&lock, &reused).is_err());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            bystander.try_wait().expect("wait").is_none(),
+            "the bystander was signalled"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
