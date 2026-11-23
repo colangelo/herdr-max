@@ -28,7 +28,7 @@ use super::status_mirror::StatusMirror;
 use crate::core_machine::panes::MachineLink;
 use crate::core_machine::MachineName;
 use crate::layout::PaneId;
-use crate::pane::runtime_io::{CoreStatusRecord, CoreTerminalLink};
+use crate::pane::runtime_io::{CoreProgramRun, CoreStatusRecord, CoreTerminalLink};
 use crate::platform::{
     ChildExitReason, ProgramIdentity, ProgramLiveness, StartTokenLookup, SuspendCause,
 };
@@ -163,6 +163,9 @@ struct Attach {
     ours_to_kill: bool,
     /// The run's `herdr.launch` label.
     launch: Option<String>,
+    /// The `herdr.launch` label the program's terminal carries, on this
+    /// Mac too: what a guarded pane action names (core-phase5 D7, #316).
+    run_launch: Option<String>,
     /// For a pane on a machine, the labels its terminal must carry.
     identity: Option<serde_json::Map<String, Value>>,
 }
@@ -331,6 +334,10 @@ struct Shared {
     machine: Option<Arc<MachineLink>>,
     /// The run's `herdr.launch` label, saved with a machine pane's link.
     launch: Option<String>,
+    /// The `herdr.launch` label the program's terminal carries (this
+    /// Mac's panes too), `None` when core showed none: a guarded pane
+    /// action is checked against it (core-phase5 D7, #316).
+    run_launch: Option<String>,
     /// For a pane on a machine, the labels a terminal must show before it
     /// is attached, taken as ended or killed (security review M2).
     identity: Option<serde_json::Map<String, Value>>,
@@ -620,6 +627,7 @@ impl StartedCore {
             cols: spawn.cols,
             ours_to_kill: true,
             launch: spawn.on.as_ref().map(|_| launch.clone()),
+            run_launch: Some(launch.clone()),
             identity: identity.clone(),
         };
         match started {
@@ -733,6 +741,7 @@ impl StartedCore {
                 cols: target.cols,
                 ours_to_kill: false,
                 launch: target.launch.clone().filter(|_| identity.is_some()),
+                run_launch: record["labels"][LAUNCH_LABEL].as_str().map(str::to_string),
                 identity,
             },
             child_pid,
@@ -758,6 +767,7 @@ impl StartedCore {
             cols,
             ours_to_kill,
             launch,
+            run_launch,
             identity,
         } = attach;
         let host = match CoreAddress::parse(&address) {
@@ -847,6 +857,7 @@ impl StartedCore {
                 host,
                 machine,
                 launch,
+                run_launch,
                 identity,
                 program: ProgramIdentity::of(pid, policy.start_token),
                 policy,
@@ -939,6 +950,7 @@ impl StartedCore {
                 machine: Some(link),
                 // The far herdr labelled the terminal; the view checks none.
                 launch: None,
+                run_launch: None,
                 identity: None,
                 program: None,
                 policy: ReattachPolicy::default(),
@@ -1201,6 +1213,15 @@ impl CorePaneIo {
             program: self.shared.program,
             launch: self.shared.launch.clone(),
             machine_cwd: None,
+        }
+    }
+
+    /// The program's run as core showed it at attach: its terminal's
+    /// `herdr.launch` label and its pid (core-phase5 D7, #316).
+    pub(crate) fn run(&self) -> CoreProgramRun {
+        CoreProgramRun {
+            launch: self.shared.run_launch.clone(),
+            pid: self.shared.pid,
         }
     }
 

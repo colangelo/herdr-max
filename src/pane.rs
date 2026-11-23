@@ -27,6 +27,7 @@ pub(crate) use input_activity::InputActivity;
 pub(crate) use runtime_io::core_machines;
 pub(crate) use runtime_io::core_session_name;
 pub(crate) use runtime_io::set_preferred_runtime;
+pub(crate) use runtime_io::CoreProgramRun;
 pub(crate) use runtime_io::CoreTerminalLink;
 #[cfg(all(test, unix))]
 pub(crate) use runtime_io::FakeCore;
@@ -3192,6 +3193,13 @@ impl PaneRuntime {
             link.machine_cwd = self.persistence_cwd.lock().ok().and_then(|cwd| cwd.clone());
         }
         Some(link)
+    }
+
+    /// The run of the core program this pane shows: its terminal's
+    /// `herdr.launch` label and its pid (core-phase5 D7, #316). `None` for
+    /// a pane not in herdr-core.
+    pub(crate) fn core_run(&self) -> Option<CoreProgramRun> {
+        self.io.core_run()
     }
 
     /// The core machine this pane's program runs on, `None` on this Mac

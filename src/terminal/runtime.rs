@@ -133,6 +133,11 @@ impl TerminalRuntime {
         self.0.core_terminal()
     }
 
+    /// The run of the core program this pane shows (core-phase5 D7, #316).
+    pub(crate) fn core_run(&self) -> Option<crate::pane::CoreProgramRun> {
+        self.0.core_run()
+    }
+
     /// A view server's pane on the far terminal `address` (core-phase5 D6).
     #[cfg(unix)]
     pub(crate) fn view_core(

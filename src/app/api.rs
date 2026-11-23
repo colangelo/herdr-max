@@ -4,6 +4,7 @@ mod agent_view;
 mod agents;
 mod application_scroll;
 mod env;
+mod guarded_panes;
 mod integrations;
 mod layouts;
 mod panes;
@@ -1791,6 +1792,15 @@ impl App {
             }
             Method::PaneRespawnIfIdle(params) => {
                 return self.handle_pane_respawn_if_idle(request.id, params)
+            }
+            Method::PaneCloseIfTerminal(params) => {
+                return self.handle_pane_close_if_terminal(request.id, params)
+            }
+            Method::PaneSplitIfTerminal(params) => {
+                return self.handle_pane_split_if_terminal(request.id, params)
+            }
+            Method::PaneRenameIfTerminal(params) => {
+                return self.handle_pane_rename_if_terminal(request.id, params)
             }
             Method::PopupClose(_) => {
                 return if self.close_popup_pane() {

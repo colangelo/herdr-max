@@ -85,6 +85,56 @@ pub struct PaneRespawnIfIdleParams {
     pub check_only: bool,
 }
 
+/// The program a guarded pane action is for (core-phase5 D7, fork issue
+/// 316): the pane's terminal in the server's primary herdr-core session, as
+/// the `herdr-app` document names it (`t7`), the pid core reported for its
+/// program, and the `herdr.launch` label of the run that started it. The
+/// server compares all three with the pane it resolves, in the same turn as
+/// the action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTerminalExpectation {
+    pub terminal: String,
+    pub pid: u32,
+    pub launch: String,
+}
+
+/// `pane.close_if_terminal`: `pane.close` of a pane that still shows the
+/// program `expect` names, and only of that one pane. A close that would
+/// close its workspace (the pane is the workspace's last), and with it a
+/// worktree group, is refused with `would_close_workspace`; a pane that
+/// shows another program is refused with `terminal_mismatch`. Its own
+/// method, so an older server answers that it does not know it instead of
+/// closing whatever pane has the id now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneCloseIfTerminalParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
+    pub expect: PaneTerminalExpectation,
+}
+
+/// `pane.split_if_terminal`: `pane.split` of the pane `pane_id` while it
+/// still shows the program `expect` names. The new pane starts in the
+/// target pane's folder and is not focused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSplitIfTerminalParams {
+    pub pane_id: String,
+    pub direction: SplitDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
+    pub expect: PaneTerminalExpectation,
+}
+
+/// `pane.rename_if_terminal`: `pane.rename` of a pane that still shows the
+/// program `expect` names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneRenameIfTerminalParams {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub expect: PaneTerminalExpectation,
+}
+
 /// Why `pane.respawn_if_idle` did not move a pane (core-phase3 D9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]

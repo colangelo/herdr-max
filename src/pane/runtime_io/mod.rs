@@ -80,6 +80,15 @@ pub struct CoreTerminalLink {
     pub machine_cwd: Option<std::path::PathBuf>,
 }
 
+/// A herdr-core program's run as core showed it at attach: the
+/// `herdr.launch` label its terminal carries and its pid, 0 when unknown.
+/// A guarded pane action names these (core-phase5 D7, fork issue 316).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreProgramRun {
+    pub launch: Option<String>,
+    pub pid: u32,
+}
+
 impl CoreTerminalLink {
     /// The core machine the program runs on (`ac-mbm5` in `ac-mbm5/t7`),
     /// `None` on this Mac's own core and for an address that does not parse
@@ -651,6 +660,16 @@ impl PaneIo {
         match self {
             #[cfg(unix)]
             PaneIo::Core(core) => Some(core.link()),
+            _ => None,
+        }
+    }
+
+    /// The run of the core program this pane shows, if it runs in
+    /// herdr-core (core-phase5 D7, #316).
+    pub(super) fn core_run(&self) -> Option<CoreProgramRun> {
+        match self {
+            #[cfg(unix)]
+            PaneIo::Core(core) => Some(core.run()),
             _ => None,
         }
     }

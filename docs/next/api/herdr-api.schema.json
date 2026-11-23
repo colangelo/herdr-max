@@ -3542,6 +3542,25 @@
           ],
           "type": "object"
         },
+        "PaneCloseIfTerminalParams": {
+          "description": "`pane.close_if_terminal`: `pane.close` of a pane that still shows the\nprogram `expect` names, and only of that one pane. A close that would\nclose its workspace (the pane is the workspace's last), and with it a\nworktree group, is refused with `would_close_workspace`; a pane that\nshows another program is refused with `terminal_mismatch`. Its own\nmethod, so an older server answers that it does not know it instead of\nclosing whatever pane has the id now.",
+          "properties": {
+            "expect": {
+              "$ref": "#/schemas/request/$defs/PaneTerminalExpectation"
+            },
+            "force": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "expect"
+          ],
+          "type": "object"
+        },
         "PaneCloseParams": {
           "description": "`pane.close`. Without `force`, a close that would drop open todos or a\nworktree group is refused with `confirmation_required`; with it, the pane\ncloses and the result lists the todos it dropped.",
           "properties": {
@@ -3974,6 +3993,28 @@
             "pane_id",
             "source",
             "agent"
+          ],
+          "type": "object"
+        },
+        "PaneRenameIfTerminalParams": {
+          "description": "`pane.rename_if_terminal`: `pane.rename` of a pane that still shows the\nprogram `expect` names.",
+          "properties": {
+            "expect": {
+              "$ref": "#/schemas/request/$defs/PaneTerminalExpectation"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "expect"
           ],
           "type": "object"
         },
@@ -4436,6 +4477,33 @@
           ],
           "type": "object"
         },
+        "PaneSplitIfTerminalParams": {
+          "description": "`pane.split_if_terminal`: `pane.split` of the pane `pane_id` while it\nstill shows the program `expect` names. The new pane starts in the\ntarget pane's folder and is not focused.",
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/SplitDirection"
+            },
+            "expect": {
+              "$ref": "#/schemas/request/$defs/PaneTerminalExpectation"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "direction",
+            "expect"
+          ],
+          "type": "object"
+        },
         "PaneSplitParams": {
           "properties": {
             "cwd": {
@@ -4566,6 +4634,28 @@
           },
           "required": [
             "pane_id"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalExpectation": {
+          "description": "The program a guarded pane action is for (core-phase5 D7, fork issue\n316): the pane's terminal in the server's primary herdr-core session, as\nthe `herdr-app` document names it (`t7`), the pid core reported for its\nprogram, and the `herdr.launch` label of the run that started it. The\nserver compares all three with the pane it resolves, in the same turn as\nthe action.",
+          "properties": {
+            "launch": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal",
+            "pid",
+            "launch"
           ],
           "type": "object"
         },
@@ -8659,6 +8749,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneRespawnIfIdleParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.close_if_terminal",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneCloseIfTerminalParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.split_if_terminal",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSplitIfTerminalParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.rename_if_terminal",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneRenameIfTerminalParams"
             }
           },
           "required": [

@@ -190,6 +190,14 @@ operations::define_operations! {
     // so an older server answers "unknown method" instead of a respawn of a
     // busy agent (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/295, D9).
     PaneRespawnIfIdle(PaneRespawnIfIdleParams) => "pane.respawn_if_idle", true, false;
+    // Fork: a pane's close, split and rename bound to the program the caller
+    // saw there, checked in the same turn as the action (core-phase5 D7,
+    // https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/316). Their
+    // own methods, so an older server answers "unknown method" instead of
+    // acting on whatever pane has the id now.
+    PaneCloseIfTerminal(PaneCloseIfTerminalParams) => "pane.close_if_terminal", true, false;
+    PaneSplitIfTerminal(PaneSplitIfTerminalParams) => "pane.split_if_terminal", true, false;
+    PaneRenameIfTerminal(PaneRenameIfTerminalParams) => "pane.rename_if_terminal", true, false;
     // Fork: the task store (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/241).
     // New names beside `todo.*`, which keep their meaning until they retire.
     TaskList(TaskListParams) => "task.list", false, true;
