@@ -470,14 +470,20 @@ stop_locked_view
 # makes only the view's lock, log and socket, never the primary's API or
 # client socket or a session file.
 M6_DIR="$BASE/c/herdr-dev/sessions/server"
-near "$HERDR_BIN" --session server server --view loop >"$BASE/m6.out" 2>&1 &
+# In a session of its own: a server's stop signals its process group.
+near python3 -I -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+  "$HERDR_BIN" --session server server --view loop >"$BASE/m6.out" 2>&1 &
 M6_PID=$!
 WAIT_TRIES=300 wait_until "the view in the session named server" test -S "$M6_DIR/herdr-view-loop.sock"
 sleep 1
 for primary_file in herdr.sock herdr-client.sock session.json; do
   [[ ! -e "$M6_DIR/$primary_file" ]] || fail "M6: a view in session server made $primary_file: $(ls "$M6_DIR")"
 done
-kill "$M6_PID" 2>/dev/null; wait "$M6_PID" 2>/dev/null; M6_PID=""
+m6_view="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$M6_DIR/herdr-view-loop.lock" 2>/dev/null)"
+[[ -n "$m6_view" ]] && ps -o comm= -p "$m6_view" 2>/dev/null | grep -q herdr && kill "$m6_view" 2>/dev/null
+kill "$M6_PID" 2>/dev/null
+wait "$M6_PID" 2>/dev/null || true
+M6_PID=""
 echo "ok: M6 a view in a session named server made only $(ls "$M6_DIR" | tr '\n' ' ')"
 
 echo "core view live test: all checks passed"
