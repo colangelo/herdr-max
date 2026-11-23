@@ -319,9 +319,14 @@ python3 -I - "$FL_DIR/link.log" "$dials" "$starts_log" <<'PY' || fail "the --dia
 import sys
 rows = [line.split(" ", 3) for line in open(sys.argv[1]) if line.count(" ") >= 2]
 dial = [r for r in rows if r[2] == "CLI"][int(sys.argv[2])]
-start = [r for r in rows if r[2] == "START"][int(sys.argv[3])]
-execd = [r for r in rows if r[2] == "EXEC" and r[1] == start[1]]
-assert float(dial[0]) <= float(start[0]) and execd, (dial, start)
+# The STARTs since the call began. Core's own retries keep coming, refused
+# for no lease; one can land just before the call's dial, so the dial is the
+# START that ran ssh (an EXEC with its pid), not the first one counted.
+starts = [r for r in rows if r[2] == "START"][int(sys.argv[3]):]
+execd = {r[1] for r in rows if r[2] == "EXEC"}
+dialled = [r for r in starts if r[1] in execd]
+assert len(dialled) == 1, (dial, dialled)
+assert float(dial[0]) <= float(dialled[0][0]), (dial, dialled)
 PY
 [[ "$(fl_cli_leases)" == 0 ]] || fail "the --dial lease outlived the call"
 echo "ok: V32 --dial wrote its lease before the one dial, gave the far JSON, and removed the lease"
