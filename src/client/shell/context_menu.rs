@@ -53,7 +53,13 @@ impl ClientContextMenuOverlay {
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
             ],
-            ClientContextMenuTarget::Agent { .. } => vec![item("Rename pane", Action::RenamePane)],
+            ClientContextMenuTarget::Agent { rename, .. } => {
+                if *rename {
+                    vec![item("Rename pane", Action::RenamePane)]
+                } else {
+                    Vec::new()
+                }
+            }
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -184,6 +190,20 @@ impl ClientShellState {
         }));
     }
 
+    /// Whether the active endpoint is a view of a core machine.
+    #[cfg(unix)]
+    fn active_endpoint_is_view(&self) -> bool {
+        matches!(
+            self.active_endpoint_id,
+            crate::client::endpoint::ClientEndpointId::Core(_)
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn active_endpoint_is_view(&self) -> bool {
+        false
+    }
+
     pub(super) fn open_agent_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -200,8 +220,12 @@ impl ClientShellState {
                 .agents
                 .iter()
                 .any(|agent| agent.agent_status == crate::api::schema::AgentStatus::Done);
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+        // A view renames only a pane of the tab the window shows.
+        let rename = !self.active_endpoint_is_view()
+            || snapshot.focused_tab_id.as_deref() == Some(agent.tab_id.as_str());
+        let menu = ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Agent {
+                rename,
                 any_unread,
                 workspace_id: agent.workspace_id.clone(),
                 pinned: snapshot
@@ -214,7 +238,11 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
-        }));
+        };
+        // Nothing to offer: no menu rather than an empty one.
+        if !menu.items().is_empty() {
+            self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
+        }
     }
 
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {

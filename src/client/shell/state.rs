@@ -651,6 +651,10 @@ pub(super) enum ClientContextMenuTarget {
         pinned: Option<bool>,
         /// Any pane is unread and the endpoint can clear it.
         any_unread: bool,
+        /// "Rename pane" is offered. Not in a view for a pane outside the
+        /// window's current tab: a view acts only on a pane of that tab
+        /// (core-phase5 D7, fork issue 316), so it would be refused.
+        rename: bool,
     },
     Pane {
         pane_id: String,

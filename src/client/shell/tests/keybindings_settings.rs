@@ -1088,3 +1088,55 @@ fn resize_mode_reuses_endpoint_resize_and_stays_active_until_done() {
     assert!(state.handle_input_bytes(b"\r").actions.is_empty());
     assert_eq!(state.mode, ClientShellMode::Terminal);
 }
+
+// Fork issue 316, review item 4: in a view, the sidebar agent menu does not
+// offer "Rename pane" for a pane outside the window's current tab, which the
+// view would refuse; for a pane of the current tab, and on any other
+// endpoint, it does.
+#[cfg(unix)]
+#[test]
+fn a_views_agent_menu_offers_rename_only_for_the_current_tab() {
+    use crate::client::endpoint::{ClientEndpointId, ClientEndpointStatus};
+    let agent = |pane: &str, tab: &str| -> crate::protocol::ClientShellAgent {
+        serde_json::from_value(serde_json::json!({
+            "pane_id": pane, "workspace_id": "ws_1", "tab_id": tab, "name": null,
+            "display_agent": null, "agent": null, "title": null, "terminal_title": null,
+            "terminal_title_stripped": null, "agent_status": "idle", "state_change_seq": 0,
+            "state_labels": [], "tokens": [], "focused": false
+        }))
+        .unwrap()
+    };
+    let mut shown = snapshot();
+    shown.agents = vec![agent("w1:p1", "tab_1"), agent("w1:p2", "tab_2")];
+    let labels = |state: &ClientShellState| -> Vec<String> {
+        match state.overlay.as_ref() {
+            Some(ClientShellOverlay::ContextMenu(menu)) => menu
+                .items()
+                .iter()
+                .map(|item| item.label.to_string())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(shown.clone()));
+    state.open_agent_context_menu("w1:p2".into(), 5, 3);
+    assert_eq!(labels(&state), ["Rename pane"], "not a view: offered");
+
+    let machine = crate::core_machine::MachineName::parse("loop").unwrap();
+    let view = ClientEndpointId::Core(machine.clone());
+    state.set_core_endpoints(std::slice::from_ref(&machine));
+    state.set_endpoint_status(&view, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&view, Box::new(shown));
+    assert!(state.activate_endpoint_projection(&view));
+    state.overlay = None;
+    state.open_agent_context_menu("w1:p2".into(), 5, 3);
+    assert!(
+        labels(&state).is_empty(),
+        "another tab: {:?}",
+        labels(&state)
+    );
+    assert!(state.overlay.is_none(), "no empty menu");
+    state.open_agent_context_menu("w1:p1".into(), 5, 3);
+    assert_eq!(labels(&state), ["Rename pane"], "the current tab");
+}
