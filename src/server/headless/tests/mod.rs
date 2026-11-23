@@ -20,6 +20,8 @@ mod surface_scroll_tests;
 #[cfg(unix)]
 mod suspended_panes;
 mod sync_input;
+#[cfg(unix)]
+mod view_policy;
 
 fn client_shell_projection(
     receiver: &std::sync::mpsc::Receiver<Vec<u8>>,

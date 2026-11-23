@@ -11,6 +11,7 @@
 
 pub(crate) mod doc;
 pub(crate) mod lifetime;
+pub(crate) mod policy;
 pub(crate) mod start;
 pub(crate) mod watch;
 

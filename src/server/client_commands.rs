@@ -16,6 +16,26 @@ pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
     crate::api::schema::operations::client_shell_method_names()
 }
 
+/// The client methods this server's endpoint welcome advertises: all of
+/// them for a primary, the view's allowlist for a view (core-phase5 D6,
+/// security review M2), the same list its dispatch takes.
+pub(crate) fn advertised_client_shell_method_names() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        crate::view::policy::advertised(
+            supported_client_shell_method_names(),
+            crate::view::viewed_machine().is_some(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        supported_client_shell_method_names()
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect()
+    }
+}
+
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
     supported_client_shell_method_names().contains(&method)
 }

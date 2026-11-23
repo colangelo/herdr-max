@@ -25,6 +25,20 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
+        // One allowlist for a view, the one its welcome advertised
+        // (core-phase5 D6, security review M2): a client that sends any
+        // other method is refused before dispatch.
+        #[cfg(unix)]
+        if let Some(refusal) = self.app.view_method_refusal(request.method.operation().name) {
+            let message = crate::server::client_commands::error_message(
+                boot_id,
+                request_id,
+                "refused_in_view",
+                refusal,
+            );
+            self.send_to_client(client_id, message);
+            return false;
+        }
         if boot_id != self.client_shell_boot_id {
             let message = crate::server::client_commands::error_message(
                 boot_id,

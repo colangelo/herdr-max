@@ -900,23 +900,29 @@ impl ClientShellState {
                     })
                 })
                 .collect();
+        // A send is `agent.message`, typed or a note through this Mac's
+        // `note_command`; an endpoint that does not take it (a view,
+        // core-phase5 D6, review M2) offers no send and no targets.
+        let can_send = self.supports_endpoint_method_name("agent.message");
         // The way into a send, after the global commands.
         let at = commands
             .iter()
             .position(|command| command.group != "global")
             .unwrap_or(commands.len());
-        commands.insert(
-            at,
-            PaletteCommand {
-                group: "sessions",
-                key: "send".to_owned(),
-                label: "send to a session…".to_owned(),
-                action: PaletteAction::OpenSend,
-            },
-        );
-        let targets = self
-            .snapshot
-            .as_deref()
+        if can_send {
+            commands.insert(
+                at,
+                PaletteCommand {
+                    group: "sessions",
+                    key: "send".to_owned(),
+                    label: "send to a session…".to_owned(),
+                    action: PaletteAction::OpenSend,
+                },
+            );
+        }
+        let targets = can_send
+            .then_some(())
+            .and(self.snapshot.as_deref())
             .map(|snapshot| {
                 snapshot
                     .agents

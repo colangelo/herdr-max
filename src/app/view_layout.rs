@@ -164,6 +164,18 @@ impl App {
         })
     }
 
+    /// Why a view refuses the client method `name` (core-phase5 D6,
+    /// security review M2: `view::policy`, the list its welcome
+    /// advertises); `None` in the primary server or for a method the view
+    /// takes.
+    pub(crate) fn view_method_refusal(&self, name: &str) -> Option<String> {
+        let machine = &self.view.as_ref()?.machine;
+        match crate::view::policy::classify(name) {
+            Some(_) => crate::view::policy::refusal(machine, name),
+            None => Some(crate::view::policy::unclassified_refusal(machine, name)),
+        }
+    }
+
     /// Turns this server into the view of `machine` (D6): no layout until the
     /// far document is read; the watcher thread follows the machine.
     pub(crate) fn start_view(
@@ -172,6 +184,11 @@ impl App {
         presence: Arc<ViewPresence>,
     ) -> std::io::Result<()> {
         self.view = Some(ViewApp::new(machine.clone()));
+        // This Mac's release notes and announcements are the primary's to
+        // show and dismiss: a view advertises no dismissal (review M2).
+        self.state.latest_release_notes = None;
+        self.state.latest_release_notes_available = false;
+        self.state.product_announcement = None;
         crate::view::watch::start(machine, presence, self.event_tx.clone())
     }
 

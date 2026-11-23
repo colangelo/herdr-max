@@ -2259,6 +2259,16 @@ impl HeadlessServer {
                 if !self.client_clipboard_image_target_is_valid(client_id, &target) {
                     return false;
                 }
+                // A view stages no file on this Mac, and the far program
+                // could not read its path (core-phase5 D6, review M2).
+                #[cfg(unix)]
+                if let Some(refusal) = self.app.view_refusal("an image paste") {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::ClientShellError { message: refusal },
+                    );
+                    return false;
+                }
                 self.record_client_input(client_id);
                 match self.stage_client_clipboard_image(client_id, &extension, &data) {
                     Ok(staged) => {

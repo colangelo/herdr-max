@@ -568,11 +568,17 @@ impl ClientShellState {
     }
 
     pub(super) fn supports_endpoint_method(&self, method: &crate::api::schema::Method) -> bool {
+        self.supports_endpoint_method_name(crate::api::api_method_name(method))
+    }
+
+    /// Whether the active endpoint takes the method `name`: one that
+    /// advertised no list takes every baseline method.
+    pub(super) fn supports_endpoint_method_name(&self, name: &str) -> bool {
         self.endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .and_then(|endpoint| endpoint.methods.as_ref())
-            .is_none_or(|methods| methods.contains(crate::api::api_method_name(method)))
+            .is_none_or(|methods| methods.iter().any(|method| method == name))
     }
 
     pub(super) fn focused_tab_count(&self) -> usize {

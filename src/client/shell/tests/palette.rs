@@ -423,6 +423,36 @@ fn the_commands_list_has_a_way_into_the_send() {
     assert!(lines.contains("send to a session…"), "{lines}");
 }
 
+// M2 (core-phase5 D6): an endpoint that does not take `agent.message` (a
+// view advertises no such method) offers no send: no "send to a session"
+// row, no session to pick, so no Note through this Mac's `note_command`
+// with a recipient a far title chose.
+#[test]
+fn an_endpoint_without_agent_message_offers_no_send_or_note() {
+    let mut state = state_with_agents(Config::default());
+    state.set_endpoint_methods(Some(vec!["pane.focus".into(), "pane.scroll".into()]));
+    open(&mut state);
+    let lines = boxed(&mut state).join("\n");
+    assert!(!lines.contains("send to a session"), "{lines}");
+    type_text(&mut state, "send reviewer");
+    assert!(palette(&state).targets.is_empty());
+    let outcome = state.handle_input_bytes(b"\r");
+    assert!(
+        !sends(&outcome)
+            .iter()
+            .any(|(_, method)| matches!(method, Method::AgentMessage(_))),
+        "no message is sent"
+    );
+    assert!(
+        !matches!(
+            state.overlay.as_ref(),
+            Some(ClientShellOverlay::Palette(palette))
+                if matches!(palette.stage, super::super::palette::PaletteStage::Compose(_))
+        ),
+        "no message is being written"
+    );
+}
+
 #[test]
 fn send_and_a_name_lists_the_sessions_with_their_state() {
     let mut state = state_with_agents(Config::default());
