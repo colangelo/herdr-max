@@ -97,3 +97,17 @@ path classes differently. So the link reaches the far machine from: Claude Code 
 Not measured: Claude Code's own sandbox mode (off here, `srt` not installed, turning it on needs a `claude`
 launch); the real `claude-gpt` and `pi-lab` profiles with their credentials (that would fetch live keys); Codex
 named permission profiles (`lab-fixture`); the bmlab local-model harness, which lives on ac-mbm5 (needs ssh).
+
+# PR D: what the view reads of a machine (2026-11-23, m4m, hc 0.1.21)
+
+Two throwaway cores (`d300loc`, `d300far`, scratch XDG folders), the far one added to the near one with `hc machine
+add --via` and a relay script; both stopped after. Nothing dialled another host.
+
+| # | Question | Result |
+|---|---|---|
+| D1 | Does a far `doc.set` reach the near core's events | Yes, as `{"method":"event","params":{"type":"doc","machine":"loop","data":{"name":"herdr-app","version":2},"seq":3}}`, 68 ms after the far write, but **only on a subscription with no filter**: one with a label filter, or with `terminal`, got none. This Mac's own `doc.set` gives the same event without `machine`. |
+| D2 | `doc.get {name, on}` | the far document and its version, through the link. |
+| D3 | A far resize on an unfiltered subscription | `{"type":"size","terminal":"loop/t4","data":{"cols":90,"rows":25}}`: the address is qualified, as in the snapshot (`loop/t1` ...). |
+
+So the view server subscribes once, with no filter, and keeps its own machine's `doc`, `size`, `status` and
+`finished`/`removed` facts (`core_backend/view_link.rs`).

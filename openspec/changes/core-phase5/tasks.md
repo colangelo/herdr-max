@@ -223,13 +223,21 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `core_waiting_cause`. The three new request shapes are frozen in the endpoint shape test beside `pane.close`'s
   `force`; `tests/fixtures/endpoint-method-shapes-v1.json` is unchanged. V13 unit: refused without the
   capability (and for an old server's capabilities), sent with it. Limit: the client shell sends no `on` (C.5).
-- [ ] C.5 New pane dialog: a machine choice, listing core machines with their gate (UI style per `docs/ui-style.md`,
+- [x] C.5 New pane dialog: a machine choice, listing core machines with their gate (UI style per `docs/ui-style.md`,
   help entry if a key is bound)
-  Not built. The client shell has no new-pane dialog (a split is a key or a context-menu item), and a safe machine
-  choice there needs two things the client-shell endpoint does not carry: whether the server takes `on` (the
-  endpoint advertises method names, not `spawn_on_machine`; an older server would start the pane locally), and the
-  core machines with their gates (a server-side listing). Both are endpoint additions to make with PR D's
-  `ClientEndpointId::Core` work; until then panes go on a machine through the CLI and API.
+  Built (with PR D): the endpoint carries `spawn_on_machine`: a primary on Unix adds
+  `SPAWN_ON_MACHINE_CAPABILITY` to its welcome's capabilities (a view server does not: it starts no program), the
+  client records it per endpoint (`ClientShellState::spawn_on_machine_endpoints`). The client shell has no new-pane
+  dialog, so the choice is in the existing pane context menu (`context_menu.rs`): after Split right/down, one
+  `Split right on <machine> · <gate>` row per core machine herdr links, `ClientContextMenuAction::SplitOnMachine(n)`
+  sending `pane.split` with `on`; the label became a `Cow` for it. The machines and gates are this Mac's
+  (`core_machine::command::linked_machines`, the state folders `machine status --core` reads: no core call, no
+  dial), offered only while the Local endpoint is active and advertises the capability. No key is bound, so no help
+  entry. Tests: `client/shell/tests/core_machine_split.rs` (the rows render with their gates and their click
+  target sends `pane.split {on: "lab-vm"}`; without the capability no machine is offered). Plan change: the machine
+  list is not carried by the endpoint. A server-side listing needs a new advertised API method, and the client
+  already reads and writes these folders for its leases (B.2), so a remote endpoint (a saved machine, a view)
+  offers no machine choice; a listing method for remote endpoints is left to PR E with the rest of the fleet path.
 - [x] C.6 `docs/next`: running a pane on a machine, what a remote pane lacks (hooks, detached-job sweep)
   Done: `connecting-machines.mdx` § Panes on a Herdr Core machine (`--on`, the JSON fields, waiting and wake, no
   hooks or integration variables, no process facts or `agent start`, close ends the program only);
@@ -412,15 +420,82 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
 
 ## PR D. The view server
 
-- [ ] D.1 `ServerRole` and `herdr server --view <machine>`; the role's boundaries per D6's table, each a match on the
+- [x] D.1 `ServerRole` and `herdr server --view <machine>`; the role's boundaries per D6's table, each a match on the
   role
-- [ ] D.2 Document parser with limits; layout projection; `doc` and `missed` handling; V15, V16
-- [ ] D.3 The size policy of D6 (`resumed` attach, AUTOMATIC_INPUT only, no DATA or FOCUS, RESIZE only for a changed
+  Built: `src/view/` (Unix only). `ServerRole { Primary, View(MachineName) }`, set once by `run_view_server`
+  (`server/headless/bootstrap.rs`, `--view` after `server`, a `--session` first allowed); `viewed_machine()` is the
+  boundary read: socket (`herdr-view-<m>.sock` and `herdr-view-<m>.log` beside the session's own), no JSON API
+  socket, `AppPolicy::VIEW` (no restore, save, plugin registry, task store, background update), every core
+  publisher off at start and on reload (`view_config`, `reload` keeps them off), no default workspace, no git
+  read, no program start (`spawn_command_builder` refuses `PaneLaunch::Command` in a view, so a split, tab or
+  workspace made there fails with "this is a view of <m>"), no focus reports, close a detach (`keep_on_drop`,
+  `kill()` and `end_program` answer `Live` without a call), input AUTOMATIC_INPUT only (D.3), wake only with a lease
+  (`MachineLink::dial` checks `dormant` in a view), lifetime (`view::lifetime::IdleExit`, 10 min after the last
+  client; `ViewPresence` tells the watcher the client count and the last input). `HeadlessServer::new_at` binds the
+  view's socket; `serve_as_view` turns on the lifetime. Tests: `view::tests` (flag, socket and log per machine),
+  `view::lifetime::tests` (exit 10 min after the last client; input window). Limits: the idle exit is a unit
+  test, not a 10 min live wait; the view keeps the user's config otherwise (keys, theme), so a key bound to a
+  local action reaches the refusal, not a hidden menu.
+- [x] D.2 Document parser with limits; layout projection; `doc` and `missed` handling; V15, V16
+  Built: `view/doc.rs` (`ViewLayout`, `ViewSpace`, `ViewTab`, `ViewNode`): only `herdr_max: 1` spaces; 1 MiB, depth
+  32, 64 spaces, 64 tabs, 64 panes a tab, 256 in all, names 256 and folders 4096 characters with control
+  characters dropped; space, tab and pane ids must be herdr's own (`w<n>`, `<space>:t<n>`, `<space>:p<n>` or
+  `:x<raw>`); a wrong-typed field herdr reads refuses the whole document, unknown fields are ignored; n-ary rows
+  fold into binary splits by weight; a leaf on a machine of the far core (`m4m/t3`), a mod or an unknown kind is
+  left out. `core_backend/view_link.rs`: one unfiltered `events.subscribe` (measured on hc 0.1.21: a machine's `doc`
+  event, `{type: doc, machine, data: {name, version}}`, reaches only a subscription with no filter; a label or
+  terminal filter gets none), `doc.get {name, on}`, `machine.list`; facts of the viewed machine only.
+  `view/watch.rs` `Watcher<S: ViewSource>`: reads the layout at start, on its `doc` event, on `missed` and when
+  the link comes up, sends only a changed layout, keeps the last good one on a refused document (one warning);
+  forwards far sizes and 7501 status; the notice line (dormant, waking, needs login, not a machine, publishes no
+  spaces, far hc older than 0.1.21 with `hc machine update`) goes in the snapshot's `config_diagnostic` (no wire
+  change). `app/view_layout.rs`: the projection keeps each far pane's `PaneId` and terminal across documents,
+  attaches new terminals off the loop (`spawn_blocking`, `ViewEvent::Attached`), detaches gone ones, keeps the
+  active workspace, tab, focus and zoom by far ids; pane, tab and workspace ids are the far side's (D4).
+  `Workspace::for_view`. Tests: V16 unit (`view::doc::tests`: oversized, deep, wrong-typed, bad ids, counts;
+  `watch::tests::a_refused_document_keeps_the_last_good_layout`); V15 unit (`watch` reads on the doc event, sends
+  only changes; `view_layout` new tab and split, a pane that stays keeps its id and terminal, focus kept); V15
+  live (below). Limits: status is mapped to an agent state on the pane (working, blocked, idle) with the app as
+  the agent; a far detection-only verdict that the far herdr does not mirror (status mirror off there) is not
+  shown. Panes the far herdr keeps on the PTY are not in the document and not shown (D6).
+- [x] D.3 The size policy of D6 (`resumed` attach, AUTOMATIC_INPUT only, no DATA or FOCUS, RESIZE only for a changed
   far size from `size` events, read-only fallback); cropped or padded drawing with the remote size in the border;
   V14, V30 (before merge)
-- [ ] D.4 `ClientEndpointId::Core`, endpoint transport that starts the view server; `herdr --remote core:<m>`;
+  Built: `StartedCore::view` and `view_far_size` (`pane_io.rs`): `terminal.get` just before, attach `resumed` at
+  that size with the full history; `observe` when the path does not take AUTOMATIC_INPUT (read-only, refuses
+  input). `ViewIo` and `view_writer`: keys, pastes, mouse, submissions and replies as AUTOMATIC_INPUT; a resize
+  carries the far size and goes as RESIZE only when it differs from the last one sent; no FACTS, FOCUS or DATA.
+  The view's `TerminalRuntime` keeps the far size whatever its rect (`resize` uses `view_size`), follows `size`
+  events (`follow_view_size`, from the watcher's subscription), and drops focus reports; the server renders the
+  grid into the rect, cropped or padded; the border label adds `<cols>x<rows> there` when the rect differs, and
+  `read-only` (`ui/panes.rs` `view_border_label`). The view never polls when idle: `machine.list` only while a
+  client is attached and the machine is away or someone typed within 30 s. Tests: unit (`pane_io`
+  `a_view_pane_never_takes_the_far_terminals_size`: resumed at 100x30, four AUTOMATIC_INPUT and one RESIZE 90x25
+  for a repeat and a change, no `terminal.kill`; `a_view_without_automatic_input_watches_only`; `watch`
+  `an_idle_connected_view_stops_reading_the_machines_state`). Live V14 and V30 below.
+- [x] D.4 `ClientEndpointId::Core`, endpoint transport that starts the view server; `herdr --remote core:<m>`;
   exit 10 min after the last client; V17
-- [ ] D.5 Both-present notice and `[remote] prefer`; V21, V22
+  Built: `ClientEndpointId::Core(MachineName)` (Unix), `storage_key` `core:<m>`; `EndpointCatalog::core` (the linked
+  machines, read at load, never saved) and `has_other_machines`; the shell's `set_core_endpoints` (after the saved
+  machines, kept across catalog reloads) and the supervisor's `reconcile_core` and `ConnectTarget::Core`, whose
+  connect runs `view::start::ensure_running` (starts `herdr [--session S] server --view M` through the daemon
+  launcher when none listens) and connects to the view's socket; reconnects follow #260's dormancy as any
+  machine's. `herdr --remote core:<m>` (`main.rs`, `view::start::run_view_client`): ensures the view and runs
+  `herdr client` on its socket with the remote-client environment. Any machine core lists can be viewed this
+  way (one added by hand too). Live V17 below. Limits: core machines added after a client started appear in its
+  sidebar after the client restarts (the catalog's file watch covers saved machines only); the 10 min exit is a
+  unit test.
+- [x] D.5 Both-present notice and `[remote] prefer`; V21, V22
+  Built: `[remote] prefer = "ssh" | "core"` (`RemotePrefer`, default `ssh`, in the default config and
+  `configuration.mdx`); `cli/target.rs` `route_machine`: a saved machine first, a name that is only a core machine
+  takes the core path, both: `prefer`. The core path refuses for now ("this build reaches it with herdr --remote
+  core:<m>"): `--machine` over `machine.exec` is PR E's E.2. The TUI shows "One Mac, two paths" once per run for a
+  saved machine and a core machine on one host (`core_machine::command::same_host_pairs`) and shows both. Tests:
+  V22 unit (`prefer_decides_only_when_a_saved_and_a_core_machine_share_the_name`,
+  `saved_and_core_machines_on_one_host_pair_up`); V21: the existing `src/remote` and endpoint suites (in `just
+  check`) and `view::start::tests` (`--remote <host>` is never a core target, so the old path runs and no view
+  starts). Plan change: the endpoint handshake carries no far core id, so the pair is found by the host of the two
+  ssh destinations, not by core id.
 - [ ] D.6 Check: `just check` 0, `just core-live-test` 0, CI green
 
 ## PR E. Actions and the fleet CLI over the link
