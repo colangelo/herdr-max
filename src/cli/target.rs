@@ -10,10 +10,60 @@ thread_local! {
 }
 
 struct MachineTarget {
-    profile: SavedSshEndpoint,
-    bridge: Option<crate::remote::SavedSshApiBridge>,
+    route: Route,
     #[cfg(test)]
     client_override: Option<ApiClient>,
+}
+
+/// How `--machine` reaches the far herdr: a saved SSH machine (the old
+/// remote), or a Herdr Core machine through `machine.exec` (core-phase5 D7).
+// One value per CLI call, held in a thread-local: the saved route's size
+// costs nothing, so it stays unboxed as it was before the core route.
+#[allow(clippy::large_enum_variant)]
+enum Route {
+    Saved {
+        profile: SavedSshEndpoint,
+        bridge: Option<crate::remote::SavedSshApiBridge>,
+    },
+    #[cfg(unix)]
+    Core(Box<crate::core_machine::fleet::FleetLink>),
+}
+
+impl MachineTarget {
+    fn label(&self) -> String {
+        match &self.route {
+            Route::Saved { profile, .. } => profile.label.clone(),
+            #[cfg(unix)]
+            Route::Core(link) => link.machine().to_string(),
+        }
+    }
+
+    fn session(&self) -> String {
+        match &self.route {
+            Route::Saved { profile, .. } => profile.session.clone(),
+            #[cfg(unix)]
+            Route::Core(link) => link.far_session().to_string(),
+        }
+    }
+
+    /// The saved profile's id, or `core:<machine>`.
+    fn id(&self) -> String {
+        match &self.route {
+            Route::Saved { profile, .. } => profile.id.to_string(),
+            #[cfg(unix)]
+            Route::Core(link) => format!("core:{}", link.machine()),
+        }
+    }
+
+    fn reported_failure(&self) -> Option<io::Error> {
+        match &self.route {
+            Route::Saved { bridge, .. } => {
+                bridge.as_ref().and_then(|bridge| bridge.reported_failure())
+            }
+            #[cfg(unix)]
+            Route::Core(link) => link.reported_failure(),
+        }
+    }
 }
 
 struct TargetScope(Option<MachineTarget>);
@@ -25,7 +75,11 @@ impl Drop for TargetScope {
 }
 
 pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutcome>> {
-    let (selector, args) = match parse_machine_prefix(args) {
+    let MachinePrefix {
+        selector,
+        dial,
+        args,
+    } = match parse_machine_prefix(args) {
         Ok(Some(target)) => target,
         Ok(None) => return None,
         Err(error) => return Some(usage_error(error)),
@@ -38,20 +92,62 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
             return Ok(super::CommandOutcome::Handled(0));
         }
         let profiles = EndpointCatalog::load_profiles().map_err(io::Error::other)?;
-        let profile = match resolve_machine(&profiles, &selector) {
-            Ok(profile) => profile.clone(),
-            Err(error) => return usage_error(error),
+        // A saved herdr machine first, unchanged (core-phase5 D8); a name
+        // no saved machine has may be a Herdr Core machine (D7).
+        let route = match resolve_machine(&profiles, &selector) {
+            Ok(profile) => Route::Saved {
+                profile: profile.clone(),
+                bridge: None,
+            },
+            Err(error) if names_a_saved_machine(&profiles, &selector) => return usage_error(error),
+            Err(error) => match core_route(&selector, dial, error) {
+                Ok(route) => route,
+                Err(outcome) => return outcome,
+            },
         };
         let _scope = TARGET.with(|target| {
             TargetScope(target.replace(Some(MachineTarget {
-                profile,
-                bridge: None,
+                route,
                 #[cfg(test)]
                 client_override: None,
             })))
         });
         super::maybe_run(&args)
     })())
+}
+
+fn names_a_saved_machine(profiles: &[SavedSshEndpoint], selector: &str) -> bool {
+    profiles
+        .iter()
+        .any(|profile| profile.id.as_str() == selector || profile.label == selector)
+}
+
+/// `selector` as a Herdr Core machine: refused (exit 75 on a machine that
+/// is not connected, without `--dial`) before any request, or ready.
+#[cfg(unix)]
+fn core_route(
+    selector: &str,
+    dial: bool,
+    unknown: String,
+) -> Result<Route, io::Result<super::CommandOutcome>> {
+    use crate::core_machine::fleet::{self, Lookup};
+    match fleet::open(selector, fleet::dial_requested(dial)) {
+        Lookup::NotCore => Err(usage_error(unknown)),
+        Lookup::Refused { message, code } => {
+            eprintln!("error: {message}");
+            Err(Ok(super::CommandOutcome::Handled(code)))
+        }
+        Lookup::Ready(link) => Ok(Route::Core(link)),
+    }
+}
+
+#[cfg(not(unix))]
+fn core_route(
+    _selector: &str,
+    _dial: bool,
+    unknown: String,
+) -> Result<Route, io::Result<super::CommandOutcome>> {
+    Err(usage_error(unknown))
 }
 
 fn usage_error(error: String) -> io::Result<super::CommandOutcome> {
@@ -73,25 +169,33 @@ pub(super) fn api_client() -> io::Result<ApiClient> {
         if let Some(client) = &target.client_override {
             return Ok(client.clone());
         }
-        if target.bridge.is_none() {
-            target.bridge = Some(
+        let (profile, bridge) = match &mut target.route {
+            Route::Saved { profile, bridge } => (profile, bridge),
+            #[cfg(unix)]
+            Route::Core(link) => {
+                return Ok(ApiClient::for_target(ConnectionTarget::SocketPath(
+                    link.socket_path().to_owned(),
+                )))
+            }
+        };
+        if bridge.is_none() {
+            *bridge = Some(
                 crate::remote::SavedSshApiBridge::start(
-                    target.profile.id.as_str(),
-                    &target.profile.target,
-                    &target.profile.session,
+                    profile.id.as_str(),
+                    &profile.target,
+                    &profile.session,
                     true,
                     true,
                 )
                 .map_err(|error| {
                     io::Error::new(
                         error.kind(),
-                        format!("machine '{}': {error}", target.profile.label),
+                        format!("machine '{}': {error}", profile.label),
                     )
                 })?,
             );
         }
-        let bridge = target
-            .bridge
+        let bridge = bridge
             .as_ref()
             .ok_or_else(|| io::Error::other("machine bridge unavailable"))?;
         Ok(ApiClient::for_target(ConnectionTarget::SocketPath(
@@ -121,7 +225,16 @@ pub(super) fn server_status(
         let Some(target) = target.as_mut() else {
             return Err(error);
         };
-        let Some(bridge) = target.bridge.as_ref() else {
+        // A core machine's probe is a request like any other: never sent
+        // twice (core-phase5 D7).
+        let (profile, saved_bridge) = match &mut target.route {
+            Route::Saved { profile, bridge } => (profile, bridge),
+            #[cfg(unix)]
+            Route::Core(link) => {
+                return Err(link.reported_failure().map(Into::into).unwrap_or(error))
+            }
+        };
+        let Some(bridge) = saved_bridge.as_ref() else {
             return Err(error);
         };
         let failure = bridge.reported_failure();
@@ -135,11 +248,11 @@ pub(super) fn server_status(
         if stale_metadata {
             bridge.invalidate_metadata();
         }
-        target.bridge.take();
-        target.bridge = Some(crate::remote::SavedSshApiBridge::start(
-            target.profile.id.as_str(),
-            &target.profile.target,
-            &target.profile.session,
+        saved_bridge.take();
+        *saved_bridge = Some(crate::remote::SavedSshApiBridge::start(
+            profile.id.as_str(),
+            &profile.target,
+            &profile.session,
             !stale_metadata,
             false,
         )?);
@@ -154,16 +267,13 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
         let Some(target) = target.as_ref() else {
             return error;
         };
-        let error = target
-            .bridge
-            .as_ref()
-            .and_then(|bridge| bridge.reported_failure())
-            .unwrap_or(error);
+        let error = target.reported_failure().unwrap_or(error);
         io::Error::new(
             error.kind(),
             format!(
                 "machine '{}' (session {}): {error}",
-                target.profile.label, target.profile.session
+                target.label(),
+                target.session()
             ),
         )
     })
@@ -171,19 +281,17 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
 
 pub(super) fn restart_guidance() -> String {
     TARGET.with(|target| match target.borrow().as_ref() {
-        Some(target) => format!("Update Herdr and restart the server on machine '{}' (session {}). Stopping the server exits its pane processes.", target.profile.label, target.profile.session),
+        Some(target) => format!("Update Herdr and restart the server on machine '{}' (session {}). Stopping the server exits its pane processes.", target.label(), target.session()),
         None => crate::session::active_restart_after_update_guidance(),
     })
 }
 
 pub(super) fn remote_identity() -> Option<(String, String)> {
     TARGET.with(|target| {
-        target.borrow().as_ref().map(|target| {
-            (
-                target.profile.id.to_string(),
-                target.profile.session.clone(),
-            )
-        })
+        target
+            .borrow()
+            .as_ref()
+            .map(|target| (target.id(), target.session()))
     })
 }
 
@@ -213,12 +321,28 @@ pub(super) fn caller_pane_id() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>, String> {
+/// `herdr --machine <selector> [--dial] <command>`, split.
+#[derive(Debug, PartialEq, Eq)]
+struct MachinePrefix {
+    selector: String,
+    /// `--dial`: a core machine that is not connected may be dialled
+    /// (core-phase5 D7). A saved SSH machine dials on every call anyway.
+    dial: bool,
+    args: Vec<String>,
+}
+
+fn parse_machine_prefix(args: &[String]) -> Result<Option<MachinePrefix>, String> {
     let mut index = 1;
     let mut machine = None;
+    let mut dial = false;
     let mut other_prefix = false;
     while let Some(arg) = args.get(index) {
-        if arg == "--machine" || arg.starts_with("--machine=") {
+        if arg == "--dial" {
+            if dial {
+                return Err("--dial can only be specified once".into());
+            }
+            dial = true;
+        } else if arg == "--machine" || arg.starts_with("--machine=") {
             if machine.is_some() {
                 return Err("--machine can only be specified once".into());
             }
@@ -248,17 +372,24 @@ fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>
         index += 1;
     }
     let Some(machine) = machine else {
+        if dial {
+            return Err("--dial applies only with --machine <name>".into());
+        }
         return Ok(None);
     };
     if other_prefix {
         return Err("--machine cannot be combined with other launch options; it uses the saved machine's session".into());
     }
     if index >= args.len() || args[index] == "--" {
-        return Err("usage: herdr --machine <label-or-id> <command>".into());
+        return Err("usage: herdr --machine <label-or-id> [--dial] <command>".into());
     }
     let mut cleaned = vec![args[0].clone()];
     cleaned.extend_from_slice(&args[index..]);
-    Ok(Some((machine, cleaned)))
+    Ok(Some(MachinePrefix {
+        selector: machine,
+        dial,
+        args: cleaned,
+    }))
 }
 
 pub(super) fn resolve_machine<'a>(
@@ -325,9 +456,11 @@ pub(super) fn with_test_client<T>(client: ApiClient, run: impl FnOnce() -> T) ->
     let _scope = TARGET.with(|target| {
         TargetScope(
             target.replace(Some(MachineTarget {
-                profile: SavedSshEndpoint::new("test-machine", "unused", "remote-session")
-                    .expect("valid test profile"),
-                bridge: None,
+                route: Route::Saved {
+                    profile: SavedSshEndpoint::new("test-machine", "unused", "remote-session")
+                        .expect("valid test profile"),
+                    bridge: None,
+                },
                 client_override: Some(client),
             })),
         )
@@ -351,10 +484,34 @@ mod tests {
             input.extend(args(&["agent", "prompt", "w4:p1", "--machine"]));
             assert_eq!(
                 parse_machine_prefix(&input).unwrap(),
-                Some((
-                    "mac".into(),
-                    args(&["herdr", "agent", "prompt", "w4:p1", "--machine"])
-                ))
+                Some(MachinePrefix {
+                    selector: "mac".into(),
+                    dial: false,
+                    args: args(&["herdr", "agent", "prompt", "w4:p1", "--machine"])
+                })
+            );
+        }
+        // `--dial` is a prefix flag only: after the command it is the
+        // command's own.
+        for input in [
+            args(&[
+                "herdr",
+                "--machine",
+                "m",
+                "--dial",
+                "pane",
+                "list",
+                "--dial",
+            ]),
+            args(&["herdr", "--dial", "--machine=m", "pane", "list", "--dial"]),
+        ] {
+            assert_eq!(
+                parse_machine_prefix(&input).unwrap(),
+                Some(MachinePrefix {
+                    selector: "m".into(),
+                    dial: true,
+                    args: args(&["herdr", "pane", "list", "--dial"])
+                })
             );
         }
         assert_eq!(
@@ -410,6 +567,16 @@ mod tests {
                 "other",
                 "--machine",
                 "mac",
+                "agent",
+                "list",
+            ]),
+            args(&["herdr", "--dial", "agent", "list"]),
+            args(&[
+                "herdr",
+                "--machine",
+                "m",
+                "--dial",
+                "--dial",
                 "agent",
                 "list",
             ]),

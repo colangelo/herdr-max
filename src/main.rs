@@ -869,7 +869,7 @@ fn main() -> io::Result<()> {
         println!();
         println!("Usage: herdr [options]");
         println!("       herdr --session <name> [options]");
-        println!("       herdr --machine <label-or-id> <command>");
+        println!("       herdr --machine <label-or-id> [--dial] <command>");
         println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
         println!("       herdr completion zsh");
@@ -968,7 +968,10 @@ fn main() -> io::Result<()> {
         println!();
         println!("Options:");
         println!("  --session <name>    Use or create a named persistent session");
-        println!("  --machine <label-or-id>  Run an API command on a saved SSH machine");
+        println!(
+            "  --machine <label-or-id>  Run an API command on a saved SSH or Herdr Core machine"
+        );
+        println!("  --dial              With --machine: reach a core machine that is not connected (opens ssh)");
         println!("  --remote <target>   Attach through SSH to a remote Herdr server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");

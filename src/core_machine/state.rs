@@ -1,8 +1,9 @@
 //! A core machine's link state on this Mac (core-phase5 D2): one private
 //! folder per machine under the account's passwd home, holding
 //! `target.json`, `gate.json`, `leases/`, `dial.lock`, `connect.lock`,
-//! `dial.json`, the link's `ssh_config` and `link.log`. Every file is parsed here, at the
-//! boundary; a file that does not parse is refused, never guessed at.
+//! `dial.json`, `far_herdr.json`, the link's `ssh_config` and `link.log`.
+//! Every file is parsed here, at the boundary; a file that does not parse is
+//! refused, never guessed at.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -117,6 +118,11 @@ impl MachineDir {
 
     pub(crate) fn log_path(&self) -> PathBuf {
         self.path.join("link.log")
+    }
+
+    /// The far herdr the fleet CLI found over the current link (D7).
+    pub(crate) fn far_herdr_path(&self) -> PathBuf {
+        self.path.join("far_herdr.json")
     }
 
     /// Appends one line to `link.log`, keeping one older log of 1 MiB.
@@ -435,8 +441,7 @@ impl LeaseHolder {
         Self(format!("client-{pid}"))
     }
 
-    /// A fleet CLI call's lease (D7; written from PR E on).
-    #[cfg(test)]
+    /// A fleet CLI call's lease (D7).
     pub(crate) fn cli(pid: u32) -> Self {
         Self(format!("cli-{pid}"))
     }

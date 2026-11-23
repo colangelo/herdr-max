@@ -6,13 +6,17 @@ mod completion;
 mod machine;
 
 pub(super) fn command() -> Command {
+    let machine = option("machine", "LABEL-OR-ID")
+        .help("Run an API command on a saved SSH or Herdr Core machine");
+    let dial = flag("dial").help("With --machine: dial a core machine that is not connected");
     let command = Command::new("herdr")
         .about("terminal workspace manager for AI coding agents")
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(help_flag())
         .arg(option("session", "NAME").help("Use or create a named persistent session"))
-        .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
+        .arg(machine)
+        .arg(dial)
         .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
         .arg(
             option("remote-keybindings", "MODE")

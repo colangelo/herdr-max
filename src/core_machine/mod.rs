@@ -5,6 +5,7 @@
 
 pub(crate) mod command;
 mod dialer;
+pub(crate) mod fleet;
 pub(crate) mod link;
 mod name;
 pub(crate) mod panes;
