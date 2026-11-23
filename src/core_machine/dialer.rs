@@ -356,11 +356,13 @@ mod tests {
         };
         assert!(second.wake());
         second.wake();
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(
-            core.lists.load(Ordering::SeqCst) > lists_before + 1,
-            "the second process did not poll"
-        );
+        // At least two polls, waited for rather than slept on: a loaded runner can
+        // let a fixed 100 ms pass with one 20 ms poll.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while core.lists.load(Ordering::SeqCst) <= lists_before + 1 {
+            assert!(Instant::now() < deadline, "the second process did not poll");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         core.release();
 
         let mut seen = Vec::new();
