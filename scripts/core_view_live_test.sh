@@ -39,6 +39,7 @@ VIEW_LOG="$BASE/c/herdr-dev/sessions/vw/herdr-view-loop.log"
 VIEW_LOCK="$BASE/c/herdr-dev/sessions/vw/herdr-view-loop.lock"
 FAR_LOG_DIR="$BASE/fc/herdr-dev/sessions/far"
 VIEW_PID=""
+M6_PID=""
 PROXY_PID=""
 FAR_PID=""
 
@@ -69,6 +70,7 @@ cleanup() {
   set +e
   tm kill-server >/dev/null 2>&1
   [[ -n "$VIEW_PID" ]] && kill "$VIEW_PID" 2>/dev/null
+  [[ -n "$M6_PID" ]] && kill "$M6_PID" 2>/dev/null
   stop_locked_view
   far "$HERDR_BIN" --session far server stop >/dev/null 2>&1
   [[ -n "$FAR_PID" ]] && kill "$FAR_PID" 2>/dev/null
@@ -457,8 +459,25 @@ sleep 3
   || fail "M2: a client of the same build restarted the view"
 [[ "$(far_pid "$FAR_ADDR")" == "$FAR_PROGRAM" ]] || fail "M2: the restart ended the far program"
 echo "ok: M2 a newer client restarted view $FIRST_VIEW as $second_view; a client of its build kept it; far program $FAR_PROGRAM ran on"
-# m2a ran on the view that was restarted, so it may have ended already.
+# What a restart does to a `--remote core:` tab on the old view (PR D's
+# second read, item 4): said, not asserted.
+if tm has-session -t m2a 2>/dev/null; then m2a_after="still open"; else m2a_after="ended with its view"; fi
+echo "note: the --remote core: tab on the restarted view: $m2a_after"
 for session in m2a m2b m2c; do tm kill-session -t "$session" 2>/dev/null || true; done
 stop_locked_view
+
+# --- M6 (review): a view started in a session named `server` is a view: it
+# makes only the view's lock, log and socket, never the primary's API or
+# client socket or a session file.
+M6_DIR="$BASE/c/herdr-dev/sessions/server"
+near "$HERDR_BIN" --session server server --view loop >"$BASE/m6.out" 2>&1 &
+M6_PID=$!
+WAIT_TRIES=300 wait_until "the view in the session named server" test -S "$M6_DIR/herdr-view-loop.sock"
+sleep 1
+for primary_file in herdr.sock herdr-client.sock session.json; do
+  [[ ! -e "$M6_DIR/$primary_file" ]] || fail "M6: a view in session server made $primary_file: $(ls "$M6_DIR")"
+done
+kill "$M6_PID" 2>/dev/null; wait "$M6_PID" 2>/dev/null; M6_PID=""
+echo "ok: M6 a view in a session named server made only $(ls "$M6_DIR" | tr '\n' ' ')"
 
 echo "core view live test: all checks passed"

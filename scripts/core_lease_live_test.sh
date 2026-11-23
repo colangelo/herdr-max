@@ -5,8 +5,8 @@
 # V2 (a lease's end closes the link), V7 (a core start while dormant dials
 # nothing), V3 (dormant means zero link bytes), V38 (a refusing far side
 # costs at most 2 dials) beside V3 on a second far core, then a TUI client
-# in a pty (no lease at its start, its first key's lease, the wake through
-# its dialer, one write a minute, no lease in a folder its primary does not
+# in a pty (no lease at its start, its first key's lease and no dial from it,
+# one write a minute, no lease in a folder its primary does not
 # list), V33's wake part with `herdr machine wake` and its view part (a
 # view's first client through `--remote core:<machine>`, PR D: no dial
 # until a key). Every time
@@ -323,11 +323,12 @@ wait "$V38_PID" || { cat "$BASE/v38.log" >&2; V38_PID=""; fail "V38 failed (log 
 V38_PID=""
 cat "$BASE/v38.log"
 
-# --- B.2, B.5, review M3 and H7: a TUI client writes no lease at its start
-# (opening herdr dials nothing); its first key writes it, before its
-# dialer's connect, and a dormant machine connects at once, not at core's
-# next retry (30 s apart by now); input within the minute writes nothing
-# more. It writes no lease into a folder its primary core does not list.
+# --- B.2, review M3 and H7, item 1 of PR D's second read: a TUI client
+# writes no lease at its start (opening herdr dials nothing); its first key,
+# in a pane of this Mac, writes it and dials nothing: a lease write wakes no
+# machine (a key in a pane on the machine, or in a view of it, does: V33's
+# view part below). Input within the minute writes nothing more. It writes
+# no lease into a folder its primary core does not list.
 cat > "$BASE/client_pty.py" <<'PY'
 import fcntl, os, pty, select, signal, struct, sys, termios, time
 hold, keys_from = float(sys.argv[1]), float(sys.argv[2])
@@ -377,24 +378,24 @@ sleep 2.5   # the client runs; its first key comes at 4 s
 wait_for "the client's lease after its first key" 6 test -f "$CLIENT_LEASE"
 ge "$(mtime "$CLIENT_LEASE")" "$(python3 -I -c 'import sys; print(float(sys.argv[1]) + 3.5)' "$client_start")" \
   || fail "M3: the client's lease came before its first key"
-wait_for "$L connected by the client's wake" 4 state_is "$L" connected
-connected_after="$(since "$client_start")"
-le "$(mtime "$CLIENT_LEASE")" "$(log_time "$L" START $((starts_before + 1)))" \
-  || { echo "lease mtime $(mtime "$CLIENT_LEASE"), client start $client_start; link log since:" >&2
-       awk -v t="$client_start" '$1 >= t - 5' "$(link_log "$L")" >&2
-       fail "the client's lease came after the dial it led to"; }
 lease_text="$(cat "$CLIENT_LEASE")"
-sleep 8   # keys from 4 s on, every 0.5 s
+sleep 8   # keys from 4 s on, every 0.5 s; core's own retry is ~30 s after the refused one
 [[ "$(cat "$CLIENT_LEASE")" == "$lease_text" ]] || fail "the client wrote its lease again within the minute"
+[[ "$(log_count "$L" "EXEC")" == "$execs_at_start" ]] \
+  || { awk -v t="$client_start" '$1 >= t - 5' "$(link_log "$L")" >&2
+       fail "item 1: the client's lease write dialled $L"; }
 wait "$client_runner" || true
 [[ -z "$(ls -A "$LINK_ROOT/$U/leases")" ]] || fail "H7: the client wrote a lease into $U, which its primary core does not list: $(ls "$LINK_ROOT/$U/leases")"
 rm -rf "${LINK_ROOT:?}/$U"
 ends="$(log_count "$L" "LEASE END")"
 rm -f "$LINK_ROOT"/*/leases/"client-$CLIENT_PID"
-echo "ok: B.2/B.5/M3/H7 no lease and no dial at the client's start; its first key's lease preceded its dial; $L connected ${connected_after}s after the client started; keys within the minute wrote nothing; no lease in a folder its primary does not list"
+echo "ok: B.2/M3/H7/item 1 no lease and no dial at the client's start; its first key wrote the lease and dialled nothing; keys within the minute wrote nothing; no lease in a folder its primary does not list"
 
 # --- V33 (wake part) and V35's reopening: herdr machine wake from dormant
-wait_for "$L dormant after the client" 15 more_in_log "$L" "LEASE END" "$ends"
+# (only a core retry inside the client's window could have linked it).
+if state_is "$L" connected; then
+  wait_for "$L dormant after the client" 15 more_in_log "$L" "LEASE END" "$ends"
+fi
 wait_for "$L unreachable" 15 state_is "$L" unreachable
 wake_start="$(now)"
 starts_before="$(log_count "$L" "START")"
