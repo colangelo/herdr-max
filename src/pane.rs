@@ -390,13 +390,16 @@ impl PaneLaunch {
     /// gets inline graphics only, no clipboard writes, and its reported
     /// folder is the far host's, never this Mac's.
     fn far_output(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            PaneLaunch::Command { machine, .. } => machine.is_some(),
-            #[cfg(not(unix))]
-            PaneLaunch::Command { .. } => false,
-            #[cfg(unix)]
-            PaneLaunch::ReattachCore { link, .. } => link.machine().is_some(),
+        #[cfg(unix)]
+        {
+            match self {
+                PaneLaunch::Command { machine, .. } => machine.is_some(),
+                PaneLaunch::ReattachCore { link, .. } => link.machine().is_some(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 
@@ -404,15 +407,19 @@ impl PaneLaunch {
     /// the saved link named it: far metadata for the save, never this
     /// Mac's cwd.
     fn far_cwd(&self) -> Option<std::path::PathBuf> {
-        match self {
-            #[cfg(unix)]
-            PaneLaunch::Command {
-                machine: Some(machine),
-                ..
-            } => machine.cwd.as_ref().map(std::path::PathBuf::from),
-            #[cfg(unix)]
-            PaneLaunch::ReattachCore { link, .. } => link.machine_cwd.clone(),
-            _ => None,
+        #[cfg(unix)]
+        {
+            match self {
+                PaneLaunch::Command { machine, .. } => machine
+                    .as_ref()
+                    .and_then(|machine| machine.cwd.as_ref())
+                    .map(std::path::PathBuf::from),
+                PaneLaunch::ReattachCore { link, .. } => link.machine_cwd.clone(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            None
         }
     }
 }
