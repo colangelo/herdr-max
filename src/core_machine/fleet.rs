@@ -1,6 +1,6 @@
 //! `herdr --machine <name>` to a Herdr Core machine (core-phase5 D7, E.1,
 //! E.2): the fleet CLI's requests go to the far side's own herdr through
-//! `machine.exec` of `<far herdr> --session S remote-api-bridge`, with the
+//! `machine.exec` of `<far herdr> --session S remote-api-bridge --request`, with the
 //! request line as its input. Those are the bytes `remote-api-bridge` reads
 //! from ssh on the old path, so the reply is the far side's own, with its
 //! pane ids.
@@ -83,7 +83,10 @@ const FAR_HERDR_TTL_SECS: f64 = 300.0;
 /// How long dropping the bridge waits for a request still in flight.
 const BRIDGE_JOIN_WAIT: Duration = Duration::from_millis(500);
 
-/// Finds the far herdr that answers `remote-api-bridge --check`, by the
+/// Finds the far herdr that answers `remote-api-bridge --check` and
+/// `remote-api-bridge --request --check` (the one-request bridge, which a
+/// waiting request needs: `machine.exec` closes stdin once the request is
+/// in, and the stream bridge passes that end on to the API), by the
 /// names given as arguments after the far herdr session, on the far `PATH`
 /// and in the usual install folders, and prints it with its `status client
 /// --json` for that session. A fixed script: names come as arguments, never
@@ -101,12 +104,14 @@ for name do
         [ -x "$candidate" ] || continue
         capability=$("$candidate" remote-api-bridge --check </dev/null 2>/dev/null) || continue
         [ "$capability" = herdr-api-bridge-v1 ] || continue
+        request=$("$candidate" remote-api-bridge --request --check </dev/null 2>/dev/null) || continue
+        [ "$request" = herdr-api-request-v1 ] || continue
         printf 'herdr-probe-v1\n%s\n' "$candidate"
         "$candidate" --session "$session" status client --json </dev/null 2>/dev/null
         exit 0
     done
 done
-echo 'no herdr there answers remote-api-bridge' >&2
+echo 'no herdr there answers remote-api-bridge --request' >&2
 exit 2"#;
 
 /// What `herdr --machine <selector>` found among core machines.
@@ -589,6 +594,10 @@ pub(crate) struct FarHerdr {
     /// (absent from a herdr older than this field).
     #[serde(default)]
     pub core_session: Option<String>,
+    /// It answers `remote-api-bridge --request`: false in a probe kept by
+    /// an older build, which is probed again.
+    #[serde(default)]
+    pub request_bridge: bool,
 }
 
 /// The far herdr found over the machine's current link, if one was.
@@ -612,7 +621,9 @@ fn far_herdr(
 ) -> Result<FarHerdr, String> {
     let now = now_unix();
     let far = match cached_far_herdr(dir).filter(|cached| {
-        cached.session == session && (0.0..FAR_HERDR_TTL_SECS).contains(&(now - cached.probed_at))
+        cached.session == session
+            && cached.request_bridge
+            && (0.0..FAR_HERDR_TTL_SECS).contains(&(now - cached.probed_at))
     }) {
         Some(cached) => cached,
         None => probe_far_herdr(core, name, dir, session)?,
@@ -638,8 +649,8 @@ fn probe_far_herdr(
     let done = exec(core, name, &argv, None, PROBE_SECS)?;
     if done.code != Some(0) {
         return Err(format!(
-            "no herdr on {name} answers remote-api-bridge (looked for {} on its PATH and in ~/.local/bin, \
-             /opt/homebrew/bin, /usr/local/bin): {}; install Herdr there",
+            "no herdr on {name} answers remote-api-bridge --request (looked for {} on its PATH and in \
+             ~/.local/bin, /opt/homebrew/bin, /usr/local/bin): {}; install or update Herdr there",
             binary_names().join(", "),
             done.stderr_tail()
         ));
@@ -656,6 +667,7 @@ fn probe_far_herdr(
         protocol: status.protocol,
         endpoint_capabilities: status.endpoint_capabilities,
         core_session: status.core_session,
+        request_bridge: true,
     };
     if link.is_some() {
         match serde_json::to_vec_pretty(&far) {
@@ -914,6 +926,7 @@ fn bridge_argv(far: &FarHerdr, session: &str) -> Vec<String> {
         "--session".into(),
         session.to_string(),
         "remote-api-bridge".into(),
+        "--request".into(),
     ]);
     argv
 }

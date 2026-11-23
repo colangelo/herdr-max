@@ -43,6 +43,7 @@ fn far() -> FarHerdr {
         protocol: Some(30),
         endpoint_capabilities: Vec::new(),
         core_session: None,
+        request_bridge: true,
     }
 }
 
@@ -182,7 +183,8 @@ fn the_request_argv_is_the_wrapper_and_the_far_bridge() {
             "/opt/homebrew/bin/herdr-beta",
             "--session",
             "work",
-            "remote-api-bridge"
+            "remote-api-bridge",
+            "--request"
         ]
     );
 }
@@ -670,7 +672,7 @@ fn the_far_herdr_is_probed_once_per_link() {
 fn a_far_side_without_herdr_is_a_failure_naming_what_was_looked_for() {
     let core = FakeCore::start_with(|config| {
         config.exec_reply = Some(
-            json!({"stdout": "", "stderr": b64(b"no herdr there answers remote-api-bridge\n"),
+            json!({"stdout": "", "stderr": b64(b"no herdr there answers remote-api-bridge --request\n"),
             "truncated": false, "timed_out": false, "ms": 1, "code": 2}),
         )
     });
@@ -684,11 +686,13 @@ fn a_far_side_without_herdr_is_a_failure_naming_what_was_looked_for() {
     )
     .expect_err("none");
     assert!(
-        error.starts_with("no herdr on loop answers remote-api-bridge"),
+        error.starts_with("no herdr on loop answers remote-api-bridge --request"),
         "{error}"
     );
     assert!(
-        error.ends_with("no herdr there answers remote-api-bridge; install Herdr there"),
+        error.ends_with(
+            "no herdr there answers remote-api-bridge --request; install or update Herdr there"
+        ),
         "{error}"
     );
     assert!(!dir.far_herdr_path().exists());
@@ -709,9 +713,14 @@ fn the_probe_script_finds_the_named_herdr() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("mode");
     };
     fake("herdr-old", "exit 2");
+    // A herdr from before the one-request bridge: skipped.
+    fake(
+        "herdr-stream",
+        r#"case "$*" in "remote-api-bridge --check") echo herdr-api-bridge-v1 ;; *) exit 1 ;; esac"#,
+    );
     fake(
         "herdr",
-        r#"case "$*" in "remote-api-bridge --check") echo herdr-api-bridge-v1 ;; "--session work status client --json") echo '{"version":"9.9.9","core_session":"herdr-work"}' ;; *) exit 3 ;; esac"#,
+        r#"case "$*" in "remote-api-bridge --check") echo herdr-api-bridge-v1 ;; "remote-api-bridge --request --check") echo herdr-api-request-v1 ;; "--session work status client --json") echo '{"version":"9.9.9","core_session":"herdr-work"}' ;; *) exit 3 ;; esac"#,
     );
     let out = std::process::Command::new("/bin/sh")
         .args([
@@ -720,6 +729,7 @@ fn the_probe_script_finds_the_named_herdr() {
             "herdr-probe",
             "work",
             "herdr-old",
+            "herdr-stream",
             "herdr",
         ])
         .env_clear()
@@ -733,7 +743,14 @@ fn the_probe_script_finds_the_named_herdr() {
     assert_eq!(status.version.as_deref(), Some("9.9.9"));
     assert_eq!(status.core_session.as_deref(), Some("herdr-work"));
     let none = std::process::Command::new("/bin/sh")
-        .args(["-c", PROBE_SCRIPT, "herdr-probe", "work", "herdr-old"])
+        .args([
+            "-c",
+            PROBE_SCRIPT,
+            "herdr-probe",
+            "work",
+            "herdr-old",
+            "herdr-stream",
+        ])
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &root)
