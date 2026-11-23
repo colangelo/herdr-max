@@ -1807,6 +1807,16 @@
           "type": "boolean",
           "default": "true",
           "description": "Use a generated ssh config with private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        },
+        {
+          "key": "remote.prefer",
+          "type": "enum",
+          "default": "\"ssh\"",
+          "description": "Which path `herdr --machine <name>` takes when a saved herdr machine and a Herdr Core machine share the name: `ssh` (the saved machine) or `core`.",
+          "values": [
+            "ssh",
+            "core"
+          ]
         }
       ]
     },
