@@ -22,6 +22,11 @@ use crate::view::lifetime::ViewPresence;
 use crate::view::watch::ViewEvent;
 use crate::workspace::{public_tab_id_for_number, Tab, Workspace};
 
+/// The most far attaches a view runs at once (review M5): each holds a
+/// blocking thread for its `terminal.get` and attach, so a far layout that
+/// churns its terminals cannot stack them up; the rest wait their turn.
+const MAX_ATTACHING: usize = 8;
+
 /// What the view knows beyond its workspaces.
 pub(crate) struct ViewApp {
     pub(crate) machine: MachineName,
@@ -30,8 +35,13 @@ pub(crate) struct ViewApp {
     far_panes: HashMap<PaneId, String>,
     /// The terminal shown for each far address (`<machine>/t7`).
     terminals: HashMap<String, TerminalId>,
-    /// Addresses whose attach is under way.
-    attaching: HashSet<String>,
+    /// Addresses whose attach is under way, with the generation of that
+    /// attach: a completion of another generation is an obsolete one
+    /// (review M5), detached at once.
+    attaching: HashMap<String, u64>,
+    next_attach: u64,
+    /// Attaches waiting for one of the `MAX_ATTACHING` slots.
+    waiting: Vec<(String, PaneId)>,
     /// Far sizes (rows, cols) as core last reported them.
     far_sizes: HashMap<String, (u16, u16)>,
     /// The view's notice line (dormant, waking, nothing published), shown
@@ -54,7 +64,9 @@ impl ViewApp {
             pane_ids: HashMap::new(),
             far_panes: HashMap::new(),
             terminals: HashMap::new(),
-            attaching: HashSet::new(),
+            attaching: HashMap::new(),
+            next_attach: 0,
+            waiting: Vec::new(),
             far_sizes: HashMap::new(),
             notice: None,
             bound: HashMap::new(),
@@ -120,7 +132,7 @@ impl Build<'_> {
                     .terminals
                     .get(&terminal_id)
                     .is_some_and(|state| state.restore_error.is_some())
-                    && !self.view.attaching.contains(&address)
+                    && !self.view.attaching.contains_key(&address)
                 {
                     self.to_attach.push((address.clone(), pane_id));
                 }
@@ -222,22 +234,37 @@ impl App {
                 cols,
             } => self.follow_view_size(address, rows, cols),
             ViewEvent::Status { address, status } => self.apply_view_status(&address, &status),
-            ViewEvent::Attached { address, runtime } => {
-                self.install_view_runtime(address, *runtime)
-            }
-            ViewEvent::AttachFailed { address, reason } => {
-                let Some(view) = self.view.as_mut() else {
-                    return;
-                };
-                view.attaching.remove(&address);
-                if let Some(state) = view
-                    .terminals
-                    .get(&address)
-                    .and_then(|terminal_id| self.state.terminals.get_mut(terminal_id))
-                {
-                    state.restore_error = Some(reason);
-                    state.revision = state.revision.saturating_add(1);
+            ViewEvent::Attached {
+                address,
+                generation,
+                runtime,
+            } => {
+                if self.finish_view_attach(&address, generation) {
+                    self.install_view_runtime(address, *runtime);
+                } else {
+                    // An attach the layout has since dropped or asked for
+                    // again (review M5): detached, never shown.
+                    runtime.shutdown();
                 }
+                self.start_waiting_view_attaches();
+            }
+            ViewEvent::AttachFailed {
+                address,
+                generation,
+                reason,
+            } => {
+                if self.finish_view_attach(&address, generation) {
+                    if let Some(state) = self
+                        .view
+                        .as_ref()
+                        .and_then(|view| view.terminals.get(&address))
+                        .and_then(|terminal_id| self.state.terminals.get_mut(terminal_id))
+                    {
+                        state.restore_error = Some(reason);
+                        state.revision = state.revision.saturating_add(1);
+                    }
+                }
+                self.start_waiting_view_attaches();
             }
         }
     }
@@ -318,8 +345,10 @@ impl App {
             .filter(|(address, _)| !used.contains(*address))
             .map(|(address, id)| (address.clone(), id.clone()))
             .collect();
-        // Sizes of terminals the layout no longer shows go too (review M5).
+        // Sizes of terminals the layout no longer shows go too, and so do
+        // their waiting attaches (review M5).
         view.far_sizes.retain(|address, _| used.contains(address));
+        view.waiting.retain(|(address, _)| used.contains(address));
         for (address, terminal_id) in gone {
             view.terminals.remove(&address);
             view.attaching.remove(&address);
@@ -463,7 +492,7 @@ impl App {
             ));
             state.revision = state.revision.saturating_add(1);
             view.held.insert(pane_id);
-            if !view.attaching.contains(&address) {
+            if !view.attaching.contains_key(&address) {
                 self.request_view_attach(&mut view, address, pane_id);
             }
         }
@@ -473,12 +502,58 @@ impl App {
         true
     }
 
+    /// Whether an attach completion of `generation` is the one under way
+    /// for `address`; if so, it is no longer under way.
+    fn finish_view_attach(&mut self, address: &str, generation: u64) -> bool {
+        let Some(view) = self.view.as_mut() else {
+            return false;
+        };
+        if view.attaching.get(address) != Some(&generation) {
+            return false;
+        }
+        view.attaching.remove(address);
+        true
+    }
+
+    /// Starts waiting attaches while slots are free, for terminals the
+    /// layout still shows and that are still not attached.
+    fn start_waiting_view_attaches(&mut self) {
+        let Some(mut view) = self.view.take() else {
+            return;
+        };
+        while view.attaching.len() < MAX_ATTACHING && !view.waiting.is_empty() {
+            let (address, pane_id) = view.waiting.remove(0);
+            let unattached = view
+                .terminals
+                .get(&address)
+                .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+                .is_some_and(|state| state.restore_error.is_some());
+            if unattached && !view.attaching.contains_key(&address) {
+                self.request_view_attach(&mut view, address, pane_id);
+            }
+        }
+        self.view = Some(view);
+    }
+
     fn request_view_attach(&mut self, view: &mut ViewApp, address: String, pane_id: PaneId) {
+        if view.attaching.contains_key(&address) {
+            return;
+        }
+        if view.attaching.len() >= MAX_ATTACHING {
+            if !view.waiting.iter().any(|(waiting, _)| *waiting == address) {
+                view.waiting.push((address, pane_id));
+            }
+            return;
+        }
+        view.next_attach += 1;
+        let generation = view.next_attach;
+        view.attaching.insert(address.clone(), generation);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // The server loop always runs on its runtime; only a unit test
+            // gets here, and its attach stays under way.
             tracing::warn!(%address, "no runtime to attach a view pane on");
             return;
         };
-        view.attaching.insert(address.clone());
         let events = self.event_tx.clone();
         let render_notify = self.render_notify.clone();
         let render_dirty = self.render_dirty.clone();
@@ -494,10 +569,12 @@ impl App {
             ) {
                 Ok(runtime) => ViewEvent::Attached {
                     address,
+                    generation,
                     runtime: Box::new(runtime),
                 },
                 Err(err) => ViewEvent::AttachFailed {
                     address,
+                    generation,
                     reason: format!("{err}; it is asked for again when the far layout changes or the link comes back"),
                 },
             };
@@ -510,7 +587,6 @@ impl App {
             runtime.shutdown();
             return;
         };
-        view.attaching.remove(&address);
         let Some(terminal_id) = view.terminals.get(&address).cloned() else {
             // Gone from the layout meanwhile: detach.
             runtime.shutdown();
@@ -948,6 +1024,70 @@ mod tests {
             !view.far_sizes.contains_key("loop/t1"),
             "a gone terminal's size goes with it"
         );
+    }
+
+    // M5 (security review): at most MAX_ATTACHING far attaches run at once;
+    // the rest wait and start as slots free. A completion of an attach the
+    // layout has since dropped or asked for again is detached, never shown,
+    // and a dropped terminal's waiting attach goes with it.
+    #[test]
+    fn far_attaches_are_capped_and_obsolete_ones_are_detached() {
+        let mut app = app();
+        let children: Vec<serde_json::Value> = (1..=20)
+            .map(|n| block(&format!("w3:p{n}"), &format!("t{n}")))
+            .collect();
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": children}}
+        ]))));
+        let view = app.view.as_ref().unwrap();
+        assert_eq!(view.attaching.len(), MAX_ATTACHING);
+        assert_eq!(view.waiting.len(), 20 - MAX_ATTACHING);
+
+        let first = |app: &App| {
+            let view = app.view.as_ref().unwrap();
+            let mut under_way: Vec<(String, u64)> = view
+                .attaching
+                .iter()
+                .map(|(address, generation)| (address.clone(), *generation))
+                .collect();
+            under_way.sort();
+            under_way.remove(0)
+        };
+        let (address, generation) = first(&app);
+        app.handle_view_event(ViewEvent::AttachFailed {
+            address,
+            generation,
+            reason: "far core away".into(),
+        });
+        let view = app.view.as_ref().unwrap();
+        assert_eq!(view.attaching.len(), MAX_ATTACHING, "a waiting one started");
+        assert_eq!(view.waiting.len(), 20 - MAX_ATTACHING - 1);
+
+        let (address, generation) = first(&app);
+        // A runtime for the test pane only; every slot is taken, so no attach
+        // starts on it.
+        let tokio = tokio::runtime::Runtime::new().expect("a runtime");
+        let entered = tokio.enter();
+        let (runtime, _input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.handle_view_event(ViewEvent::Attached {
+            address: address.clone(),
+            generation: generation + 1000,
+            runtime: Box::new(runtime),
+        });
+        drop(entered);
+        assert_eq!(app.terminal_runtimes.len(), 0, "an obsolete attach is never shown");
+        assert_eq!(
+            app.view.as_ref().unwrap().attaching.get(&address),
+            Some(&generation),
+            "the current attach is still under way"
+        );
+
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [block("w3:p1", "t1")]}}
+        ]))));
+        let view = app.view.as_ref().unwrap();
+        assert!(view.waiting.is_empty(), "{:?}", view.waiting);
+        assert!(view.attaching.keys().all(|address| address == "loop/t1"));
     }
 
     #[test]

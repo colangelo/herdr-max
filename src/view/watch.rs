@@ -35,6 +35,10 @@ const RESUBSCRIBE: Duration = Duration::from_secs(2);
 const LAYOUT_RETRY: Duration = Duration::from_secs(1);
 const LAYOUT_RETRY_MAX: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_millis(250);
+/// The least time between two layout reads (review M5): a far herdr that
+/// changes its document many times a second costs the view two reads and
+/// two projections a second, the last state included.
+const LAYOUT_EVERY: Duration = Duration::from_millis(500);
 /// The far hc version D9 asks for.
 const MIN_FAR_VERSION: (u64, u64, u64) = (0, 1, 21);
 
@@ -53,14 +57,20 @@ pub(crate) enum ViewEvent {
     },
     /// The far terminal's 7501 record, as the far herdr mirrors its verdict.
     Status { address: String, status: Value },
-    /// A pane's far terminal attached, off the loop.
+    /// A pane's far terminal attached, off the loop; `generation` names
+    /// the attach (review M5).
     Attached {
         address: String,
+        generation: u64,
         runtime: Box<crate::terminal::TerminalRuntime>,
     },
     /// It could not attach; the pane says why and is asked for again on the
     /// next layout or wake.
-    AttachFailed { address: String, reason: String },
+    AttachFailed {
+        address: String,
+        generation: u64,
+        reason: String,
+    },
 }
 
 impl std::fmt::Debug for ViewEvent {
@@ -77,7 +87,9 @@ impl std::fmt::Debug for ViewEvent {
             }
             Self::Status { address, .. } => write!(f, "Status({address})"),
             Self::Attached { address, .. } => write!(f, "Attached({address})"),
-            Self::AttachFailed { address, reason } => {
+            Self::AttachFailed {
+                address, reason, ..
+            } => {
                 write!(f, "AttachFailed({address}: {reason})")
             }
         }
@@ -175,6 +187,9 @@ pub(crate) struct Watcher<S> {
     /// After a failed `doc.get`: not before this, and the pause after the
     /// next failure.
     layout_retry: Option<(Instant, Duration)>,
+    /// When the layout was last read (review M5: at most one read per
+    /// `LAYOUT_EVERY`).
+    last_layout_read: Option<Instant>,
     /// The count of view inputs (`ViewPresence::inputs`) the last wake
     /// answered: one wake per person's input, never one per state read.
     woken_for: u64,
@@ -208,6 +223,7 @@ impl<S: ViewSource> Watcher<S> {
             next_subscribe: now,
             layout_due: true,
             layout_retry: None,
+            last_layout_read: None,
             woken_for: 0,
             read_for: 0,
             last_layout: None,
@@ -271,16 +287,20 @@ impl<S: ViewSource> Watcher<S> {
                 };
             self.read_state(now);
         }
-        let layout_waits = self.layout_retry.is_some_and(|(at, _)| now < at);
+        let layout_waits = self.layout_retry.is_some_and(|(at, _)| now < at)
+            || self
+                .last_layout_read
+                .is_some_and(|at| now.saturating_duration_since(at) < LAYOUT_EVERY);
         if self.layout_due && self.connected() && !layout_waits {
             self.layout_due = false;
+            self.last_layout_read = Some(now);
             self.read_layout(now, &mut out);
         }
         if !self.sent_notice {
             self.sent_notice = true;
             out.push(ViewEvent::Notice(self.notice.clone()));
         }
-        out
+        coalesce(out)
     }
 
     fn set_notice(&mut self, notice: Option<String>) {
@@ -436,6 +456,25 @@ impl<S: ViewSource> Watcher<S> {
     }
 }
 
+/// One far size and one status per terminal per tick, the latest (review
+/// M5): a burst of far resizes is one grid resize, not one each.
+fn coalesce(events: Vec<ViewEvent>) -> Vec<ViewEvent> {
+    use std::collections::HashSet;
+    let mut sized = HashSet::new();
+    let mut statused = HashSet::new();
+    let mut kept: Vec<ViewEvent> = events
+        .into_iter()
+        .rev()
+        .filter(|event| match event {
+            ViewEvent::FarSize { address, .. } => sized.insert(address.clone()),
+            ViewEvent::Status { address, .. } => statused.insert(address.clone()),
+            _ => true,
+        })
+        .collect();
+    kept.reverse();
+    kept
+}
+
 fn away_notice(machine: &MachineName, state: &str, leased: bool) -> String {
     match (state, leased) {
         ("needs_login", _) => format!("{machine} needs a login: run herdr machine login {machine}"),
@@ -577,11 +616,13 @@ mod tests {
             layouts(&watch.tick(now, Duration::ZERO)).is_empty(),
             "nothing changed"
         );
+        let now = now + LAYOUT_EVERY;
         watch.source.doc = space_doc("api, renamed");
         watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
         let changed = watch.tick(now, Duration::ZERO);
         assert_eq!(layouts(&changed)[0].spaces[0].name, "api, renamed");
 
+        let now = now + LAYOUT_EVERY;
         watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
         assert!(
             layouts(&watch.tick(now, Duration::ZERO)).is_empty(),
@@ -602,10 +643,12 @@ mod tests {
         assert_eq!(layouts(&watch.tick(now, Duration::ZERO)).len(), 1);
         watch.source.doc = json!({"spaces": [{"id": "../../x", "herdr_max": 1}]});
         watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
+        let now = now + LAYOUT_EVERY;
         assert!(layouts(&watch.tick(now, Duration::ZERO)).is_empty());
         assert!(watch.warned_bad);
         watch.source.doc = space_doc("good");
         watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
+        let now = now + LAYOUT_EVERY;
         assert!(
             layouts(&watch.tick(now, Duration::ZERO)).is_empty(),
             "back to the same good layout"
@@ -739,6 +782,61 @@ mod tests {
         assert!(notice.contains("hc machine update loop"), "{notice}");
     }
 
+    // M5 (security review): a far herdr changing its document many times a
+    // second costs at most one layout read per LAYOUT_EVERY, and its last
+    // document still arrives; a burst of far resizes in one tick is one size
+    // per terminal, the latest.
+    #[test]
+    fn far_churn_is_coalesced() {
+        let (mut watch, _) = watcher(Fake {
+            doc: space_doc("v0"),
+            state: Some(("connected".into(), "0.1.21".into())),
+            ..Fake::default()
+        });
+        let start = Instant::now();
+        watch.tick(start, Duration::ZERO);
+        assert_eq!(watch.source.layout_reads, 1);
+        let mut last = Vec::new();
+        for step in 1..=40u32 {
+            watch.source.doc = space_doc(&format!("v{step}"));
+            watch.source.facts.push_back(vec![ViewFact::LayoutChanged]);
+            let events = watch.tick(start + Duration::from_millis(u64::from(step) * 25), Duration::ZERO);
+            last.extend(layouts(&events).into_iter().map(|layout| layout.spaces[0].name.clone()));
+        }
+        assert!(
+            watch.source.layout_reads <= 3,
+            "40 doc events in 1 s read the layout {} times",
+            watch.source.layout_reads
+        );
+        let settled = watch.tick(start + Duration::from_secs(2), Duration::ZERO);
+        last.extend(layouts(&settled).into_iter().map(|layout| layout.spaces[0].name.clone()));
+        assert_eq!(last.last().map(String::as_str), Some("v40"), "the last document arrives");
+
+        watch.source.facts.push_back(
+            (0..100u16)
+                .map(|step| ViewFact::Size {
+                    address: "loop/t1".into(),
+                    rows: 20 + step % 7,
+                    cols: 80,
+                })
+                .chain([ViewFact::Size {
+                    address: "loop/t2".into(),
+                    rows: 10,
+                    cols: 10,
+                }])
+                .collect(),
+        );
+        let sizes: Vec<(String, u16)> = watch
+            .tick(start + Duration::from_secs(3), Duration::ZERO)
+            .into_iter()
+            .filter_map(|event| match event {
+                ViewEvent::FarSize { address, rows, .. } => Some((address, rows)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [("loop/t1".to_string(), 20 + 99 % 7), ("loop/t2".to_string(), 10)]);
+    }
+
     #[test]
     fn sizes_and_status_of_the_snapshot_reach_the_loop() {
         let (mut watch, _) = watcher(Fake {
@@ -768,7 +866,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sizes, [(30, 100), (25, 90)]);
+        assert_eq!(sizes, [(25, 90)], "the latest size of the tick");
         assert!(events
             .iter()
             .any(|event| matches!(event, ViewEvent::Status { .. })));
