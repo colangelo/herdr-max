@@ -82,7 +82,7 @@ trap cleanup EXIT
 
 fail() {
   echo "FAIL: $*" >&2
-  for f in "${LINK_ROOT:-/nonexistent}"/t$$-*/link.log; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 30 "$f"; for g in "$(dirname "$f")"/gate.json "$(dirname "$f")"/leases/*; do [[ -f "$g" ]] && echo "  $(basename "$g"): $(cat "$g")"; done; } >&2; done
+  for f in "${LINK_ROOT:-/nonexistent}"/t$$-*/link.log "${FL_ROOT:-/nonexistent}"/f$$-*/link.log; do [[ -f "$f" ]] && { echo "--- $f ---"; tail -n 30 "$f"; for g in "$(dirname "$f")"/gate.json "$(dirname "$f")"/leases/*; do [[ -f "$g" ]] && echo "  $(basename "$g"): $(cat "$g")"; done; } >&2; done
   [[ -f "$BASE/bytes.log" ]] && { echo "--- bytes tail ---"; tail -n 5 "$BASE/bytes.log"; } >&2
   echo "--- server log tail ---" >&2
   tail -n 40 "$CONFIG_HOME"/herdr-dev/sessions/"$SESSION"/*.log 2>/dev/null >&2 || true

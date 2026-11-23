@@ -325,6 +325,7 @@ echo "ok: V32 --dial wrote its lease before the one dial, gave the far JSON, and
 # it, and only it.
 fl_wait "$FT dormant before the drop" 20 fl_is unreachable
 starts="$(fl_ssh_starts)"
+settled="$(fl_log_count "SETTLED")"
 fleet_cli_bg --machine "$FT" --dial pane wait-output "$FL_PANE" --match "never-printed-$$" --timeout 30000 \
   >"$BASE/fl-drop.out" 2>"$BASE/fl-drop.err"
 drop_pid=$!
@@ -333,6 +334,9 @@ fl_wait "$FT connected for the call" 10 fl_is connected
 bridges="$(grep -c "args=--session $FL_SESSION remote-api-bridge" "$FL_FAR_LOG")"
 fl_far_bridge_more() { [[ "$(grep -c "args=--session $FL_SESSION remote-api-bridge" "$FL_FAR_LOG")" -gt "$bridges" ]]; }
 fl_wait "the call's request on the far side" 15 fl_far_bridge_more
+# A link that settled (5 s up) cleared the retry budget, so the drop is a
+# first failure that closes nothing: only the leases decide core's retry.
+fl_wait "the call's link settled" 15 fl_more "SETTLED" "$settled"
 python3 -I -c 'import os,sys,time
 d = sys.argv[1]; tmp = os.path.join(d, ".cli-1.tmp")
 open(tmp, "w").write(f"{time.time() + 60:.3f} 0 keep\n"); os.replace(tmp, os.path.join(d, "cli-1"))' "$FL_DIR/leases"
