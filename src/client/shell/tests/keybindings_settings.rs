@@ -671,9 +671,11 @@ fn an_action_a_view_refuses_says_so_not_update() {
     assert!(!notice.body.contains("Update"), "{}", notice.body);
 }
 
-// core-phase5 E.3 (D7): a structural action a view advertises goes to the
-// view; when the far herdr refuses it or lacks the verb, the answer is that
-// action's notice, and the view stays connected and shown.
+// core-phase5 E.3 (D7): a structural action a view advertises (its real
+// welcome list, `view::policy`) goes to the view; when the far herdr lacks
+// the verb (an older herdr's API answers an unknown method with
+// `invalid_request`, here built by this build's own API code), the view's
+// answer is that action's notice, and the view stays connected and shown.
 #[cfg(unix)]
 #[test]
 fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
@@ -686,7 +688,10 @@ fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
     state.set_endpoint_status(&view, ClientEndpointStatus::Online);
     state.set_endpoint_snapshot(&view, Box::new(snapshot()));
     assert!(state.activate_endpoint_projection(&view));
-    state.set_endpoint_methods(Some(vec!["pane.focus".into(), "tab.create".into()]));
+    state.set_endpoint_methods(Some(crate::view::policy::advertised(
+        crate::api::schema::operations::client_shell_method_names(),
+        true,
+    )));
     let mut outcome = ClientShellInput::default();
     state.push_endpoint_method(
         crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
@@ -708,14 +713,26 @@ fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
         panic!("expected the action sent to the view");
     };
     assert_eq!(endpoint_id, &view);
+    // The far herdr's own answer to a method it lacks, and the view's
+    // answer to the client for it.
+    let line = r#"{"id":"view:1","method":"tab.create_v9","params":{}}"#;
+    let err = serde_json::from_str::<crate::api::schema::Request>(line).expect_err("unknown");
+    let far = serde_json::to_vec(&crate::api::unparsed_request_response(line, &err)).unwrap();
+    let answer: serde_json::Value = serde_json::from_str(&crate::app::client_answer_for_test(
+        &machine,
+        "tab.create_v9",
+        &far,
+    ))
+    .unwrap();
     let (repaint, actions) = state.handle_endpoint_result(
         boot_id,
         &request.id,
         Err(ClientShellEndpointError {
-            code: Some("unknown_method".into()),
-            message:
-                "loop's herdr does not take tab.create; update Herdr there to do this from a view"
-                    .into(),
+            code: answer["error"]["code"].as_str().map(str::to_string),
+            message: answer["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
         }),
     );
     assert!(repaint);
@@ -726,10 +743,13 @@ fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
         .expect("the action's notice");
     assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Rejected);
     assert!(
-        notice.body.contains("does not take tab.create"),
+        notice
+            .body
+            .contains("loop's herdr does not take tab.create_v9; update Herdr there"),
         "{}",
         notice.body
     );
+    assert!(!notice.body.contains("expected one of"), "{}", notice.body);
     assert!(state.endpoint_is_online(&view), "the view stays connected");
     assert_eq!(state.active_endpoint_id, view, "and shown");
 }

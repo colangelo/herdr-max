@@ -199,61 +199,104 @@ fn reply(text: &str) -> Value {
     serde_json::from_str(text).expect("a response")
 }
 
-// D7: a far herdr that does not know the method (an older build) is a
-// missing verb: the action is refused with a notice that says so, as the
-// action's own answer; nothing else changes.
+/// What this build's API answers a request for `method`, which it does
+/// not know: the reply an older far herdr gives a method it lacks.
+fn real_reply_to_an_unknown(method: &str) -> Vec<u8> {
+    let line = format!(
+        "{}",
+        json!({"id": "view:1", "method": method, "params": {}})
+    );
+    let err = serde_json::from_str::<Request>(&line).expect_err("an unknown method");
+    let mut reply =
+        serde_json::to_vec(&crate::api::unparsed_request_response(&line, &err)).expect("json");
+    reply.push(b'\n');
+    reply
+}
+
+// Review M1, D7: a far herdr that does not know the method (an older
+// build) answers `invalid_request` naming it (serde's "unknown variant"),
+// or `unknown_method` for a retired one. Either is a missing verb: the
+// action is refused with the update notice, never with the far list of
+// methods.
 #[test]
 fn a_missing_far_verb_is_the_actions_refusal() {
     let machine = MachineName::parse("loop").unwrap();
-    let far_reply = br#"{"id":"view:1","error":{"code":"unknown_method","message":"unknown method: tab.create"}}
-"#;
+    let real = real_reply_to_an_unknown("pane.rename_v9");
+    let as_sent: Value = serde_json::from_slice(&real).unwrap();
+    assert_eq!(
+        as_sent["error"]["code"], "invalid_request",
+        "the real shape"
+    );
     let answer = reply(&client_reply(
         &machine,
-        "tab.create",
+        "pane.rename_v9",
         "endpoint:1".into(),
-        Ok(far_reply.to_vec()),
+        Ok(real),
     ));
     assert_eq!(answer["id"], "endpoint:1");
     assert_eq!(answer["error"]["code"], "unknown_method");
     let message = answer["error"]["message"].as_str().unwrap();
+    assert_eq!(
+        message,
+        "loop's herdr does not take pane.rename_v9; update Herdr there to do this from a view"
+    );
+
+    let retired = real_reply_to_an_unknown("pane.graphics.clear");
+    let answer = reply(&client_reply(
+        &machine,
+        "pane.graphics.clear",
+        "endpoint:2".into(),
+        Ok(retired),
+    ));
+    assert_eq!(answer["error"]["code"], "unknown_method");
+
+    // Another method's invalid request is no missing verb, and its list of
+    // methods is not shown.
+    let other = real_reply_to_an_unknown("tab.create_v9");
+    let answer = reply(&client_reply(
+        &machine,
+        "pane.rename",
+        "endpoint:3".into(),
+        Ok(other),
+    ));
+    assert_eq!(answer["error"]["code"], NOT_DONE);
+    let message = answer["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("loop's herdr does not take tab.create; update Herdr there"),
+        !message.contains("expected one of") && !message.contains("ping"),
         "{message}"
     );
 }
 
 // The far answers become the client's: a result it reads, a far error with
-// its code (a close's confirmation is asked for here, then sent forced) and
-// its text escaped, and a send that failed with why.
+// its text escaped, and a send that failed with why. Only a code whose
+// client handling this build knows is passed on (review L2); a reply that
+// is neither a result nor an error, or an error that is no object, may
+// have run (review L1).
 #[test]
 fn far_answers_become_the_clients() {
     let machine = MachineName::parse("loop").unwrap();
-    let ok = reply(&client_reply(
-        &machine,
-        "pane.rename",
-        "endpoint:2".into(),
-        Ok(br#"{"id":"view:2","result":{"type":"ok"}}"#.to_vec()),
-    ));
-    assert_eq!(ok, json!({"id": "endpoint:2", "result": {"type": "ok"}}));
+    let answer = |text: &[u8]| {
+        reply(&client_reply(
+            &machine,
+            "pane.close",
+            "endpoint:2".into(),
+            Ok(text.to_vec()),
+        ))
+    };
+    assert_eq!(
+        answer(br#"{"id":"view:2","result":{"type":"ok"}}"#),
+        json!({"id": "endpoint:2", "result": {"type": "ok"}})
+    );
+    assert_eq!(
+        answer(br#"{"id":"view:3","result":{"type":"a_result_from_a_newer_herdr"}}"#)["result"],
+        json!({"type": "ok"})
+    );
 
-    let unread = reply(&client_reply(
-        &machine,
-        "pane.rename",
-        "endpoint:3".into(),
-        Ok(br#"{"id":"view:3","result":{"type":"a_result_from_a_newer_herdr"}}"#.to_vec()),
-    ));
-    assert_eq!(unread["result"], json!({"type": "ok"}));
-
-    let confirm = reply(&client_reply(
-        &machine,
-        "pane.close",
-        "endpoint:4".into(),
-        Ok(br#"{"id":"view:4","error":{"code":"confirmation_required","message":"the pane has open todos\u001b]52;c;eA==\u0007"}}"#.to_vec()),
-    ));
+    let confirm = answer(br#"{"id":"view:4","error":{"code":"confirmation_required","message":"this pane still has 2 open todos\u001b]52;c;eA==\u0007"}}"#);
     assert_eq!(confirm["error"]["code"], "confirmation_required");
     let message = confirm["error"]["message"].as_str().unwrap();
     assert!(
-        message.starts_with("loop: the pane has open todos"),
+        message.starts_with("loop: this pane still has 2 open todos"),
         "{message}"
     );
     assert!(
@@ -261,18 +304,53 @@ fn far_answers_become_the_clients() {
         "{message:?}"
     );
 
-    let odd_code = reply(&client_reply(
-        &machine,
-        "pane.close",
-        "endpoint:5".into(),
-        Ok(br#"{"id":"view:5","error":{"code":"Odd Code\u001b","message":"no"}}"#.to_vec()),
-    ));
-    assert_eq!(odd_code["error"]["code"], NOT_DONE);
+    for code in [
+        "stale_target",
+        "stale_content",
+        "endpoint_timeout",
+        "endpoint_cancelled",
+        "server_unavailable",
+        "pane_not_found",
+        "Odd Code\u{1b}",
+    ] {
+        let far = json!({"id": "view:5", "error": {"code": code, "message": "no"}});
+        let got = answer(far.to_string().as_bytes());
+        assert_eq!(got["error"]["code"], NOT_DONE, "{code}");
+        let message = got["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("loop's herdr refused pane.close"),
+            "{message}"
+        );
+        assert!(!message.contains('\u{1b}'), "{message:?}");
+    }
+
+    for odd in [
+        br#"{"id":"view:6"}"#.as_slice(),
+        br#"{"id":"view:6","result":null}"#,
+        br#"{"id":"view:6","error":"no"}"#,
+        br#"{"id":"view:6","error":null}"#,
+        br#"[1]"#,
+    ] {
+        let got = answer(odd);
+        assert_eq!(
+            got["error"]["code"],
+            NOT_DONE,
+            "{}",
+            String::from_utf8_lossy(odd)
+        );
+        assert!(
+            got["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("it may have run there"),
+            "{got}"
+        );
+    }
 
     let failed = reply(&client_reply(
         &machine,
         "tab.create",
-        "endpoint:6".into(),
+        "endpoint:7".into(),
         Err("loop is dormant: press a key in one of its panes to wake it\u{1b}[2J".into()),
     ));
     assert_eq!(failed["error"]["code"], NOT_DONE);

@@ -327,6 +327,36 @@ fn handle_connection(
     )
 }
 
+/// The answer to a request line that does not parse as a `Request`: an
+/// unknown method (`invalid_request`, "unknown variant `<method>`, expected
+/// one of ..."), or `unknown_method` for a retired one. A view reads this
+/// shape from an older far herdr as a missing verb (core-phase5 E.3).
+pub(crate) fn unparsed_request_response(
+    line: &str,
+    request_error: &serde_json::Error,
+) -> ErrorResponse {
+    // Recover correlation without relaxing typed request validation or accepting
+    // ambiguous duplicate IDs. Invalid JSON and non-string IDs stay uncorrelated.
+    #[derive(serde::Deserialize)]
+    struct RequestId {
+        id: String,
+    }
+    let id = if line.starts_with('{') {
+        serde_json::from_str::<RequestId>(line)
+            .map(|request| request.id)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    retired_pane_graphics_method_error(line, &id).unwrap_or_else(|| ErrorResponse {
+        id,
+        error: ErrorBody {
+            code: "invalid_request".into(),
+            message: format!("invalid request: {request_error}"),
+        },
+    })
+}
+
 fn handle_connection_with_stop(
     mut stream: LocalStream,
     api_tx: &ApiRequestSender,
@@ -352,27 +382,7 @@ fn handle_connection_with_stop(
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(request_error) => {
-            // Recover correlation without relaxing typed request validation or accepting
-            // ambiguous duplicate IDs. Invalid JSON and non-string IDs stay uncorrelated.
-            #[derive(serde::Deserialize)]
-            struct RequestId {
-                id: String,
-            }
-            let id = if line.starts_with('{') {
-                serde_json::from_str::<RequestId>(line)
-                    .map(|request| request.id)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let response =
-                retired_pane_graphics_method_error(line, &id).unwrap_or_else(|| ErrorResponse {
-                    id,
-                    error: ErrorBody {
-                        code: "invalid_request".into(),
-                        message: format!("invalid request: {request_error}"),
-                    },
-                });
+            let response = unparsed_request_response(line, &request_error);
             write_json_line_allow_disconnect(&mut stream, &response)?;
             return Ok(());
         }

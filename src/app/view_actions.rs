@@ -19,9 +19,16 @@ use crate::api::schema::{
 };
 use crate::core_machine::MachineName;
 
-/// The code of an action the view could not send or the far side did not
-/// answer: nothing a client retries by itself.
+/// The code of an action the view could not send, the far side did not
+/// answer, or refused for a reason the client has no handling of its own
+/// for: nothing a client retries by itself.
 const NOT_DONE: &str = "view_action_failed";
+
+/// The far error codes passed on to the client as they are, because this
+/// build knows what the client does with them: a close's
+/// `confirmation_required` asks the person, then sends the close forced
+/// (review L2). Every other far code becomes `NOT_DONE`, shown.
+const PASSED_ON: &[&str] = &["confirmation_required"];
 
 impl App {
     /// The far herdr's request for the structural action `method` of a view
@@ -199,11 +206,39 @@ fn error_response(id: String, code: &str, message: impl Into<String>) -> String 
     .unwrap_or_default()
 }
 
+/// The longest far message the client is shown, in characters.
+const FAR_MESSAGE_CHARS: usize = 300;
+
+/// A far error's text as the client shows it: escaped (security review of
+/// PR E, M1), without a parser's list of the methods it takes, and short.
+fn far_message(text: &str) -> String {
+    let text = text.split(", expected one of").next().unwrap_or_default();
+    let text = crate::remote::far_text(text);
+    if text.chars().count() <= FAR_MESSAGE_CHARS {
+        return text;
+    }
+    let mut short: String = text.chars().take(FAR_MESSAGE_CHARS).collect();
+    short.push('…');
+    short
+}
+
+/// Whether a far error says the far herdr does not know `method_name`: an
+/// older herdr's API answers an unknown method with `invalid_request` and
+/// serde's "unknown variant `<method>`, expected one of ..." (review M1),
+/// a retired one with `unknown_method`.
+fn missing_verb(code: &str, message: &str, method_name: &str) -> bool {
+    code == "unknown_method"
+        || (code == "invalid_request"
+            && message.contains(&format!("unknown variant `{method_name}`")))
+}
+
 /// The client's answer to a far action: the far result (one this build
-/// reads, else a plain `ok`), the far error with its code, or why there is
-/// no reply. Far text is shown escaped (security review of PR E, M1). A
+/// reads, else a plain `ok`), the far error, or why there is no reply. A
 /// far herdr that does not know the method (an older build) is a missing
 /// verb: that action is refused with a notice, nothing else changes (D7).
+/// A far error passes its code on only when the client's handling of it is
+/// known (`PASSED_ON`); a reply that is neither a result nor an error, or
+/// an error that is no object, may have run there (review L1, L2).
 fn client_reply(
     machine: &MachineName,
     method_name: &str,
@@ -214,19 +249,30 @@ fn client_reply(
         Ok(reply) => reply,
         Err(why) => return error_response(id, NOT_DONE, crate::remote::far_text(&why)),
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&reply) else {
-        return error_response(
-            id,
+    let may_have_run = |what: &str| {
+        error_response(
+            id.clone(),
             NOT_DONE,
-            format!(
-                "{machine}'s herdr answered something that is no API reply; it may have run there"
-            ),
-        );
+            format!("{machine}'s herdr answered {what} to {method_name}; it may have run there"),
+        )
+    };
+    let Ok(serde_json::Value::Object(value)) = serde_json::from_slice::<serde_json::Value>(&reply)
+    else {
+        return may_have_run("something that is no API reply");
     };
     if let Some(error) = value.get("error") {
-        let code = error["code"].as_str().unwrap_or_default();
-        let message = crate::remote::far_text(error["message"].as_str().unwrap_or_default());
-        if code == "unknown_method" {
+        let Some(error) = error.as_object() else {
+            return may_have_run("an error that is no error object");
+        };
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if missing_verb(code, message, method_name) {
             return error_response(
                 id,
                 "unknown_method",
@@ -235,23 +281,50 @@ fn client_reply(
                 ),
             );
         }
-        // A code is a plain word the client may act on (a close's
-        // `confirmation_required` asks the person, then sends it forced).
+        if PASSED_ON.contains(&code) {
+            return error_response(id, code, format!("{machine}: {}", far_message(message)));
+        }
         let code = if !code.is_empty()
             && code.len() <= 64
             && code
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
         {
-            code
+            format!(" ({code})")
         } else {
-            NOT_DONE
+            String::new()
         };
-        return error_response(id, code, format!("{machine}: {message}"));
+        return error_response(
+            id,
+            NOT_DONE,
+            format!(
+                "{machine}'s herdr refused {method_name}{code}: {}",
+                far_message(message)
+            ),
+        );
     }
-    let result = serde_json::from_value::<ResponseResult>(value["result"].clone())
-        .unwrap_or(ResponseResult::Ok {});
+    let Some(result) = value.get("result").filter(|result| result.is_object()) else {
+        return may_have_run("neither a result nor an error");
+    };
+    let result =
+        serde_json::from_value::<ResponseResult>(result.clone()).unwrap_or(ResponseResult::Ok {});
     serde_json::to_string(&SuccessResponse { id, result }).unwrap_or_default()
+}
+
+/// The client's answer the view gives for the far herdr's `reply` to
+/// `method_name`, for a client test of what the person then sees.
+#[cfg(test)]
+pub(crate) fn client_answer_for_test(
+    machine: &MachineName,
+    method_name: &str,
+    reply: &[u8],
+) -> String {
+    client_reply(
+        machine,
+        method_name,
+        "endpoint:test".into(),
+        Ok(reply.to_vec()),
+    )
 }
 
 #[cfg(test)]

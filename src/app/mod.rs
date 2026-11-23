@@ -48,6 +48,8 @@ mod terminal_titles;
 mod theme_sync;
 #[cfg(unix)]
 mod view_actions;
+#[cfg(all(test, unix))]
+pub(crate) use view_actions::client_answer_for_test;
 #[cfg(unix)]
 pub(crate) mod view_layout;
 mod window_title;
