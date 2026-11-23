@@ -31,9 +31,9 @@ use crate::core_machine::MachineName;
 /// own 60 s wait for an endpoint command.
 pub(crate) const VIEW_ACTION_SECS: u64 = 20;
 
-/// The view's keep lease lives this long past its one write: longer than
-/// any action (the probe's 30 s and the action's 20 s, with core's
-/// margins), within a CLI lease's 60 s.
+/// The view's keep lease lives this long past each write: a CLI lease's
+/// 60 s, longer than the probe (30 s and core's 5 s) and the request (20 s
+/// and 5 s), before each of which it is written.
 const VIEW_LEASE_SECS: f64 = super::LEASE_LIFE_SECS;
 
 /// One action at a time in a view process: they share its one lease file.
@@ -103,9 +103,13 @@ pub(super) fn send_at(
         return Err(not_connected(name, state));
     }
     check_request_line(name, line)?;
-    let _lease = KeepLease::write(&dir, holder)
+    let lease = KeepLease::write(&dir, holder)
         .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
     let far = far_herdr(core, name, &dir, &session, &target.session)?;
+    // Written again for the request: a probe may have taken 35 s of it.
+    lease
+        .write_again()
+        .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
     let argv = bridge_argv(&far, &session);
     FarRoute {
         core,
@@ -131,11 +135,12 @@ fn not_connected(name: &MachineName, state: &str) -> String {
     format!("{what}, then do this again; nothing was sent and nothing dialled")
 }
 
-/// The view's `cli-<pid>` keep lease for one action: written once, removed
-/// when the action ends. It is not renewed: an action ends long before it
-/// does, and a view killed during one leaves a lease that keeps an up link
-/// a minute at most and admits no dial. No termination handler is put in
-/// the view server for it (the fleet CLI's would end the server on SIGHUP).
+/// The view's `cli-<pid>` keep lease for one action: written before the
+/// probe and again before the request, removed when the action ends. No
+/// renewer runs: each part ends within its minute, and a view killed
+/// during one leaves a lease that keeps an up link a minute at most and
+/// admits no dial. No termination handler is put in the view server for it
+/// (the fleet CLI's would end the server on SIGHUP).
 struct KeepLease<'a> {
     dir: &'a MachineDir,
     holder: &'a LeaseHolder,
@@ -143,8 +148,14 @@ struct KeepLease<'a> {
 
 impl<'a> KeepLease<'a> {
     fn write(dir: &'a MachineDir, holder: &'a LeaseHolder) -> io::Result<Self> {
-        dir.write_keep_lease(holder, now_unix() + VIEW_LEASE_SECS)?;
-        Ok(Self { dir, holder })
+        let lease = Self { dir, holder };
+        lease.write_again()?;
+        Ok(lease)
+    }
+
+    fn write_again(&self) -> io::Result<()> {
+        self.dir
+            .write_keep_lease(self.holder, now_unix() + VIEW_LEASE_SECS)
     }
 }
 
