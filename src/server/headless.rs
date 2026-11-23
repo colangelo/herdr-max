@@ -2481,6 +2481,14 @@ impl HeadlessServer {
                 events,
             } => {
                 self.record_client_input(client_id);
+                // Only a person's input in a view's pane counts as typing
+                // there: it is what may wake the machine (D3, review M3).
+                #[cfg(unix)]
+                if let Some(view) = &self.view {
+                    if crate::view::lifetime::is_person_input(&events) {
+                        view.presence.input(Instant::now());
+                    }
+                }
                 self.route_synced_pane_input(client_id, pane_id, events)
             }
             ServerEvent::ClientShellPopupInput {

@@ -5,10 +5,6 @@ impl HeadlessServer {
     /// that client's idle time. Runs once per event batch in the server's event
     /// handler: nothing per frame and nothing per pane.
     pub(super) fn record_client_input(&mut self, client_id: u64) {
-        #[cfg(unix)]
-        if let Some(view) = &self.view {
-            view.presence.input(Instant::now());
-        }
         if let Some(client) = self.clients.get_mut(&client_id) {
             if client.is_shell_client() {
                 client.record_input(Instant::now());

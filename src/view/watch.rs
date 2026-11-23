@@ -4,9 +4,10 @@
 //! event, on `missed` and on wake; forwards the far terminals' sizes and
 //! status; reads `machine.list` only while a client is attached and the
 //! machine is away or a client typed lately (so an idle view sends nothing,
-//! V30); and wakes the machine only while a lease is in force (D3), through
-//! this process's dialer (D3a). It never starts a core and never dials
-//! itself.
+//! V30); and wakes the machine only for a person's input in the view, once
+//! per input, while a lease is in force (D3), through this process's dialer
+//! (D3a): a client attaching or a state read wakes nothing (review M3). It
+//! never starts a core and never dials itself.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +30,10 @@ const STATE_EVERY_WAKING: Duration = Duration::from_secs(1);
 const TYPING_WINDOW: Duration = Duration::from_secs(30);
 /// The pause before a lost subscription is opened again.
 const RESUBSCRIBE: Duration = Duration::from_secs(2);
+/// The first pause after a failed `doc.get`, doubled per failure up to
+/// `LAYOUT_RETRY_MAX` (review L5.3).
+const LAYOUT_RETRY: Duration = Duration::from_secs(1);
+const LAYOUT_RETRY_MAX: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_millis(250);
 /// The far hc version D9 asks for.
 const MIN_FAR_VERSION: (u64, u64, u64) = (0, 1, 21);
@@ -167,6 +172,15 @@ pub(crate) struct Watcher<S> {
     next_subscribe: Instant,
     /// The layout must be read again (start, `doc` event, `missed`, wake).
     layout_due: bool,
+    /// After a failed `doc.get`: not before this, and the pause after the
+    /// next failure.
+    layout_retry: Option<(Instant, Duration)>,
+    /// The count of view inputs (`ViewPresence::inputs`) the last wake
+    /// answered: one wake per person's input, never one per state read.
+    woken_for: u64,
+    /// The count of view inputs the state was last read for: a new input
+    /// while away reads it at once.
+    read_for: u64,
     /// The last good layout's text, so an unchanged document is not sent.
     last_layout: Option<ViewLayout>,
     /// A refused document is logged once until a good one comes.
@@ -193,6 +207,9 @@ impl<S: ViewSource> Watcher<S> {
             next_state_read: now,
             next_subscribe: now,
             layout_due: true,
+            layout_retry: None,
+            woken_for: 0,
+            read_for: 0,
             last_layout: None,
             warned_bad: false,
             notice: None,
@@ -241,7 +258,10 @@ impl<S: ViewSource> Watcher<S> {
             || first_client
             || (clients > 0
                 && (!self.connected() || self.presence.typed_within(now, TYPING_WINDOW)));
-        if worth_reading && (first_client || now >= self.next_state_read) {
+        let inputs = self.presence.inputs();
+        let new_input_away = !self.connected() && inputs != self.read_for;
+        if worth_reading && (first_client || new_input_away || now >= self.next_state_read) {
+            self.read_for = inputs;
             let waking = !self.connected() && self.presence.typed_within(now, TYPING_WINDOW);
             self.next_state_read = now
                 + if waking {
@@ -249,11 +269,12 @@ impl<S: ViewSource> Watcher<S> {
                 } else {
                     STATE_EVERY
                 };
-            self.read_state(clients);
+            self.read_state(now);
         }
-        if self.layout_due && self.connected() {
+        let layout_waits = self.layout_retry.is_some_and(|(at, _)| now < at);
+        if self.layout_due && self.connected() && !layout_waits {
             self.layout_due = false;
-            self.read_layout(&mut out);
+            self.read_layout(now, &mut out);
         }
         if !self.sent_notice {
             self.sent_notice = true;
@@ -314,7 +335,7 @@ impl<S: ViewSource> Watcher<S> {
         }
     }
 
-    fn read_state(&mut self, clients: usize) {
+    fn read_state(&mut self, now: Instant) {
         let record = match self.source.machine() {
             Ok(record) => record,
             Err(err) => {
@@ -346,10 +367,15 @@ impl<S: ViewSource> Watcher<S> {
             self.set_notice(self.far_version_notice());
             return;
         }
-        // Away. Only a lease in force lets the view wake it (D3): a person's
-        // client writes one on input, and at its start.
+        // Away. Only a person's input in the view wakes it, once per input
+        // and while a lease is in force (D3, review M3): the person's client
+        // writes that lease for the same input, so an input that arrives
+        // before its lease is woken on a later read, while it is recent. A
+        // client attaching, or the read itself, wakes nothing.
         let leased = self.source.leased();
-        if leased && clients > 0 {
+        let inputs = self.presence.inputs();
+        if leased && inputs != self.woken_for && self.presence.typed_within(now, TYPING_WINDOW) {
+            self.woken_for = inputs;
             self.source.wake();
         }
         self.set_notice(Some(away_notice(&self.machine, &state, leased)));
@@ -366,15 +392,20 @@ impl<S: ViewSource> Watcher<S> {
         })
     }
 
-    fn read_layout(&mut self, out: &mut Vec<ViewEvent>) {
+    fn read_layout(&mut self, now: Instant, out: &mut Vec<ViewEvent>) {
         let value = match self.source.layout() {
             Ok(value) => value,
             Err(err) => {
-                tracing::debug!(machine = %self.machine, %err, "view: doc.get failed; keeping the layout");
+                let pause = self
+                    .layout_retry
+                    .map_or(LAYOUT_RETRY, |(_, pause)| (pause * 2).min(LAYOUT_RETRY_MAX));
+                tracing::debug!(machine = %self.machine, %err, ?pause, "view: doc.get failed; keeping the layout");
                 self.layout_due = true;
+                self.layout_retry = Some((now + pause, pause));
                 return;
             }
         };
+        self.layout_retry = None;
         match doc::parse(&value) {
             Ok(layout) => {
                 self.warned_bad = false;
@@ -458,6 +489,7 @@ mod tests {
         leased: bool,
         wakes: usize,
         layout_reads: usize,
+        layout_fails: bool,
         state_reads: usize,
         marked: Vec<bool>,
     }
@@ -471,6 +503,9 @@ mod tests {
         }
         fn layout(&mut self) -> Result<Value, String> {
             self.layout_reads += 1;
+            if self.layout_fails {
+                return Err("doc.get timed out".into());
+            }
             Ok(self.doc.clone())
         }
         fn machine(&mut self) -> Result<Option<(String, String)>, String> {
@@ -577,10 +612,12 @@ mod tests {
         );
     }
 
-    // D3 / V33's view part: a dormant machine is woken only with a lease and
-    // a client; the layout waits for the link.
+    // D3 / V33's view part, review M3: a dormant machine is woken only by a
+    // person's input in the view, once per input, and only with a lease in
+    // force. A client attaching and the state reads while away wake
+    // nothing; the layout waits for the link.
     #[test]
-    fn a_dormant_machine_is_woken_only_with_a_lease_and_a_client() {
+    fn a_dormant_machine_is_woken_only_by_input_in_the_view() {
         let (mut watch, presence) = watcher(Fake {
             doc: space_doc("api"),
             state: Some(("unreachable".into(), "0.1.21".into())),
@@ -595,20 +632,41 @@ mod tests {
         assert!(layouts(&first).is_empty(), "no layout read while away");
         assert_eq!(watch.source.wakes, 0, "no client, no lease: nothing dials");
 
-        presence.set_clients(1);
-        watch.tick(now, Duration::ZERO);
-        assert_eq!(
-            watch.source.wakes, 0,
-            "a client but no lease: nothing dials"
-        );
-
+        // A client attaches while some lease is in force (another client's
+        // input, a `machine wake`): its attach dials nothing, nor do the
+        // state reads that follow.
         watch.source.leased = true;
-        let waking = watch.tick(now + STATE_EVERY, Duration::ZERO);
-        assert_eq!(watch.source.wakes, 1);
+        presence.set_clients(1);
+        for second in 0..=30 {
+            watch.tick(now + Duration::from_secs(second), Duration::ZERO);
+        }
+        assert!(watch.source.state_reads > 2, "the view watches the link");
+        assert_eq!(watch.source.wakes, 0, "an attach is no person's input");
+
+        // A key in the view before its client's lease landed: no wake yet,
+        // then one on the read after the lease, and no more for that key.
+        watch.source.leased = false;
+        let key = now + Duration::from_secs(31);
+        presence.input(key);
+        watch.tick(key, Duration::ZERO);
+        assert_eq!(watch.source.wakes, 0, "a key but no lease: nothing dials");
+        watch.source.leased = true;
+        let waking = watch.tick(key + STATE_EVERY_WAKING, Duration::ZERO);
+        assert_eq!(
+            watch.source.wakes, 1,
+            "the key wakes it once its lease is in"
+        );
         assert_eq!(notices(&waking), [Some("waking loop…")]);
+        for step in 2..=20 {
+            watch.tick(key + STATE_EVERY_WAKING * step, Duration::ZERO);
+        }
+        assert_eq!(watch.source.wakes, 1, "one wake per input");
+        presence.input(key + Duration::from_secs(25));
+        watch.tick(key + Duration::from_secs(26), Duration::ZERO);
+        assert_eq!(watch.source.wakes, 2, "the next key wakes again");
 
         watch.source.state = Some(("connected".into(), "0.1.21".into()));
-        let up = watch.tick(now + STATE_EVERY * 2, Duration::ZERO);
+        let up = watch.tick(key + Duration::from_secs(27), Duration::ZERO);
         assert_eq!(
             layouts(&up).len(),
             1,
@@ -616,6 +674,31 @@ mod tests {
         );
         assert_eq!(notices(&up), [None]);
         assert_eq!(watch.source.marked.last(), Some(&true));
+    }
+
+    // L5.3: a failing `doc.get` is asked again after a pause that doubles
+    // up to 30 s, not on every 250 ms tick; a good read ends the back-off.
+    #[test]
+    fn a_failing_layout_read_backs_off() {
+        let (mut watch, _) = watcher(Fake {
+            doc: space_doc("api"),
+            state: Some(("connected".into(), "0.1.21".into())),
+            layout_fails: true,
+            ..Fake::default()
+        });
+        let now = Instant::now();
+        let mut at = now;
+        while at < now + Duration::from_secs(60) {
+            watch.tick(at, Duration::ZERO);
+            at += TICK;
+        }
+        // Reads at 0, 1, 3, 7, 15, 31 s; then the pause is 30 s.
+        assert_eq!(watch.source.layout_reads, 6, "backed off");
+        watch.source.layout_fails = false;
+        let good = watch.tick(now + Duration::from_secs(92), Duration::ZERO);
+        assert_eq!(layouts(&good).len(), 1);
+        assert_eq!(watch.source.layout_reads, 7);
+        assert!(watch.layout_retry.is_none());
     }
 
     // V30's watcher part: an idle view with its machine connected reads
