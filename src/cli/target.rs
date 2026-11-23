@@ -562,14 +562,19 @@ mod tests {
     }
 
     /// security review 2026-11-23 M1: far text in a core refusal prints
-    /// escaped; an old saved-SSH machine's error prints as it always did,
-    /// its lines kept (#310).
+    /// escaped (#310).
+    #[cfg(unix)]
     #[test]
     fn far_errors_print_their_controls_escaped() {
         let far = "boom\x1b]52;c;aGk=\x07\x1b]0;t\x1b\\\x1b[2K\u{9b}1A";
         let shown = "boom\\x1b]52;c;aGk=\\x07\\x1b]0;t\\x1b\\\\\\x1b[2K\\u{9b}1A";
-        #[cfg(unix)]
         assert_eq!(refusal_line(far), format!("error: {shown}"));
+    }
+
+    /// An old saved-SSH machine's error prints as it always did, its lines
+    /// kept (#310).
+    #[test]
+    fn a_saved_machines_error_prints_as_before() {
         let client = ApiClient::for_target(ConnectionTarget::SocketPath("/nonexistent".into()));
         let ssh = "ssh: connect to host x port 22: refused\r\nsecond line\nthird line";
         let error = with_test_client(client, || remote_error(io::Error::other(ssh)));
