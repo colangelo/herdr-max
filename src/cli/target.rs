@@ -55,6 +55,16 @@ impl MachineTarget {
         }
     }
 
+    /// `text` as printed: escaped for a core route, unchanged for a saved
+    /// SSH one.
+    fn far_text(&self, text: &str) -> String {
+        match &self.route {
+            Route::Saved { .. } => text.to_string(),
+            #[cfg(unix)]
+            Route::Core(_) => crate::remote::far_text(text),
+        }
+    }
+
     fn reported_failure(&self) -> Option<io::Error> {
         match &self.route {
             Route::Saved { bridge, .. } => {
@@ -165,7 +175,7 @@ fn core_route(
 /// stderr or the far herdr's session (security review 2026-11-23 M1).
 #[cfg(unix)]
 fn refusal_line(message: &str) -> String {
-    format!("error: {}", crate::remote::visible_line(message))
+    format!("error: {}", crate::remote::far_line(message))
 }
 
 #[cfg(not(unix))]
@@ -300,15 +310,16 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
             return error;
         };
         let error = target.reported_failure().unwrap_or(error);
-        // The far server's message and the far side's stderr are far text
-        // (security review 2026-11-23 M1).
+        // A core machine's far server message and far stderr are far text,
+        // escaped here, once, per line (security review 2026-11-23 M1). A
+        // saved-SSH machine's error prints as it always did.
+        let text = target.far_text(&error.to_string());
         io::Error::new(
             error.kind(),
             format!(
-                "machine '{}' (session {}): {}",
+                "machine '{}' (session {}): {text}",
                 target.label(),
-                target.session(),
-                crate::remote::visible_line(&error.to_string())
+                target.session()
             ),
         )
     })
@@ -550,19 +561,21 @@ mod tests {
         );
     }
 
-    /// security review 2026-11-23 M1: far text in a refusal or in a far
-    /// error (a server's message, a far side's stderr) prints escaped.
+    /// security review 2026-11-23 M1: far text in a core refusal prints
+    /// escaped; an old saved-SSH machine's error prints as it always did,
+    /// its lines kept (#310).
     #[test]
     fn far_errors_print_their_controls_escaped() {
         let far = "boom\x1b]52;c;aGk=\x07\x1b]0;t\x1b\\\x1b[2K\u{9b}1A";
-        let shown = "boom\\x1b]52;c;aGk=\\x07\\x1b]0;t\\x1b\\\\x1b[2K\\u{9b}1A";
+        let shown = "boom\\x1b]52;c;aGk=\\x07\\x1b]0;t\\x1b\\\\\\x1b[2K\\u{9b}1A";
         #[cfg(unix)]
         assert_eq!(refusal_line(far), format!("error: {shown}"));
         let client = ApiClient::for_target(ConnectionTarget::SocketPath("/nonexistent".into()));
-        let error = with_test_client(client, || remote_error(io::Error::other(far)));
+        let ssh = "ssh: connect to host x port 22: refused\r\nsecond line\nthird line";
+        let error = with_test_client(client, || remote_error(io::Error::other(ssh)));
         assert_eq!(
             error.to_string(),
-            format!("machine 'test-machine' (session remote-session): {shown}")
+            format!("machine 'test-machine' (session remote-session): {ssh}")
         );
     }
 

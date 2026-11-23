@@ -59,6 +59,7 @@ pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
     }
     let created = !dir.exists();
     dir.create()?;
+    let via = via_command(&herdr, &parsed.name);
     let target = Target {
         target: parsed.target.clone(),
         session: parsed.session.clone(),
@@ -67,6 +68,7 @@ pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
         ssh_auth_sock: std::env::var_os("SSH_AUTH_SOCK")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute()),
+        via: Some(via.clone()),
     };
     target.validate()?;
     dir.write_target(&target)?;
@@ -75,11 +77,6 @@ pub(crate) fn add(args: &[String]) -> std::io::Result<i32> {
     let now = now_unix();
     dir.write_lease(&LeaseHolder::manual(), now + MANUAL_LEASE_SECS, now)?;
 
-    let via = format!(
-        "{} core-link {}",
-        sh_quote(&herdr.to_string_lossy()),
-        parsed.name
-    );
     let mut hc = match core::hc_command() {
         Ok(hc) => hc,
         Err(err) => {
@@ -222,6 +219,12 @@ fn default_name(target: &str) -> String {
 }
 
 /// One shell word for an sh line (core runs the via as one).
+/// The command line core runs to reach `name`: this herdr's path, quoted
+/// for a shell, and `core-link <name>`.
+fn via_command(herdr: &Path, name: &MachineName) -> String {
+    format!("{} core-link {name}", sh_quote(&herdr.to_string_lossy()))
+}
+
 fn sh_quote(word: &str) -> String {
     if !word.is_empty()
         && word
@@ -568,7 +571,7 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
         println!(
             "{}\t{}\tgate {}\tleases {}",
             row.name,
-            crate::remote::visible_line(&row.state),
+            crate::remote::far_line(&row.state),
             row.gate.as_deref().unwrap_or("-"),
             if leases.is_empty() {
                 "-".to_string()
@@ -678,18 +681,21 @@ pub(crate) fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
 }
 
 /// Whether core's `machine.list` record of `name` is the link herdr's
-/// `machine add --core` made: reached `via` a command that ends in
-/// `core-link <name>`, and, when the record names its session, in
-/// `session` (D1, M5).
-pub(crate) fn runs_herdr_link(record: &Value, name: &MachineName, session: &str) -> bool {
-    let through_link = record["via"] == true
-        && record["target"]
-            .as_str()
-            .is_some_and(|via| via.ends_with(&format!(" core-link {name}")));
-    let in_session = record["session"]
-        .as_str()
-        .is_none_or(|listed| listed == session);
-    through_link && in_session
+/// `machine add --core` made: reached `via` exactly the command line the
+/// add recorded in `target.json` (this herdr's path and `core-link
+/// <name>`; a target written before that is checked for the `core-link
+/// <name>` end only), in the session herdr linked. Core lists `session`
+/// as the hc session there, null for its default (D1, M5).
+pub(crate) fn runs_herdr_link(record: &Value, name: &MachineName, target: &Target) -> bool {
+    let Some(via) = record["target"].as_str().filter(|_| record["via"] == true) else {
+        return false;
+    };
+    let through_link = match &target.via {
+        Some(recorded) => via == recorded,
+        None => via.ends_with(&format!(" core-link {name}")),
+    };
+    let listed = record["session"].as_str().unwrap_or("default");
+    through_link && listed == target.session
 }
 
 fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> {
@@ -729,13 +735,9 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
                     record["state"].as_str().unwrap_or("unknown").to_string()
                 }
             };
-            let herdr_link = core_record.is_some_and(|record| {
-                runs_herdr_link(
-                    record,
-                    &name,
-                    target.as_ref().map_or("", |target| target.session.as_str()),
-                )
-            });
+            let herdr_link = core_record
+                .zip(target.as_ref())
+                .is_some_and(|(record, target)| runs_herdr_link(record, &name, target));
             StatusRow {
                 gate: gate.as_ref().map(|gate| {
                     let act = newest_act(&leases, now);
@@ -785,6 +787,65 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
 mod tests {
     use super::*;
     use crate::core_machine::state::{tests::scratch, GateClass};
+
+    /// #310 (M5): core's record is herdr's link only through the exact
+    /// command `machine add` recorded, in the session it linked; a
+    /// record with no session is the default session's.
+    #[test]
+    fn a_record_is_herdrs_link_only_by_its_exact_via_and_session() {
+        let name = MachineName::parse("loop").expect("name");
+        let target = |via: Option<&str>, session: &str| Target {
+            target: "ac@loop".into(),
+            session: session.into(),
+            ssh: "/usr/bin/ssh".into(),
+            ssh_config: None,
+            ssh_auth_sock: None,
+            via: via.map(String::from),
+        };
+        let own = "/opt/homebrew/bin/herdr-beta core-link loop";
+        let record =
+            |via: &str, session: Value| json!({"via": true, "target": via, "session": session});
+        let mine = target(Some(own), "default");
+        assert!(runs_herdr_link(&record(own, Value::Null), &name, &mine));
+        assert!(runs_herdr_link(
+            &record(own, json!("default")),
+            &name,
+            &mine
+        ));
+        assert!(!runs_herdr_link(
+            &record("/tmp/evil/herdr core-link loop", Value::Null),
+            &name,
+            &mine
+        ));
+        assert!(!runs_herdr_link(&record(own, json!("other")), &name, &mine));
+        assert!(!runs_herdr_link(
+            &record(own, Value::Null),
+            &name,
+            &target(Some(own), "herdr-work")
+        ));
+        assert!(runs_herdr_link(
+            &record(own, json!("herdr-work")),
+            &name,
+            &target(Some(own), "herdr-work")
+        ));
+        assert!(!runs_herdr_link(
+            &json!({"via": false, "target": own}),
+            &name,
+            &mine
+        ));
+        // A target written before `via` was recorded: the end only.
+        let old = target(None, "default");
+        assert!(runs_herdr_link(
+            &record("/x/herdr core-link loop", Value::Null),
+            &name,
+            &old
+        ));
+        assert!(!runs_herdr_link(
+            &record("/x/herdr core-link other", Value::Null),
+            &name,
+            &old
+        ));
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| arg.to_string()).collect()
@@ -903,6 +964,7 @@ mod tests {
             ssh: "/usr/bin/ssh".into(),
             ssh_config: None,
             ssh_auth_sock: None,
+            via: None,
         })
         .expect("target");
         ours.write_gate(&Gate {
@@ -914,7 +976,7 @@ mod tests {
         ours.write_lease(&LeaseHolder::manual(), 2_000.0, 5.0)
             .expect("lease");
         let listed = json!({"machines": [
-            {"name": "loop", "state": "unreachable", "via": true, "target": "/bin/herdr core-link loop"},
+            {"name": "loop", "state": "unreachable", "via": true, "target": "/bin/herdr core-link loop", "session": "far"},
             {"name": "vps", "state": "connected", "via": false, "target": "vps"},
         ]});
         let rows = status_rows(&root, Some(&listed), 1_000.0);

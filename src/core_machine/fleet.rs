@@ -49,7 +49,6 @@ use super::state::{
     MachineDir, FAR_CORE_DOWN_SECS,
 };
 use crate::pane::core_machines::{self as core, CallError};
-use crate::remote::visible_line;
 
 /// The exit code of a refusal on a machine that is not connected (D7, F7):
 /// `EX_TEMPFAIL`, as core-link's own refusals.
@@ -315,7 +314,7 @@ fn prepare(
     // lists under that name must be the one herdr added, reached through
     // `herdr core-link <name>` in the session herdr linked, before any
     // lease or exec (security review 2026-11-23 M5).
-    if !super::command::runs_herdr_link(&record, name, &target.session) {
+    if !super::command::runs_herdr_link(&record, name, &target) {
         return refused(
             1,
             format!(
@@ -833,7 +832,6 @@ fn check_far_session(name: &MachineName, far: &FarHerdr, linked: &str) -> Result
     match far.core_session.as_deref() {
         Some(core_session) if core_session == linked => Ok(()),
         Some(core_session) => {
-            let core_session = visible_line(core_session);
             Err(format!(
                 "the herdr found on {name} ({}) runs session {} in Herdr Core session {core_session}, \
                  not {linked}, the one {name} was added with; --machine would reach another herdr. \
@@ -932,7 +930,7 @@ struct Ran {
 
 impl Ran {
     /// The last line it wrote to stderr, for a message: at most 400
-    /// characters, its controls shown as escapes (far text, M1).
+    /// characters. Far text: escaped once, where it is printed (`cli::target`).
     fn stderr_tail(&self) -> String {
         let text = String::from_utf8_lossy(&self.stderr);
         let tail: String = text
@@ -943,7 +941,7 @@ impl Ran {
             .chars()
             .take(400)
             .collect();
-        visible_line(&tail).into_owned()
+        tail
     }
 }
 
@@ -1023,33 +1021,32 @@ fn exec(
         Err(CallError::Rpc { kind, message }) if kind == "unavailable" => {
             return Err(MayHaveRun(format!(
                 "herdr-core lost {name} (unavailable: {})",
-                visible_line(&message)
+                message
             )))
         }
         Err(CallError::Rpc { kind, message }) => {
             return Err(NotSent(format!(
                 "herdr-core refused the request for {name}: {}: {}",
-                visible_line(&kind),
-                visible_line(&message)
+                kind, message
             )))
         }
         Err(CallError::NoAnswer(why)) => {
             return Err(MayHaveRun(format!(
                 "no answer from {name} after the request was sent ({})",
-                visible_line(&why)
+                why
             )))
         }
         Err(CallError::NotSent(why)) => {
             return Err(NotSent(format!(
                 "herdr-core here is not reachable: {}",
-                visible_line(&why)
+                why
             )))
         }
     };
     let result: ExecResult = serde_json::from_value(reply).map_err(|err| {
         MayHaveRun(format!(
             "herdr-core's answer from {name} does not parse: {}",
-            visible_line(&err.to_string())
+            err
         ))
     })?;
     if result.timed_out {
@@ -1118,8 +1115,19 @@ fn bridge_argv(far: &FarHerdr, session: &str) -> Vec<String> {
     argv
 }
 
+/// The `id` of one API request line, `None` when the line is no JSON
+/// object with an id: a reply could then not be matched to it (M6).
+fn request_id(request: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(request)
+        .ok()?
+        .get("id")
+        .filter(|id| !id.is_null())
+        .cloned()
+}
+
 /// Whether a far bridge's output is one whole reply line to `request`:
-/// JSON with the request's id (M6).
+/// JSON with the request's id (M6). A request with no id of its own
+/// matches no reply.
 fn whole_reply(request: &[u8], stdout: &[u8]) -> Result<(), &'static str> {
     let line = match stdout {
         [] => return Err("answered with no reply"),
@@ -1134,9 +1142,10 @@ fn whole_reply(request: &[u8], stdout: &[u8]) -> Result<(), &'static str> {
     let Some(reply_id) = id(line) else {
         return Err("answered with a line that is no API reply");
     };
-    match id(request) {
-        Some(request_id) if request_id != reply_id => Err("answered another request"),
-        _ => Ok(()),
+    match request_id(request) {
+        Some(request_id) if request_id == reply_id => Ok(()),
+        Some(_) => Err("answered another request"),
+        None => Err("was sent a request with no id to match a reply to"),
     }
 }
 
@@ -1313,6 +1322,13 @@ impl Bridge {
         if !line.ends_with(b"\n") {
             self.fail(format!(
                 "the request is not one whole line, so it was not sent to {}",
+                self.name
+            ));
+            return;
+        }
+        if request_id(&line).is_none() {
+            self.fail(format!(
+                "the request has no id to match a reply to, so it was not sent to {}",
                 self.name
             ));
             return;
@@ -1506,18 +1522,29 @@ fn private_folder() -> io::Result<PathBuf> {
     let fits = |base: &Path| base.join(&longest).join(SOCKET_NAME).as_os_str().len() < 100;
     // A temporary folder another account could replace is passed over
     // for `/tmp` (security review 2026-11-23 E1).
-    let base = [temp, PathBuf::from("/tmp")]
-        .into_iter()
-        .find(|base| fits(base) && is_trusted_base(base))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "neither the temporary folder nor /tmp is safe from other accounts \
-                 for the fleet bridge's socket",
-            )
-        })?;
+    let base = trusted_base([temp, PathBuf::from("/tmp")], fits).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "neither the temporary folder nor /tmp is safe from other accounts \
+             for the fleet bridge's socket",
+        )
+    })?;
     remove_dead_folders(&base);
     private_folder_in(&base, unguessable_leaf)
+}
+
+/// The first of `candidates`, by its canonical path, that `fits` and that
+/// `is_trusted_base`. The folder is made under the canonical path that was
+/// checked, not under a symlink that could be repointed after the check
+/// (#310).
+fn trusted_base(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    fits: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .filter_map(|base| base.canonicalize().ok())
+        .find(|base| fits(base) && is_trusted_base(base))
 }
 
 /// Whether no other account can replace `base` or anything under it that

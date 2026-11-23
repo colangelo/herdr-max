@@ -1010,6 +1010,7 @@ fn a_connected_machine_gets_a_keep_lease_and_no_connect() {
         ssh: "/usr/bin/ssh".into(),
         ssh_config: None,
         ssh_auth_sock: None,
+        via: None,
     })
     .expect("target");
     let Lookup::Ready(link) = prepare(
@@ -1037,13 +1038,14 @@ fn a_connected_machine_gets_a_keep_lease_and_no_connect() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// security review 2026-11-23 M1: far stderr reaches the message with its
-/// controls escaped, in a probe's failure and in a request's, and so does
-/// a far herdr's core session.
+/// security review 2026-11-23 M1: far stderr reaches the message raw and
+/// prints with its controls escaped exactly once (`far_line` where the CLI
+/// prints a refusal, `far_text` for a request's failure), in a probe's
+/// failure and in a request's, and so does a far herdr's core session.
 #[test]
 fn far_text_in_messages_shows_its_controls_escaped() {
     let hostile = b"\x1b]52;c;aGk=\x07\x1b]0;pwned\x1b\\\x1b[2K\x1b[1Agone\rX\n";
-    let shown = "\\x1b]52;c;aGk=\\x07\\x1b]0;pwned\\x1b\\\\x1b[2K\\x1b[1Agone\\x0dX";
+    let shown = "\\x1b]52;c;aGk=\\x07\\x1b]0;pwned\\x1b\\\\\\x1b[2K\\x1b[1Agone\\x0dX";
     let core = FakeCore::start_with(|config| {
         config.exec_reply = Some(json!({"stdout": "", "stderr": b64(hostile),
             "truncated": false, "timed_out": false, "ms": 1, "code": 2}))
@@ -1057,12 +1059,14 @@ fn far_text_in_messages_shows_its_controls_escaped() {
         "default",
     )
     .expect_err("probe fails");
+    let probe = crate::remote::far_line(&probe).into_owned();
     assert!(probe.contains(shown), "{probe}");
     assert!(!probe.chars().any(char::is_control), "{probe:?}");
 
     let link = link_to(&core, &dir);
     assert!(client(&link).request_value(&ping()).is_err());
     let failure = link.reported_failure().expect("failure").to_string();
+    let failure = crate::remote::far_text(&failure);
     assert!(failure.contains(shown), "{failure}");
     assert!(!failure.chars().any(char::is_control), "{failure:?}");
     drop(link);
@@ -1070,7 +1074,13 @@ fn far_text_in_messages_shows_its_controls_escaped() {
     let mut found = far();
     found.core_session = Some("herdr-x\x1b]0;t\x07".into());
     let refused = check_far_session(&machine(), &found, "default").expect_err("other core");
+    let refused = crate::remote::far_line(&refused).into_owned();
     assert!(refused.contains("herdr-x\\x1b]0;t\\x07"), "{refused}");
+    // Escaped once: a literal backslash in far text is not read as an escape.
+    found.core_session = Some("herdr-x\\x1b".into());
+    let literal = check_far_session(&machine(), &found, "default").expect_err("literal");
+    let literal = crate::remote::far_line(&literal).into_owned();
+    assert!(literal.contains("herdr-x\\\\x1b"), "{literal}");
     assert!(!refused.chars().any(char::is_control), "{refused:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1247,6 +1257,50 @@ fn a_reply_must_answer_the_request_sent() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// #310 (security M6): a request whose id cannot be read is refused before
+/// it is sent, and no reply matches it.
+#[test]
+fn a_request_with_no_id_is_not_sent_and_matches_no_reply() {
+    assert!(whole_reply(b"{\"method\":\"ping\"}\n", b"{\"id\":null}\n").is_err());
+    assert!(whole_reply(b"junk\n", b"{\"id\":null}\n").is_err());
+    assert!(whole_reply(b"{\"id\":\"a\"}\n", b"{\"id\":\"a\"}\n").is_ok());
+    for line in [&b"not json\n"[..], b"{\"method\":\"ping\"}\n"] {
+        let core = FakeCore::start();
+        let (root, dir) = machine_dir("fleet-no-id");
+        let link = link_to(&core, &dir);
+        {
+            use std::io::Write as _;
+            let mut stream = UnixStream::connect(link.socket_path()).expect("connect");
+            stream.write_all(line).expect("write");
+            let mut reply = Vec::new();
+            let _ = stream.read_to_end(&mut reply);
+            assert!(reply.is_empty());
+        }
+        assert_eq!(
+            link.reported_failure().expect("failure").to_string(),
+            "the request has no id to match a reply to, so it was not sent to loop"
+        );
+        assert!(execs(&core).is_empty());
+        drop(link);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// #310: the bridge's base is the canonical path that was checked, so a
+/// symlinked temporary folder is not the folder the bridge is made under.
+#[test]
+fn the_bridge_base_is_the_checked_canonical_path() {
+    let root = scratch("fleet-canonical");
+    let real = root.join("real");
+    std::fs::create_dir(&real).expect("real");
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let base = trusted_base([link.clone()], |_| true).expect("trusted");
+    assert_eq!(base, real.canonicalize().expect("canonical"));
+    assert_ne!(base, link);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// E1: the bridge's folder goes only under a base no other account can
 /// replace: its own and every folder above it are this account's or
 /// root's, and one others can write is sticky.
@@ -1289,12 +1343,9 @@ fn a_tmpdir_others_can_write_is_passed_over_for_tmp() {
     std::env::set_var("TMPDIR", &root);
     let folder = private_folder().expect("folder");
     std::env::remove_var("TMPDIR");
-    assert_eq!(
-        folder.parent(),
-        Some(Path::new("/tmp")),
-        "{}",
-        folder.display()
-    );
+    // Under /tmp's canonical path (#310), where it was checked.
+    let tmp = Path::new("/tmp").canonicalize().expect("tmp");
+    assert_eq!(folder.parent(), Some(tmp.as_path()), "{}", folder.display());
     assert_eq!(std::fs::read_dir(&root).expect("list").count(), 0);
     remove_bridge_folder(&folder).expect("remove");
     forget_leftover(&folder);
@@ -1335,6 +1386,7 @@ fn a_same_name_machine_that_is_not_herdrs_link_gets_nothing() {
         json!({"state": "connected", "via": true, "target": "/bin/other-tool loop"}),
         json!({"state": "connected", "via": true, "target": "/bin/herdr core-link loop",
                "session": "someone-else"}),
+        json!({"state": "connected", "via": true, "target": "/tmp/evil/herdr core-link loop"}),
         json!({"state": "unreachable"}),
     ] {
         let core = FakeCore::start();
@@ -1346,6 +1398,7 @@ fn a_same_name_machine_that_is_not_herdrs_link_gets_nothing() {
             ssh: "/usr/bin/ssh".into(),
             ssh_config: None,
             ssh_auth_sock: None,
+            via: Some("/bin/herdr core-link loop".into()),
         })
         .expect("target");
         match prepare(
@@ -1390,6 +1443,7 @@ fn dial_announces_itself_before_it_dials() {
         ssh: "/usr/bin/ssh".into(),
         ssh_config: None,
         ssh_auth_sock: None,
+        via: None,
     })
     .expect("target");
     let mut said = Vec::new();

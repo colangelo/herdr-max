@@ -14,7 +14,29 @@ use std::borrow::Cow;
 /// return included), DEL, every C1 control, and the bidirectional and line
 /// separator marks that reorder or split what is shown, escaped visibly.
 pub(crate) fn visible_line(text: &str) -> Cow<'_, str> {
-    let hidden = |ch: char| ch != '\t' && is_hidden(ch);
+    escape(text, false)
+}
+
+/// Far text of a core machine, for one line: `visible_line`, and a literal
+/// backslash escaped too (`\\`), so far text cannot spell an escape that
+/// this function would have written. Apply it once to a string, at the
+/// point it is printed.
+pub(crate) fn far_line(text: &str) -> Cow<'_, str> {
+    escape(text, true)
+}
+
+/// Far text of a core machine over several lines: each line as `far_line`,
+/// real newlines kept.
+#[cfg(unix)]
+pub(crate) fn far_text(text: &str) -> String {
+    text.split('\n')
+        .map(|line| escape(line, true))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape(text: &str, backslash: bool) -> Cow<'_, str> {
+    let hidden = |ch: char| (ch != '\t' && is_hidden(ch)) || (backslash && ch == '\\');
     if !text.chars().any(hidden) {
         return Cow::Borrowed(text);
     }
@@ -22,6 +44,8 @@ pub(crate) fn visible_line(text: &str) -> Cow<'_, str> {
     for ch in text.chars() {
         if !hidden(ch) {
             out.push(ch);
+        } else if ch == '\\' {
+            out.push_str("\\\\");
         } else if (ch as u32) < 0x80 {
             out.push_str(&format!("\\x{:02x}", ch as u32));
         } else {
@@ -32,11 +56,21 @@ pub(crate) fn visible_line(text: &str) -> Cow<'_, str> {
 }
 
 /// C0, DEL and C1 (`char::is_control`), and the marks that reorder or
-/// break a line on screen: the bidirectional embeddings, overrides and
+/// break a line on screen: the Arabic letter mark, the left-to-right and
+/// right-to-left marks, the bidirectional embeddings, overrides and
 /// isolates, and the line and paragraph separators.
 fn is_hidden(ch: char) -> bool {
     ch.is_control()
-        || matches!(ch, '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        || matches!(
+            ch,
+            '\u{61c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 #[cfg(test)]
@@ -59,6 +93,31 @@ mod tests {
         );
         assert!(!line.chars().any(|ch| ch.is_control() && ch != '\t'));
         assert_eq!(visible_line("\u{202e}txt.exe"), "\\u{202e}txt.exe");
+    }
+
+    /// #310: the Arabic letter mark and the left/right marks print escaped.
+    #[test]
+    fn direction_marks_print_escaped() {
+        assert_eq!(
+            visible_line("a\u{61c}b\u{200e}c\u{200f}"),
+            "a\\u{61c}b\\u{200e}c\\u{200f}"
+        );
+    }
+
+    /// #310: a literal backslash in far text is escaped, so `\x1b` as text
+    /// differs from an escaped ESC; and `far_text` keeps real newlines.
+    #[test]
+    fn far_line_escapes_its_backslashes_once() {
+        assert_eq!(far_line("\\x1b"), "\\\\x1b");
+        assert_ne!(far_line("\\x1b"), far_line("\x1b"));
+        assert_eq!(far_line("\x1b"), "\\x1b");
+        #[cfg(unix)]
+        assert_eq!(far_text("a\\b\nc\r\nd\x1b"), "a\\\\b\nc\\x0d\nd\\x1b");
+        assert_eq!(
+            visible_line("C:\\dir"),
+            "C:\\dir",
+            "local text is unchanged"
+        );
     }
 
     #[test]

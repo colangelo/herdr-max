@@ -208,6 +208,7 @@ mod tests {
             ssh: "/usr/bin/ssh".into(),
             ssh_config: None,
             ssh_auth_sock: Some("/tmp/recorded.sock".into()),
+            via: None,
         }
     }
 

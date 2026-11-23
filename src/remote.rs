@@ -10,7 +10,9 @@ mod ssh_agent;
 
 pub(crate) use args::*;
 pub(crate) use attach::*;
-pub(crate) use far_text::visible_line;
+#[cfg(unix)]
+pub(crate) use far_text::far_text;
+pub(crate) use far_text::{far_line, visible_line};
 pub(crate) use host::run_remote_client_bridge;
 pub(crate) use saved::*;
 
