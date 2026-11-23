@@ -804,6 +804,12 @@ async fn run_client_loop(
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
     if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
+        #[cfg(unix)]
+        catalog_reload::watch_core_machines(
+            event_tx.clone(),
+            should_quit.clone(),
+            endpoint_catalog.core.clone(),
+        );
     }
 
     // This (foreground) client owns the prefix ASCII input-source switch
@@ -986,6 +992,53 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
+            // A core machine listed after the client started, or one no
+            // longer listed (PR D's second read, item 3).
+            #[cfg(unix)]
+            ClientLoopEvent::CoreMachines(machines) => {
+                let now = std::time::Instant::now();
+                endpoint_catalog.core = machines;
+                let names = endpoint_catalog.core_names();
+                if !federated && !names.is_empty() {
+                    federated = true;
+                    supervisors.add_local(
+                        client_socket_path(),
+                        write_stream
+                            .connection(&endpoint::ClientEndpointId::Local)
+                            .map(|connection| connection.generation),
+                        now,
+                    );
+                }
+                for endpoint_id in supervisors.reconcile_core(&names, now) {
+                    write_stream.disconnect(&endpoint_id);
+                    let cancelled = endpoint_commands.disconnect(&endpoint_id);
+                    state.forget_endpoint_graphics(&endpoint_id);
+                    if let Some(shell) = state.shell.as_mut() {
+                        for request_id in cancelled {
+                            shell.cancel_endpoint_request(&request_id);
+                        }
+                        shell.retire_endpoint(&endpoint_id);
+                    }
+                }
+                if let Some(shell) = state.shell.as_mut() {
+                    shell.set_core_endpoints(&names);
+                    shell.set_local_core_machines(
+                        endpoint_catalog
+                            .core
+                            .iter()
+                            .map(|machine| (machine.name.to_string(), machine.gate.clone()))
+                            .collect(),
+                    );
+                }
+                let (cols, rows) = state.reported_size;
+                if let Some(frame) = state
+                    .shell
+                    .as_mut()
+                    .and_then(|shell| shell.compose(cols, rows))
+                {
+                    state.present_frame(frame);
+                }
+            }
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let image_bridge_active = endpoint_accepts_local_images(

@@ -23,6 +23,56 @@ pub(super) fn watch_profiles(
     });
 }
 
+/// How often a client reads which core machines its primary core lists.
+#[cfg(unix)]
+const CORE_MACHINES_EVERY: Duration = Duration::from_secs(30);
+
+/// Reads the core machines this session's primary core lists, every 30 s
+/// (PR D's second read, item 3): the first herdr after a reboot can start
+/// before its primary core, and a machine added later shows as a view
+/// without a client restart. One `machine.list` of at most 1 s on the
+/// running primary, never a start; a primary that is not up lists nothing,
+/// which removes no view (`core_machines_update`).
+#[cfg(unix)]
+pub(super) fn watch_core_machines(
+    event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    should_quit: Arc<AtomicBool>,
+    known: Vec<crate::core_machine::command::LinkedMachine>,
+) {
+    std::thread::spawn(move || {
+        let mut previous = known;
+        loop {
+            std::thread::sleep(CORE_MACHINES_EVERY);
+            if should_quit.load(Ordering::Acquire) {
+                break;
+            }
+            let listed = crate::core_machine::command::linked_machines_of_primary();
+            let Some(current) = core_machines_update(&previous, listed) else {
+                continue;
+            };
+            previous = current.clone();
+            if event_tx
+                .blocking_send(ClientLoopEvent::CoreMachines(current))
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
+/// The core machines a client shows after a read that listed `listed`,
+/// when that changes what it shows: `None` for the same list, and for an
+/// empty one (the primary core is not up, or lists none for now) so a core
+/// restart never takes the views away.
+#[cfg(unix)]
+pub(super) fn core_machines_update(
+    shown: &[crate::core_machine::command::LinkedMachine],
+    listed: Vec<crate::core_machine::command::LinkedMachine>,
+) -> Option<Vec<crate::core_machine::command::LinkedMachine>> {
+    (!listed.is_empty() && listed != shown).then_some(listed)
+}
+
 // Only called between surface handoffs: removing a source must not invalidate an in-flight
 // rollback. Connection attempts are independent and fenced by supervisor generations.
 pub(super) fn apply_profiles(
@@ -238,5 +288,34 @@ mod tests {
                 ));
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod core_machine_tests {
+    use super::core_machines_update;
+    use crate::core_machine::command::LinkedMachine;
+
+    fn machine(name: &str, gate: &str) -> LinkedMachine {
+        LinkedMachine {
+            name: crate::core_machine::MachineName::parse(name).unwrap(),
+            gate: gate.into(),
+            target: None,
+        }
+    }
+
+    // Item 3 of PR D's second read: a client shows the core machines its
+    // primary lists when that list changes (a machine added, a gate that
+    // changed, the primary up after the client); a primary that lists none
+    // (not up yet, or restarting) takes no view away.
+    #[test]
+    fn a_later_listing_adds_views_and_an_empty_one_keeps_them() {
+        let none: Vec<LinkedMachine> = Vec::new();
+        let one = vec![machine("ac-mbm5", "dormant")];
+        assert_eq!(core_machines_update(&none, one.clone()), Some(one.clone()));
+        assert_eq!(core_machines_update(&one, one.clone()), None, "unchanged");
+        assert_eq!(core_machines_update(&one, Vec::new()), None, "core not up");
+        let open = vec![machine("ac-mbm5", "open")];
+        assert_eq!(core_machines_update(&one, open.clone()), Some(open));
     }
 }

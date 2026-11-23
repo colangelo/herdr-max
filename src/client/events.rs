@@ -25,6 +25,10 @@ pub(super) enum ClientLoopEvent {
     },
     EndpointSupervisor(endpoint::EndpointSupervisorEvent),
     EndpointCatalog(Result<Vec<endpoint::SavedSshEndpoint>, String>),
+    /// The core machines this session's primary core lists now (core-phase5
+    /// D6, PR D's second read, item 3).
+    #[cfg(unix)]
+    CoreMachines(Vec<crate::core_machine::command::LinkedMachine>),
     HostPower(crate::platform::HostPowerEvent),
     ActivateEndpoint {
         endpoint_id: endpoint::ClientEndpointId,
