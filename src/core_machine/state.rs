@@ -701,9 +701,12 @@ pub(crate) mod tests {
         let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
         dir.create().expect("create");
         assert_eq!(dir.read_gate().expect("none"), None);
+        // A nanosecond clock reading whose shortest form has 17 digits: serde_json's default
+        // float parser read it back one ulp off, so the gate came back a different time
+        // (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/300).
         let gate = Gate {
             class: GateClass::AuthStalled,
-            at: now_unix(),
+            at: 1_795_385_661.720_020_5,
             detail: Some("15 s".into()),
         };
         dir.write_gate(&gate).expect("write");
