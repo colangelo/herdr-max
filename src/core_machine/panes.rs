@@ -9,8 +9,9 @@
 //! the folder checks, the dialer's own thread and every core call happen on
 //! that thread, the dialer's or the server's probe thread.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -24,8 +25,8 @@ use crate::pane::core_machines as core;
 /// The most wakes one machine's panes post, so a person typing into a pane
 /// whose machine is away starts one dial, not one per key.
 const WAKE_EVERY: Duration = Duration::from_secs(5);
-/// Wakes waiting for the wake thread; a full queue drops one, as a wake
-/// for that machine is already on its way within `WAKE_EVERY`.
+/// Wakes waiting for the wake thread, which never blocks on one: a full
+/// queue drops the wake and leaves the next input free to post again.
 const WAKE_QUEUE: usize = 16;
 /// How long a wake waits for the person's lease (PR D's second read, item
 /// 1): the person's client writes it for the same input that reached the
@@ -33,6 +34,8 @@ const WAKE_QUEUE: usize = 16;
 /// the wake can arrive first. Input that no person's client leases (an
 /// agent's, the API's) still dials nothing.
 const LEASE_GRACE: Duration = Duration::from_secs(3);
+/// How often the wake thread looks again for the lease of a waiting wake.
+const LEASE_POLL: Duration = Duration::from_millis(100);
 
 /// One machine as this process sees it.
 pub(crate) struct MachineLink {
@@ -56,9 +59,12 @@ fn wake_thread() -> Option<&'static SyncSender<Arc<MachineLink>>> {
             let started = std::thread::Builder::new()
                 .name("herdr-machine-wake".into())
                 .spawn(move || {
-                    while let Ok(link) = requests.recv() {
-                        link.dial();
-                    }
+                    run_wakes(
+                        &requests,
+                        || passwd_machines_root().ok(),
+                        LEASE_GRACE,
+                        |link, root| link.dial_now(root),
+                    );
                 });
             match started {
                 Ok(_) => Some(wakes),
@@ -105,45 +111,42 @@ impl MachineLink {
     /// posts a wake to the wake thread and returns at once, at most once
     /// per `WAKE_EVERY`. True when one was posted.
     pub(crate) fn wake(self: &Arc<Self>) -> bool {
-        let now = Instant::now();
-        {
-            let mut last = self
-                .last_wake
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if last.is_some_and(|at| now.saturating_duration_since(at) < WAKE_EVERY) {
-                return false;
-            }
-            *last = Some(now);
-        }
         let Some(wakes) = wake_thread() else {
             return false;
         };
+        self.post_wake(wakes)
+    }
+
+    /// Posts a wake on `wakes` unless one went within `WAKE_EVERY`. A wake
+    /// the queue could not take starts no interval, so the next input posts
+    /// again (#312 follow-up: a person's first key after a burst of agent
+    /// input is never held off for 5 s).
+    fn post_wake(self: &Arc<Self>, wakes: &SyncSender<Arc<MachineLink>>) -> bool {
+        let now = Instant::now();
+        let mut last = self
+            .last_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| now.saturating_duration_since(at) < WAKE_EVERY) {
+            return false;
+        }
         match wakes.try_send(Arc::clone(self)) {
-            Ok(()) => true,
+            Ok(()) => {
+                *last = Some(now);
+                true
+            }
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
         }
     }
 
-    /// On the wake thread: the machine's dialer, made on first use, gets
-    /// the wake. Only a machine herdr links is dialled (its folder holds
-    /// `target.json`), and only while a lease is in force: leases are a
-    /// person's input, which the person's client writes; input through the
-    /// API, from an agent or a script, writes none, so it never dials a
-    /// dormant machine, even where `core-link` would refuse (security
-    /// review M7).
-    fn dial(&self) {
-        self.dial_in(passwd_machines_root().ok().as_deref());
-    }
-
-    fn dial_in(&self, root: Option<&std::path::Path>) {
-        let Some(root) = root else {
-            return;
-        };
-        if !lease_within(root, &self.name, LEASE_GRACE, Duration::from_millis(100)) {
-            tracing::debug!(machine = %self.name, "no lease for the machine: input does not wake it");
-            return;
-        }
+    /// On the wake thread, once a lease allows the link: the machine's
+    /// dialer, made on first use, gets the wake. Only a machine herdr links
+    /// is dialled (its folder holds `target.json`), and only while a lease
+    /// is in force (`run_wakes`): leases are a person's input, which the
+    /// person's client writes; input through the API, from an agent or a
+    /// script, writes none, so it never dials a dormant machine, even where
+    /// `core-link` would refuse (security review M7).
+    fn dial_now(&self, root: &Path) {
         let mut dialer = self.dialer.lock().unwrap_or_else(PoisonError::into_inner);
         if dialer.is_none() {
             *dialer = self.spawn_dialer(root);
@@ -153,7 +156,7 @@ impl MachineLink {
         }
     }
 
-    fn spawn_dialer(&self, root: &std::path::Path) -> Option<Dialer> {
+    fn spawn_dialer(&self, root: &Path) -> Option<Dialer> {
         let dir = MachineDir::at(root, &self.name);
         if dir.check().is_err() || !dir.target_path().is_file() {
             tracing::debug!(machine = %self.name, "not a machine herdr links; core redials it itself");
@@ -237,23 +240,53 @@ pub(crate) fn leased(root: Option<&std::path::Path>, machine: &MachineName) -> b
     dir.leases().iter().any(|lease| lease.in_force(now))
 }
 
-/// Whether a lease allows `machine`'s link now or within `grace`, read
-/// every `every`.
-fn lease_within(
-    root: &std::path::Path,
-    machine: &MachineName,
+/// The wake thread's loop: a wake whose machine a lease allows dials at
+/// once (`dial`); one with no lease yet waits as the machine's one pending
+/// wake (a newer wake of the machine takes its place and deadline), looked
+/// at again every `LEASE_POLL` until `grace` ends, when it goes undialled.
+/// The thread never sleeps on one wake, so a wake waiting for a lease (an
+/// agent's input, which no person leases) never holds up another
+/// machine's, and the queue does not fill behind it (#312 follow-up).
+fn run_wakes(
+    requests: &Receiver<Arc<MachineLink>>,
+    root: impl Fn() -> Option<PathBuf>,
     grace: Duration,
-    every: Duration,
-) -> bool {
-    let deadline = Instant::now() + grace;
+    mut dial: impl FnMut(&MachineLink, &Path),
+) {
+    let mut pending: Vec<(Arc<MachineLink>, Instant)> = Vec::new();
     loop {
-        if leased(Some(root), machine) {
-            return true;
+        let received = if pending.is_empty() {
+            match requests.recv() {
+                Ok(link) => Some(link),
+                Err(_) => return,
+            }
+        } else {
+            match requests.recv_timeout(LEASE_POLL) {
+                Ok(link) => Some(link),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        };
+        let now = Instant::now();
+        if let Some(link) = received {
+            pending.retain(|(waiting, _)| waiting.name != link.name);
+            pending.push((link, now + grace));
         }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(every);
+        let Some(root) = root() else {
+            pending.clear();
+            continue;
+        };
+        pending.retain(|(link, deadline)| {
+            if leased(Some(&root), &link.name) {
+                dial(link, &root);
+                return false;
+            }
+            if now >= *deadline {
+                tracing::debug!(machine = %link.name, "no lease for the machine: input does not wake it");
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -368,6 +401,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A herdr-linked machine folder under `root`, with no lease.
+    fn gated(root: &Path, raw: &str) -> MachineDir {
+        let dir = MachineDir::at(root, &name(raw));
+        dir.create().expect("create");
+        std::fs::write(dir.target_path(), b"{}").expect("target");
+        dir
+    }
+
+    fn lease_now(dir: &MachineDir) {
+        let now = now_unix();
+        dir.write_lease(&LeaseHolder::client(std::process::id()), now + 60.0, now)
+            .expect("lease");
+    }
+
+    /// The wake loop on a thread of its own, recording what it dials.
+    struct WakeLoop {
+        wakes: SyncSender<Arc<MachineLink>>,
+        dials: Receiver<(MachineName, Instant)>,
+        thread: std::thread::JoinHandle<()>,
+    }
+
+    impl WakeLoop {
+        /// Over `root`, with `grace` for a lease.
+        fn start(root: &Path, grace: Duration) -> Self {
+            let (wakes, requests) = mpsc::sync_channel::<Arc<MachineLink>>(WAKE_QUEUE);
+            let (dialled, dials) = mpsc::channel();
+            let root = root.to_path_buf();
+            let thread = std::thread::spawn(move || {
+                run_wakes(
+                    &requests,
+                    || Some(root.clone()),
+                    grace,
+                    |link, _| {
+                        let _ = dialled.send((link.name.clone(), Instant::now()));
+                    },
+                );
+            });
+            Self {
+                wakes,
+                dials,
+                thread,
+            }
+        }
+
+        fn stop(self) {
+            drop(self.wakes);
+            self.thread.join().expect("loop");
+        }
+    }
+
     // Item 1 of PR D's second read: a lease write wakes nothing, so input in
     // a pane on the machine wakes it, and that wake can come before the
     // person's client wrote the lease for the same input. It waits a short
@@ -375,31 +458,77 @@ mod tests {
     #[test]
     fn a_wake_waits_briefly_for_the_persons_lease() {
         let root = crate::core_machine::state::tests::scratch("panes-grace");
-        let machine = name("loop");
-        let dir = MachineDir::at(&root, &machine);
-        dir.create().expect("create");
-        std::fs::write(dir.target_path(), b"{}").expect("target");
-        let every = Duration::from_millis(20);
-        let started = Instant::now();
-        assert!(!lease_within(
-            &root,
-            &machine,
-            Duration::from_millis(200),
-            every
-        ));
-        assert!(started.elapsed() >= Duration::from_millis(200), "it waited");
-        let writer = {
-            let dir = MachineDir::at(&root, &machine);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(150));
-                let now = now_unix();
-                dir.write_lease(&LeaseHolder::client(1), now + 60.0, now)
-                    .expect("lease");
-            })
-        };
-        assert!(lease_within(&root, &machine, Duration::from_secs(3), every));
-        writer.join().expect("writer");
+        let late = gated(&root, "grace-late");
+        let _never = gated(&root, "grace-never");
+        let wakes = WakeLoop::start(&root, Duration::from_millis(600));
+        let posted = Instant::now();
+        wakes.wakes.send(link(&name("grace-never"))).expect("post");
+        wakes.wakes.send(link(&name("grace-late"))).expect("post");
+        std::thread::sleep(Duration::from_millis(150));
+        lease_now(&late);
+        let (dialled, at) = wakes
+            .dials
+            .recv_timeout(Duration::from_secs(3))
+            .expect("a dial");
+        assert_eq!(dialled, name("grace-late"));
+        assert!(at - posted >= Duration::from_millis(150), "it waited");
+        assert!(
+            wakes
+                .dials
+                .recv_timeout(Duration::from_millis(900))
+                .is_err(),
+            "input no person leases never dials"
+        );
+        wakes.stop();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // #312 follow-up: a wake waiting for a lease never holds up another
+    // machine's. Agent input into panes on dormant machines leaves them
+    // pending, and a person's wake behind them dials at once, not after
+    // their grace.
+    #[test]
+    fn a_wake_without_a_lease_never_holds_up_another_machines() {
+        let root = crate::core_machine::state::tests::scratch("panes-no-block");
+        for agent in ["agent-a", "agent-b", "agent-c"] {
+            gated(&root, agent);
+        }
+        let person = gated(&root, "person");
+        lease_now(&person);
+        let wakes = WakeLoop::start(&root, Duration::from_secs(3));
+        for agent in ["agent-a", "agent-b", "agent-c"] {
+            wakes.wakes.send(link(&name(agent))).expect("post");
+        }
+        let posted = Instant::now();
+        wakes.wakes.send(link(&name("person"))).expect("post");
+        let (dialled, at) = wakes
+            .dials
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a dial");
+        assert_eq!(dialled, name("person"));
+        assert!(
+            at - posted < Duration::from_secs(1),
+            "the person's wake waited {:?} behind agents' wakes",
+            at - posted
+        );
+        wakes.stop();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // #312 follow-up: a wake the queue could not take starts no interval,
+    // so the next input posts at once instead of 5 s later.
+    #[test]
+    fn a_dropped_wake_does_not_hold_off_the_next() {
+        let link = link(&name("wake-dropped"));
+        let (full, _never_read) = mpsc::sync_channel::<Arc<MachineLink>>(0);
+        assert!(!link.post_wake(&full), "the queue took nothing");
+        let (open, posted) = mpsc::sync_channel::<Arc<MachineLink>>(1);
+        assert!(link.post_wake(&open), "the next input posts");
+        assert!(posted.try_recv().is_ok());
+        assert!(
+            !link.post_wake(&open),
+            "within the interval: nothing posted"
+        );
     }
 
     // C4 (D5): a `machine.list` that failed reads nothing for the machines
@@ -463,12 +592,24 @@ mod tests {
         let core = crate::pane::FakeCore::start();
         std::env::set_var("HC_SOCKET", &core.socket);
         let root = crate::core_machine::state::tests::scratch("panes-no-lease-wake");
-        let machine = name("no-lease-wake");
-        let dir = MachineDir::at(&root, &machine);
-        dir.create().expect("create");
-        std::fs::write(dir.target_path(), b"{}").expect("target");
-        let link = link(&machine);
-        link.dial_in(Some(&root));
+        gated(&root, "no-lease-wake");
+        let link = link(&name("no-lease-wake"));
+        let (wakes, requests) = mpsc::sync_channel::<Arc<MachineLink>>(1);
+        let thread = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                run_wakes(
+                    &requests,
+                    || Some(root.clone()),
+                    Duration::from_millis(200),
+                    |link, root| link.dial_now(root),
+                );
+            })
+        };
+        wakes.send(Arc::clone(&link)).expect("post");
+        std::thread::sleep(Duration::from_millis(500));
+        drop(wakes);
+        thread.join().expect("loop");
         assert!(
             link.dialer
                 .lock()
