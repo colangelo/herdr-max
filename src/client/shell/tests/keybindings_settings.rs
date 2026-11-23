@@ -1140,3 +1140,95 @@ fn a_views_agent_menu_offers_rename_only_for_the_current_tab() {
     state.open_agent_context_menu("w1:p1".into(), 5, 3);
     assert_eq!(labels(&state), ["Rename pane"], "the current tab");
 }
+
+// Fork issue 316, M1, through the dispatcher's wiring: a view's structural
+// action behind another one still running is refused at once with the
+// busy notice, never queued to be sent later at what the pane shows then.
+#[cfg(unix)]
+#[test]
+fn a_view_action_behind_a_running_one_is_refused_not_queued() {
+    use crate::client::endpoint::{
+        ClientEndpointId, ClientEndpointStatus, EndpointNegotiation, EndpointRegistry,
+    };
+    use crate::client::endpoint_commands::EndpointCommands;
+    use crate::protocol::ClientMessage;
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<ClientMessage>>>);
+    impl crate::client::endpoint::EndpointTransport for Capture {
+        fn send(&mut self, message: &ClientMessage) -> std::io::Result<()> {
+            self.0.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+    }
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let machine = crate::core_machine::MachineName::parse("loop").unwrap();
+    let view = ClientEndpointId::Core(machine.clone());
+    state.set_core_endpoints(std::slice::from_ref(&machine));
+    state.set_endpoint_status(&view, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&view, Box::new(snapshot()));
+    assert!(state.activate_endpoint_projection(&view));
+    state.set_endpoint_methods(Some(crate::view::policy::advertised(
+        crate::api::schema::operations::client_shell_method_names(),
+        true,
+    )));
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut endpoints = EndpointRegistry::empty();
+    endpoints.insert(
+        view.clone(),
+        Capture(sent.clone()),
+        7,
+        EndpointNegotiation::default(),
+        true,
+    );
+    assert!(endpoints.set_active(&view));
+    endpoints.set_surface_active(&view, true);
+    endpoints.unfreeze_input();
+    let mut commands = EndpointCommands::default();
+    let close = |state: &mut ClientShellState,
+                 commands: &mut EndpointCommands,
+                 endpoints: &mut EndpointRegistry| {
+        let mut outcome = ClientShellInput::default();
+        state.push_endpoint_method(
+            crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
+                pane_id: "ws_1:p1".into(),
+                force: false,
+            }),
+            &mut outcome,
+        );
+        assert!(
+            matches!(
+                outcome.actions.as_slice(),
+                [ClientShellAction::Endpoint { .. }]
+            ),
+            "the close goes to the view"
+        );
+        crate::client::shell_runtime::dispatch_client_shell_actions(
+            outcome.actions,
+            commands,
+            endpoints,
+            Some(state),
+            &mut Vec::new(),
+            &mut None,
+        )
+        .unwrap();
+    };
+
+    close(&mut state, &mut commands, &mut endpoints);
+    assert!(state.visible_endpoint_notice.is_none());
+    assert!(commands.send_next(&view, &mut endpoints).is_empty());
+    assert_eq!(sent.lock().unwrap().len(), 1, "the first close is running");
+
+    close(&mut state, &mut commands, &mut endpoints);
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("the busy notice");
+    assert!(notice.body.contains("still running"), "{}", notice.body);
+    assert_eq!(
+        commands.disconnect(&view).len(),
+        1,
+        "only the running one: the second was never queued"
+    );
+}

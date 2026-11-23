@@ -188,6 +188,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use crate::api::schema::{Method, Request};
+    use crate::app::api::RespawnTarget;
     use crate::app::App;
     use crate::layout::PaneId;
     use crate::pane::FakeCore;
@@ -346,23 +347,43 @@ mod tests {
     }
 
     // A pane whose program is not in herdr-core has no terminal a view could
-    // have named: refused.
+    // have named: refused, with nothing done. The pane here is a real PTY
+    // pane (a shell, its runtime present), the third pane of the fixture
+    // respawned outside core, so the refusal is the `core_terminal()`
+    // check's, not a missing runtime's.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_pane_outside_core_is_refused() {
         let mut far = far();
-        let first = far.id(0);
-        let expect = far.expect(0);
-        let terminal_id = far.app.state.workspaces[0].tabs[0]
-            .terminal_id(far.panes[0])
-            .cloned()
-            .expect("a terminal");
-        if let Some(runtime) = far.app.terminal_runtimes.remove(&terminal_id) {
-            runtime.shutdown();
+        let alone = far.id(2);
+        crate::pane::set_preferred_runtime(false);
+        assert!(far
+            .app
+            .respawn_pane_runtime(far.panes[2], RespawnTarget::Shell));
+        let runtime = far.app.state.workspaces[1]
+            .terminal_id(far.panes[2])
+            .and_then(|terminal| far.app.terminal_runtimes.get(terminal))
+            .expect("a runtime");
+        assert!(runtime.core_terminal().is_none(), "a PTY pane, not core");
+
+        let expect = far.expect(2);
+        for (method, params) in [
+            ("pane.rename_if_terminal", json!({"label": "x"})),
+            ("pane.split_if_terminal", json!({"direction": "right"})),
+            ("pane.close_if_terminal", json!({})),
+        ] {
+            let mut params = params;
+            params["pane_id"] = json!(alone);
+            params["expect"] = expect.clone();
+            let refused = far.call(method, params);
+            assert_eq!(refused["error"]["code"], "terminal_mismatch", "{refused}");
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("does not run in Herdr Core")),
+                "{refused}"
+            );
         }
-        let refused = far.call(
-            "pane.rename_if_terminal",
-            json!({"pane_id": first, "label": "x", "expect": expect}),
-        );
-        assert_eq!(refused["error"]["code"], "terminal_mismatch", "{refused}");
+        assert_eq!(far.panes_of(1), 1, "nothing split or closed");
+        assert_eq!(far.label(2), None, "not renamed");
     }
 }
