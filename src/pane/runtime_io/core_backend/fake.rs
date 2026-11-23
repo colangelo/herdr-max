@@ -22,6 +22,9 @@ pub(crate) struct FakeConfig {
     pub hello_line: Option<Vec<u8>>,
     /// False: after hello, never read again, as a stalled core.
     pub reads_after_hello: bool,
+    /// The hello reply goes a byte at a time, this far apart, as a core
+    /// that answers slowly.
+    pub hello_drip: Option<std::time::Duration>,
     /// How long `terminal.run` takes to answer, as a slow core; other calls
     /// on the connection are answered meanwhile.
     pub run_delay: std::time::Duration,
@@ -72,6 +75,7 @@ impl Default for FakeConfig {
             pid: 4242,
             hello_line: None,
             reads_after_hello: true,
+            hello_drip: None,
             run_delay: std::time::Duration::ZERO,
             lose_run_reply: false,
             failing: Vec::new(),
@@ -303,8 +307,20 @@ fn serve(stream: UnixStream, config: &FakeConfig, shared: Arc<Mutex<Shared>>) {
         line.push(b'\n');
         line
     });
-    if writer.write_all(&line).is_err() {
-        return;
+    match config.hello_drip {
+        Some(pause) => {
+            for byte in &line {
+                if writer.write_all(std::slice::from_ref(byte)).is_err() {
+                    return;
+                }
+                std::thread::sleep(pause);
+            }
+        }
+        None => {
+            if writer.write_all(&line).is_err() {
+                return;
+            }
+        }
     }
     lock(&shared).stream = Some(stream);
     if !config.reads_after_hello {

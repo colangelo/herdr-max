@@ -83,38 +83,34 @@ pub(crate) fn call_running_by(
     timeout: Duration,
     deadline: Option<std::time::Instant>,
 ) -> Result<Option<Value>, CallError> {
-    let left =
-        || deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
-    let connected = match left() {
+    // One absolute deadline through the connect, the hello, the version
+    // check and the call, its write and its wait (fork issue 317 M6).
+    let connected = match deadline {
         None => client::connect_at(socket),
-        Some(left) => client::connect_at_within(socket, left),
+        Some(deadline) => client::connect_at_by(socket, deadline),
     };
     let connected = match connected {
         Ok((connected, _)) => connected,
         Err(client::CoreError::NoCore(_)) => return Ok(None),
         Err(err) => return Err(CallError::NotSent(err.to_string())),
     };
-    let timeout = match left() {
-        None => timeout,
-        Some(left) if left.is_zero() => {
-            return Err(CallError::NotSent(format!(
-                "no time left to send {method} to herdr-core"
-            )))
-        }
-        Some(left) => timeout.min(left),
+    let reply = match deadline {
+        None => connected.call(method, params, timeout),
+        Some(deadline) => connected.call_by(
+            method,
+            params,
+            deadline.min(std::time::Instant::now() + timeout),
+        ),
     };
-    connected
-        .call(method, params, timeout)
-        .map(Some)
-        .map_err(|err| match err {
-            client::CoreError::Rpc { kind, message } => CallError::Rpc { kind, message },
-            err @ (client::CoreError::Closed | client::CoreError::Timeout(_)) => {
-                CallError::NoAnswer(err.to_string())
-            }
-            err @ (client::CoreError::Unavailable(_) | client::CoreError::NoCore(_)) => {
-                CallError::NotSent(err.to_string())
-            }
-        })
+    reply.map(Some).map_err(|err| match err {
+        client::CoreError::Rpc { kind, message } => CallError::Rpc { kind, message },
+        err @ (client::CoreError::Closed | client::CoreError::Timeout(_)) => {
+            CallError::NoAnswer(err.to_string())
+        }
+        err @ (client::CoreError::Unavailable(_) | client::CoreError::NoCore(_)) => {
+            CallError::NotSent(err.to_string())
+        }
+    })
 }
 
 /// `env -u NAME ... --` for each herdr integration variable: the start of

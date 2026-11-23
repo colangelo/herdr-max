@@ -5,13 +5,13 @@
 //! pane that owns the stream.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -198,26 +198,26 @@ impl CoreClient {
     /// Connects to the core at `socket`, says hello and switches to framed
     /// mode. Refuses a socket another user could have placed or serves, and a
     /// core of another protocol generation. Production callers connect
-    /// through `connect_at`, bounded (`connect_within`).
+    /// through `connect_at`, bounded (`connect_by`).
     #[cfg(test)]
     pub(crate) fn connect(
         socket: &Path,
         on_event: Option<EventHandler>,
     ) -> Result<Self, CoreError> {
-        Self::connect_within(socket, on_event, HANDSHAKE_WAIT)
+        Self::connect_by(socket, on_event, Instant::now() + HANDSHAKE_WAIT)
     }
 
-    /// `connect` with the hello's write and read bounded by `wait` (at most
-    /// `HANDSHAKE_WAIT`): a caller with a deadline of its own (a view's
-    /// action, fork issue 316 M7) does not wait past it for a core that
-    /// accepts and does not answer.
-    pub(crate) fn connect_within(
+    /// `connect`, all of it by `deadline` (fork issue 317 M6): the socket's
+    /// connect, the hello's write and every read of its reply each get only
+    /// what is left, so a core that accepts slowly, or sends its hello a byte
+    /// at a time, cannot hold the caller past it.
+    pub(crate) fn connect_by(
         socket: &Path,
         on_event: Option<EventHandler>,
-        wait: Duration,
+        deadline: Instant,
     ) -> Result<Self, CoreError> {
-        let wait = wait.min(HANDSHAKE_WAIT);
-        if wait.is_zero() {
+        let left = || deadline.saturating_duration_since(Instant::now());
+        if left().is_zero() {
             return Err(CoreError::Unavailable(format!(
                 "no time left to connect to {}",
                 socket.display()
@@ -225,9 +225,7 @@ impl CoreClient {
         }
         let euid = unsafe { libc::geteuid() };
         check_socket_folder(socket, euid)?;
-        let mut stream = UnixStream::connect(socket).map_err(|err| {
-            CoreError::Unavailable(format!("cannot connect to {}: {err}", socket.display()))
-        })?;
+        let mut stream = connect_unix_by(socket, deadline)?;
         match crate::platform::unix_stream_peer_uid(&stream) {
             Some(uid) if uid == euid => {}
             Some(uid) => {
@@ -243,9 +241,12 @@ impl CoreClient {
                 )))
             }
         }
+        let write_wait = left().min(WRITE_TIMEOUT);
+        if write_wait.is_zero() {
+            return Err(CoreError::Unavailable("no time left to say hello".into()));
+        }
         stream
-            .set_read_timeout(Some(wait))
-            .and_then(|()| stream.set_write_timeout(Some(wait.min(WRITE_TIMEOUT))))
+            .set_write_timeout(Some(write_wait))
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
         let hello =
             json!({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {"framed": true}});
@@ -255,23 +256,11 @@ impl CoreClient {
         stream
             .write_all(&line)
             .map_err(|err| CoreError::Unavailable(format!("hello not sent: {err}")))?;
-        let mut reader = BufReader::new(
-            stream
-                .try_clone()
-                .map_err(|err| CoreError::Unavailable(err.to_string()))?,
-        );
-        let mut reply = String::new();
-        let read = (&mut reader)
-            .take(HELLO_LIMIT)
-            .read_line(&mut reply)
-            .map_err(|err| CoreError::Unavailable(format!("no hello reply: {err}")))?;
-        if read as u64 == HELLO_LIMIT && !reply.ends_with('\n') {
-            return Err(CoreError::Unavailable(format!(
-                "hello reply longer than {} KiB",
-                HELLO_LIMIT / 1024
-            )));
-        }
-        let reply: Value = serde_json::from_str(reply.trim())
+        let mut read_half = stream
+            .try_clone()
+            .map_err(|err| CoreError::Unavailable(err.to_string()))?;
+        let (reply, leftover) = read_hello_by(&mut read_half, deadline)?;
+        let reply: Value = serde_json::from_slice(reply.trim_ascii())
             .map_err(|err| CoreError::Unavailable(format!("bad hello reply: {err}")))?;
         let result = reply
             .get("result")
@@ -309,9 +298,8 @@ impl CoreClient {
             on_event,
         });
         let reader_inner = Arc::clone(&inner);
-        // Bytes already buffered past the hello line belong to the framed stream.
-        let leftover = reader.buffer().to_vec();
-        let socket = reader.into_inner();
+        // Bytes read past the hello line belong to the framed stream.
+        let socket = read_half;
         std::thread::Builder::new()
             .name("herdr-core-reader".into())
             .spawn(move || read_loop(reader_inner, socket, leftover))
@@ -339,7 +327,15 @@ impl CoreClient {
 
     /// One JSON-RPC call on channel 0.
     pub(crate) fn call(&self, method: &str, params: Value, timeout: Duration) -> Reply {
-        self.call_inner(method, params, timeout, None, MAX_PAYLOAD)
+        self.call_inner(method, params, timeout, None, MAX_PAYLOAD, None)
+    }
+
+    /// One call that ends by `deadline` (fork issue 317 M6): its write gets
+    /// only what is left, and so does the wait for the reply after it. With
+    /// nothing left it is not sent (`Unavailable`).
+    pub(crate) fn call_by(&self, method: &str, params: Value, deadline: Instant) -> Reply {
+        let left = deadline.saturating_duration_since(Instant::now());
+        self.call_inner(method, params, left, None, MAX_PAYLOAD, Some(deadline))
     }
 
     /// One call whose reply is refused, unread, when its message is over
@@ -352,19 +348,33 @@ impl CoreClient {
         timeout: Duration,
         max_reply: usize,
     ) -> Reply {
-        self.call_inner(method, params, timeout, None, max_reply)
+        self.call_inner(method, params, timeout, None, max_reply, None)
     }
 
     /// `terminal.attach`: returns the reply and routes the stream's frames to
     /// `sink` from the first one on.
     pub(crate) fn attach(&self, params: Value, sink: StreamSink, timeout: Duration) -> Reply {
-        self.call_inner("terminal.attach", params, timeout, Some(sink), MAX_PAYLOAD)
+        self.call_inner(
+            "terminal.attach",
+            params,
+            timeout,
+            Some(sink),
+            MAX_PAYLOAD,
+            None,
+        )
     }
 
     /// `events.subscribe`: returns the snapshot and routes the subscription's
     /// event lines to `sink`.
     pub(crate) fn subscribe(&self, params: Value, sink: StreamSink, timeout: Duration) -> Reply {
-        self.call_inner("events.subscribe", params, timeout, Some(sink), MAX_PAYLOAD)
+        self.call_inner(
+            "events.subscribe",
+            params,
+            timeout,
+            Some(sink),
+            MAX_PAYLOAD,
+            None,
+        )
     }
 
     fn call_inner(
@@ -374,9 +384,15 @@ impl CoreClient {
         timeout: Duration,
         stream: Option<StreamSink>,
         max_reply: usize,
+        deadline: Option<Instant>,
     ) -> Reply {
         if self.is_closed() {
             return Err(CoreError::Closed);
+        }
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(CoreError::Unavailable(format!(
+                "no time left to send {method} to herdr-core"
+            )));
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -393,10 +409,14 @@ impl CoreClient {
             kind: "encode".into(),
             message: err.to_string(),
         })?;
-        if let Err(err) = self.send(&Frame::new(0, kind::DATA, payload)) {
+        if let Err(err) = self.send_by(&Frame::new(0, kind::DATA, payload), deadline) {
             lock(&self.inner.pending).remove(&id);
             return Err(err);
         }
+        // The wait is what the deadline leaves after the write.
+        let timeout = deadline.map_or(timeout, |deadline| {
+            timeout.min(deadline.saturating_duration_since(Instant::now()))
+        });
         match reply_rx.recv_timeout(timeout) {
             Ok(reply) => reply,
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -412,6 +432,13 @@ impl CoreClient {
     /// (core not reading for `WRITE_TIMEOUT`) may have sent part of a frame,
     /// so it shuts the connection: every stream then sees ConnectionLost.
     pub(crate) fn send(&self, frame: &Frame) -> Result<(), CoreError> {
+        self.send_by(frame, None)
+    }
+
+    /// `send`, with the write stalled no later than `deadline` when one is
+    /// given (fork issue 317 M6); the connection's own write timeout comes
+    /// back after it.
+    fn send_by(&self, frame: &Frame, deadline: Option<Instant>) -> Result<(), CoreError> {
         let mut bytes = Vec::new();
         frame
             .encode_into(&mut bytes)
@@ -420,7 +447,28 @@ impl CoreClient {
                 message: err.to_string(),
             })?;
         let mut writer = lock(&self.inner.writer);
-        writer.write_all(&bytes).map_err(|err| {
+        let wait = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(CoreError::Unavailable(
+                        "no time left to write to herdr-core".into(),
+                    ));
+                }
+                Some(left.min(WRITE_TIMEOUT))
+            }
+            None => None,
+        };
+        if let Some(wait) = wait {
+            writer
+                .set_write_timeout(Some(wait))
+                .map_err(|err| CoreError::Unavailable(err.to_string()))?;
+        }
+        let written = writer.write_all(&bytes);
+        if wait.is_some() {
+            let _ = writer.set_write_timeout(Some(WRITE_TIMEOUT));
+        }
+        written.map_err(|err| {
             warn!(err = %err, "herdr-core write failed; closing the connection");
             let _ = writer.shutdown(std::net::Shutdown::Both);
             CoreError::Closed
@@ -430,6 +478,74 @@ impl CoreClient {
     /// Stops routing a stream (after a detach or the stream's end).
     pub(crate) fn forget_stream(&self, channel: u32) {
         lock(&self.inner.streams).remove(&channel);
+    }
+}
+
+/// Connects to the Unix socket `socket` by `deadline` (fork issue 317 M6):
+/// a connect blocks while core's listen queue is full, so it runs on a
+/// thread of its own, and one that has not finished by then is left there
+/// (its stream, should it come, is dropped).
+fn connect_unix_by(socket: &Path, deadline: Instant) -> Result<UnixStream, CoreError> {
+    let (done, connected) = mpsc::channel();
+    let path = socket.to_path_buf();
+    std::thread::Builder::new()
+        .name("herdr-core-connect".into())
+        .spawn(move || {
+            let _ = done.send(UnixStream::connect(&path));
+        })
+        .map_err(|err| CoreError::Unavailable(format!("connect thread: {err}")))?;
+    match connected.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(err)) => Err(CoreError::Unavailable(format!(
+            "cannot connect to {}: {err}",
+            socket.display()
+        ))),
+        Err(_) => Err(CoreError::Unavailable(format!(
+            "{} did not take the connection in time",
+            socket.display()
+        ))),
+    }
+}
+
+/// Core's hello reply line, read by `deadline`, and the bytes after it, which
+/// belong to the framed stream. Each read waits what is left, never a fresh
+/// timeout (fork issue 317 M6).
+fn read_hello_by(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<(Vec<u8>, Vec<u8>), CoreError> {
+    let mut got = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(end) = got.iter().position(|byte| *byte == b'\n') {
+            let rest = got.split_off(end + 1);
+            return Ok((got, rest));
+        }
+        if got.len() as u64 >= HELLO_LIMIT {
+            return Err(CoreError::Unavailable(format!(
+                "hello reply longer than {} KiB",
+                HELLO_LIMIT / 1024
+            )));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(CoreError::Unavailable("no hello reply in time".into()));
+        }
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|err| CoreError::Unavailable(err.to_string()))?;
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(CoreError::Unavailable(
+                    "no hello reply: the connection closed".into(),
+                ))
+            }
+            Ok(read) => got.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(CoreError::Unavailable(format!("no hello reply: {err}")));
+            }
+        }
     }
 }
 
@@ -781,16 +897,23 @@ pub(crate) fn connect_at_within(
     socket: &Path,
     wait: Duration,
 ) -> Result<(CoreClient, Value), CoreError> {
+    connect_at_by(socket, Instant::now() + wait.min(HANDSHAKE_WAIT))
+}
+
+/// `connect_at` with its connect, hello and version check all by
+/// `deadline` (fork issue 316 M7, 317 M6).
+pub(crate) fn connect_at_by(
+    socket: &Path,
+    deadline: Instant,
+) -> Result<(CoreClient, Value), CoreError> {
     if !socket.exists() {
         return Err(CoreError::NoCore(format!(
             "no herdr-core socket at {}",
             socket.display()
         )));
     }
-    let started = std::time::Instant::now();
-    let client = CoreClient::connect_within(socket, None, wait)?;
-    let left = wait.saturating_sub(started.elapsed());
-    let status = check_version_within(&client, left)?;
+    let client = CoreClient::connect_by(socket, None, deadline)?;
+    let status = check_version_by(&client, deadline)?;
     Ok((client, status))
 }
 
@@ -934,17 +1057,17 @@ fn is_our_child(pid: u32) -> bool {
 
 #[cfg(test)]
 fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
-    check_version_within(client, HANDSHAKE_WAIT)
+    check_version_by(client, Instant::now() + HANDSHAKE_WAIT)
 }
 
-fn check_version_within(client: &CoreClient, wait: Duration) -> Result<Value, CoreError> {
-    let wait = wait.min(HANDSHAKE_WAIT);
-    if wait.is_zero() {
+fn check_version_by(client: &CoreClient, deadline: Instant) -> Result<Value, CoreError> {
+    let deadline = deadline.min(Instant::now() + HANDSHAKE_WAIT);
+    if deadline <= Instant::now() {
         return Err(CoreError::Unavailable(
             "no time left to ask herdr-core its version".into(),
         ));
     }
-    let status = client.call("server.status", json!({}), wait)?;
+    let status = client.call_by("server.status", json!({}), deadline)?;
     let text = status["version"].as_str().unwrap_or_default();
     match parse_version(text) {
         Some(version) if version >= MIN_CORE_VERSION => Ok(status),
@@ -1436,6 +1559,60 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    // Fork issue 317 M6: one absolute deadline through the hello, the
+    // version check and a call's write and wait. A hello that comes a byte at
+    // a time (each read within a per-read timeout), a version reply that
+    // never comes, and a call whose write stalls on a core that stopped
+    // reading each end by the deadline, not a fresh timeout per step.
+    #[test]
+    fn a_slow_core_holds_no_step_past_the_deadline() {
+        let within = |what: &str, started: Instant, limit: Duration| {
+            assert!(
+                started.elapsed() < limit,
+                "{what} took {:?}",
+                started.elapsed()
+            );
+        };
+        let dripping = FakeCore::start_with(|config| {
+            config.hello_drip = Some(Duration::from_millis(40));
+        });
+        let started = Instant::now();
+        let slow_hello = CoreClient::connect_by(
+            &dripping.socket,
+            None,
+            Instant::now() + Duration::from_millis(600),
+        );
+        assert!(slow_hello.is_err(), "the hello finished in time");
+        within("a dripped hello", started, Duration::from_millis(1500));
+
+        let no_version = FakeCore::start_with(|config| config.stall_on.push("server.status"));
+        let started = Instant::now();
+        let stalled = connect_at_by(
+            &no_version.socket,
+            Instant::now() + Duration::from_millis(600),
+        );
+        assert!(stalled.is_err(), "no version, no client");
+        within("a stalled version", started, Duration::from_millis(1500));
+
+        let deaf = FakeCore::start_with(|config| config.reads_after_hello = false);
+        let client = CoreClient::connect(&deaf.socket, None).expect("connect");
+        let big = json!({"data": "x".repeat(4 * 1024 * 1024)});
+        let started = Instant::now();
+        let blocked = client.call_by(
+            "terminal.send",
+            big,
+            Instant::now() + Duration::from_millis(600),
+        );
+        assert!(blocked.is_err(), "{blocked:?}");
+        within("a blocked write", started, Duration::from_millis(1500));
+
+        let after = client.call_by("server.status", json!({}), Instant::now());
+        assert!(
+            matches!(after, Err(CoreError::Unavailable(_) | CoreError::Closed)),
+            "with no time left nothing is sent: {after:?}"
+        );
     }
 
     #[test]
