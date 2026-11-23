@@ -244,19 +244,33 @@ fn to_json(value: &impl Serialize) -> io::Result<Vec<u8>> {
 /// Writes `<path>.new` (0600), then renames it over `path`, so a reader sees
 /// the old file or the new one, never half of one.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    // A temporary name of this process and write alone, so two processes
+    // writing one file (two fleet CLIs keeping `far_herdr.json`) never
+    // write into each other's temporary file.
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".new");
+    temporary.push(format!(
+        ".{}-{}.new",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     let temporary = PathBuf::from(temporary);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&temporary, path)
+    let written = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// How ssh reaches the machine, written by `herdr machine add --core` and
@@ -759,6 +773,28 @@ pub(crate) mod tests {
         dir.remove_lease(&LeaseHolder::cli(42))
             .expect("remove twice");
         assert_eq!(dir.leases().len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 7.4: a write never takes over another writer's temporary file.
+    #[test]
+    fn an_atomic_write_leaves_another_writers_temporary_alone() {
+        let root = scratch("atomic");
+        let path = root.join("far_herdr.json");
+        let theirs = root.join("far_herdr.json.new");
+        fs::write(&theirs, b"another writer, mid-write").expect("theirs");
+        write_atomic(&path, b"mine").expect("write");
+        assert_eq!(fs::read(&path).expect("mine"), b"mine");
+        assert_eq!(
+            fs::read(&theirs).expect("theirs"),
+            b"another writer, mid-write"
+        );
+        let left: Vec<_> = fs::read_dir(&root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "no temporary of mine is left: {left:?}");
         let _ = fs::remove_dir_all(&root);
     }
 
