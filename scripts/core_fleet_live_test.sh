@@ -12,7 +12,8 @@
 # a link dropped during a call that is not redialled on its account; E.3
 # and V20 live: a new tab named `$(touch x); w` from a view of the machine
 # reaches the far herdr as that one name, through the same far bridge, and
-# no shell ran it.
+# no shell ran it; and `prefix x` in the view on that tab's pane closes
+# exactly that far pane, ending its program and no other (review M5).
 #
 # The far side is a scratch core on this Mac with its own herdr server,
 # reached through herdr's own link command and a fake `ssh` that runs the
@@ -324,9 +325,69 @@ fl_wait "the view following the far tab" 10 fl_view_follows
 [[ "$(fl_x_files)" == "$x_before" ]] \
   || fail "V20: a file x appeared: the name ran as a shell line"
 [[ "$(fl_cli_leases)" == 0 ]] || fail "E.3: the view action's lease outlived it: $(ls "$FL_DIR/leases")"
+echo "ok: E.3/V20 a new tab named '$FL_NAME' from a view of $FT is that far tab, through the far bridge; nothing ran it; no lease left"
+
+# --- E.3 (review M5) live: `prefix x` on that new tab's pane in the view
+# closes exactly that far pane over herdr's own link (D5: a person's close):
+# its program ends; every other far pane keeps its terminal and program.
+fl_far_rpc() {
+  python3 -I - "$F3_SOCK" "$1" "$2" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); f = s.makefile("rb")
+s.sendall((json.dumps({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {}}) + "\n").encode())
+f.readline()
+s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": sys.argv[2], "params": json.loads(sys.argv[3])}) + "\n").encode())
+print(json.dumps(json.loads(f.readline()).get("result")))
+PY
+}
+# The pid of the far core's terminal $1 while it is live, else nothing.
+fl_term_pid() {
+  fl_far_rpc terminal.get "{\"terminal\":\"$1\"}" 2>/dev/null \
+    | python3 -I -c 'import json,sys; r = json.load(sys.stdin) or {}; print(r.get("pid", "") if r.get("state") == "live" else "")'
+}
+# Each far pane as "<pane id> <tab id> <core address>".
+fl_far_panes() {
+  far_fl_herdr pane list 2>/dev/null | python3 -I -c 'import json,sys
+for p in json.load(sys.stdin)["result"]["panes"]: print(p["pane_id"], p["tab_id"], p.get("core_address") or "-")'
+}
+fl_new_tab="$(far_fl_herdr tab list 2>/dev/null | python3 -I -c 'import json,sys
+print(next(t["tab_id"] for t in json.load(sys.stdin)["result"]["tabs"] if t["label"] == sys.argv[1]))' "$FL_NAME")"
+read -r FL_CLOSE_PANE _ FL_CLOSE_ADDR < <(fl_far_panes | awk -v tab="$fl_new_tab" '$2 == tab') || true
+[[ "$FL_CLOSE_ADDR" =~ ^t[0-9]+$ ]] || fail "M5: the new far tab's pane is not a core terminal: '$FL_CLOSE_PANE' '$FL_CLOSE_ADDR'"
+FL_CLOSE_PID="$(fl_term_pid "$FL_CLOSE_ADDR")"
+[[ -n "$FL_CLOSE_PID" ]] || fail "M5: the far terminal $FL_CLOSE_ADDR is not live"
+fl_others() {
+  fl_far_panes | awk -v pane="$FL_CLOSE_PANE" '$1 != pane' | while read -r pane _ address; do
+    printf '%s %s %s\n' "$pane" "$address" "$(fl_term_pid "$address")"
+  done
+}
+others_before="$(fl_others)"
+[[ -n "$others_before" ]] || fail "M5: no other far pane to leave alone"
+grep -q " t[0-9]* [0-9][0-9]*$" <<<"$others_before" || fail "M5: the other far panes have no live program: $others_before"
+# A mark on the far pane's screen, so the view shows when it is that pane's tab.
+python3 -I - "$FL_FAR_API" "$FL_CLOSE_PANE" "E3-CLOSE-$$" <<'PY' || fail "M5: could not type into the far pane"
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
+s.sendall((json.dumps({"id": "m5", "method": "pane.send_input", "params": {"pane_id": sys.argv[2], "text": "echo " + sys.argv[3], "keys": ["Enter"]}}) + "\n").encode())
+assert "result" in json.loads(s.makefile("rb").readline())
+PY
+fl_view_has() { fl_tm capture-pane -p -t flview 2>/dev/null | grep -q "$1"; }
+fl_tm send-keys -t flview C-b n
+fl_wait "the view showing the new far tab's pane" 20 fl_view_has "E3-CLOSE-$$"
+bridges="$(grep -c "args=--session $FL_SESSION remote-api-bridge --request" "$FL_FAR_LOG" || true)"
+fl_tm send-keys -t flview C-b x
+fl_close_gone() { ! fl_far_panes | awk '{print $1}' | grep -qxF "$FL_CLOSE_PANE"; }
+fl_wait "the far pane $FL_CLOSE_PANE closed" 30 fl_close_gone
+fl_program_ended() { [[ -z "$(fl_term_pid "$FL_CLOSE_ADDR")" ]] && ! ps -o pid= -p "$FL_CLOSE_PID" >/dev/null 2>&1; }
+fl_wait "the far program $FL_CLOSE_PID ending" 15 fl_program_ended
+[[ "$(grep -c "args=--session $FL_SESSION remote-api-bridge --request" "$FL_FAR_LOG")" -gt "$bridges" ]] \
+  || fail "M5: the view's close did not go through the far bridge"
+[[ "$(fl_others)" == "$others_before" ]] \
+  || fail "M5: another far pane or program changed: before '$others_before', after '$(fl_others)'"
+[[ "$(fl_cli_leases)" == 0 ]] || fail "M5: the close's lease outlived it: $(ls "$FL_DIR/leases")"
 fl_tm kill-server >/dev/null 2>&1
 fl_stop_view
-echo "ok: E.3/V20 a new tab named '$FL_NAME' from a view of $FT is that far tab, through the far bridge; nothing ran it; no lease left"
+echo "ok: E.3 M5 prefix x in the view closed far pane $FL_CLOSE_PANE ($FL_CLOSE_ADDR, pid $FL_CLOSE_PID) through the far bridge; its program ended; the other far panes and programs are as they were; no lease left"
 # The far layout changed: the link's answer is read again, and checked
 # against the far herdr's own, for the comparisons below.
 fleet_cli --machine "$FT" pane list >"$BASE/fl-core.json" 2>"$BASE/fl-core.err" \
