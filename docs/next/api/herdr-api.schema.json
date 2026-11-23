@@ -11610,6 +11610,11 @@
               "const": "on_machine",
               "description": "The pane's program runs on a herdr-core machine: a move would end\nit there and start its replacement on this host (core-phase5 D5).",
               "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "A reason a newer server gives that this client does not know.",
+              "type": "string"
             }
           ]
         },

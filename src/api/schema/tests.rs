@@ -215,6 +215,18 @@ fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     assert_no_standalone_refs(&protocol_schema_document());
 }
 
+// Third read, finding 4 (AGENTS.md § Stable client endpoint contract): a
+// move refusal a newer server adds reads as `unknown`, not as an error.
+#[test]
+fn an_unknown_move_refusal_reads_as_unknown() {
+    let refusals: Vec<PaneMoveRefusal> =
+        serde_json::from_str(r#"["on_machine", "a_reason_from_a_newer_server"]"#).unwrap();
+    assert_eq!(
+        refusals,
+        [PaneMoveRefusal::OnMachine, PaneMoveRefusal::Unknown]
+    );
+}
+
 #[test]
 fn generated_protocol_schema_artifact_is_current() {
     let actual = format!(

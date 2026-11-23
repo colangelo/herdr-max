@@ -126,6 +126,9 @@ pub enum PaneMoveRefusal {
     /// The pane's program runs on a herdr-core machine: a move would end
     /// it there and start its replacement on this host (core-phase5 D5).
     OnMachine,
+    /// A reason a newer server gives that this client does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `tab.close`, with the same `force` as `pane.close`.
