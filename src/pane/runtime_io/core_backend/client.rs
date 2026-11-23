@@ -1601,7 +1601,7 @@ mod tests {
         let big = json!({"data": "x".repeat(4 * 1024 * 1024)});
         let started = Instant::now();
         let blocked = client.call_by(
-            "terminal.send",
+            "file.write",
             big,
             Instant::now() + Duration::from_millis(600),
         );
