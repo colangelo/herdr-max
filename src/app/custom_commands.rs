@@ -214,6 +214,12 @@ impl App {
         binding: &crate::config::CustomCommandKeybind,
         selected_text: Option<String>,
     ) -> io::Result<()> {
+        // A view's custom commands and plugin actions would run here with
+        // this Mac's API socket and the far side's pane ids (review M4.1).
+        #[cfg(unix)]
+        if let Some(refusal) = self.view_refusal("a custom command") {
+            return Err(io::Error::other(refusal));
+        }
         match binding.action {
             crate::config::CustomCommandAction::Shell => self.spawn_custom_command(binding),
             crate::config::CustomCommandAction::Pane => {
@@ -729,6 +735,39 @@ mod tests {
 
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "stale_content");
+    }
+
+    // M4.1 (core-phase5 D6): in a view, a custom command would run on this
+    // Mac with its API socket and the far side's pane ids; every action is
+    // refused and nothing runs.
+    #[cfg(unix)]
+    #[test]
+    fn a_view_runs_no_custom_command() {
+        for action in [
+            crate::config::CustomCommandAction::Shell,
+            crate::config::CustomCommandAction::Popup,
+            crate::config::CustomCommandAction::Pane,
+            crate::config::CustomCommandAction::PluginAction,
+        ] {
+            let mut app = test_app();
+            app.view = Some(crate::app::view_layout::ViewApp::new(
+                crate::core_machine::MachineName::parse("loop").unwrap(),
+            ));
+            let path = std::path::PathBuf::from(format!(
+                "/var/tmp/herdr-view-command-{}-{:?}",
+                std::process::id(),
+                action
+            ));
+            let _ = std::fs::remove_file(&path);
+            let mut command = binding(action);
+            command.command = format!("printf ran > {}", path.display());
+            let error = app
+                .execute_custom_command_binding(&command, None)
+                .expect_err("refused in a view");
+            assert!(error.to_string().contains("view of loop"), "{error}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(!path.exists(), "{action:?} ran");
+        }
     }
 
     #[cfg(unix)]

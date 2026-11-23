@@ -144,6 +144,18 @@ struct Kept {
 }
 
 impl App {
+    /// Why an action that would run something on this Mac, with the far
+    /// side's ids or folders, is refused in a view (core-phase5 D6, review
+    /// M4.1, L4.3); `None` in the primary server.
+    pub(crate) fn view_refusal(&self, what: &str) -> Option<String> {
+        self.view.as_ref().map(|view| {
+            let machine = &view.machine;
+            format!("this is a view of {machine}: {what} runs on this Mac, not on {machine}; use {machine}'s own herdr")
+        })
+    }
+
+    /// Turns this server into the view of `machine` (D6): no layout until the
+    /// far document is read; the watcher thread follows the machine.
     /// Turns this server into the view of `machine` (D6): no layout until the
     /// far document is read; the watcher thread follows the machine.
     pub(crate) fn start_view(

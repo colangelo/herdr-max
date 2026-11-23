@@ -18,6 +18,22 @@ impl App {
         respond_to: std::sync::mpsc::Sender<String>,
         client_local: bool,
     ) -> bool {
+        // A view's folders are the far Mac's: a worktree made or removed
+        // from one would be git on this Mac at a far path (review L4.3).
+        #[cfg(unix)]
+        if matches!(
+            request.method,
+            crate::api::schema::Method::WorktreeCreate(_)
+                | crate::api::schema::Method::WorktreeRemove(_)
+        ) {
+            if let Some(refusal) = self.view_refusal("a worktree") {
+                Self::send_api_response(
+                    respond_to,
+                    encode_error(request.id, "invalid_request", refusal),
+                );
+                return true;
+            }
+        }
         match request.method {
             crate::api::schema::Method::WorktreeList(_)
             | crate::api::schema::Method::WorktreeOpen(_) => {

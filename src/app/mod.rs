@@ -1375,7 +1375,9 @@ impl App {
             #[cfg(unix)]
             self.set_core_label_sync(publishes && config.experimental.core_label_sync);
             self.persist_pane_history = config.experimental.pane_history;
-            if !self.persist_pane_history {
+            // Only a server that saves the session clears its history: a
+            // view's reload must not touch the primary's (review L4.2).
+            if !self.persist_pane_history && self.policy.persist_session {
                 crate::persist::clear_history();
             }
         }
@@ -2791,6 +2793,31 @@ mod tests {
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // L4.2 (core-phase5 D6): a view saves nothing, so its config reload
+    // with pane history off leaves the session's history file (the primary
+    // server's) alone; a server that saves the session clears it.
+    #[cfg(unix)]
+    #[test]
+    fn a_views_reload_leaves_the_primarys_pane_history() {
+        let history = crate::session::data_dir().join("session-history.json");
+        std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+        std::fs::write(&history, "{}").unwrap();
+        let mut config = Config::default();
+        config.experimental.pane_history = false;
+
+        let mut view = test_app();
+        view.view = Some(super::view_layout::ViewApp::new(
+            crate::core_machine::MachineName::parse("loop").unwrap(),
+        ));
+        view.apply_live_config(&config, &[], &[], false);
+        assert!(history.exists(), "a view's reload cleared the history");
+
+        let mut primary = test_app();
+        primary.policy.persist_session = true;
+        primary.apply_live_config(&config, &[], &[], false);
+        assert!(!history.exists(), "the saving server clears it");
     }
 
     #[test]

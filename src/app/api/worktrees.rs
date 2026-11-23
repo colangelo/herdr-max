@@ -726,6 +726,45 @@ mod tests {
             .expect("deferred API request should respond after completion event")
     }
 
+    // L4.3 (core-phase5 D6): a view's folders are the far Mac's; a
+    // worktree.create there would run git on this Mac at that path. It is
+    // refused and no worktree is made.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_view_makes_no_worktree() {
+        let repo = create_committed_repo("api-worktree-create-view-repo");
+        let worktree_root = unique_temp_path("api-worktree-create-view-root");
+        let mut app = test_app();
+        app.view = Some(crate::app::view_layout::ViewApp::new(
+            crate::core_machine::MachineName::parse("loop").unwrap(),
+        ));
+        let mut parent = Workspace::test_new("main");
+        parent.identity_cwd = repo.clone();
+        app.state.workspaces = vec![parent];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.worktree_directory = worktree_root.clone();
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some("worktree/view".into()),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert!(error.error.message.contains("view of loop"), "{response}");
+        assert!(!worktree_root.exists(), "no worktree folder");
+        assert_eq!(app.state.workspaces.len(), 1);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
     #[tokio::test]
     async fn api_worktree_create_opens_workspace_and_marks_membership() {
         let repo = create_committed_repo("api-worktree-create-repo");
