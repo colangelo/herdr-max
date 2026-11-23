@@ -641,8 +641,8 @@ impl LeaseHolder {
 
     /// Whether the holder can still hold its lease: `manual` always, a
     /// client or a CLI call while its process runs (review H7). A pid the
-    /// system gave again to another process keeps the lease to its expiry,
-    /// which is where a time-only lease ended anyway.
+    /// system gave again to another process is caught by `reused_since`, not
+    /// here.
     fn alive(&self) -> bool {
         self.pid()
             .is_none_or(crate::platform::core_link::process_alive)
