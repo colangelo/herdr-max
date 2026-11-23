@@ -671,6 +671,69 @@ fn an_action_a_view_refuses_says_so_not_update() {
     assert!(!notice.body.contains("Update"), "{}", notice.body);
 }
 
+// core-phase5 E.3 (D7): a structural action a view advertises goes to the
+// view; when the far herdr refuses it or lacks the verb, the answer is that
+// action's notice, and the view stays connected and shown.
+#[cfg(unix)]
+#[test]
+fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
+    use crate::client::endpoint::{ClientEndpointId, ClientEndpointStatus};
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let machine = crate::core_machine::MachineName::parse("loop").unwrap();
+    let view = ClientEndpointId::Core(machine.clone());
+    state.set_core_endpoints(std::slice::from_ref(&machine));
+    state.set_endpoint_status(&view, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot(&view, Box::new(snapshot()));
+    assert!(state.activate_endpoint_projection(&view));
+    state.set_endpoint_methods(Some(vec!["pane.focus".into(), "tab.create".into()]));
+    let mut outcome = ClientShellInput::default();
+    state.push_endpoint_method(
+        crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
+            workspace_id: Some("ws_1".into()),
+            cwd: None,
+            focus: true,
+            label: None,
+            env: Default::default(),
+            on: None,
+        }),
+        &mut outcome,
+    );
+    let [ClientShellAction::Endpoint {
+        endpoint_id,
+        boot_id,
+        request,
+    }] = &outcome.actions[..]
+    else {
+        panic!("expected the action sent to the view");
+    };
+    assert_eq!(endpoint_id, &view);
+    let (repaint, actions) = state.handle_endpoint_result(
+        boot_id,
+        &request.id,
+        Err(ClientShellEndpointError {
+            code: Some("unknown_method".into()),
+            message:
+                "loop's herdr does not take tab.create; update Herdr there to do this from a view"
+                    .into(),
+        }),
+    );
+    assert!(repaint);
+    assert!(actions.is_empty(), "nothing else is done: {actions:?}");
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("the action's notice");
+    assert_eq!(notice.key.kind, ClientEndpointNoticeKind::Rejected);
+    assert!(
+        notice.body.contains("does not take tab.create"),
+        "{}",
+        notice.body
+    );
+    assert!(state.endpoint_is_online(&view), "the view stays connected");
+    assert_eq!(state.active_endpoint_id, view, "and shown");
+}
+
 #[test]
 fn unavailable_endpoint_method_is_disabled_without_disconnect() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));

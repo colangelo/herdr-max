@@ -79,9 +79,10 @@ async fn a_view_refuses_every_method_outside_its_allowlist_before_dispatch() {
             serde_json::json!({"version": "0.0.1"}),
         ),
         (
-            "pane.split",
-            serde_json::json!({"target_pane_id": pane_id, "direction": "right"}),
+            "pane.swap",
+            serde_json::json!({"pane_id": pane_id, "direction": "right"}),
         ),
+        ("workspace.create", serde_json::json!({})),
     ]
     .into_iter()
     .map(|(method, params)| {
@@ -121,6 +122,61 @@ async fn a_view_refuses_every_method_outside_its_allowlist_before_dispatch() {
         }),
     });
     assert!(server.clients[&client_id].shell_endpoint_command_in_flight);
+    shutdown_test_runtimes(&mut server);
+}
+
+// E.3 (D7): a structural action in a view is never done by the view: it
+// takes the far herdr's path, off the loop, and its answer is the action's
+// own. Here the target is a pane the far document did not show, so it is
+// refused unsent, and nothing changed in the view's layout.
+#[tokio::test]
+async fn a_views_structural_action_is_never_done_here() {
+    let (mut server, control_rx, client_id) = view_server();
+    let pane_id = server
+        .app
+        .public_pane_id(0, server.app.state.workspaces[0].tabs[0].root_pane)
+        .unwrap();
+    let panes_before = server.app.state.workspaces[0].tabs[0].layout.pane_count();
+    let method: Method = serde_json::from_value(serde_json::json!({
+        "method": "pane.split",
+        "params": {"target_pane_id": pane_id, "direction": "right"}
+    }))
+    .expect("pane.split");
+    let boot_id = server.client_shell_boot_id.clone();
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id,
+        request: Box::new(Request {
+            id: "view:split".into(),
+            method,
+        }),
+    });
+    assert!(
+        server.clients[&client_id].shell_endpoint_command_in_flight,
+        "sent on, not refused as a far layout change"
+    );
+    let ready = loop {
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            server.server_event_rx.recv(),
+        )
+        .await
+        .expect("an answer in time")
+        .expect("the channel");
+        if matches!(
+            event,
+            ServerEvent::ClientShellEndpointResponseChunkReady { .. }
+        ) {
+            break event;
+        }
+    };
+    server.handle_server_event(ready);
+    assert_eq!(error_code(&control_rx), "view_action_failed");
+    assert_eq!(
+        server.app.state.workspaces[0].tabs[0].layout.pane_count(),
+        panes_before,
+        "no split here"
+    );
     shutdown_test_runtimes(&mut server);
 }
 
