@@ -252,27 +252,43 @@ fn to_json(value: &impl Serialize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Writes `<path>.new` (0600), then renames it over `path`, so a reader sees
-/// the old file or the new one, never half of one.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    // A temporary name of this process and write alone, so two processes
-    // writing one file (two fleet CLIs keeping `far_herdr.json`) never
-    // write into each other's temporary file.
+/// Counts this process's `write_atomic` calls, for their temporary names.
+static WRITE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `<path>.<pid>-<n>.new`: a temporary name of this process and write alone.
+fn temporary_path(path: &Path, n: u32) -> PathBuf {
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(
-        ".{}-{}.new",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let temporary = PathBuf::from(temporary);
-    let written = (|| {
-        let mut file = fs::OpenOptions::new()
+    temporary.push(format!(".{}-{n}.new", std::process::id()));
+    PathBuf::from(temporary)
+}
+
+/// Writes `<path>.<pid>-<n>.new` (0600), then renames it over `path`, so a
+/// reader sees the old file or the new one, never half of one. The name is
+/// this process's and this write's alone, so two processes writing one file
+/// (two fleet CLIs keeping `far_herdr.json`) never write into each other's.
+/// One that is there already was left by a writer killed before its rename
+/// that had this pid: no live writer can hold it, so it is removed and the
+/// write made again (#310).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let temporary = temporary_path(
+        path,
+        WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    );
+    let open = || {
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temporary)?;
+            .open(&temporary)
+    };
+    let written = (|| {
+        let mut file = match open() {
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                fs::remove_file(&temporary)?;
+                open()?
+            }
+            opened => opened?,
+        };
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -878,6 +894,22 @@ pub(crate) mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(left.len(), 2, "no temporary of mine is left: {left:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// #310: a temporary file with this pid and the next write's number,
+    /// left by a killed writer, does not fail the write.
+    #[test]
+    fn an_atomic_write_replaces_a_stale_temporary_of_its_own_name() {
+        use std::sync::atomic::Ordering;
+        let root = scratch("atomic-stale");
+        let path = root.join("far_herdr.json");
+        let next = WRITE_SEQ.load(Ordering::Relaxed);
+        for n in next..next + 4 {
+            fs::write(temporary_path(&path, n), b"left by a killed writer").expect("stale");
+        }
+        write_atomic(&path, b"mine").expect("write");
+        assert_eq!(fs::read(&path).expect("mine"), b"mine");
         let _ = fs::remove_dir_all(&root);
     }
 
