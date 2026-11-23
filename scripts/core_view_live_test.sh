@@ -411,10 +411,9 @@ wait_until "far herdr again" far_up
 # close). This loop was added with hc, not `herdr machine add --core`, so
 # herdr's link does not reach it: the view refuses the close with a notice
 # and sends nothing (core_fleet_live_test.sh drives an action over herdr's
-# own link).
+# own link). No dialog opens, so nothing more is typed: a `y` would reach
+# the far program.
 tm send-keys -t view C-b x
-sleep 0.5
-tm send-keys -t view y
 close_refused() { tm capture-pane -p -t view | grep -q "herdr here did not add loop"; }
 wait_until "the view's notice refusing the close" close_refused
 sleep 1
