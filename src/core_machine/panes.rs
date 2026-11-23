@@ -121,21 +121,34 @@ impl MachineLink {
 
     /// On the wake thread: the machine's dialer, made on first use, gets
     /// the wake. Only a machine herdr links is dialled (its folder holds
-    /// `target.json`); `core-link` still refuses unless a lease is in force,
-    /// which the person's client writes for its own input.
+    /// `target.json`), and only while a lease is in force: leases are a
+    /// person's input, which the person's client writes; input through the
+    /// API, from an agent or a script, writes none, so it never dials a
+    /// dormant machine, even where `core-link` would refuse (security
+    /// review M7).
     fn dial(&self) {
+        self.dial_in(passwd_machines_root().ok().as_deref());
+    }
+
+    fn dial_in(&self, root: Option<&std::path::Path>) {
+        let Some(root) = root else {
+            return;
+        };
+        if !leased(Some(root), &self.name) {
+            tracing::debug!(machine = %self.name, "no lease for the machine: input does not wake it");
+            return;
+        }
         let mut dialer = self.dialer.lock().unwrap_or_else(PoisonError::into_inner);
         if dialer.is_none() {
-            *dialer = self.spawn_dialer();
+            *dialer = self.spawn_dialer(root);
         }
         if let Some(dialer) = dialer.as_ref() {
             dialer.wake();
         }
     }
 
-    fn spawn_dialer(&self) -> Option<Dialer> {
-        let root = passwd_machines_root().ok()?;
-        let dir = MachineDir::at(&root, &self.name);
+    fn spawn_dialer(&self, root: &std::path::Path) -> Option<Dialer> {
+        let dir = MachineDir::at(root, &self.name);
         if dir.check().is_err() || !dir.target_path().is_file() {
             tracing::debug!(machine = %self.name, "not a machine herdr links; core redials it itself");
             return None;
@@ -380,6 +393,30 @@ mod tests {
         let link = link(&name("wake-once"));
         assert!(link.wake(), "posted");
         assert!(!link.wake(), "within the interval: nothing posted");
+    }
+
+    // Security review M7: input without a lease, as API input is, does not
+    // dial a machine herdr gates: no dialer is made, no connect posted.
+    #[test]
+    fn input_without_a_lease_does_not_dial_a_gated_machine() {
+        // Whatever happens, no dial reaches a real core.
+        let core = crate::pane::FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let root = crate::core_machine::state::tests::scratch("panes-no-lease-wake");
+        let machine = name("no-lease-wake");
+        let dir = MachineDir::at(&root, &machine);
+        dir.create().expect("create");
+        std::fs::write(dir.target_path(), b"{}").expect("target");
+        let link = link(&machine);
+        link.dial_in(Some(&root));
+        assert!(
+            link.dialer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_none(),
+            "no dialer, no connect"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // C10 (D5): a machine is connected only once core answered for it.
