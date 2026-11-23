@@ -13,6 +13,7 @@
 //! Unix only, as the core backend is.
 
 pub(crate) mod doc;
+pub(crate) mod instance;
 pub(crate) mod lifetime;
 pub(crate) mod policy;
 pub(crate) mod start;

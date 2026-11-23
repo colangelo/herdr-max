@@ -33,6 +33,7 @@ use crate::platform::{
     ChildExitReason, ProgramIdentity, ProgramLiveness, StartTokenLookup, SuspendCause,
 };
 use crate::pty::actor::{PtyReadResult, ReadCallback};
+use crate::view::instance::FarInstance;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_QUEUE: usize = 1024;
@@ -378,37 +379,12 @@ struct ViewIo {
     sent: Mutex<(u16, u16)>,
     /// The far terminal the pane first attached to (security review M3):
     /// a reattach takes only that one, never another at its address.
-    instance: ViewInstance,
+    instance: FarInstance,
     /// Set when the terminal at the address is another one now (a far core
     /// reset gave the address to another program): the stream ends instead
     /// of attaching it, and the view binds the pane afresh, with its input
     /// held until a person's new click or focus.
     replaced: AtomicBool,
-}
-
-/// What tells one far terminal from another at the same address: the far
-/// herdr's launch label and the program's pid, as core reported them at
-/// the first attach. Either missing is not compared.
-#[derive(Debug, Clone, PartialEq)]
-struct ViewInstance {
-    launch: Value,
-    pid: u32,
-}
-
-impl ViewInstance {
-    fn of(record: &Value) -> Self {
-        Self {
-            launch: record["labels"][LAUNCH_LABEL].clone(),
-            pid: core_pid(&record["pid"]),
-        }
-    }
-
-    /// Whether `record` is this terminal: the same launch label and pid
-    /// where the first attach had them.
-    fn matches(&self, record: &Value) -> bool {
-        (self.launch.is_null() || record["labels"][LAUNCH_LABEL] == self.launch)
-            && (self.pid == 0 || core_pid(&record["pid"]) == self.pid)
-    }
 }
 
 impl Shared {
@@ -460,7 +436,7 @@ pub(crate) fn exit_reason(record: &Value) -> Option<ChildExitReason> {
 
 /// The label that names one `terminal.run`, so a launch whose answer was
 /// lost can be found again (security review M3, Sol H7).
-const LAUNCH_LABEL: &str = "herdr.launch";
+const LAUNCH_LABEL: &str = crate::view::instance::LAUNCH_LABEL;
 
 /// The terminals of `listed` started for `launch` on `on` (this Mac's core
 /// for `None`). A record of another host is left out even with the same
@@ -944,15 +920,12 @@ impl StartedCore {
         // The terminal this pane is bound to (review M3), as the attach
         // answer describes it, or as core lists it when that has no record.
         let instance = if first["terminal"].is_object() {
-            ViewInstance::of(&first["terminal"])
+            FarInstance::of(&first["terminal"])
         } else {
             client
                 .call("terminal.get", json!({"terminal": address}), CALL_TIMEOUT)
-                .map(|record| ViewInstance::of(&record))
-                .unwrap_or(ViewInstance {
-                    launch: Value::Null,
-                    pid: 0,
-                })
+                .map(|record| FarInstance::of(&record))
+                .unwrap_or_else(|_| FarInstance::unknown())
         };
         let link = crate::core_machine::panes::link(&machine);
         link.set_connected(true);
