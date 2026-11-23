@@ -1,8 +1,10 @@
 //! The far side's `herdr-app` document as the view reads it (core-phase5 D6,
-//! D11). It is untrusted input: parsed here, once, with size, depth, count
-//! and id-format limits; unknown fields are ignored; a document that breaks
-//! a limit or has a wrong-typed field herdr reads is refused whole, so the
-//! view keeps its last good layout. Only spaces marked `"herdr_max": 1`
+//! D11). It is untrusted input: its size is bounded before it is parsed at
+//! all (`view_link::layout_document` refuses a reply over `MAX_DOC_BYTES`
+//! before it becomes a `Value`, review L5.1); it is then read here, once,
+//! with depth, count, id-format and uniqueness limits; unknown fields are
+//! ignored; a document that breaks a limit or has a wrong-typed field herdr
+//! reads is refused whole, so the view keeps its last good layout. Only spaces marked `"herdr_max": 1`
 //! (the far herdr's own, core-spaces-doc D6) are read; other clients' spaces
 //! are not looked into.
 
@@ -113,13 +115,10 @@ fn refuse(why: impl Into<String>) -> DocError {
     DocError(why.into())
 }
 
-/// Reads the document core holds (`doc.get`'s `value`). `null` (never
-/// written, or removed) is an empty layout.
+/// Reads the document core holds (`doc.get`'s `value`), already bounded
+/// to `MAX_DOC_BYTES`. `null` (never written, or removed) is an empty
+/// layout.
 pub(crate) fn parse(value: &Value) -> Result<ViewLayout, DocError> {
-    let size = serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len());
-    if size > MAX_DOC_BYTES {
-        return Err(refuse(format!("the document is {size} bytes, over 1 MiB")));
-    }
     let fields = match value {
         Value::Null => return Ok(ViewLayout { spaces: Vec::new() }),
         Value::Object(fields) => fields,
@@ -146,13 +145,53 @@ pub(crate) fn parse(value: &Value) -> Result<ViewLayout, DocError> {
         .into_iter()
         .map(|space| parse_space(space, &mut budget))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut seen = std::collections::HashSet::new();
-    for space in &spaces {
-        if !seen.insert(space.id.as_str()) {
-            return Err(refuse(format!("space {} is listed twice", space.id)));
+    unique_ids(&spaces)?;
+    Ok(ViewLayout { spaces })
+}
+
+/// Each space, tab, pane and terminal is listed once (review L5.2): the
+/// view keys its panes by far pane id and its terminals by address, so a
+/// repeat would show one pane, or one stream, in two places.
+fn unique_ids(spaces: &[ViewSpace]) -> Result<(), DocError> {
+    fn nodes<'a>(
+        node: &'a ViewNode,
+        panes: &mut std::collections::HashSet<&'a str>,
+        terminals: &mut std::collections::HashSet<&'a str>,
+    ) -> Result<(), DocError> {
+        match node {
+            ViewNode::Pane { id, terminal, .. } => {
+                if !panes.insert(id) {
+                    return Err(refuse(format!("pane {id} is listed twice")));
+                }
+                if !terminals.insert(terminal) {
+                    return Err(refuse(format!("terminal {terminal} is shown twice")));
+                }
+                Ok(())
+            }
+            ViewNode::Split { first, second, .. } => {
+                nodes(first, panes, terminals)?;
+                nodes(second, panes, terminals)
+            }
         }
     }
-    Ok(ViewLayout { spaces })
+    let mut space_ids = std::collections::HashSet::new();
+    let mut tab_ids = std::collections::HashSet::new();
+    let mut panes = std::collections::HashSet::new();
+    let mut terminals = std::collections::HashSet::new();
+    for space in spaces {
+        if !space_ids.insert(space.id.as_str()) {
+            return Err(refuse(format!("space {} is listed twice", space.id)));
+        }
+        for tab in &space.tabs {
+            if !tab_ids.insert(tab.id.as_str()) {
+                return Err(refuse(format!("tab {} is listed twice", tab.id)));
+            }
+            if let Some(root) = &tab.root {
+                nodes(root, &mut panes, &mut terminals)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn string_field<'a>(
@@ -530,16 +569,45 @@ mod tests {
         assert!(parse(&json!({"spaces": []})).unwrap().spaces.is_empty());
     }
 
+    // L5.2: a tab, pane or terminal listed twice refuses the document: the
+    // view would show one pane, or one far stream, in two places.
+    #[test]
+    fn repeated_tab_pane_and_terminal_ids_are_refused() {
+        let row = |children: Value| json!({"id": "w3:t1", "type": "row", "children": children});
+        assert!(parse(&one_tab(row(json!([
+            leaf("w3:p1", "t1", None),
+            leaf("w3:p2", "t2", None)
+        ]))))
+        .is_ok());
+        let pane_twice = one_tab(row(json!([
+            leaf("w3:p1", "t1", None),
+            leaf("w3:p1", "t2", None)
+        ])));
+        assert!(parse(&pane_twice).unwrap_err().0.contains("pane w3:p1"));
+        let terminal_twice = one_tab(row(json!([
+            leaf("w3:p1", "t1", None),
+            leaf("w3:p2", "t1", None)
+        ])));
+        assert!(parse(&terminal_twice)
+            .unwrap_err()
+            .0
+            .contains("terminal t1"));
+        let tab_twice = doc(json!([
+            {"id": "w3:t1", "root": leaf("w3:p1", "t1", None)},
+            {"id": "w3:t1", "root": leaf("w3:p2", "t2", None)}
+        ]));
+        assert!(parse(&tab_twice).unwrap_err().0.contains("tab w3:t1"));
+        let pane_in_two_tabs = doc(json!([
+            {"id": "w3:t1", "root": leaf("w3:p1", "t1", None)},
+            {"id": "w3:t2", "root": leaf("w3:p1", "t2", None)}
+        ]));
+        assert!(parse(&pane_in_two_tabs).is_err());
+    }
+
     // V16 (D11): a bad document is refused whole, so the view keeps its last
     // good layout; unknown fields are ignored (above).
     #[test]
-    fn oversized_deep_and_wrong_typed_documents_are_refused() {
-        let big = "x".repeat(MAX_DOC_BYTES);
-        assert!(
-            parse(&json!({"spaces": [], "pad": big})).is_err(),
-            "over 1 MiB"
-        );
-
+    fn deep_and_wrong_typed_documents_are_refused() {
         let mut deep = leaf("w3:p1", "t1", None);
         for _ in 0..MAX_DEPTH + 1 {
             deep = json!({"id": "w3:t1", "type": "row", "children": [deep]});

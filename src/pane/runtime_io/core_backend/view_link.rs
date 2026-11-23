@@ -199,17 +199,24 @@ impl Drop for ViewSubscription {
     }
 }
 
+/// The room a `doc.get` reply takes beyond its document: the JSON-RPC
+/// envelope and the reply's own fields.
+const DOC_REPLY_ENVELOPE: usize = 16 * 1024;
+
 /// The far side's layout document (`doc.get {name, on}`).
 pub(crate) fn layout_document(
     connector: &Connector,
     machine: &MachineName,
 ) -> Result<Value, CoreError> {
-    let reply = connector()?.call(
+    // Core refuses a document over 1 MiB at `doc.set`; the far core is not
+    // trusted to have, so the reply is bounded before it is parsed (L5.1).
+    let mut reply = connector()?.call_bounded(
         "doc.get",
         json!({"name": LAYOUT_DOC, "on": machine.as_str()}),
         CALL_TIMEOUT,
+        crate::view::doc::MAX_DOC_BYTES + DOC_REPLY_ENVELOPE,
     )?;
-    Ok(reply["value"].clone())
+    Ok(reply["value"].take())
 }
 
 /// The machine's state and hc version in the primary core's `machine.list`;

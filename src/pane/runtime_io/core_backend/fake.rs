@@ -47,6 +47,8 @@ pub(crate) struct FakeConfig {
     pub stall_on: Vec<&'static str>,
     /// The error `machine.exec` answers instead of a result.
     pub exec_error: Option<Value>,
+    /// `doc.get`'s `value`, whatever the name asked for.
+    pub doc_value: Value,
 }
 
 impl Default for FakeConfig {
@@ -68,6 +70,7 @@ impl Default for FakeConfig {
             hang_up_on: Vec::new(),
             stall_on: Vec::new(),
             exec_error: None,
+            doc_value: Value::Null,
         }
     }
 }
@@ -432,6 +435,7 @@ fn answer(
             })),
             None,
         ),
+        "doc.get" => (Ok(json!({"value": config.doc_value})), None),
         "machine.list" => {
             let machines: Vec<Value> = lock(shared)
                 .machines

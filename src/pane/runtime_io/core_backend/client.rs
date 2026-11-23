@@ -16,7 +16,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
-use super::frame::{kind, Frame, FrameDecoder};
+use super::frame::{kind, Frame, FrameDecoder, MAX_PAYLOAD};
 
 /// The oldest core this client speaks to (phase 0 ran 0.1.21).
 pub(crate) const MIN_CORE_VERSION: (u64, u64, u64) = (0, 1, 21);
@@ -158,6 +158,8 @@ struct Pending {
     /// For `terminal.attach`: registered by the reader as soon as the reply
     /// arrives, before any frame of the stream can be routed.
     stream: Option<StreamSink>,
+    /// The longest reply message this call reads (`call_bounded`).
+    max_reply: usize,
 }
 
 struct Inner {
@@ -314,19 +316,32 @@ impl CoreClient {
 
     /// One JSON-RPC call on channel 0.
     pub(crate) fn call(&self, method: &str, params: Value, timeout: Duration) -> Reply {
-        self.call_inner(method, params, timeout, None)
+        self.call_inner(method, params, timeout, None, MAX_PAYLOAD)
+    }
+
+    /// One call whose reply is refused, unread, when its message is over
+    /// `max_reply` bytes: an untrusted document is bounded before it is
+    /// parsed into a `Value` (core-phase5 review L5.1).
+    pub(crate) fn call_bounded(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        max_reply: usize,
+    ) -> Reply {
+        self.call_inner(method, params, timeout, None, max_reply)
     }
 
     /// `terminal.attach`: returns the reply and routes the stream's frames to
     /// `sink` from the first one on.
     pub(crate) fn attach(&self, params: Value, sink: StreamSink, timeout: Duration) -> Reply {
-        self.call_inner("terminal.attach", params, timeout, Some(sink))
+        self.call_inner("terminal.attach", params, timeout, Some(sink), MAX_PAYLOAD)
     }
 
     /// `events.subscribe`: returns the snapshot and routes the subscription's
     /// event lines to `sink`.
     pub(crate) fn subscribe(&self, params: Value, sink: StreamSink, timeout: Duration) -> Reply {
-        self.call_inner("events.subscribe", params, timeout, Some(sink))
+        self.call_inner("events.subscribe", params, timeout, Some(sink), MAX_PAYLOAD)
     }
 
     fn call_inner(
@@ -335,6 +350,7 @@ impl CoreClient {
         params: Value,
         timeout: Duration,
         stream: Option<StreamSink>,
+        max_reply: usize,
     ) -> Reply {
         if self.is_closed() {
             return Err(CoreError::Closed);
@@ -346,6 +362,7 @@ impl CoreClient {
             Pending {
                 reply: reply_tx,
                 stream,
+                max_reply,
             },
         );
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
@@ -510,7 +527,42 @@ fn route(inner: &Inner, frame: Frame) {
     }
 }
 
+/// Replies at most this long are parsed at once; a longer one is first
+/// checked against its call's bound (`call_bounded`).
+const SMALL_REPLY: usize = 64 * 1024;
+
+/// The id of a JSON-RPC message, read without building the message.
+fn message_id(payload: &[u8]) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        #[serde(default)]
+        id: Option<Value>,
+    }
+    serde_json::from_slice::<Head>(payload).ok()?.id?.as_u64()
+}
+
 fn route_rpc(inner: &Inner, payload: &[u8]) {
+    if payload.len() > SMALL_REPLY {
+        if let Some(id) = message_id(payload) {
+            let mut pending = lock(&inner.pending);
+            if pending
+                .get(&id)
+                .is_some_and(|call| payload.len() > call.max_reply)
+            {
+                if let Some(call) = pending.remove(&id) {
+                    let _ = call.reply.send(Err(CoreError::Rpc {
+                        kind: "too_large".into(),
+                        message: format!(
+                            "the reply is {} bytes, over the {} this call takes",
+                            payload.len(),
+                            call.max_reply
+                        ),
+                    }));
+                }
+                return;
+            }
+        }
+    }
     let Ok(message) = serde_json::from_slice::<Value>(payload) else {
         warn!("herdr-core sent a message that is not JSON");
         return;
@@ -1384,6 +1436,52 @@ mod tests {
             client.call("server.status", json!({}), Duration::from_secs(1)),
             Err(CoreError::Closed)
         );
+    }
+
+    // L5.1: a bounded call refuses a reply over its bound before the reply
+    // is parsed into a `Value`; one within it, and an unbounded call of the
+    // same size, read it.
+    #[test]
+    fn a_bounded_call_refuses_a_reply_over_its_bound() {
+        let big = "x".repeat(200 * 1024);
+        let core = FakeCore::start_with(|config| {
+            config.doc_value = json!({"pad": big});
+        });
+        let client = CoreClient::connect(&core.socket, None).expect("connect");
+        let refused = client.call_bounded(
+            "doc.get",
+            json!({"name": "herdr-app"}),
+            Duration::from_secs(5),
+            128 * 1024,
+        );
+        assert!(
+            matches!(&refused, Err(CoreError::Rpc { kind, .. }) if kind == "too_large"),
+            "{refused:?}"
+        );
+        let read = client
+            .call_bounded(
+                "doc.get",
+                json!({"name": "herdr-app"}),
+                Duration::from_secs(5),
+                256 * 1024,
+            )
+            .expect("within the bound");
+        assert_eq!(
+            read["value"]["pad"].as_str().map(str::len),
+            Some(200 * 1024)
+        );
+        assert!(client
+            .call(
+                "doc.get",
+                json!({"name": "herdr-app"}),
+                Duration::from_secs(5)
+            )
+            .is_ok());
+        assert_eq!(
+            message_id(br#"{"jsonrpc":"2.0","id":7,"result":{}}"#),
+            Some(7)
+        );
+        assert_eq!(message_id(br#"{"method":"event"}"#), None);
     }
 
     /// Live check against a real core: `HERDR_TEST_HC_SOCKET=<socket>` (a
