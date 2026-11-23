@@ -825,11 +825,11 @@ fn without_herdrs_state_an_unknown_name_stays_a_usage_error() {
     let at = CoreAt::at(&core.socket);
     let gone = || Err(io::Error::other("uid 501 has no passwd entry"));
     assert!(matches!(
-        open_at(&at, gone(), &machine(), false),
+        open_at(&at, gone(), &machine(), false, &mut |_| {}),
         Lookup::NotCore
     ));
     core.set_machine("loop", "connected");
-    match open_at(&at, gone(), &machine(), false) {
+    match open_at(&at, gone(), &machine(), false, &mut |_| {}) {
         Lookup::Refused { code: 1, message } => {
             assert!(
                 message.contains("cannot find herdr's machine state"),
@@ -1012,7 +1012,13 @@ fn a_connected_machine_gets_a_keep_lease_and_no_connect() {
         ssh_auth_sock: None,
     })
     .expect("target");
-    let Lookup::Ready(link) = prepare(&CoreAt::at(&core.socket), &machine(), &dir, false) else {
+    let Lookup::Ready(link) = prepare(
+        &CoreAt::at(&core.socket),
+        &machine(),
+        &dir,
+        false,
+        &mut |_| {},
+    ) else {
         panic!("not ready");
     };
     let leases = dir.leases();
@@ -1182,7 +1188,8 @@ fn a_name_herdr_did_not_add_costs_no_core_call() {
             &CoreAt::at(&core.socket),
             Ok(root.clone()),
             &machine(),
-            false
+            false,
+            &mut |_| {}
         ),
         Lookup::NotCore
     ));
@@ -1341,7 +1348,13 @@ fn a_same_name_machine_that_is_not_herdrs_link_gets_nothing() {
             ssh_auth_sock: None,
         })
         .expect("target");
-        match prepare(&CoreAt::at(&core.socket), &machine(), &dir, true) {
+        match prepare(
+            &CoreAt::at(&core.socket),
+            &machine(),
+            &dir,
+            true,
+            &mut |_| {},
+        ) {
             Lookup::Refused { code: 1, message } => {
                 assert!(
                     message.contains("is not the one herdr added"),
@@ -1361,4 +1374,51 @@ fn a_same_name_machine_that_is_not_herdrs_link_gets_nothing() {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// M7: `--dial` says on the terminal, before its one dial, that it opens
+/// ssh to the machine and that a check can prompt; a plain refusal says
+/// nothing of the kind.
+#[test]
+fn dial_announces_itself_before_it_dials() {
+    let core = FakeCore::start();
+    core.set_machine("loop", "unreachable");
+    let (root, dir) = machine_dir("fleet-announce");
+    dir.write_target(&crate::core_machine::state::Target {
+        target: "ac@loop".into(),
+        session: "default".into(),
+        ssh: "/usr/bin/ssh".into(),
+        ssh_config: None,
+        ssh_auth_sock: None,
+    })
+    .expect("target");
+    let mut said = Vec::new();
+    let at = CoreAt::at(&core.socket);
+    let refused = prepare(&at, &machine(), &dir, false, &mut |line| {
+        said.push(line.to_string())
+    });
+    assert!(matches!(
+        refused,
+        Lookup::Refused {
+            code: EXIT_DORMANT,
+            ..
+        }
+    ));
+    assert!(said.is_empty(), "{said:?}");
+    let mut connects_then = None;
+    let _ = prepare(&at, &machine(), &dir, true, &mut |line| {
+        said.push(line.to_string());
+        connects_then = Some(
+            core.methods()
+                .iter()
+                .filter(|m| *m == "machine.connect")
+                .count(),
+        );
+    });
+    assert_eq!(
+        said,
+        ["herdr: --dial: opening ssh to loop now; a Touch ID or Tailscale check can prompt on this Mac"]
+    );
+    assert_eq!(connects_then, Some(0), "announced after the connect");
+    let _ = std::fs::remove_dir_all(&root);
 }

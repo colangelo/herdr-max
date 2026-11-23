@@ -217,10 +217,23 @@ pub(crate) fn open(selector: &str, dial: bool) -> Lookup {
     let Ok(name) = MachineName::parse(selector) else {
         return Lookup::NotCore;
     };
-    open_at(&CoreAt::primary(), passwd_machines_root(), &name, dial)
+    open_at(
+        &CoreAt::primary(),
+        passwd_machines_root(),
+        &name,
+        dial,
+        &mut |line| eprintln!("{line}"),
+    )
 }
 
-fn open_at(core: &CoreAt, root: io::Result<PathBuf>, name: &MachineName, dial: bool) -> Lookup {
+/// `announce` gets the line `--dial` prints before it dials (M7).
+fn open_at(
+    core: &CoreAt,
+    root: io::Result<PathBuf>,
+    name: &MachineName,
+    dial: bool,
+    announce: &mut dyn FnMut(&str),
+) -> Lookup {
     let root = match root {
         Ok(root) => root,
         // Without herdr's state no machine is herdr's; a name core does not
@@ -242,7 +255,7 @@ fn open_at(core: &CoreAt, root: io::Result<PathBuf>, name: &MachineName, dial: b
     if !dir.target_path().exists() {
         return Lookup::NotCore;
     }
-    prepare(core, name, &dir, dial)
+    prepare(core, name, &dir, dial, announce)
 }
 
 /// The far herdr session whose primary core is `core_session` on the far
@@ -262,7 +275,13 @@ pub(crate) fn far_herdr_session(core_session: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn prepare(core: &CoreAt, name: &MachineName, dir: &MachineDir, dial: bool) -> Lookup {
+fn prepare(
+    core: &CoreAt,
+    name: &MachineName,
+    dir: &MachineDir,
+    dial: bool,
+    announce: &mut dyn FnMut(&str),
+) -> Lookup {
     if let Err(err) = dir.check() {
         return refused(1, format!("{name}: {err}"));
     }
@@ -331,6 +350,9 @@ fn prepare(core: &CoreAt, name: &MachineName, dir: &MachineDir, dial: bool) -> L
             Ok(lease) => lease,
             Err(err) => return refused(1, format!("{name}: could not write the lease: {err}")),
         };
+        // S4b at run time, not only in the docs (M7): whoever passed
+        // `--dial`, the terminal shows that a login is starting.
+        announce(&dial_notice(name));
         dir.log("CLI --dial: lease, then connect");
         let outcome = dialer::dial_once(
             core,
@@ -373,6 +395,13 @@ fn describe(outcome: &Outcome) -> String {
         Outcome::NotListed => "herdr-core does not list it".into(),
         other => other.state().unwrap_or("unknown").to_string(),
     }
+}
+
+/// The line `--dial` prints, on stderr, before its one dial (S4b, M7).
+fn dial_notice(name: &MachineName) -> String {
+    format!(
+        "herdr: --dial: opening ssh to {name} now; a Touch ID or Tailscale check can prompt on this Mac"
+    )
 }
 
 /// D7's refusal without `--dial` (S4a): nothing was written or dialled.
