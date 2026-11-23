@@ -840,4 +840,197 @@ mod tests {
             assert!(validate_machine_command(&input).is_ok(), "{input:?}");
         }
     }
+
+    /// What a command allowed under `--machine` prints for a human.
+    enum Printed {
+        /// Far text, printed by this fn with `FAR_CONTROLS` in each string field.
+        Text(fn() -> String),
+        /// Prints the reply as JSON (serde escapes every control) or is
+        /// quiet: no human printer of far text.
+        JsonOrQuiet,
+        /// Prints pane or agent text raw, by design: `pane read`, `agent read`.
+        RawByDesign,
+    }
+
+    /// Every `(command, subcommand)` the clap tree offers that
+    /// `validate_machine_command` allows.
+    fn allowed_machine_commands() -> Vec<(String, String)> {
+        let tree = crate::cli::spec::command();
+        let mut allowed = Vec::new();
+        for top in tree.get_subcommands() {
+            let subs: Vec<String> = top
+                .get_subcommands()
+                .map(|sub| sub.get_name().to_string())
+                .filter(|name| name != "help")
+                .collect();
+            let pairs: Vec<(String, String)> = if subs.is_empty() {
+                vec![(top.get_name().to_string(), String::new())]
+            } else {
+                subs.into_iter()
+                    .map(|sub| (top.get_name().to_string(), sub))
+                    .collect()
+            };
+            for (command, sub) in pairs {
+                let mut input = args(&["herdr", &command]);
+                if !sub.is_empty() {
+                    input.push(sub.clone());
+                }
+                if validate_machine_command(&input).is_ok() {
+                    allowed.push((command, sub));
+                }
+            }
+        }
+        allowed
+    }
+
+    /// Every command allowed under `--machine`, classified. A command added
+    /// to the allowlist without a row here fails the walk below, so it is
+    /// classified when it is added (#311).
+    fn machine_command_printers() -> Vec<(&'static str, &'static str, Printed)> {
+        use Printed::{JsonOrQuiet as J, RawByDesign, Text};
+        let mut table = vec![
+            (
+                "notification",
+                "list",
+                Text(crate::cli::notification::far_output_tests::walk_text),
+            ),
+            (
+                "agent",
+                "explain",
+                Text(crate::cli::agent::far_output_tests::walk_text),
+            ),
+            (
+                "status",
+                "server",
+                Text(crate::cli::status::tests::walk_text),
+            ),
+            ("plugin", "list", Text(crate::cli::plugin::tests::walk_text)),
+            (
+                "server",
+                "agent-manifests",
+                Text(crate::cli::server::tests::walk_text),
+            ),
+            (
+                "pane",
+                "report-agent-session",
+                Text(crate::cli::pane::fork_regression_tests::walk_text),
+            ),
+            ("pane", "read", RawByDesign),
+            ("agent", "read", RawByDesign),
+        ];
+        for (command, subs) in [
+            (
+                "server",
+                &["stop", "reload-config", "reload-agent-manifests"][..],
+            ),
+            ("api", &["snapshot"]),
+            (
+                "workspace",
+                &[
+                    "list",
+                    "create",
+                    "get",
+                    "focus",
+                    "pin",
+                    "unpin",
+                    "rename",
+                    "report-metadata",
+                    "close",
+                ],
+            ),
+            ("worktree", &["list", "create", "remove", "open"]),
+            (
+                "tab",
+                &["list", "create", "get", "focus", "rename", "sync", "close"],
+            ),
+            ("notification", &["clear", "show"]),
+            (
+                "agent",
+                &[
+                    "list",
+                    "get",
+                    "focus",
+                    "send-keys",
+                    "message",
+                    "rename",
+                    "wait",
+                    "prompt",
+                    "start",
+                    "pin",
+                    "unpin",
+                ],
+            ),
+            (
+                "pane",
+                &[
+                    "mark-seen",
+                    "list",
+                    "current",
+                    "get",
+                    "layout",
+                    "balance",
+                    "process-info",
+                    "neighbor",
+                    "edges",
+                    "focus",
+                    "resize",
+                    "zoom",
+                    "sync",
+                    "rename",
+                    "input",
+                    "split",
+                    "swap",
+                    "move",
+                    "clear",
+                    "close",
+                    "respawn",
+                    "send-text",
+                    "send-keys",
+                    "wait-output",
+                    "run",
+                    "report-agent",
+                    "release-agent",
+                    "report-metadata",
+                    "report-hint",
+                ],
+            ),
+            (
+                "plugin",
+                &[
+                    "link", "unlink", "enable", "disable", "action", "log", "pane",
+                ],
+            ),
+            ("client", &["list"]),
+            ("popup", &["close"]),
+        ] {
+            for sub in subs {
+                table.push((command, sub, J));
+            }
+        }
+        table
+    }
+
+    #[test]
+    fn every_machine_command_prints_far_text_escaped_or_has_no_human_printer_of_it() {
+        let table = machine_command_printers();
+        let allowed = allowed_machine_commands();
+        for (command, sub) in &allowed {
+            assert!(
+                table.iter().any(|(c, s, _)| c == command && s == sub),
+                "`{command} {sub}` is allowed under --machine but not classified in \
+                 machine_command_printers: does it print far text for a human?"
+            );
+        }
+        for (command, sub, printed) in &table {
+            assert!(
+                allowed.iter().any(|(c, s)| c == command && s == sub),
+                "`{command} {sub}` is classified but not an allowed machine command"
+            );
+            if let Printed::Text(walk) = printed {
+                let remote = as_remote(walk);
+                assert!(!remote.is_empty(), "`{command} {sub}` printed nothing");
+                assert_escaped(&remote);
+            }
+        }
+    }
 }

@@ -1415,7 +1415,8 @@ pub(in crate::cli) mod tests {
         let plugin = github_plugin("far.plugin", "o", "r", None);
         let local_dir = crate::plugin_paths::plugin_config_dir("far.plugin");
         let local_dir = local_dir.display().to_string();
-        let remote = crate::cli::target::as_remote(|| plugin_list_text(&[plugin.clone()]));
+        let remote =
+            crate::cli::target::as_remote(|| plugin_list_text(std::slice::from_ref(&plugin)));
         assert!(!remote.contains("config:"), "{remote}");
         assert!(!remote.contains(&local_dir), "{remote}");
         let local = plugin_list_text(&[plugin]);
