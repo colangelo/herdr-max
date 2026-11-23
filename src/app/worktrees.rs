@@ -48,6 +48,12 @@ impl App {
             if self.terminal_runtimes.get(&terminal_id).is_none() {
                 continue;
             }
+            // A program on a core machine holds no folder of this Mac, and
+            // only a person's close ends it (core-phase5 D5; third read,
+            // finding 6).
+            if self.pane_machine(pane_id).is_some() {
+                continue;
+            }
             tracing::debug!(
                 workspace_index = ws_idx,
                 terminal_id = %terminal_id,

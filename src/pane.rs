@@ -384,6 +384,39 @@ enum PaneLaunch {
     },
 }
 
+impl PaneLaunch {
+    /// Whether all of the pane's output comes from another host: a program
+    /// on a core machine (core-phase5 D5, security review M1). Such output
+    /// gets inline graphics only, no clipboard writes, and its reported
+    /// folder is the far host's, never this Mac's.
+    fn far_output(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            PaneLaunch::Command { machine, .. } => machine.is_some(),
+            #[cfg(not(unix))]
+            PaneLaunch::Command { .. } => false,
+            #[cfg(unix)]
+            PaneLaunch::ReattachCore { link, .. } => link.machine().is_some(),
+        }
+    }
+
+    /// The folder on the far host the program runs in, as the request or
+    /// the saved link named it: far metadata for the save, never this
+    /// Mac's cwd.
+    fn far_cwd(&self) -> Option<std::path::PathBuf> {
+        match self {
+            #[cfg(unix)]
+            PaneLaunch::Command {
+                machine: Some(machine),
+                ..
+            } => machine.cwd.as_ref().map(std::path::PathBuf::from),
+            #[cfg(unix)]
+            PaneLaunch::ReattachCore { link, .. } => link.machine_cwd.clone(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct SpawnInitialState<'a> {
     detected_agent: Option<Agent>,
@@ -2140,7 +2173,10 @@ pub struct PaneRuntime {
     #[cfg(unix)]
     nested_agent_process_group_id: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
-    persistence_cwd: Mutex<Option<std::path::PathBuf>>,
+    /// The folder last seen for a save, not for this Mac's own cwd facts:
+    /// a process lookup, or what a program on a core machine reports there
+    /// (security review M1).
+    persistence_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     cwd_process_exited: Arc<AtomicBool>,
     /// Directory of the shell the user is interacting with, published by the
     /// per-pane detection task. Keeps `cwd` a lock-and-clone: resolving it walks
@@ -2587,8 +2623,74 @@ fn is_powershell_shell(shell: &str) -> bool {
     )
 }
 
+/// The Kitty graphics transports a pane's terminal accepts: inline data
+/// only for output from another host (security review M1).
+fn kitty_media(far_output: bool) -> crate::ghostty::KittyMedia {
+    if far_output {
+        crate::ghostty::KittyMedia::InlineOnly
+    } else {
+        crate::ghostty::KittyMedia::All
+    }
+}
+
 fn usable_reported_cwd(cwd: std::path::PathBuf) -> Option<std::path::PathBuf> {
     (cwd.is_absolute() && cwd.is_dir()).then_some(cwd)
+}
+
+/// What a chunk of a pane's output asks of this host besides its screen.
+struct OutputRequests {
+    /// The folder the program reported (OSC 7).
+    reported_cwd: Option<std::path::PathBuf>,
+    /// Programmatic clipboard writes (OSC 52).
+    clipboard_writes: Vec<Vec<u8>>,
+}
+
+/// Hands a pane's output requests to the server. Output from another host
+/// (security review M1) sets no clipboard, and its folder is the far
+/// host's: kept for the save only, never this Mac's cwd, the root of a git
+/// lookup, the workspace's identity or the folder of the next local split.
+fn publish_output_requests(
+    pane_id: PaneId,
+    far_output: bool,
+    requests: OutputRequests,
+    reported_cwd: &Arc<Mutex<Option<std::path::PathBuf>>>,
+    persistence_cwd: &Arc<Mutex<Option<std::path::PathBuf>>>,
+    events: &mpsc::Sender<AppEvent>,
+) {
+    let OutputRequests {
+        reported_cwd: cwd,
+        clipboard_writes,
+    } = requests;
+    if far_output {
+        if let Some(cwd) = cwd.filter(|cwd| cwd.is_absolute()) {
+            if let Ok(mut known) = persistence_cwd.lock() {
+                *known = Some(cwd);
+            }
+        }
+        if !clipboard_writes.is_empty() {
+            debug!(
+                pane = pane_id.raw(),
+                writes = clipboard_writes.len(),
+                "dropped clipboard writes from a program on another host"
+            );
+        }
+        return;
+    }
+    if let Some(cwd) = cwd {
+        publish_reported_cwd(pane_id, cwd, reported_cwd, events);
+    }
+    for content in clipboard_writes {
+        if let Err(err) = events.try_send(AppEvent::ClipboardWrite {
+            content,
+            source_pane: Some(pane_id),
+        }) {
+            warn!(
+                pane = pane_id.raw(),
+                err = %err,
+                "failed to send OSC 52 clipboard write"
+            );
+        }
+    }
 }
 
 fn publish_terminal_bells(pane_id: PaneId, count: u16, events: &mpsc::Sender<AppEvent>) {
@@ -2991,6 +3093,11 @@ impl PaneRuntime {
     pub fn core_terminal(&self) -> Option<CoreTerminalLink> {
         let mut link = self.io.core_terminal()?;
         link.agent = self.agent_program.lock().ok().and_then(|agent| *agent);
+        // A machine's folder, as its program last reported it (or as the
+        // request or the saved link named it), goes with the link only.
+        if link.machine().is_some() {
+            link.machine_cwd = self.persistence_cwd.lock().ok().and_then(|cwd| cwd.clone());
+        }
         Some(link)
     }
 
@@ -3222,7 +3329,7 @@ impl PaneRuntime {
             agent_program,
             nested_agent_process_group_id,
             reported_cwd,
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd: Arc::new(Mutex::new(None)),
             cwd_process_exited,
             resolved_cwd,
             child_wait_completed: None,
@@ -3261,11 +3368,12 @@ impl PaneRuntime {
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
+        let far_output = launch.far_output();
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         if crate::kitty_graphics::is_enabled() {
             terminal
-                .enable_kitty_graphics()
+                .enable_kitty_graphics_with(kitty_media(far_output))
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
@@ -3297,6 +3405,7 @@ impl PaneRuntime {
         #[cfg(unix)]
         let nested_agent_process_group_id = Arc::new(AtomicU32::new(0));
         let reported_cwd = Arc::new(Mutex::new(None));
+        let persistence_cwd = Arc::new(Mutex::new(launch.far_cwd()));
         let resolved_cwd: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let child_wait_completed = Arc::new(AtomicBool::new(false));
         let content_seq = Arc::new(AtomicU64::new(0));
@@ -3333,6 +3442,7 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
+            let persistence_cwd = persistence_cwd.clone();
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
@@ -3367,21 +3477,17 @@ impl PaneRuntime {
                         }
                     });
                 }
-                if let Some(cwd) = result.reported_cwd.clone() {
-                    publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
-                }
-                for content in result.clipboard_writes {
-                    if let Err(err) = events.try_send(AppEvent::ClipboardWrite {
-                        content,
-                        source_pane: Some(pane_id),
-                    }) {
-                        warn!(
-                            pane = pane_id.raw(),
-                            err = %err,
-                            "failed to send OSC 52 clipboard write"
-                        );
-                    }
-                }
+                publish_output_requests(
+                    pane_id,
+                    far_output,
+                    OutputRequests {
+                        reported_cwd: result.reported_cwd.clone(),
+                        clipboard_writes: result.clipboard_writes,
+                    },
+                    &reported_cwd,
+                    &persistence_cwd,
+                    &events,
+                );
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
                 }
@@ -3967,7 +4073,7 @@ impl PaneRuntime {
             #[cfg(unix)]
             nested_agent_process_group_id,
             reported_cwd,
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd,
             cwd_process_exited: child_wait_completed.clone(),
             resolved_cwd,
             child_wait_completed: Some(child_wait_completed),
@@ -4924,7 +5030,7 @@ impl PaneRuntime {
                 #[cfg(unix)]
                 nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
-                persistence_cwd: Mutex::new(None),
+                persistence_cwd: Arc::new(Mutex::new(None)),
                 cwd_process_exited: Arc::new(AtomicBool::new(false)),
                 resolved_cwd: Arc::new(Mutex::new(None)),
                 child_wait_completed: None,
@@ -5406,6 +5512,58 @@ mod tests {
         std::fs::remove_dir(&cwd).expect("remove reported cwd after admission");
 
         assert_eq!(runtime.cwd(), Some(cwd));
+    }
+
+    // Security review M1 (core-phase5 D5): a program on a core machine
+    // reports a folder of its own host, here one this Mac also has, and
+    // writes to the clipboard. The folder is kept for the save only: it is
+    // not this Mac's cwd, so no git lookup, workspace identity or next
+    // split starts from it, and no clipboard write reaches a client. The
+    // same output from a program on this Mac does both.
+    #[tokio::test]
+    async fn far_output_sets_no_clipboard_and_its_folder_stays_save_metadata() {
+        let here = std::env::temp_dir();
+        let requests = || OutputRequests {
+            reported_cwd: Some(here.clone()),
+            clipboard_writes: vec![b"from far".to_vec()],
+        };
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        let (events, mut event_rx) = mpsc::channel(8);
+        publish_output_requests(
+            runtime.pane_id,
+            true,
+            requests(),
+            &runtime.reported_cwd,
+            &runtime.persistence_cwd,
+            &events,
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "no clipboard write, no cwd report"
+        );
+        assert_eq!(runtime.cwd(), None);
+        assert_eq!(runtime.cached_cwd(), None);
+        assert_eq!(runtime.follow_cwd(), None);
+        assert_eq!(runtime.cwd_for_persistence(), Some(here.clone()));
+
+        let (local, _rx) = PaneRuntime::test_with_channel(80, 24);
+        publish_output_requests(
+            local.pane_id,
+            false,
+            requests(),
+            &local.reported_cwd,
+            &local.persistence_cwd,
+            &events,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::TerminalCwdReported { .. })
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(AppEvent::ClipboardWrite { .. })
+        ));
+        assert_eq!(local.cwd(), Some(here));
     }
 
     #[cfg(unix)]
@@ -6419,7 +6577,7 @@ mod tests {
             #[cfg(unix)]
             nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             resolved_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
@@ -6478,7 +6636,7 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             nested_agent_process_group_id: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             resolved_cwd: Arc::new(Mutex::new(Some(std::path::PathBuf::from("/resolved")))),
             child_wait_completed: None,
@@ -6523,7 +6681,7 @@ mod tests {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd: Arc::new(Mutex::new(None)),
             pane_id,
             terminal,
             io: PaneIo::TestChannel {
@@ -6570,7 +6728,7 @@ mod tests {
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             managed_start_probe_window: Arc::new(Mutex::new(None)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
-            persistence_cwd: Mutex::new(None),
+            persistence_cwd: Arc::new(Mutex::new(None)),
             pane_id,
             terminal,
             io: PaneIo::TestChannel {

@@ -851,6 +851,8 @@ mod tests {
                 session: "legacy".into(),
                 address: "t7".into(),
                 program: ProgramIdentity::of(program.id(), crate::platform::process_start),
+                launch: None,
+                machine_cwd: None,
             },
             Some("w1-p1".into()),
             0,

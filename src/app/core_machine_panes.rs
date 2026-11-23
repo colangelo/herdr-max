@@ -281,12 +281,17 @@ mod tests {
         (app, pane)
     }
 
+    /// The launch label of the runs these tests' links name.
+    const LAUNCH: &str = "L1";
+
     fn link_on(address: &str) -> CoreTerminalLink {
         CoreTerminalLink {
             agent: None,
             session: crate::pane::core_session_name(),
             address: address.into(),
             program: None,
+            launch: Some(LAUNCH.into()),
+            machine_cwd: None,
         }
     }
 
@@ -300,6 +305,20 @@ mod tests {
                 public_pane_id,
                 why: CoreWaitReason::MachineAway { machine, dormant },
             }));
+    }
+
+    /// The folder on the machine a waiting pane's link names.
+    fn set_machine_cwd(app: &mut App, pane_id: PaneId, cwd: &std::path::Path) {
+        let terminal = app.state.pane_terminal_mut(pane_id).expect("terminal");
+        let Some(PaneHold::CoreWaiting(waiting)) = terminal.hold.as_mut() else {
+            panic!("the pane waits");
+        };
+        waiting.link.machine_cwd = Some(cwd.to_path_buf());
+    }
+
+    /// A folder of the machine `loop`, which this Mac does not have.
+    fn far_folder() -> std::path::PathBuf {
+        std::path::PathBuf::from("/far/on/loop/project")
     }
 
     fn why(app: &App, pane_id: PaneId) -> Option<CoreWaitReason> {
@@ -334,7 +353,19 @@ mod tests {
     }
 
     fn split_on(app: &mut App, machine: &str) -> serde_json::Value {
-        let target = app.public_pane_id(0, app.state.workspaces[0].tabs[0].root_pane);
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        split_with(app, target, Some(machine), None)
+    }
+
+    /// Splits `target` with a new pane, on `on` when given, in `cwd` when
+    /// given (on the machine, for a pane there).
+    fn split_with(
+        app: &mut App,
+        target: PaneId,
+        on: Option<&str>,
+        cwd: Option<&std::path::Path>,
+    ) -> serde_json::Value {
+        let target = app.public_pane_id(0, target);
         let response = app.handle_api_request(Request {
             id: "split".into(),
             method: Method::PaneSplit(crate::api::schema::PaneSplitParams {
@@ -342,14 +373,20 @@ mod tests {
                 target_pane_id: target,
                 direction: crate::api::schema::SplitDirection::Right,
                 ratio: None,
-                cwd: None,
+                cwd: cwd.map(|cwd| cwd.display().to_string()),
                 focus: false,
                 right_click: Default::default(),
                 env: Default::default(),
-                on: Some(machine.into()),
+                on: on.map(str::to_string),
             }),
         });
         serde_json::from_str(&response).expect("json")
+    }
+
+    fn new_pane(app: &App, split: &serde_json::Value) -> PaneId {
+        app.parse_pane_id(split["result"]["pane"]["pane_id"].as_str().expect("id"))
+            .map(|(_, pane)| pane)
+            .expect("the new pane")
     }
 
     /// The record core gives for `pane_id`'s terminal at `address`: its
@@ -365,6 +402,7 @@ mod tests {
             "labels": {
                 "herdr.session": format!("{}@fake", crate::pane::herdr_session_label()),
                 "herdr.pane_id": app.public_pane_id(0, pane_id).expect("public id"),
+                "herdr.launch": LAUNCH,
             },
         });
         for (key, value) in extra.as_object().expect("fields") {
@@ -608,8 +646,8 @@ mod tests {
         std::env::set_var("HC_SOCKET", &core.socket);
         let (mut app, pane) = app_with_one_pane();
         wait_for_machine(&mut app, pane, "loop/t3", false);
+        set_machine_cwd(&mut app, pane, &far_folder());
         let real = std::env::temp_dir();
-        app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
         let json = serde_json::to_value(capture(&app)).expect("json");
         let pane_json = &json["workspaces"][0]["tabs"][0]["panes"][pane.raw().to_string()];
         assert_eq!(
@@ -629,17 +667,18 @@ mod tests {
         );
         before["cwd"] = serde_json::json!(real);
         assert_eq!(previous_beta_restores(&before), "started fresh on this Mac");
-        // This build keeps the folder.
+        // This build keeps the folder there with the link, and never takes
+        // it for one of this Mac: not the pane's, not the workspace's
+        // (security review M1).
         let back: crate::persist::SessionSnapshot =
             serde_json::from_value(json).expect("this build reads it");
+        let saved = &back.workspaces[0].tabs[0].panes[&pane.raw()];
         assert_eq!(
-            back.workspaces[0].tabs[0].panes[&pane.raw()].program_cwd(),
-            real.as_path()
+            saved.core_link().and_then(|link| link.link().machine_cwd),
+            Some(far_folder())
         );
-        assert_eq!(
-            back.workspaces[0].identity_cwd, real,
-            "named by its real folder"
-        );
+        assert_eq!(saved.local_cwd(), None);
+        assert_ne!(back.workspaces[0].identity_cwd, far_folder());
     }
 
     // N3 (D5): the save of a machine pane carries its link only as
@@ -656,6 +695,7 @@ mod tests {
                 pid: 4242,
                 started: 7,
             }),
+            launch: None,
             ..link_on("t3")
         };
         app.state.pane_terminal_mut(pane).expect("terminal").hold =
@@ -681,6 +721,8 @@ mod tests {
                 pid: 4242,
                 started: 7,
             }),
+            launch: Some("L1".into()),
+            machine_cwd: Some(far_folder()),
             ..link_on("loop/t3")
         };
         app.state.pane_terminal_mut(pane).expect("terminal").hold =
@@ -702,7 +744,7 @@ mod tests {
         assert_eq!(
             far["core_machine_terminal"],
             serde_json::json!({"session": crate::pane::core_session_name(),
-                "address": "loop/t3", "machine_cwd": real}),
+                "address": "loop/t3", "machine_cwd": far_folder(), "launch": "L1"}),
             "{far}"
         );
     }
@@ -723,8 +765,7 @@ mod tests {
             "labels": {"herdr.session": crate::pane::herdr_session_label(),
                 "herdr.pane_id": public_pane_id}}));
         wait_for_machine(&mut app, pane, "loop/t3", false);
-        let real = std::env::temp_dir();
-        app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
+        set_machine_cwd(&mut app, pane, &far_folder());
         let json = serde_json::to_string(&capture(&app)).expect("json");
         let mut snapshot: crate::persist::SessionSnapshot =
             serde_json::from_str(&json).expect("this build reads it");
@@ -754,7 +795,12 @@ mod tests {
                 "{:?}",
                 waiting.why
             );
-            assert_eq!(terminal.cwd, real, "its folder there");
+            assert_eq!(
+                waiting.link.machine_cwd,
+                Some(far_folder()),
+                "its folder there, with its link"
+            );
+            assert_ne!(terminal.cwd, far_folder(), "never a folder of this Mac");
             snapshot =
                 crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
             let saved = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
@@ -774,6 +820,111 @@ mod tests {
                 .any(|method| method == "terminal.list" || method == "terminal.run"),
             "no search, nothing started: {methods:?}"
         );
+    }
+
+    // Security review M1: `--cwd` on a machine names a folder there. It
+    // goes to the machine and stays with the pane's link, and it is never
+    // a folder of this Mac: not the pane's here, nor the folder a local
+    // split of the pane starts in, even when this Mac has a folder of that
+    // name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_folder_never_becomes_a_folder_here() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, root) = app_with_one_pane();
+        let here_too = std::env::temp_dir().join(format!("h308-far-{}", std::process::id()));
+        std::fs::create_dir_all(&here_too).expect("a folder of that name here");
+        let split = split_with(&mut app, root, Some("loop"), Some(&here_too));
+        let pane = new_pane(&app, &split);
+        let run = core
+            .requests()
+            .into_iter()
+            .find(|request| request["method"] == "terminal.run")
+            .expect("run");
+        assert_eq!(
+            run["params"]["cwd"],
+            serde_json::json!(here_too),
+            "sent there"
+        );
+        let terminal = app.state.pane_terminal(pane).expect("terminal");
+        assert_ne!(terminal.cwd, here_too, "not its folder here");
+        let link = app
+            .terminal_runtimes
+            .get(&terminal.id)
+            .and_then(crate::terminal::TerminalRuntime::core_terminal)
+            .expect("link");
+        assert_eq!(
+            link.machine_cwd,
+            Some(here_too.clone()),
+            "kept with its link"
+        );
+
+        let local = split_with(&mut app, pane, None, None);
+        let local = new_pane(&app, &local);
+        assert_ne!(
+            app.state.pane_terminal(local).expect("terminal").cwd,
+            here_too,
+            "a local split does not start there"
+        );
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.set_keep_core_terminal(true);
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(here_too);
+    }
+
+    // Third read, finding 6: a worktree removal stops the runtimes of its
+    // workspace's panes on this Mac; a program on a machine holds no folder
+    // here, and only a person's close ends it, so it runs on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worktree_removal_leaves_a_machine_pane_running() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, _) = app_with_one_pane();
+        let split = split_on(&mut app, "loop");
+        let pane = new_pane(&app, &split);
+        let stopped = app.shutdown_workspace_terminal_runtimes_for_worktree_remove(0);
+        assert!(!stopped.contains(&pane), "{stopped:?}");
+        assert!(has_runtime(&app, pane));
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.set_keep_core_terminal(true);
+            runtime.shutdown();
+        }
+    }
+
+    // Third read, finding 6: whatever the pane is, a suspend cause on a
+    // machine pane makes it wait with its link, never close and leave its
+    // program there without one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_pane_waits_even_where_a_pane_would_close() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, root) = app_with_one_pane();
+        let split = split_on(&mut app, "loop");
+        let pane = new_pane(&app, &split);
+        app.overlay_panes.insert(
+            pane,
+            crate::app::OverlayPaneState {
+                ws_idx: 0,
+                tab_idx: 0,
+                previous_focus: root,
+                previous_zoomed: false,
+                temp_files: Vec::new(),
+            },
+        );
+        app.handle_internal_event(crate::events::AppEvent::PaneDied {
+            pane_id: pane,
+            exit_reason: crate::platform::ChildExitReason::Suspended(
+                crate::platform::SuspendCause::CoreStopped,
+            ),
+        });
+        assert!(app.find_pane(pane).is_some(), "the pane stays");
+        assert!(matches!(
+            why(&app, pane),
+            Some(CoreWaitReason::MachineAway { .. })
+        ));
+        assert_eq!(kills(&core), 0, "{:?}", core.methods());
     }
 
     // N4 (D5): the idle move refuses a pane on a machine by name: its kill

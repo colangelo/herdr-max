@@ -728,14 +728,11 @@ fn restore_tab(
     for id in &pane_ids {
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
-        let saved_cwd = saved_pane
-            .map(|p| p.program_cwd().to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
-
-        let cwd = saved_cwd;
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
         // A pane on a core machine runs in the machine's folders, which this
-        // Mac need not have (core-phase5 D5).
+        // Mac need not have (core-phase5 D5). The saved address decides the
+        // host first; the machine's folder stays with the link, never a
+        // folder of this Mac (security review M1, M6).
         #[cfg(unix)]
         let on_machine = saved_pane
             .and_then(|pane| pane.core_link())
@@ -744,6 +741,18 @@ fn restore_tab(
             });
         #[cfg(not(unix))]
         let on_machine = false;
+        let here = || std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let cwd = match saved_pane {
+            None => here(),
+            Some(pane) => match pane.local_cwd() {
+                Some(cwd) => cwd.to_path_buf(),
+                // A machine pane's own folder here, which nothing starts in.
+                None if on_machine => here(),
+                // The `cwd` no host has without its machine link: held below,
+                // never started (third read, finding 3).
+                None => pane.cwd.clone(),
+            },
+        };
         if !has_import && !on_machine && !cwd.is_dir() {
             #[cfg_attr(not(unix), allow(unused_mut))]
             let mut terminal = unavailable_restored_terminal(
@@ -4067,6 +4076,8 @@ mod core_restore_tests {
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: own_program(),
+            launch: None,
+            machine_cwd: None,
         };
         match restore(&link, "w1-p2") {
             CoreRestore::Waiting(waiting) => assert_eq!(waiting.link, link),
@@ -4089,6 +4100,8 @@ mod core_restore_tests {
             session: crate::pane::core_session_name(),
             address: "loop/t7".into(),
             program: None,
+            launch: None,
+            machine_cwd: None,
         };
         match restore(&link, "w1-p2") {
             CoreRestore::Waiting(waiting) => {
@@ -4130,6 +4143,8 @@ mod core_restore_tests {
             session: crate::pane::core_session_name(),
             address: "loop/t7".into(),
             program: None,
+            launch: Some("L1".into()),
+            machine_cwd: None,
         };
         let CoreRestore::Waiting(missing) = restore(&link, "w1-p2") else {
             panic!("expected the pane to wait");
@@ -4144,7 +4159,7 @@ mod core_restore_tests {
             serde_json::json!({"address": "loop/t7", "state": "finished",
             "reason": "exited", "labels": {
                 "herdr.session": format!("{}@fake", crate::pane::herdr_session_label()),
-                "herdr.pane_id": "w1-p2"}}),
+                "herdr.pane_id": "w1-p2", "herdr.launch": "L1"}}),
         );
         let CoreRestore::Waiting(waiting) = restore(&link, "w1-p2") else {
             panic!("expected the pane to hold its link");
@@ -4178,6 +4193,8 @@ mod core_restore_tests {
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: None,
+            launch: None,
+            machine_cwd: None,
         };
         assert!(matches!(restore(&link, "w1-p2"), CoreRestore::Waiting(_)));
     }
@@ -4200,6 +4217,8 @@ mod core_restore_tests {
             session: "herdr".into(),
             address: "t7".into(),
             program: None,
+            launch: None,
+            machine_cwd: None,
         };
 
         let CoreRestore::Attached(runtime) = restore(&link, "w1-p2") else {
@@ -4253,6 +4272,8 @@ mod core_restore_tests {
             address: "t7".into(),
             program: Some(WRAPPER),
             agent: Some(AGENT),
+            launch: None,
+            machine_cwd: None,
         };
         std::env::set_var(
             "HC_SOCKET",
@@ -4307,6 +4328,8 @@ mod core_restore_tests {
             address: "t7".into(),
             program: None,
             agent: None,
+            launch: None,
+            machine_cwd: None,
         };
 
         // A secondary herdr knows whose socket is there and refuses.
@@ -4364,6 +4387,8 @@ mod core_restore_tests {
                 address: "t7".into(),
                 program: Some(WRAPPER),
                 agent: Some(AGENT),
+                launch: None,
+                machine_cwd: None,
             },
         );
         let pane = snapshot.workspaces[0].tabs[0].panes.get_mut(&1).unwrap();
@@ -4419,6 +4444,8 @@ mod core_restore_tests {
             session: crate::pane::core_session_name(),
             address: "t7".into(),
             program: None,
+            launch: None,
+            machine_cwd: None,
         };
         match restore(&link, "w1-p2") {
             CoreRestore::Waiting(CoreWaiting {

@@ -64,9 +64,14 @@ impl App {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
         let machine_cwd = cwd.clone();
-        let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
-            self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
-        });
+        // With `on`, `cwd` names a folder on the machine: it goes there only,
+        // and the pane's folder here is a new pane's (security review M1).
+        let cwd = cwd
+            .filter(|_| on.is_none())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
+            });
         let (rows, cols) = self.state.new_pane_size(crate::ui::NewPanePlacement::Alone);
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;

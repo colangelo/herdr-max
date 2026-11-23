@@ -56,12 +56,19 @@ impl App {
             }
         };
         let machine_cwd = params.cwd.clone();
-        let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
-            source_workspace_index.map_or_else(
-                || self.resolve_new_terminal_cwd(None),
-                |index| self.resolved_new_workspace_cwd_from(index),
-            )
-        });
+        // With `on`, `cwd` names a folder on the machine: it goes there only,
+        // and the workspace's folder here is a new one's (security review M1).
+        let on_machine = params.on.is_some();
+        let cwd = params
+            .cwd
+            .filter(|_| !on_machine)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                source_workspace_index.map_or_else(
+                    || self.resolve_new_terminal_cwd(None),
+                    |index| self.resolved_new_workspace_cwd_from(index),
+                )
+            });
         let extra_env = match super::env::normalize_launch_env(params.env)
             .and_then(|env| super::env::launch_extra(env, params.on, machine_cwd.as_deref()))
         {

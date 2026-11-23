@@ -646,6 +646,8 @@ mod tests {
             session: session.into(),
             address: address.into(),
             program: None,
+            launch: None,
+            machine_cwd: None,
         }
     }
 

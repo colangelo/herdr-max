@@ -142,6 +142,10 @@ pub(crate) struct CoreReattach {
     pub address: String,
     /// Labels the terminal must carry to be this pane's program.
     pub labels: serde_json::Map<String, Value>,
+    /// The `herdr.launch` label of the run that started it, saved with the
+    /// link: a pane on a machine attaches only to a terminal carrying it
+    /// (security review M2).
+    pub launch: Option<String>,
     pub rows: u16,
     pub cols: u16,
 }
@@ -153,8 +157,13 @@ struct Attach {
     pid: u32,
     rows: u16,
     cols: u16,
-    /// A terminal this call just started is killed if the attach fails.
+    /// A terminal this call just started on this Mac is killed if the
+    /// attach fails; one on a machine never is (security review M5).
     ours_to_kill: bool,
+    /// The run's `herdr.launch` label.
+    launch: Option<String>,
+    /// For a pane on a machine, the labels its terminal must carry.
+    identity: Option<serde_json::Map<String, Value>>,
 }
 
 /// A pid from core, or 0 when it is missing or out of range (a pid_t is
@@ -186,6 +195,30 @@ fn label_refusal(record: &Value, labels: &serde_json::Map<String, Value>) -> Opt
     })
 }
 
+/// The labels that show a terminal on a machine is this pane's program
+/// (security review M2): the owner value, which names this core, and the
+/// run's launch label, which no other run has. A far core whose state was
+/// wiped can give the address to another terminal; that one carries
+/// neither, and is never attached, taken as ended or killed. `None` when
+/// the launch is unknown: nothing can show a terminal is the pane's then.
+fn machine_identity(
+    labels: &serde_json::Map<String, Value>,
+    launch: Option<&str>,
+) -> Option<serde_json::Map<String, Value>> {
+    let mut identity = serde_json::Map::new();
+    identity.insert(LAUNCH_LABEL.into(), Value::String(launch?.to_string()));
+    if let Some(owner) = labels.get("herdr.session") {
+        identity.insert("herdr.session".into(), owner.clone());
+    }
+    Some(identity)
+}
+
+/// Whether `record` shows the labels of `identity` (a pane on a machine)
+/// or no identity is asked for (a pane on this Mac).
+fn shows_identity(record: &Value, identity: Option<&serde_json::Map<String, Value>>) -> bool {
+    identity.is_none_or(|identity| label_refusal(record, identity).is_none())
+}
+
 /// Whether core reports the record's program as ended: only a `finished`
 /// record says so (hc 0.1.21: `state` is `live` or `finished`, and a
 /// finished one has its `reason`, `exit_code` or `signal`). The only end
@@ -205,11 +238,14 @@ fn finished_exit(record: &Value) -> ChildExitReason {
 /// goes up as it is (the server makes the pane wait for its machine), and
 /// any other end is final only on a finished record; a CLOSE without one
 /// is asked about again (`None`).
-fn close_exit(host: &Host, record: &Value) -> Option<ChildExitReason> {
+fn close_exit(shared: &Shared, record: &Value) -> Option<ChildExitReason> {
     let exit = exit_reason(record)?;
-    match host {
+    match shared.host {
         Host::Local => Some(exit),
-        Host::Machine(_) if exit.suspend_cause().is_some() || finished(record) => Some(exit),
+        // A wait, never final: the server asks again with the labels.
+        Host::Machine(_) if exit.suspend_cause().is_some() => Some(exit),
+        // An end only for the pane's own terminal (security review M2).
+        Host::Machine(_) if finished(record) && shared.shows_identity(record) => Some(exit),
         Host::Machine(_) => None,
     }
 }
@@ -220,21 +256,30 @@ fn close_exit(host: &Host, record: &Value) -> Option<ChildExitReason> {
 /// out the terminals of a machine it has not linked again (P5), and may list
 /// them before it has them all, so a `not_found`, a record labelled for
 /// another pane or one in another state makes the pane wait and ask again.
+/// Why a machine pane's terminal is not attached, as a wait: missing while
+/// core has the machine connected, unreachable while it does not.
+fn machine_missing(
+    client: &CoreClient,
+    machine: &MachineName,
+    address: &str,
+    why: &str,
+) -> ReattachError {
+    if machine_connected(client, machine) {
+        ReattachError::Missing(format!("terminal {address} {why}"))
+    } else {
+        ReattachError::Unreachable(CoreError::Unavailable(format!(
+            "{machine} is not connected; terminal {address} {why}"
+        )))
+    }
+}
+
 fn machine_record(
     client: &CoreClient,
     machine: &MachineName,
     address: &str,
     labels: &serde_json::Map<String, Value>,
 ) -> Result<Value, ReattachError> {
-    let missing = |why: String| {
-        if machine_connected(client, machine) {
-            ReattachError::Missing(format!("terminal {address} {why}"))
-        } else {
-            ReattachError::Unreachable(CoreError::Unavailable(format!(
-                "{machine} is not connected; terminal {address} {why}"
-            )))
-        }
-    };
+    let missing = |why: String| machine_missing(client, machine, address, &why);
     let record = match client.call("terminal.get", json!({"terminal": address}), CALL_TIMEOUT) {
         Ok(record) => record,
         Err(CoreError::Rpc { kind, .. }) if kind == "not_found" => {
@@ -283,6 +328,11 @@ struct Shared {
     /// The machine's link state, for a pane on a machine: input waits for
     /// it (core-phase5 D5).
     machine: Option<Arc<MachineLink>>,
+    /// The run's `herdr.launch` label, saved with a machine pane's link.
+    launch: Option<String>,
+    /// For a pane on a machine, the labels a terminal must show before it
+    /// is attached, taken as ended or killed (security review M2).
+    identity: Option<serde_json::Map<String, Value>>,
     /// The program as it was at attach, for telling a gone program from one
     /// core lost track of (core-phase3 D1a).
     program: Option<ProgramIdentity>,
@@ -314,6 +364,10 @@ struct Shared {
 impl Shared {
     fn client(&self) -> CoreClient {
         lock(&self.client).clone()
+    }
+
+    fn shows_identity(&self, record: &Value) -> bool {
+        shows_identity(record, self.identity.as_ref())
     }
 
     fn send(&self, frame_kind: u8, payload: Vec<u8>) -> Result<(), CoreError> {
@@ -491,6 +545,10 @@ impl StartedCore {
             })?;
             machine_owner_label(&mut labels, core_id);
         }
+        let identity = spawn
+            .on
+            .as_ref()
+            .and_then(|_| machine_identity(&labels, Some(&launch)));
         let mut params = json!({
             "argv": spawn.argv,
             "cwd": spawn.cwd,
@@ -506,6 +564,18 @@ impl StartedCore {
         }
         let reply = client.call("terminal.run", params, CALL_TIMEOUT);
         let started = match reply {
+            // A machine's run answers with its terminal's labels: an address
+            // without the launch label is not this run's (security review M2),
+            // and is neither attached nor killed.
+            Ok(record) if !shows_identity(&record, identity.as_ref()) => {
+                return Err(StartFailure::Unknown(CoreError::Rpc {
+                    kind: "protocol".into(),
+                    message: format!(
+                        "terminal.run answered with a terminal not labelled for this launch: {}",
+                        record["address"]
+                    ),
+                }))
+            }
             Ok(record) => address_on(&record, spawn.on.as_ref())
                 .map(|address| (address.to_string(), core_pid(&record["pid"])))
                 .ok_or_else(|| CoreError::Rpc {
@@ -523,6 +593,8 @@ impl StartedCore {
             rows: spawn.rows,
             cols: spawn.cols,
             ours_to_kill: true,
+            launch: spawn.on.as_ref().map(|_| launch.clone()),
+            identity: identity.clone(),
         };
         match started {
             Ok((address, pid)) => {
@@ -577,13 +649,27 @@ impl StartedCore {
         // A pane on a machine carries the owner label (core-phase5 D5): the
         // far herdr's own pane with our plain labels is not ours (F1).
         let mut labels = target.labels.clone();
-        if address.machine.is_some() {
+        let mut identity = None;
+        if let Some(machine) = &address.machine {
             let core_id = client.core_id().ok_or_else(|| {
                 ReattachError::Unreachable(CoreError::Unavailable(
                     "herdr-core gave no id, which a pane on a machine is labelled with".into(),
                 ))
             })?;
             machine_owner_label(&mut labels, core_id);
+            // Without its run's launch label nothing can show a terminal
+            // there is this pane's: it waits, and nothing is attached,
+            // taken as ended or killed (security review M2).
+            let Some(launch) = target.launch.as_deref() else {
+                return Err(machine_missing(
+                    &client,
+                    machine,
+                    &target.address,
+                    "was saved without its launch label",
+                ));
+            };
+            labels.insert(LAUNCH_LABEL.into(), Value::String(launch.to_string()));
+            identity = machine_identity(&labels, Some(launch));
         }
         let record = match &address.machine {
             Some(machine) => machine_record(&client, machine, &target.address, &labels)?,
@@ -620,6 +706,8 @@ impl StartedCore {
                 rows: target.rows,
                 cols: target.cols,
                 ours_to_kill: false,
+                launch: target.launch.clone().filter(|_| identity.is_some()),
+                identity,
             },
             child_pid,
             connector,
@@ -643,6 +731,8 @@ impl StartedCore {
             rows,
             cols,
             ours_to_kill,
+            launch,
+            identity,
         } = attach;
         let host = match CoreAddress::parse(&address) {
             Ok(parsed) => Host::of(&parsed),
@@ -677,6 +767,18 @@ impl StartedCore {
             events_tx.clone(),
             CALL_TIMEOUT,
         ) {
+            // The stream is to the terminal the answer names: on a machine,
+            // it must show the pane's launch, or it is detached unused
+            // (security review M2).
+            Ok(attach) if !shows_identity(&attach["terminal"], identity.as_ref()) => {
+                let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
+                let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
+                client.forget_stream(channel);
+                return Err(StartFailure::Unknown(CoreError::Rpc {
+                    kind: "protocol".into(),
+                    message: format!("terminal {address} is not labelled for this pane's launch"),
+                }));
+            }
             Ok(attach) => (
                 attach["channel"].as_u64().unwrap_or(0) as u32,
                 client.automatic_input() && attach["automatic_input"] == true,
@@ -690,7 +792,12 @@ impl StartedCore {
             }
             Err(err) => {
                 // Do not leave a program running that no pane shows; one
-                // core does not confirm ended may still run.
+                // core does not confirm ended may still run. A program on a
+                // machine is never killed for a failed setup: only a
+                // person's close ends it (security review M5).
+                if matches!(host, Host::Machine(_)) {
+                    return Err(StartFailure::Unknown(err));
+                }
                 if ours_to_kill && !kill_terminal(&client, &address).ended() {
                     return Err(StartFailure::Unknown(err));
                 }
@@ -713,6 +820,8 @@ impl StartedCore {
                 address,
                 host,
                 machine,
+                launch,
+                identity,
                 program: ProgramIdentity::of(pid, policy.start_token),
                 policy,
                 connector,
@@ -762,17 +871,28 @@ impl StartedCore {
                 )
             });
         if let Err(err) = started {
-            let _ = shared.client().call(
-                "terminal.kill",
-                json!({"terminal": shared.address}),
-                CALL_TIMEOUT,
-            );
+            abandon_setup(&shared);
             return Err(std::io::Error::other(err.to_string()));
         }
         Ok(CorePaneIo {
             shared,
             writer: Mutex::new(Some(writer)),
         })
+    }
+}
+
+/// The pane's threads did not start: no pane shows its terminal. On this
+/// Mac it is killed, as before; on a machine it is only detached, and its
+/// program runs on there, since only a person's close ends one (security
+/// review M5).
+fn abandon_setup(shared: &Shared) {
+    let client = shared.client();
+    let channel = shared.channel.load(Ordering::Acquire);
+    if shared.host == Host::Local {
+        let _ = kill_terminal(&client, &shared.address);
+    } else if channel != 0 {
+        let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
+        client.forget_stream(channel);
     }
 }
 
@@ -894,6 +1014,8 @@ impl CorePaneIo {
             session: self.shared.session.clone(),
             address: self.shared.address.clone(),
             program: self.shared.program,
+            launch: self.shared.launch.clone(),
+            machine_cwd: None,
         }
     }
 
@@ -917,9 +1039,33 @@ impl CorePaneIo {
     }
 
     /// Ends the program in core (D8's first half; the local sweep follows in
-    /// `terminate_session`) and says what core observed.
+    /// `terminate_session`) and says what core observed. On a machine, only
+    /// a terminal core shows live with the pane's launch label is killed: a
+    /// far core whose state was wiped can have given the address to another
+    /// (security review M2). Core has no kill bound to a label (hc 0.1.21),
+    /// so the check and the kill are two calls.
     pub(crate) fn kill(&self) -> KillOutcome {
-        kill_terminal(&self.shared.client(), &self.shared.address)
+        let client = self.shared.client();
+        if self.shared.identity.is_some() {
+            let record = match client.call(
+                "terminal.get",
+                json!({"terminal": self.shared.address}),
+                CALL_TIMEOUT,
+            ) {
+                Ok(record) => record,
+                Err(err) => return KillOutcome::Failed(err),
+            };
+            if !self.shared.shows_identity(&record) {
+                return KillOutcome::Failed(CoreError::Unavailable(format!(
+                    "terminal {} is not shown to carry this pane's launch label; not killed",
+                    self.shared.address
+                )));
+            }
+            if finished(&record) {
+                return KillOutcome::Finished;
+            }
+        }
+        kill_terminal(&client, &self.shared.address)
     }
 
     /// The core server's and its holders' pids, for the sweep guard (D8).
@@ -1072,15 +1218,21 @@ fn spawn_parser(
             // server makes that pane wait for its machine, never starts it
             // again here (core-phase5 D5). A stop of this Mac's core says
             // nothing about the program there.
-            let mut finish = |reason: ChildExitReason| {
-                if reason == ChildExitReason::Suspended(SuspendCause::CoreStopped) {
+            let mut finish = |reason: ChildExitReason, ended_here: bool| {
+                // Only this Mac's own terminals say its core was stopped: a
+                // machine's `server_stop` is the far core's (security
+                // review M3).
+                if reason == ChildExitReason::Suspended(SuspendCause::CoreStopped)
+                    && shared.host == Host::Local
+                {
                     super::note_stopped_by_person(&shared.session);
                 }
-                // Whatever ended a machine pane's stream, nothing automatic
-                // ends its program: finished, it has nothing to kill, and
-                // after a suspend cause it may run on there. Only a person's
-                // close, before this, sends `terminal.kill` (D5).
-                if matches!(shared.host, Host::Machine(_)) {
+                // A machine pane whose program core reports finished has
+                // nothing to kill, and a kill by its address could reach a
+                // terminal that took it over. After a suspend cause its
+                // program may run on: the server keeps it for the wait it
+                // starts, so a person's close racing this still ends it (D5).
+                if ended_here && matches!(shared.host, Host::Machine(_)) {
                     shared.keep_on_drop.store(true, Ordering::Release);
                 }
                 child_wait_completed.store(true, Ordering::Release);
@@ -1125,15 +1277,15 @@ fn spawn_parser(
                         }
                     }
                     StreamEvent::Close(reason) => {
-                        if let Some(exit) = close_exit(&shared.host, &reason) {
-                            finish(exit);
+                        if let Some(exit) = close_exit(&shared, &reason) {
+                            finish(exit, finished(&reason));
                             return;
                         }
                         if shared.closing.load(Ordering::Acquire) {
                             return;
                         }
                         if let Some(exit) = reattach(&shared, &mut on_unreachable) {
-                            finish(exit);
+                            finish(exit, true);
                             return;
                         }
                     }
@@ -1148,7 +1300,7 @@ fn spawn_parser(
                             let _ = shared.send(kind::CLOSE, Vec::new());
                         }
                         if let Some(exit) = reattach(&shared, &mut on_unreachable) {
-                            finish(exit);
+                            finish(exit, true);
                             return;
                         }
                     }
@@ -1364,6 +1516,18 @@ fn machine_reattach_check(
         json!({"terminal": shared.address}),
         CALL_TIMEOUT,
     ) {
+        // Only the pane's own terminal, shown by its launch label, is
+        // attached or ended; any other at the address is waited out
+        // (security review M2, third read 1).
+        Ok(record) if !shared.shows_identity(&record) => {
+            debug!(
+                pane = shared.pane_id.raw(),
+                %machine,
+                terminal = %shared.address,
+                "the terminal at the pane's address is not labelled for its launch; waiting"
+            );
+            Some(ReattachOutcome::Unreachable)
+        }
         Ok(record) if record["state"] == "live" => None,
         Ok(record) if finished(&record) => Some(ReattachOutcome::Gone(finished_exit(&record))),
         answer => {
@@ -1387,6 +1551,13 @@ fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
         shared.sink.clone(),
         CALL_TIMEOUT,
     ) {
+        Ok(attach) if !shared.shows_identity(&attach["terminal"]) => {
+            let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
+            let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
+            client.forget_stream(channel);
+            debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "the attached terminal is not labelled for the pane's launch; detached, retrying");
+            ReattachOutcome::Unreachable
+        }
         Ok(attach) => {
             let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
             shared.channel.store(channel, Ordering::Release);
@@ -1478,9 +1649,27 @@ mod tests {
             session: "herdr-test".into(),
             address: address.into(),
             labels: labels(pane),
+            launch: None,
             rows: 24,
             cols: 80,
         }
+    }
+
+    /// A saved link to `address` on a machine, for the run `launch`.
+    fn machine_target(address: &str, pane: &str, launch: &str) -> CoreReattach {
+        CoreReattach {
+            launch: Some(launch.into()),
+            ..target(address, pane)
+        }
+    }
+
+    /// The labels the fake core's pane `pane` on a machine carries, for the
+    /// run `launch`: the owner value, the pane and the launch.
+    fn owned(pane: &str, launch: &str) -> serde_json::Map<String, Value> {
+        let mut labels = labels(pane);
+        machine_owner_label(&mut labels, "fake");
+        labels.insert(LAUNCH_LABEL.into(), json!(launch));
+        labels
     }
 
     #[test]
@@ -1707,7 +1896,11 @@ mod tests {
                                   "labels": labels("w1-p2")}));
         core.set_machine("loop", "connected");
         let pid = AtomicU32::new(0);
-        let refused = StartedCore::reattach(target("loop/t1", "w1-p2"), &pid, connector_to(&core));
+        let refused = StartedCore::reattach(
+            machine_target("loop/t1", "w1-p2", "L1"),
+            &pid,
+            connector_to(&core),
+        );
         assert!(
             matches!(refused, Err(ReattachError::Missing(_))),
             "{:?}",
@@ -1785,7 +1978,11 @@ mod tests {
         pane.shutdown();
         let before = core.methods().len();
         super::super::terminate_session(&pane, PaneId::from_raw(6), 0, None);
-        assert_eq!(core.methods()[before..], ["terminal.kill"]);
+        assert_eq!(
+            core.methods()[before..],
+            ["terminal.get", "terminal.kill"],
+            "the launch label is checked, then the terminal killed"
+        );
         let kill = core.requests().pop().expect("kill");
         assert_eq!(kill["params"]["terminal"], "loop/t1");
     }
@@ -1795,15 +1992,18 @@ mod tests {
     #[test]
     fn a_machine_pane_reattaches_by_address_with_the_owner_label() {
         let core = FakeCore::start();
-        let mut owned = labels("w1-p2");
-        machine_owner_label(&mut owned, "fake");
         core.add_terminal(json!({"address": "loop/t3", "pid": 777, "state": "live",
-                                  "labels": owned}));
+                                  "labels": owned("w1-p2", "L1")}));
         let pid = AtomicU32::new(0);
         let pane = ignore_pane(
-            StartedCore::reattach(target("loop/t3", "w1-p2"), &pid, connector_to(&core))
-                .expect("attached"),
+            StartedCore::reattach(
+                machine_target("loop/t3", "w1-p2", "L1"),
+                &pid,
+                connector_to(&core),
+            )
+            .expect("attached"),
         );
+        assert_eq!(pane.link().launch.as_deref(), Some("L1"), "saved again");
         assert_eq!(pid.load(Ordering::Acquire), 0, "no far pid");
         assert_eq!(pane.machine().map(MachineName::as_str), Some("loop"));
         assert_eq!(core.methods(), ["terminal.get", "terminal.attach"]);
@@ -1821,10 +2021,14 @@ mod tests {
         core.forget_terminal("loop/t3");
         let pid = AtomicU32::new(0);
         let answer = |core: &FakeCore| {
-            StartedCore::reattach(target("loop/t3", "w1-p2"), &pid, connector_to(core))
-                .err()
-                .map(|err| format!("{err:?}"))
-                .unwrap_or_default()
+            StartedCore::reattach(
+                machine_target("loop/t3", "w1-p2", "L1"),
+                &pid,
+                connector_to(core),
+            )
+            .err()
+            .map(|err| format!("{err:?}"))
+            .unwrap_or_default()
         };
         for state in [None, Some("connecting"), Some("unreachable")] {
             if let Some(state) = state {
@@ -1843,10 +2047,14 @@ mod tests {
             answer(&core).starts_with("Missing"),
             "a finished record of another pane is not ours"
         );
-        let mut owned = labels("w1-p2");
-        machine_owner_label(&mut owned, "fake");
         core.add_terminal(json!({"address": "loop/t3", "state": "finished",
-                                  "reason": "exited", "labels": owned}));
+                                  "reason": "exited", "labels": owned("w1-p2", "L0")}));
+        assert!(
+            answer(&core).starts_with("Missing"),
+            "a finished record of another launch at the address is not ours"
+        );
+        core.add_terminal(json!({"address": "loop/t3", "state": "finished",
+                                  "reason": "exited", "labels": owned("w1-p2", "L1")}));
         assert!(answer(&core).starts_with("Gone"), "finished: its end");
         assert!(
             !core.methods().iter().any(|method| {
@@ -1920,8 +2128,10 @@ mod tests {
             None,
             "connected and not listed: still not final"
         );
+        let launch = pane.link().launch.expect("a machine pane saves its launch");
         core.add_terminal(json!({"address": "loop/t1", "state": "finished",
-                                  "reason": "exited", "exit_code": 0}));
+                                  "reason": "exited", "exit_code": 0,
+                                  "labels": owned("w1-p6", &launch)}));
         assert_eq!(
             exits.recv_timeout(Duration::from_secs(5)).ok(),
             Some(ChildExitReason::Exited),
@@ -1946,10 +2156,10 @@ mod tests {
     fn a_finished_machine_pane_is_never_killed_after_its_end() {
         let core = FakeCore::start();
         let (pane, exits) = machine_pane_on(&core, "loop");
-        core.close_stream(
-            1,
-            br#"{"address": "loop/t1", "state": "finished", "reason": "exited", "exit_code": 0}"#,
-        );
+        let launch = pane.link().launch.expect("launch");
+        let record = json!({"address": "loop/t1", "state": "finished", "reason": "exited",
+                            "exit_code": 0, "labels": owned("w1-p6", &launch)});
+        core.close_stream(1, record.to_string().as_bytes());
         assert_eq!(
             exits.recv_timeout(Duration::from_secs(5)).ok(),
             Some(ChildExitReason::Exited)
@@ -1983,6 +2193,220 @@ mod tests {
             .count();
         assert_eq!(attaches, 2, "attached again: {:?}", core.methods());
         pane.shutdown();
+    }
+
+    // Security review M2 (Sol C-03): a far core whose state was wiped can
+    // give a saved address to another terminal, even one with the pane's
+    // owner and pane labels. Without the run's launch label it is never
+    // attached; a link saved without a launch attaches to nothing.
+    #[test]
+    fn a_restored_machine_pane_attaches_only_to_its_launch() {
+        let core = FakeCore::start();
+        core.set_machine("loop", "connected");
+        core.add_terminal(json!({"address": "loop/t3", "pid": 777, "state": "live",
+                                  "labels": owned("w1-p2", "other-run")}));
+        let pid = AtomicU32::new(0);
+        for (case, target) in [
+            (
+                "another run at the address",
+                machine_target("loop/t3", "w1-p2", "L1"),
+            ),
+            ("no launch saved", target("loop/t3", "w1-p2")),
+        ] {
+            let refused = StartedCore::reattach(target, &pid, connector_to(&core));
+            assert!(
+                matches!(refused, Err(ReattachError::Missing(_))),
+                "{case}: {:?}",
+                refused.err()
+            );
+        }
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| { method == "terminal.attach" || method == "terminal.kill" }),
+            "{:?}",
+            core.methods()
+        );
+        core.add_terminal(json!({"address": "loop/t3", "pid": 777, "state": "live",
+                                  "labels": owned("w1-p2", "L1")}));
+        let pane = ignore_pane(
+            StartedCore::reattach(
+                machine_target("loop/t3", "w1-p2", "L1"),
+                &pid,
+                connector_to(&core),
+            )
+            .expect("its own run attaches"),
+        );
+        pane.shutdown();
+    }
+
+    // Security review M2 and the third read's finding 1: a live machine
+    // pane whose address core gave to another run (here with the pane's
+    // own owner and pane labels) does not attach to it again, does not take
+    // its finished record for its end, and a person's close does not kill
+    // it. Its own run's finished record still ends it.
+    #[test]
+    fn a_live_machine_pane_never_takes_another_run_at_its_address() {
+        let core = FakeCore::start();
+        core.set_machine("loop", "connected");
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        let launch = pane.link().launch.expect("launch");
+        let attaches = |core: &FakeCore| {
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.attach")
+                .count()
+        };
+        core.add_terminal(json!({"address": "loop/t1", "state": "live",
+                                  "labels": owned("w1-p6", "other-run")}));
+        drop_stream(&core);
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "waits");
+        assert_eq!(attaches(&core), 1, "not attached again");
+        let other_end = json!({"address": "loop/t1", "state": "finished",
+                               "reason": "exited", "exit_code": 0,
+                               "labels": owned("w1-p6", "other-run")});
+        core.add_terminal(other_end);
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "not its end");
+        core.add_terminal(json!({"address": "loop/t1", "state": "live",
+                                  "labels": owned("w1-p6", "other-run")}));
+        pane.shutdown();
+        super::super::terminate_session(&pane, PaneId::from_raw(6), 0, None);
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            core.methods()
+        );
+        assert!(!pane.kill().ended(), "a kill says the program may run on");
+
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        let launch_two = pane.link().launch.expect("launch");
+        assert_ne!(launch, launch_two, "every run has its own launch");
+        core.add_terminal(json!({"address": "loop/t1", "state": "finished",
+                                  "reason": "exited", "exit_code": 0,
+                                  "labels": owned("w1-p6", &launch_two)}));
+        drop_stream(&core);
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Exited)
+        );
+        pane.shutdown();
+    }
+
+    // Security review M2: a stream CLOSE whose finished record does not
+    // show the pane's launch is not its end: the pane asks core again.
+    #[test]
+    fn a_machine_close_without_the_launch_label_is_not_an_end() {
+        let core = FakeCore::start();
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        core.close_stream(
+            1,
+            br#"{"address": "loop/t1", "state": "finished", "reason": "exited", "exit_code": 0}"#,
+        );
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None, "not ended");
+        pane.shutdown();
+    }
+
+    // Security review M3 (Sol C-04): a machine stream's `server_stop` is
+    // the far core's stop, not this Mac's: the primary is not marked as
+    // stopped by a person. This Mac's own terminal still marks it.
+    #[test]
+    fn a_machine_streams_server_stop_is_not_this_macs_core_stop() {
+        let core = FakeCore::start();
+        let (exit_tx, exits) = std_mpsc::channel();
+        let spawn = CoreSpawn {
+            session: super::super::core_session_name(),
+            ..machine_spawn("w1-p6")
+        };
+        let pid = AtomicU32::new(0);
+        let pane = StartedCore::start(spawn, &pid, connector_to(&core))
+            .expect("start")
+            .into_pane(
+                Box::new(|_: &[u8]| PtyReadResult {
+                    terminal_responses: Vec::new(),
+                }),
+                Box::new(move |reason| {
+                    let _ = exit_tx.send(reason);
+                }),
+                Box::new(|_| {}),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("pane");
+        core.close_stream(1, br#"{"reason": "server_stop"}"#);
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::CoreStopped))
+        );
+        assert!(!super::super::sessions::primary_stopped_by_person());
+        pane.shutdown();
+    }
+
+    // Third read, finding 6: after a suspend cause the server keeps the
+    // program for the wait it starts; the stream end itself keeps nothing,
+    // so a person's close that races it still ends the program there.
+    #[test]
+    fn a_close_racing_a_suspend_cause_still_ends_the_machine_program() {
+        let core = FakeCore::start();
+        let (pane, exits) = machine_pane_on(&core, "loop");
+        core.close_stream(1, br#"{"reason": "server_stop"}"#);
+        assert!(exits.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(!pane.kept_on_drop());
+        pane.shutdown();
+        super::super::terminate_session(&pane, PaneId::from_raw(6), 0, None);
+        assert_eq!(
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.kill")
+                .count(),
+            1,
+            "{:?}",
+            core.methods()
+        );
+    }
+
+    // Security review M5 (Sol C-07): a setup failure of a machine pane
+    // kills nothing: a failed attach, or threads that did not start, leave
+    // its program running there, detached.
+    #[test]
+    fn a_machine_pane_setup_failure_kills_nothing() {
+        let failing = FakeCore::start_with(|config| config.failing = vec!["terminal.attach"]);
+        let pid = AtomicU32::new(0);
+        assert!(matches!(
+            StartedCore::start(machine_spawn("w1-p6"), &pid, connector_to(&failing)),
+            Err(StartFailure::Unknown(_))
+        ));
+        assert!(
+            !failing
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            failing.methods()
+        );
+
+        let core = FakeCore::start();
+        let started =
+            StartedCore::start(machine_spawn("w1-p6"), &pid, connector_to(&core)).expect("start");
+        abandon_setup(&started.shared);
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            core.methods()
+        );
+        let local =
+            StartedCore::start(spawn_for("w1-p6"), &pid, connector_to(&core)).expect("start here");
+        abandon_setup(&local.shared);
+        assert_eq!(
+            core.methods().last().map(String::as_str),
+            Some("terminal.kill"),
+            "a program on this Mac is killed as before"
+        );
     }
 
     // C10 (D5): the machine is marked connected only once core attached the

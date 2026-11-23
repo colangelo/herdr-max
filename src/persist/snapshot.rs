@@ -190,12 +190,17 @@ impl PaneSnapshot {
         })
     }
 
-    /// The folder the pane's program runs in: for a pane on a core machine
-    /// the one saved with its link, else `cwd` (core-phase5 D5).
-    pub(crate) fn program_cwd(&self) -> &std::path::Path {
-        self.core_link()
-            .and_then(|link| link.machine_cwd.as_deref())
-            .unwrap_or(&self.cwd)
+    /// The folder of this Mac the pane has, where a start here would run:
+    /// its saved `cwd`. `None` for a pane on a core machine, whose folder is
+    /// the machine's (`machine_cwd`, far metadata that is never a folder of
+    /// this Mac, whatever the save says; security review M1, M6), and for
+    /// the machine pane `cwd` no host has, saved without its link by a
+    /// build that dropped it (third read, finding 3).
+    pub(crate) fn local_cwd(&self) -> Option<&std::path::Path> {
+        let on_machine = self
+            .core_link()
+            .is_some_and(|saved| saved.link().machine().is_some());
+        (!on_machine && !is_machine_pane_cwd(&self.cwd)).then_some(self.cwd.as_path())
     }
 }
 
@@ -225,11 +230,20 @@ pub struct PaneCoreTerminalSnapshot {
     /// this Mac and in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_cwd: Option<PathBuf>,
+    /// The `herdr.launch` label of a pane on a core machine, which its
+    /// terminal must show before a restore attaches it (core-phase5
+    /// security review M2). Absent for a pane on this Mac and in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
 }
 
 /// The saved `cwd` of a pane on a core machine: below `/dev/null`, a
 /// character device, so no folder by that name can exist (core-phase5 D5).
 pub(crate) const MACHINE_PANE_CWD: &str = "/dev/null/herdr-pane-on-a-core-machine";
+
+fn is_machine_pane_cwd(cwd: &std::path::Path) -> bool {
+    cwd == std::path::Path::new(MACHINE_PANE_CWD)
+}
 
 impl PaneCoreTerminalSnapshot {
     pub(crate) fn from_link(link: crate::pane::CoreTerminalLink) -> Self {
@@ -241,12 +255,14 @@ impl PaneCoreTerminalSnapshot {
             agent_pid: link.agent.map(|agent| agent.pid),
             agent_pid_started: link.agent.map(|agent| agent.started),
             machine_cwd: None,
+            launch: link.launch,
         }
     }
 
     /// The saved link of a pane on a core machine: no pids, which are the
-    /// machine's and name nothing on this Mac, and the folder there.
-    pub(crate) fn on_machine(link: crate::pane::CoreTerminalLink, machine_cwd: PathBuf) -> Self {
+    /// machine's and name nothing on this Mac, its folder there when known
+    /// (never the `cwd` no host has, third read finding 3) and its launch.
+    pub(crate) fn on_machine(link: crate::pane::CoreTerminalLink) -> Self {
         Self {
             session: link.session,
             address: link.address,
@@ -254,7 +270,8 @@ impl PaneCoreTerminalSnapshot {
             pid_started: None,
             agent_pid: None,
             agent_pid_started: None,
-            machine_cwd: Some(machine_cwd),
+            machine_cwd: link.machine_cwd.filter(|cwd| !is_machine_pane_cwd(cwd)),
+            launch: link.launch,
         }
     }
 
@@ -269,6 +286,11 @@ impl PaneCoreTerminalSnapshot {
             address: self.address.clone(),
             program: identity(self.pid, self.pid_started),
             agent: identity(self.agent_pid, self.agent_pid_started),
+            launch: self.launch.clone(),
+            machine_cwd: self
+                .machine_cwd
+                .clone()
+                .filter(|cwd| !is_machine_pane_cwd(cwd)),
         }
     }
 }
@@ -535,7 +557,7 @@ fn capture_workspace(
     let identity_cwd = tabs
         .first()
         .and_then(|tab| tab.root_pane.and_then(|id| tab.panes.get(&id)))
-        .map(|pane| pane.program_cwd().to_path_buf())
+        .and_then(|pane| pane.local_cwd().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| ws.identity_cwd.clone());
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
@@ -614,12 +636,13 @@ fn capture_tab(
         // A pane on a core machine saves its link and folder apart from
         // `core_terminal` and a `cwd` no host has, so a build from before
         // machine panes neither starts it here nor attaches a terminal of
-        // this Mac to it (D5).
+        // this Mac to it (D5). Its folder there comes with its link, never
+        // from this Mac's state (security review M1).
         let (cwd, core_terminal, core_machine_terminal) = match link {
             Some(link) if link.machine().is_some() => (
                 PathBuf::from(MACHINE_PANE_CWD),
                 None,
-                Some(PaneCoreTerminalSnapshot::on_machine(link, cwd)),
+                Some(PaneCoreTerminalSnapshot::on_machine(link)),
             ),
             link => (cwd, link.map(PaneCoreTerminalSnapshot::from_link), None),
         };
@@ -1687,6 +1710,8 @@ mod tests {
                 session: "herdr".into(),
                 address: "t7".into(),
                 program: None,
+                launch: None,
+                machine_cwd: None,
             },
             Some("w1-p1".into()),
             0,
@@ -2026,7 +2051,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(pane.core_link(), None);
-        assert_eq!(pane.program_cwd(), std::path::Path::new(MACHINE_PANE_CWD));
+        assert_eq!(pane.local_cwd(), None, "a folder no host has");
         let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
             "cwd": MACHINE_PANE_CWD,
             "core_machine_terminal": {"session": "herdr", "address": "loop/t3", "machine_cwd": "/tmp"}
@@ -2036,7 +2061,65 @@ mod tests {
             pane.core_link().map(|link| link.address.as_str()),
             Some("loop/t3")
         );
-        assert_eq!(pane.program_cwd(), std::path::Path::new("/tmp"));
+        assert_eq!(pane.local_cwd(), None, "its folder is the machine's");
+        assert_eq!(
+            pane.core_link().and_then(|saved| saved.link().machine_cwd),
+            Some(std::path::PathBuf::from("/tmp"))
+        );
+    }
+
+    // Security review M1 and M6: a machine's folder is never a folder of
+    // this Mac, whatever the save says. A local link with a `machine_cwd`
+    // (a malformed or migrated save) restores in its own `cwd`, and with
+    // the `cwd` no host has, in none.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_folder_is_never_a_local_one() {
+        let here = std::env::temp_dir();
+        for (cwd, expected) in [
+            (here.clone(), Some(here.as_path())),
+            (std::path::PathBuf::from(MACHINE_PANE_CWD), None),
+        ] {
+            let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
+                "cwd": cwd,
+                "core_terminal": {"session": "herdr", "address": "t3", "machine_cwd": "/far"}
+            }))
+            .unwrap();
+            assert_eq!(pane.local_cwd(), expected, "{cwd:?}");
+        }
+    }
+
+    // Third read, finding 3: a build before machine panes saved, then gave
+    // back, the pane `cwd` no host has without the machine's folder. It is
+    // no folder at all: not a local one, and never saved as the folder on
+    // the machine.
+    #[cfg(unix)]
+    #[test]
+    fn the_machine_pane_cwd_is_never_a_folder() {
+        let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
+            "cwd": MACHINE_PANE_CWD,
+            "core_terminal": {"session": "herdr", "address": "loop/t3"}
+        }))
+        .unwrap();
+        assert_eq!(pane.local_cwd(), None);
+        let mut link = pane.core_link().expect("link").link();
+        assert_eq!(link.machine_cwd, None, "unknown");
+        link.machine_cwd = Some(MACHINE_PANE_CWD.into());
+        let saved = PaneCoreTerminalSnapshot::on_machine(link);
+        assert_eq!(
+            saved.machine_cwd, None,
+            "never saved as the machine's folder"
+        );
+        let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
+            "cwd": MACHINE_PANE_CWD,
+            "core_machine_terminal": {"session": "herdr", "address": "loop/t3",
+                                      "machine_cwd": MACHINE_PANE_CWD}
+        }))
+        .unwrap();
+        assert_eq!(
+            pane.core_link().and_then(|saved| saved.link().machine_cwd),
+            None
+        );
     }
 
     #[test]
@@ -2054,6 +2137,7 @@ mod tests {
                 agent_pid: None,
                 agent_pid_started: None,
                 machine_cwd: None,
+                launch: None,
             })
         );
         let back = serde_json::to_value(&pane).unwrap();
@@ -2090,6 +2174,8 @@ mod tests {
                 pid: 4343,
                 started: 98,
             }),
+            launch: None,
+            machine_cwd: None,
         };
         let saved = PaneCoreTerminalSnapshot::from_link(link.clone());
         let json = serde_json::to_string(&saved).unwrap();

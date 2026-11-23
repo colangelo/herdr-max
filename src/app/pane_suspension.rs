@@ -219,18 +219,20 @@ impl App {
     /// suspended, and returns true; false for a pane that closes as before
     /// (a popup, an overlay, one a worktree removal is stopping).
     pub(super) fn suspend_pane_after_exit(&mut self, pane_id: PaneId, cause: SuspendCause) -> bool {
+        // A pane on a core machine waits for its machine instead, whatever
+        // it is: a suspended pane starts again here, and one that closed
+        // would leave its program there with no link (core-phase5 D5;
+        // third read, finding 6).
+        #[cfg(unix)]
+        if self.wait_for_machine_after_exit(pane_id) {
+            return true;
+        }
         if self.overlay_panes.contains_key(&pane_id)
             || self
                 .pending_worktree_remove_runtime_exits
                 .contains_key(&pane_id)
         {
             return false;
-        }
-        // A pane on a core machine waits for its machine instead: a
-        // suspended pane starts again here (core-phase5 D5).
-        #[cfg(unix)]
-        if self.wait_for_machine_after_exit(pane_id) {
-            return true;
         }
         let Some(terminal_id) = self
             .find_pane(pane_id)
@@ -901,6 +903,8 @@ mod tests {
                 session: "herdr".into(),
                 address: "t7".into(),
                 program: Some(PROGRAM),
+                launch: None,
+                machine_cwd: None,
             },
             public_pane_id: Some("w1-p2".into()),
             why: crate::terminal::state::CoreWaitReason::Unreachable,

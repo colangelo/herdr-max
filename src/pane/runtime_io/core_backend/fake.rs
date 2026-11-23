@@ -342,11 +342,15 @@ fn answer(
             *next_channel += 1;
             let paint = (!config.first_paint.is_empty())
                 .then(|| Frame::new(channel, kind::DATA, config.first_paint.clone()));
+            // As core's own, the answer names the attached terminal's record.
             let address = params["terminal"].as_str().unwrap_or("t1");
+            let terminal = lock(shared)
+                .terminals
+                .get(address)
+                .cloned()
+                .unwrap_or_else(|| json!({"address": address}));
             (
-                Ok(
-                    json!({"channel": channel, "automatic_input": true, "terminal": {"address": address}}),
-                ),
+                Ok(json!({"channel": channel, "automatic_input": true, "terminal": terminal})),
                 paint,
             )
         }

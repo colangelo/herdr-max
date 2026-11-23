@@ -54,6 +54,11 @@ impl StartRule {
         self.stopped_by_person = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_stopped_by_person(&self) -> bool {
+        self.stopped_by_person
+    }
+
     /// Whether this start, if made, follows a loss: the core ran for this
     /// server before.
     pub(crate) fn after_loss(&self) -> bool {

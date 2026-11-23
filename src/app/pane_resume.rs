@@ -1006,6 +1006,8 @@ mod tests {
             address: "t7".into(),
             program: Some(GONE),
             agent: None,
+            launch: None,
+            machine_cwd: None,
         });
         let ask = |app: &mut App| {
             let now = Instant::now();

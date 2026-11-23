@@ -50,7 +50,7 @@ pub(in crate::pane) struct SpawnSpec {
 
 /// A pane's program in herdr-core, saved with the pane so the next server
 /// attaches to it instead of starting it again (core-backend D10).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoreTerminalLink {
     /// The core session the program runs in: `default` (or `herdr`, where
     /// earlier builds put it) for a release build's default herdr session,
@@ -65,6 +65,15 @@ pub struct CoreTerminalLink {
     /// started with a pid of its own and which can outlive it (security
     /// review M3, Sol H6). `None` when detection saw none.
     pub agent: Option<crate::platform::ProgramIdentity>,
+    /// The `herdr.launch` label core was asked to put on the terminal, for
+    /// a pane on a core machine: it attaches to, ends with and kills only a
+    /// terminal shown to carry it (core-phase5 security review M2). `None`
+    /// on this Mac and in links saved before it.
+    pub launch: Option<String>,
+    /// The folder of a pane on a core machine, there: far metadata the save
+    /// keeps, never a folder of this Mac (security review M1). `None` when
+    /// unknown and on this Mac.
+    pub machine_cwd: Option<std::path::PathBuf>,
 }
 
 impl CoreTerminalLink {
@@ -259,6 +268,8 @@ pub(crate) fn find_pane_core_terminals(
                 address,
                 program: None,
                 agent: None,
+                launch: None,
+                machine_cwd: None,
             })
             .collect(),
         complete: search.unanswered.is_empty(),
@@ -527,6 +538,7 @@ impl PaneIo {
             session: link.session.clone(),
             address: link.address.clone(),
             labels: core_backend::pane_labels(public_pane_id),
+            launch: link.launch.clone(),
             rows,
             cols,
         };
@@ -879,6 +891,8 @@ mod tests {
                 session: "herdr".into(),
                 address: address.into(),
                 program: None,
+                launch: None,
+                machine_cwd: None,
             }
             .machine()
         };

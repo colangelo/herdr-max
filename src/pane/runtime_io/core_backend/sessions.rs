@@ -223,6 +223,12 @@ pub(crate) fn note_stopped_by_person(session: &str) {
     }
 }
 
+/// Whether the primary is marked as stopped by a person.
+#[cfg(test)]
+pub(crate) fn primary_stopped_by_person() -> bool {
+    lock(&SESSIONS.primary).rule.is_stopped_by_person()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
