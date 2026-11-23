@@ -1586,9 +1586,12 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     ));
     // `agent_not_found` is the answer until process detection has seen the
     // agent; it is retried, not final (fork issue 313).
-    wait_for_agent(&api_socket, &pane_id, "agent process was not detected", |r| {
-        r.get("result").is_some()
-    });
+    wait_for_agent(
+        &api_socket,
+        &pane_id,
+        "agent process was not detected",
+        |r| r.get("result").is_some(),
+    );
     assert_ok(request(
         &api_socket,
         serde_json::json!({
