@@ -23,7 +23,8 @@ pub(super) fn dispatch_client_shell_actions(
         );
     }
     let mut repaint = false;
-    for action in actions {
+    let mut actions = std::collections::VecDeque::from(actions);
+    while let Some(action) = actions.pop_front() {
         match action {
             shell::ClientShellAction::CancelQueuedEndpoint {
                 endpoint_id,
@@ -47,6 +48,23 @@ pub(super) fn dispatch_client_shell_actions(
                                     crate::api::schema::Method::WorkspaceFocus(_)
                                 )))
                 }) {
+                    if endpoint_commands.refuses_behind(&endpoint_id, &request.method) {
+                        // Fork issue 316, M1: refused, not queued behind
+                        // the view's running action.
+                        if let Some(shell) = shell.as_deref_mut() {
+                            let (refused, follow) = shell.handle_endpoint_result(
+                                &boot_id,
+                                &request.id,
+                                Err(shell::ClientShellEndpointError {
+                                    code: Some("view_action_busy".into()),
+                                    message: "another action on this machine is still running; do this again when it ends".into(),
+                                }),
+                            );
+                            repaint |= refused;
+                            actions.extend(follow);
+                        }
+                        continue;
+                    }
                     endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);

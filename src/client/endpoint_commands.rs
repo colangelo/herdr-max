@@ -24,6 +24,9 @@ struct InFlightCommand {
     request_id: String,
     response: Vec<u8>,
     sent_at: Instant,
+    /// A view's structural action, sent to the far herdr (core-phase5 D7):
+    /// another waits for none (`refuses_behind`).
+    view_action: bool,
 }
 
 pub(super) struct EndpointCommandResult {
@@ -96,6 +99,27 @@ impl EndpointCommands {
             });
     }
 
+    /// Whether `method` for `endpoint_id` is refused rather than queued: a
+    /// view's structural action aims at the pane the person sees now, so it
+    /// waits behind no other one (one runs up to 45 s), never to be sent
+    /// later at what the pane shows then (fork issue 316, M1).
+    pub(super) fn refuses_behind(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        method: &crate::api::schema::Method,
+    ) -> bool {
+        is_view_action(endpoint_id, method)
+            && self.lanes.get(endpoint_id).is_some_and(|lane| {
+                lane.in_flight
+                    .as_ref()
+                    .is_some_and(|command| command.view_action)
+                    || lane
+                        .queued
+                        .iter()
+                        .any(|command| is_view_action(endpoint_id, &command.request.method))
+            })
+    }
+
     pub(super) fn send_next(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -131,6 +155,7 @@ impl EndpointCommands {
             lane.in_flight = Some(InFlightCommand {
                 generation: queued.generation,
                 boot_id: queued.boot_id,
+                view_action: is_view_action(endpoint_id, &queued.request.method),
                 request_id,
                 response: Vec::new(),
                 sent_at: Instant::now(),
@@ -268,6 +293,20 @@ impl EndpointCommands {
     }
 }
 
+/// Whether `method` is a structural action a view of a core machine sends
+/// to the far herdr (core-phase5 D7, `view::policy`).
+#[cfg(unix)]
+fn is_view_action(endpoint_id: &ClientEndpointId, method: &crate::api::schema::Method) -> bool {
+    matches!(endpoint_id, ClientEndpointId::Core(_))
+        && crate::view::policy::goes_far(method.operation().name)
+}
+
+/// Without the core backend there are no views.
+#[cfg(not(unix))]
+fn is_view_action(_endpoint_id: &ClientEndpointId, _method: &crate::api::schema::Method) -> bool {
+    false
+}
+
 pub(super) fn parse_response(
     expected_id: &str,
     response: &[u8],
@@ -325,6 +364,7 @@ mod tests {
                         request_id: "request-a".into(),
                         response: Vec::new(),
                         sent_at: Instant::now(),
+                        view_action: false,
                     }),
                     ..EndpointCommandLane::default()
                 },
@@ -496,6 +536,7 @@ mod tests {
                     request_id: "request-b".into(),
                     response: Vec::new(),
                     sent_at: Instant::now(),
+                    view_action: false,
                 }),
                 ..EndpointCommandLane::default()
             },
@@ -644,5 +685,58 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(has_in_flight(&commands));
+    }
+
+    // Fork issue 316, M1: a view's structural action aims at what the
+    // person sees now. Behind another one (in flight up to 45 s, or queued)
+    // it is refused, never sent later at what the pane shows then; behind
+    // the view's own quick commands, and on any other endpoint, it queues
+    // as every command does.
+    #[cfg(unix)]
+    #[test]
+    fn a_view_action_waits_behind_no_other_one() {
+        use crate::api::schema::{Method, PaneCloseParams, PaneTarget};
+        let view = ClientEndpointId::Core(crate::core_machine::MachineName::parse("loop").unwrap());
+        let close = Method::PaneClose(PaneCloseParams {
+            pane_id: "w3:p1".into(),
+            force: false,
+        });
+        let focus = Method::PaneFocus(PaneTarget {
+            pane_id: "w3:p1".into(),
+        });
+        let in_flight = |view_action: bool| EndpointCommandLane {
+            in_flight: Some(InFlightCommand {
+                generation: 1,
+                boot_id: "boot-a".into(),
+                request_id: "request-a".into(),
+                response: Vec::new(),
+                sent_at: Instant::now(),
+                view_action,
+            }),
+            ..EndpointCommandLane::default()
+        };
+        let mut commands = EndpointCommands::default();
+        assert!(!commands.refuses_behind(&view, &close), "an idle lane");
+        commands.lanes.insert(view.clone(), in_flight(true));
+        assert!(commands.refuses_behind(&view, &close));
+        assert!(!commands.refuses_behind(&view, &focus), "the view's own");
+        commands.lanes.insert(view.clone(), in_flight(false));
+        assert!(!commands.refuses_behind(&view, &close), "behind a focus");
+        commands.enqueue(
+            view.clone(),
+            1,
+            "boot-a".into(),
+            Box::new(Request {
+                id: "queued-close".into(),
+                method: close.clone(),
+            }),
+        );
+        assert!(
+            commands.refuses_behind(&view, &close),
+            "behind a queued one"
+        );
+        commands.lanes.insert(endpoint(), in_flight(true));
+        assert!(!commands.refuses_behind(&endpoint(), &close), "not a view");
+        assert!(is_view_action(&view, &close) && !is_view_action(&endpoint(), &close));
     }
 }
