@@ -106,9 +106,18 @@ impl Default for EndpointCatalog {
 }
 
 impl EndpointCatalog {
+    /// The saved SSH machines and the selection: files only, no core call.
+    /// The old `--remote <host>` path and `herdr machine` use this (V21).
     pub(crate) fn load() -> Result<Self, String> {
+        Self::load_from_paths(&catalog_path(), &selection_path())
+    }
+
+    /// `load`, with the core machines the primary core lists as view
+    /// endpoints (core-phase5 D6): the TUI's catalog. One `machine.list` on
+    /// a running primary core, only when herdr links some machine.
+    pub(crate) fn load_with_core_machines() -> Result<Self, String> {
         #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut catalog = Self::load_from_paths(&catalog_path(), &selection_path())?;
+        let mut catalog = Self::load()?;
         #[cfg(unix)]
         {
             catalog.core = crate::core_machine::command::linked_machines_of_primary();

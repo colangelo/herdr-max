@@ -1097,8 +1097,8 @@ fn main() -> io::Result<()> {
     let loaded_config = config::Config::load();
     exit_if_nested_disabled(&loaded_config.config);
 
-    let saved_federation =
-        client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_other_machines());
+    let saved_federation = client::endpoint::EndpointCatalog::load_with_core_machines()
+        .is_ok_and(|catalog| catalog.has_other_machines());
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
         eprintln!("herdr: {err}");
         std::process::exit(1);
