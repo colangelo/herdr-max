@@ -377,11 +377,15 @@ echo "ok: V27 kill -9 of the via (ssh $via) left no watcher ($watcher)"
 # test's connect; two far_core_down dials in the budget then close it as
 # retry_spent (D2 step 9). Either way the guard refused the far side, which
 # the log's GATE far_core_down line after the open shows.
+# The guard's far_core_down was recorded since line $2: as the first failure,
+# or as the retry's (`retry_spent (far_core_down)`) when core's own retry
+# dial was ended by the test's connect (core restarts a dial in flight, R4)
+# and so counted as the budget's first failure.
 far_down_since() {
   local class
   class="$(gate_class "$1")"
   [[ "$class" == far_core_down || "$class" == retry_spent ]] || return 1
-  tail -n +"$(( $2 + 1 ))" "$(link_log "$1")" | grep -q " GATE far_core_down"
+  tail -n +"$(( $2 + 1 ))" "$(link_log "$1")" | grep -Eq " GATE (far_core_down|retry_spent \(far_core_down\))"
 }
 log_lines() { wc -l < "$(link_log "$1")" | tr -d ' '; }
 wait_for "core's retries settle on the closed gate" 25 gate_is "$M" auth_stalled
