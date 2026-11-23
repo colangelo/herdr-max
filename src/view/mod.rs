@@ -128,16 +128,14 @@ impl ViewRecord {
     }
 
     /// Whether `pid` is still the process that wrote this record (review
-    /// M8): its start token matches. A record of an older build has none,
-    /// and only its lock, held, speaks for it.
+    /// M8): its start token matches. A record with none (an older build's,
+    /// or one whose start could not be read) names no process: a live pid
+    /// alone may be another program's, so such a view is never signalled.
     pub(crate) fn names_its_process(&self) -> bool {
-        match self.start {
-            Some(token) => {
-                crate::platform::process_start(self.pid)
-                    == crate::platform::ProcessStart::Started(token)
-            }
-            None => crate::platform::core_link::process_alive(self.pid),
-        }
+        self.start.is_some_and(|token| {
+            crate::platform::process_start(self.pid)
+                == crate::platform::ProcessStart::Started(token)
+        })
     }
 }
 
@@ -546,6 +544,12 @@ mod tests {
             ..own.clone()
         };
         assert!(!reused.names_its_process());
+        // #312 follow-up: no start token names no process, alive or not.
+        let unnamed = ViewRecord {
+            start: None,
+            ..own.clone()
+        };
+        assert!(!unnamed.names_its_process());
         let gone = ViewRecord {
             pid: 4_000_000,
             ..own

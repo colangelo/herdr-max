@@ -445,7 +445,11 @@ near "$HERDR_BIN" --session vw server --view loop >"$BASE/second.out" 2>&1 || co
 (( $(wc -c < "$VIEW_LOG" | tr -d ' ') >= log_bytes )) || fail "L3.4: the second start cut the view's log"
 echo "ok: L3.4 a second view of loop exited 1 and left the running view $FIRST_VIEW, its lock and its log"
 # The running view says it is an older build: the next client restarts it.
-printf '{"version":"0.0.1","pid":%s}' "$FIRST_VIEW" > "$VIEW_LOCK"
+# Its process start stays in the record: one without names no process, and
+# is never signalled (#312 follow-up).
+python3 -I -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); r["version"]="0.0.1"; open(p,"w").write(json.dumps(r))' "$VIEW_LOCK"
+python3 -I -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("start") else 1)' "$VIEW_LOCK" \
+  || fail "M2: the running view's record names no process start"
 view_client m2b
 restarted() { [[ -n "$(lock_pid)" && "$(lock_pid)" != "$FIRST_VIEW" ]] && ! kill -0 "$FIRST_VIEW" 2>/dev/null && [[ -S "$VIEW_SOCK" ]]; }
 WAIT_TRIES=600 wait_until "the newer client's restart of the view" restarted

@@ -115,8 +115,23 @@ pub(crate) fn ensure_running(machine: &MachineName) -> io::Result<PathBuf> {
 
 /// The running view whose lock is at `lock`, when a client of build `mine`
 /// restarts it (`replaces`); `None` to use it as it is.
+/// A record that names no process (no start token: an older build's) is
+/// left as it is and used, never signalled on a live pid alone (#312
+/// follow-up).
 fn stale_view(lock: &std::path::Path, mine: &str) -> Option<super::ViewRecord> {
-    super::running_view_at(lock).filter(|running| replaces(mine, &running.version))
+    super::running_view_at(lock)
+        .filter(|running| replaces(mine, &running.version))
+        .filter(|running| {
+            let ours = running.names_its_process();
+            if !ours {
+                tracing::warn!(
+                    pid = running.pid,
+                    version = %running.version,
+                    "the running view's record names no process start; it is used as it is, not restarted"
+                );
+            }
+            ours
+        })
 }
 
 /// Whether a client of build `mine` restarts a view running build
@@ -177,6 +192,12 @@ fn stop_view(lock: &std::path::Path, running: &super::ViewRecord) -> io::Result<
         super::running_view_at(lock).is_some_and(|now| now.pid == running.pid)
             && running.names_its_process()
     };
+    if running.start.is_none() {
+        return Err(io::Error::other(format!(
+            "the view server recorded as pid {} wrote no process start (an older build), so it is not known to be that process; nothing was signalled (it stops 10 minutes after its last window closes)",
+            running.pid
+        )));
+    }
     if !still_it() {
         return Err(io::Error::other(format!(
             "the view server recorded as pid {} is not that process any more; nothing was signalled",
@@ -251,12 +272,21 @@ mod tests {
             .expect("held");
         let mine = crate::build_info::version();
         assert_eq!(stale_view(&lock, &mine), None, "the same build is used");
-        std::fs::write(&lock, r#"{"version":"0.0.1","pid":4000000}"#).expect("an old record");
+        let older = super::super::ViewRecord {
+            version: "0.0.1".into(),
+            ..super::super::ViewRecord::own()
+        };
+        std::fs::write(&lock, serde_json::to_string(&older).unwrap()).expect("an old record");
         assert_eq!(
             stale_view(&lock, &mine).map(|running| running.version),
             Some("0.0.1".to_string()),
             "an older view is restarted"
         );
+        // #312 follow-up: a record with no process start names no process,
+        // so it is used as it is, never restarted on a live pid alone.
+        let unnamed = format!(r#"{{"version":"0.0.1","pid":{}}}"#, std::process::id());
+        std::fs::write(&lock, unnamed).expect("a record without a start");
+        assert_eq!(stale_view(&lock, &mine), None, "not restarted");
         drop(held);
         assert_eq!(stale_view(&lock, &mine), None, "it ended");
         let _ = std::fs::remove_dir_all(&dir);
@@ -285,6 +315,35 @@ mod tests {
         };
         std::fs::write(&lock, serde_json::to_string(&reused).unwrap()).expect("record");
         assert!(stop_view(&lock, &reused).is_err());
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            bystander.try_wait().expect("wait").is_none(),
+            "the bystander was signalled"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // #312 follow-up: a record with no start token (an older build's) is
+    // never signalled on its pid being alive: that pid may be another
+    // program's now.
+    #[test]
+    fn a_restart_never_signals_a_record_without_a_start() {
+        let dir = std::env::temp_dir().join(format!("herdr-view-nostart-{}", std::process::id()));
+        let lock = dir.join("herdr-view-loop.lock");
+        let held = super::super::take_lock_at(&lock)
+            .expect("lock")
+            .expect("held");
+        let mut bystander = Command::new("/bin/sleep").arg("30").spawn().expect("sleep");
+        let unnamed = super::super::ViewRecord {
+            version: "0.0.1".into(),
+            pid: bystander.id(),
+            start: None,
+        };
+        std::fs::write(&lock, serde_json::to_string(&unnamed).unwrap()).expect("record");
+        assert!(stop_view(&lock, &unnamed).is_err());
         std::thread::sleep(Duration::from_millis(100));
         assert!(
             bystander.try_wait().expect("wait").is_none(),
