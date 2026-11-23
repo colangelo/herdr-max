@@ -228,7 +228,7 @@ client's 10 min, `machine wake`'s 12 h, each with 5 s for clocks) or whose act i
 | Holder | Writes | Expiry |
 |---|---|---|
 | a TUI client (`client-<pid>`), for every core machine its own primary core lists as herdr's own `core-link` and its own core session added (`primary.json`; a folder of an older build counts) | on a person's input (#260's `InputClock` events: key, text, paste, click, drag, scroll; a bare pointer motion is none, #312 M7), at most once a minute; never at its start (review M3); not by the old remote's local client (`--remote <host>`), which has no core machine to allow (#312 item 2); a view's client (`--remote core:<m>`) does | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
-| a fleet CLI call through the machine (`cli-<pid>`, D7); a view's structural action (E.3) under the view's pid | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP; a view's action writes it before the far herdr probe and again before the request, on a connected machine only, and removes it after (no renewer and no signal handler in a view: each part ends within 35 s) | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect; a view's is always a keep lease |
+| a fleet CLI call through the machine (`cli-<pid>`, D7); a view's structural action (E.3) under the view's pid | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP; a view's action writes it before the far herdr probe and again before the request, on a connected machine only, and removes it after (no renewer and no signal handler in a view: the whole action ends within its 45 s) | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect; a view's is always a keep lease |
 | `herdr machine add --core`, `herdr machine login` (`manual`) | before they call hc (F8: both dial at once) | 30 min |
 | `herdr machine wake <name> [--for D]` (`manual`) | before it calls `machine.connect` | the given duration, 30 min by default, at most 12 h |
 
@@ -382,7 +382,7 @@ The role is one type, `enum ServerRole { Primary, View(MachineName) }`, read at 
 | Status | detection, hooks, 7501 | the terminal's 7501 record from core (ac-mbm5's herdr mirrors its verdict there); no detection |
 | Persistence, orphan scan, spaces publisher, status mirror | yes | none |
 | JSON API socket | yes | none; the fleet uses `--machine` (D7) |
-| Close | ends the program | a tab's or workspace's close detaches: the programs and the far side's panes stay. A pane's close (`prefix x`, the pane menu's close) is sent to the far herdr (D7, E.3) and closes the far pane there, **ending its far program**: a person's close (D5); before E.3 it only detached |
+| Close | ends the program | a tab's or workspace's close detaches: the programs and the far side's panes stay. A pane's close (`prefix x`, the pane menu's close) is sent to the far herdr (D7, E.3) and closes the far pane there, **ending its far program**: a person's close (D5); before E.3 it only detached. The last pane of a far workspace is not closed from a view (it would close the far workspace, and a worktree group's parent its whole group; D7) |
 | Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below); no terminal replies at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, resize reports): the far herdr answers its own programs (review H1). Bound to the far terminal, not the pane id (#312 M3): a pane attaches to one terminal instance (its `herdr.launch` label and pid at the first attach) and a reattach takes only that one; when the far layout puts another address under a pane id, or the address holds another program, the pane takes no input until a person clicks or focuses it, and its border says so |
 | Output | this Mac's | far data, as a pane on a machine (D5): inline Kitty graphics only, no OSC 52, OSC 7 never a folder here; replayed history included |
 | Local actions | as today | one allowlist (`view::policy`, #312 M2), the same for the welcome's advertised methods and the dispatch: focus, zoom, scroll, copy, selection, the view's own screen clear, seen marks, tab and workspace closes (detaches) and a config reload; sent to the far herdr instead of dispatched (D7, E.3): `tab.create`, `pane.split`, `pane.close` and the workspace, tab and pane renames; refused before dispatch: every other far layout change (workspace create, move, swap, resize, pin, sync, presets, respawn) and everything that runs, writes or reads on this Mac (custom commands, plugin actions, all four worktree methods, `agent.message`, links, scrollback edit, todos, tasks, integrations, dismissals); an unclassified method is refused and fails a test. Also no clipboard image staging, no tab-bar status command (a far folder as a local cwd, M1), no release notes or announcement, no palette send; a config reload keeps the history |
@@ -505,24 +505,55 @@ Alternatives:
   mapping per verb). The view turns the client's ids into the far ones through its own layout, so only what the
   far document showed can be named, and sends nothing of this Mac (no folder, environment, `on` or far focus: the
   far screen keeps its focus, and the view does not move to a new tab or pane; it shows on the next document).
-  A machine that is not connected refuses at once with nothing written, sent or dialled (`<m> is dormant: press a
-  key in one of its panes to wake it, then do this again`); a key in a pane of the view is the wake (D6). On a
+  A machine that is not connected refuses at once; the action writes no lease and sends or dials nothing (`<m> is
+  dormant: press a key in one of its panes to wake it, then do this again; this action sent nothing and dialled
+  nothing (keys in this window may still let Herdr Core's own retry connect it)`); a key in a pane of the view is
+  the wake (D6). Design call (second review, item 11): the chord's own keys stay a person's input in that window,
+  as every key is (the client writes its lease, B.2, on input before any key binding is read, and the lease is the
+  window's, for every machine, not one machine's), so they may renew the client's lease, and while it is in force
+  Herdr Core's own retry (every 30 s by then) may connect the machine; the notice says so rather than claim that
+  nothing dials. On a
   connected one the view's `cli-<pid>` keep lease holds the link for the call, written before the probe and again
   before the request. A request that names a folder, an environment or a machine (`cwd`, `env`, `on`) is refused,
   not sent with them dropped; ids it leaves out resolve against the sending client's own tab, never the server's
   focus, and with no tab of the client's it is refused (review L3, L4).
-  An action on a pane reaches the far terminal the person aimed at, or nothing (review M2, M4): a pane the view
-  holds (another terminal under its id, a far core reset, or a public id that moved: a number the view gave a far
-  pane that has none moves when the far herdr numbers another pane, so both panes are held) is refused, as is a
-  pane the far herdr has no number for (its `w3:x<n>` id is no far API id); a forced close goes only to the pane and
-  far terminal whose unforced close the far herdr asked to confirm; and just before the request the far document is
-  read again and must still show that terminal under that far pane id. Left: the far layout can still change
-  between that read and the far herdr's handling of the request (milliseconds); closing it needs a far-side check
-  by terminal, which the far API does not have.
+  An action on a pane reaches the far program the person aimed at, or nothing (review M2, M4; second review, item
+  1). A pane is bound at its first attach to its far program, the `herdr.launch` label and pid core reported
+  (`view::instance::FarInstance`, the binding the stream's reattach already used). Refused on this side: a pane the
+  view holds (another terminal under its id, a far core reset, a public id that moved), a pane the far herdr has no
+  number for (its `w3:x<n>` id is no far API id), and a pane whose terminal is not attached (not yet, or attaching
+  again after a rebind), whose program the view cannot vouch for. A forced close goes only to the pane, far
+  terminal and program whose unforced close the far herdr asked to confirm; that record stays until the far herdr
+  answers the forced close, so a send refused before its request (busy, not connected, the check below) keeps the
+  person's confirmation (item 9). Just before the request the far document is read again and must still show that
+  terminal under that far pane id, and core's `terminal.get` of `<m>/<terminal>` must show it live and the program
+  the pane bound: a far core reset gives an address to another program, which the document cannot tell.
+  A view never closes the last pane of a far workspace (security review of E.3, M2 P2): with the far
+  `confirm_close` off, closing a worktree group parent's last pane there closes the whole group, sibling
+  workspaces' agents included. Refused from the view's own layout and again from the re-read document, with
+  `closing the last pane of <workspace> on <m> is not done from a view; close it there`; a workspace that shows one
+  pane here may have PTY panes there, which only makes the refusal stricter. A tab's last pane (other tabs left)
+  still closes.
+  The numbers the view gives panes the far herdr numbers none for start at 65 536, past any far number, and stay
+  with their pane; none is given twice in a workspace, and a far pane that later takes one is held (items 4, 5).
+  So a far pane numbered later moves no id and holds no pane, and a client that still holds an id the view gave
+  reaches nothing else through it.
+  Left (item 2): the check and the far herdr's handling of the request are about 0.5 to 2 s apart (the request
+  first starts the far bridge through `machine.exec`), and the document the check reads lags the far layout by up
+  to 500 ms (the far spaces publisher's debounce, `CORE_SPACES_DEBOUNCE`) plus the link. Far pane numbers are never
+  reused, so a far pane id cannot name another pane; what can slip through is a far rebind of the same pane in that
+  window: another program at the same terminal after the check, or, hidden by the debounce up to 500 ms before the
+  check, another terminal while the old program lives on. The instance check closes the first up to the check
+  itself. Closing the rest needs the far herdr to check the terminal and program under its own lock (security
+  review M1): a next change, a far request that names the expected terminal and instance, advertised so an older
+  far herdr is never sent it.
   Time (review M3): one deadline per action, 45 s from the moment the view takes it, inside the client's 60 s
   (a compile-time check holds them 10 s apart). A second action while one runs in that view is refused at once,
-  never queued; core's `machine.list` takes 5 s at most, a stale probe runs 12 s (and core's 5), the check's
-  `doc.get` 5 s, and the request runs what is left, 15 s at most; with less than 5 s left nothing is sent. The
+  never queued (the lock is the view's own route's, not the process's, item 8); core's `machine.list` takes 5 s
+  at most, a stale probe runs 12 s (and core's 5), the check's `doc.get` and `terminal.get` 10 s, on a thread of its
+  own so that a slow connection to core (the shared view connection, then its hello and status) cannot take it past
+  that share or past the deadline less the shortest request (item 7), and the request runs what is left, 15 s at
+  most; with less than 5 s left nothing is sent. The
   client's command lane holds one command per endpoint by design, so that client's other commands to the view wait
   for the action's answer, 45 s at worst; a client never times out on one and does it again.
   The far reply is the client's answer, far text escaped (M1) and without a parser's method list. A far herdr
