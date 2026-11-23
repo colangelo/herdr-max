@@ -111,3 +111,38 @@ add --via` and a relay script; both stopped after. Nothing dialled another host.
 
 So the view server subscribes once, with no filter, and keeps its own machine's `doc`, `size`, `status` and
 `finished`/`removed` facts (`core_backend/view_link.rs`).
+
+# R.2.0: far labels (2026-11-23, m4m, hc 0.1.21)
+
+Precondition for the phase 5 rollout (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/300): herdr saves a
+launch label on each machine pane and checks it before any attach or kill (#308 M2), so a far hc that drops labels over
+the link would leave machine panes never attached. `hc --version` on both ends: `hc 0.1.21`.
+
+Method as PR D: two throwaway cores (`lblnear`, `lblfar`, scratch XDG runtime, state and config folders), the far one
+added with `hc machine add --name loop --session lblfar --via <relay script>` (the relay runs the line against the far
+core's folders; no ssh, nothing dialled another host). A small client spoke the near core's framed JSON-RPC as herdr's
+`client.rs` does (`hello {framed: true}`, then frames on channel 0). Each terminal was started with the params of
+`pane_io.rs` (`argv`, `env`, `labels`, `size`, `no_parent`, `no_notify`, `keep: false`, `on: "loop"`) and then read back.
+Both cores stopped and the scratch folders removed after.
+
+Label sets: the herdr one is `herdr.session=herdrdev-<name>@<near core id>` (the owner value),
+`herdr.pane_id=w1:p6`, `herdr.launch=<random token>`, `herdr.seen=0`. The odd one has spaces, `/`, `=`, `,`, a tab, quotes,
+a backslash, `;$(id)`, `ü`, `ç`, a check mark and CJK in the values.
+
+| # | Call (near core, `on: "loop"`) | Herdr label set | Odd label set |
+|---|---|---|---|
+| L1 | `terminal.run` reply (the record) | `labels` present, equal to what was sent (address `loop/t1`) | equal |
+| L2 | `terminal.get {terminal: "loop/tN"}` | equal | equal |
+| L3 | `terminal.list {labels: {herdr.launch}, on: "loop"}` | one record, labels equal | equal |
+| L4 | `terminal.list {}` (no `on`, all terminals) | the far record is listed, labels equal | equal |
+| L5 | `terminal.list {labels: {herdr.session: <owner value>}}` (as the orphan scan) | finds it (1) | finds it (1) |
+| L6 | `terminal.attach {terminal, cols, rows, history}` | reply has `terminal.labels` equal; the reply's top level has only `automatic_input`, `channel`, `resize_notifications`, `terminal` (no top-level `labels`) | equal |
+| L7 | `terminal.attach {..., resumed: true, observe: true}` (the view's) | `terminal.labels` equal | equal |
+
+"Equal" means a JSON equality of the whole `labels` object: no key dropped, added or rewritten, no value altered.
+
+Result: a far hc 0.1.21 returns the labels exactly in all five places herdr reads them, including the unusual
+characters. Two points to keep in the code: the attach reply carries the record under `terminal` (herdr's
+`attach["terminal"]`, which is what `shows_identity` already reads; reading `attach["labels"]` would find nothing), and
+the far `address` is qualified (`loop/t1`). Not measured: a far hc other than 0.1.21 (the far side here is the same
+installed binary), and a real ssh link (the relay runs the same far-side line).
