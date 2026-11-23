@@ -166,10 +166,18 @@ impl TerminalRuntime {
         self.0.view_read_only()
     }
 
-    /// A view server's pane follows the far terminal's new size (D6, R8).
+    /// A view server's pane whose far address holds another terminal now
+    /// (security review M3).
     #[cfg(unix)]
-    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) {
-        self.0.follow_view_size(rows, cols);
+    pub(crate) fn view_replaced(&self) -> bool {
+        self.0.view_replaced()
+    }
+
+    /// A view server's pane follows the far terminal's new size (D6, R8).
+    /// False when the size is over the view's budget (review M4).
+    #[cfg(unix)]
+    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) -> bool {
+        self.0.follow_view_size(rows, cols)
     }
 
     /// The core machine this runtime's program runs on (core-phase5 D5).

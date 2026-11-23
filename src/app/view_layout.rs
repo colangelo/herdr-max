@@ -37,6 +37,14 @@ pub(crate) struct ViewApp {
     /// The view's notice line (dormant, waking, nothing published), shown
     /// beside the config diagnostic, never in its place.
     notice: Option<String>,
+    /// The far address each pane showed in the last projection.
+    bound: HashMap<PaneId, String>,
+    /// Panes whose far terminal changed under them (security review M3): the
+    /// far layout put another address under the pane's id, or the address
+    /// holds another program after a far core reset. Input typed for the old
+    /// one must reach neither, so such a pane takes none until a person
+    /// clicks it or focuses it again.
+    held: HashSet<PaneId>,
 }
 
 impl ViewApp {
@@ -49,6 +57,8 @@ impl ViewApp {
             attaching: HashSet::new(),
             far_sizes: HashMap::new(),
             notice: None,
+            bound: HashMap::new(),
+            held: HashSet::new(),
         }
     }
 
@@ -83,6 +93,12 @@ impl Build<'_> {
             ViewNode::Pane { id, terminal, .. } => {
                 let pane_id = self.view.pane_id(id);
                 let address = self.view.address(terminal);
+                // Another far terminal under the same pane id (review M3).
+                if let Some(before) = self.view.bound.insert(pane_id, address.clone()) {
+                    if before != address {
+                        self.view.held.insert(pane_id);
+                    }
+                }
                 let terminal_id = match self.view.terminals.get(&address) {
                     Some(terminal_id) if self.terminals.contains_key(terminal_id) => {
                         terminal_id.clone()
@@ -302,6 +318,8 @@ impl App {
             .filter(|(address, _)| !used.contains(*address))
             .map(|(address, id)| (address.clone(), id.clone()))
             .collect();
+        // Sizes of terminals the layout no longer shows go too (review M5).
+        view.far_sizes.retain(|address, _| used.contains(address));
         for (address, terminal_id) in gone {
             view.terminals.remove(&address);
             view.attaching.remove(&address);
@@ -319,6 +337,8 @@ impl App {
         let far_panes = &view.far_panes;
         view.pane_ids
             .retain(|_, pane_id| far_panes.contains_key(pane_id));
+        view.bound.retain(|pane_id, _| live_panes.contains(pane_id));
+        view.held.retain(|pane_id| live_panes.contains(pane_id));
 
         let find = |id: &Option<String>| {
             id.as_ref()
@@ -345,8 +365,112 @@ impl App {
             "view layout"
         );
         self.view = Some(view);
+        self.sync_view_holds();
         self.full_redraw_pending = true;
         self.state.mark_session_dirty();
+    }
+
+    /// Marks the terminal of each held pane for its border, and clears the
+    /// mark everywhere else.
+    fn sync_view_holds(&mut self) {
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        let held: HashSet<TerminalId> = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|(pane_id, _)| view.held.contains(pane_id))
+            .map(|(_, pane)| pane.attached_terminal_id.clone())
+            .collect();
+        for (terminal_id, state) in &mut self.state.terminals {
+            let now = held.contains(terminal_id);
+            if state.view_input_held != now {
+                state.view_input_held = now;
+                state.revision = state.revision.saturating_add(1);
+            }
+        }
+    }
+
+    /// Whether `pane_id` is a view's pane that takes no input until a
+    /// person clicks or focuses it (security review M3).
+    pub(crate) fn view_input_held(&self, pane_id: PaneId) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|view| view.held.contains(&pane_id))
+    }
+
+    /// Holds `pane_id`'s input as a changed far binding does.
+    #[cfg(test)]
+    pub(crate) fn hold_view_input_for_test(&mut self, pane_id: PaneId) {
+        if let Some(view) = self.view.as_mut() {
+            view.held.insert(pane_id);
+        }
+        self.sync_view_holds();
+    }
+
+    /// A person clicked or focused `pane_id`: it takes input again. True
+    /// when it was held.
+    pub(crate) fn release_view_hold(&mut self, pane_id: PaneId) -> bool {
+        let released = self
+            .view
+            .as_mut()
+            .is_some_and(|view| view.held.remove(&pane_id));
+        if released {
+            self.sync_view_holds();
+            self.full_redraw_pending = true;
+        }
+        released
+    }
+
+    /// A view's pane whose stream ended because its far address holds
+    /// another program now (review M3): the pane is bound afresh to that
+    /// program, attached again, and takes no input until a person clicks or
+    /// focuses it. True when `pane_id` was such a pane (its exit is not the
+    /// far program's end).
+    pub(crate) fn rebind_replaced_view_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some(terminal_id) = self
+            .state
+            .pane_terminal(pane_id)
+            .map(|terminal| terminal.id.clone())
+        else {
+            return false;
+        };
+        if !self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(crate::terminal::TerminalRuntime::view_replaced)
+        {
+            return false;
+        }
+        let Some(mut view) = self.view.take() else {
+            return false;
+        };
+        let address = view
+            .terminals
+            .iter()
+            .find(|(_, id)| **id == terminal_id)
+            .map(|(address, _)| address.clone());
+        if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
+            runtime.shutdown();
+        }
+        if let (Some(address), Some(state)) = (address, self.state.terminals.get_mut(&terminal_id))
+        {
+            state.restore_error = Some(format!(
+                "{address} is another program now; attaching to it…"
+            ));
+            state.revision = state.revision.saturating_add(1);
+            view.held.insert(pane_id);
+            if !view.attaching.contains(&address) {
+                self.request_view_attach(&mut view, address, pane_id);
+            }
+        }
+        self.view = Some(view);
+        self.sync_view_holds();
+        self.full_redraw_pending = true;
+        true
     }
 
     fn request_view_attach(&mut self, view: &mut ViewApp, address: String, pane_id: PaneId) {
@@ -413,12 +537,22 @@ impl App {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        view.far_sizes.insert(address.clone(), (rows, cols));
+        // Over the grid budget: ignored, the pane keeps its last size
+        // (security review M4).
+        if !crate::view::far_size_fits(rows, cols) {
+            tracing::debug!(%address, rows, cols, "a far size over the view's budget is ignored");
+            return;
+        }
+        // Only for an address the layout shows (review M5): an attach reads
+        // the size of a new one itself, so no size is kept for others.
         let Some(terminal_id) = view.terminals.get(&address) else {
             return;
         };
+        view.far_sizes.insert(address.clone(), (rows, cols));
         if let Some(runtime) = self.terminal_runtimes.get(terminal_id) {
-            runtime.follow_view_size(rows, cols);
+            if !runtime.follow_view_size(rows, cols) {
+                return;
+            }
         }
         if let Some(state) = self.state.terminals.get_mut(terminal_id) {
             if state.view_far_size != Some((rows, cols)) {
@@ -737,6 +871,83 @@ mod tests {
         );
         app.handle_view_event(ViewEvent::Notice(None));
         assert_eq!(app.view_notice(), None);
+    }
+
+    // M3 (security review): when the far layout puts another terminal under
+    // a pane's id (here two panes swap terminals), the pane's input is held:
+    // keys typed for the old terminal must reach neither. The border says
+    // so, and a person's focus releases it. A pane that keeps its terminal
+    // is not held.
+    #[test]
+    fn a_pane_whose_far_terminal_changes_holds_its_input_until_focused() {
+        let mut app = app();
+        let doc = |first: &str, second: &str, third: &str| {
+            layout(one_space(json!([
+                {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [
+                    block("w3:p1", first), block("w3:p2", second), block("w3:p3", third)
+                ]}}
+            ])))
+        };
+        app.apply_view_layout(&doc("t1", "t2", "t3"));
+        let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
+        assert!(panes.iter().all(|pane| !app.view_input_held(*pane)));
+        app.apply_view_layout(&doc("t2", "t1", "t3"));
+        let held: Vec<bool> = panes.iter().map(|pane| app.view_input_held(*pane)).collect();
+        assert_eq!(held, [true, true, false], "the two swapped panes only");
+        let marked = |app: &App, pane: PaneId| {
+            app.state
+                .pane_terminal(pane)
+                .is_some_and(|terminal| terminal.view_input_held)
+        };
+        assert!(marked(&app, panes[0]) && marked(&app, panes[1]) && !marked(&app, panes[2]));
+        // A projection of the same layout keeps the hold.
+        app.apply_view_layout(&doc("t2", "t1", "t3"));
+        assert!(app.view_input_held(panes[0]));
+        assert!(app.release_view_hold(panes[0]));
+        assert!(!app.view_input_held(panes[0]) && !marked(&app, panes[0]));
+        assert!(app.view_input_held(panes[1]), "only the one focused");
+    }
+
+    // M4, M5: a far size over the grid budget is ignored (the pane keeps
+    // its last size), and no size is kept for an address the layout does not
+    // show, nor for one it no longer shows.
+    #[test]
+    fn far_sizes_are_bounded_and_kept_only_for_shown_terminals() {
+        let mut app = app();
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [block("w3:p1", "t1")]}}
+        ]))));
+        let size = |app: &App| app.state.terminals.values().next().unwrap().view_far_size;
+        app.handle_view_event(ViewEvent::FarSize {
+            address: "loop/t1".into(),
+            rows: 30,
+            cols: 100,
+        });
+        for (rows, cols) in [(65_535, 65_535), (2000, 10), (600, 600)] {
+            app.handle_view_event(ViewEvent::FarSize {
+                address: "loop/t1".into(),
+                rows,
+                cols,
+            });
+        }
+        assert_eq!(size(&app), Some((30, 100)), "over the budget: the last size");
+        for n in 0..500 {
+            app.handle_view_event(ViewEvent::FarSize {
+                address: format!("loop/t{}", 100 + n),
+                rows: 30,
+                cols: 100,
+            });
+        }
+        let view = app.view.as_ref().unwrap();
+        assert_eq!(view.far_sizes.len(), 1, "only the shown terminal's size");
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [block("w3:p1", "t2")]}}
+        ]))));
+        let view = app.view.as_ref().unwrap();
+        assert!(
+            !view.far_sizes.contains_key("loop/t1"),
+            "a gone terminal's size goes with it"
+        );
     }
 
     #[test]

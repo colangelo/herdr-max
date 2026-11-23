@@ -540,3 +540,38 @@ async fn sync_input_uses_the_origin_group_instead_of_global_focused_pane_or_othe
     assert!(drain(&mut other_rx).is_empty());
     shutdown_test_runtimes(&mut server);
 }
+
+// M3 (core-phase5 D6, security review): a view's pane whose far terminal
+// changed under it takes no input typed for the old one: keys and pastes
+// reach nothing until a person clicks it, and the click itself is not sent.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_held_view_pane_takes_no_input_until_a_person_clicks_it() {
+    let (mut server, [a, b, _], mut receivers) = fixture();
+    server.app.view = Some(crate::app::view_layout::ViewApp::new(
+        crate::core_machine::MachineName::parse("loop").unwrap(),
+    ));
+    server.app.hold_view_input_for_test(a);
+    send(&mut server, a, vec![key(ClientKeyKind::Press, false, None)]);
+    assert!(drain(&mut receivers[0]).is_empty(), "a held pane got a key");
+    let click = |kind| ClientPaneInputEvent::Mouse {
+        kind,
+        position: crate::protocol::ClientMousePosition::Cell { column: 1, row: 1 },
+        geometry: None,
+        modifiers: 0,
+        lines: 0,
+    };
+    send(
+        &mut server,
+        a,
+        vec![click(crate::protocol::ClientMouseKind::Down(
+            crate::protocol::ClientMouseButton::Left,
+        ))],
+    );
+    assert!(drain(&mut receivers[0]).is_empty(), "the click is not sent");
+    assert!(!server.app.view_input_held(a));
+    send(&mut server, a, vec![key(ClientKeyKind::Press, false, None)]);
+    assert_eq!(drain(&mut receivers[0]), b"x", "after the click it types");
+    send(&mut server, b, vec![key(ClientKeyKind::Press, false, None)]);
+    assert_eq!(drain(&mut receivers[1]), b"x", "an unheld pane types");
+}

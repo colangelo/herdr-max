@@ -109,6 +109,14 @@ impl HeadlessServer {
                 });
             let popup_blocks = self.app.state.popup_pane.is_some()
                 && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
+            // A view's pane whose far terminal changed takes no input until
+            // a person clicks or focuses it (review M3).
+            #[cfg(unix)]
+            let viewed = viewed
+                && !self
+                    .app
+                    .parse_pane_id(&params.pane_id)
+                    .is_some_and(|(_, pane)| self.app.view_input_held(pane));
             if self.handoff_in_progress || !viewed || popup_blocks {
                 self.send_to_client(client_id, crate::server::client_commands::error_message(
                     boot_id, request_id, "input_target_unavailable",

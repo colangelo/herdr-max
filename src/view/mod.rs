@@ -50,6 +50,27 @@ pub(crate) fn set_role(role: ServerRole) -> bool {
     ROLE.set(role).is_ok()
 }
 
+/// The largest far grid a view builds (security review M4): a far size is
+/// checked against these before a grid is built at it or resized to it. A
+/// 6K display at a 6x12 px font is about 1000 columns by 280 rows, so a
+/// real terminal fits with room; 300 000 cells is a few MB of grid, and the
+/// document caps a view at 256 panes. A size over any of them is refused,
+/// never clamped: a clamped grid would draw the far screen wrongly, and its
+/// size would reach core as the view's RESIZE (D6 Size). The pane keeps its
+/// last good size; an attach at such a size fails and says why.
+pub(crate) const MAX_FAR_ROWS: u16 = 1000;
+pub(crate) const MAX_FAR_COLS: u16 = 1000;
+pub(crate) const MAX_FAR_CELLS: u32 = 300_000;
+
+/// Whether a far size (rows, cols) is one a view builds a grid for.
+pub(crate) fn far_size_fits(rows: u16, cols: u16) -> bool {
+    rows > 0
+        && cols > 0
+        && rows <= MAX_FAR_ROWS
+        && cols <= MAX_FAR_COLS
+        && u32::from(rows) * u32::from(cols) <= MAX_FAR_CELLS
+}
+
 /// The view server's client socket for `machine`, beside the herdr
 /// session's own: one per viewed machine, so two views never share one.
 pub(crate) fn socket_path(machine: &MachineName) -> PathBuf {

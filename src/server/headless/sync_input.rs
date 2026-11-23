@@ -220,6 +220,24 @@ impl HeadlessServer {
             let Some((workspace_index, runtime_pane_id)) = self.app.parse_pane_id(&pane_id) else {
                 continue;
             };
+            // A view's pane whose far terminal changed under it takes no
+            // input typed for the old one: nothing until a person clicks it
+            // (the click itself is not sent) or focuses it (review M3).
+            #[cfg(unix)]
+            if self.app.view_input_held(runtime_pane_id) {
+                if active
+                    && matches!(
+                        event,
+                        ClientPaneInputEvent::Mouse {
+                            kind: crate::protocol::ClientMouseKind::Down(_),
+                            ..
+                        }
+                    )
+                {
+                    changed |= self.app.release_view_hold(runtime_pane_id);
+                }
+                continue;
+            }
             let popup_blocks = self.app.state.popup_pane.is_some()
                 && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
             if (popup_blocks

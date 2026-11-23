@@ -536,6 +536,23 @@ impl PaneIo {
         }
     }
 
+    /// A view server's pane takes the far size (D6, review M4); false for
+    /// any other pane or a size over the view's budget.
+    #[cfg(unix)]
+    pub(super) fn follow_far_size(&self, rows: u16, cols: u16) -> bool {
+        match self {
+            PaneIo::Core(core) => core.follow_far_size(rows, cols),
+            _ => false,
+        }
+    }
+
+    /// A view server's pane whose far address holds another terminal now
+    /// (review M3).
+    #[cfg(unix)]
+    pub(super) fn view_replaced(&self) -> bool {
+        matches!(self, PaneIo::Core(core) if core.view_replaced())
+    }
+
     /// A view server's pane that sends no input.
     #[cfg(unix)]
     pub(super) fn view_read_only(&self) -> bool {

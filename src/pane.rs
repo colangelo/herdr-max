@@ -3150,16 +3150,27 @@ impl PaneRuntime {
         self.io.view_read_only()
     }
 
+    /// A view server's pane whose far address holds another terminal than
+    /// the one it attached to (security review M3).
+    #[cfg(unix)]
+    pub(crate) fn view_replaced(&self) -> bool {
+        self.io.view_replaced()
+    }
+
     /// A view server's pane learned the far terminal's new size from core
     /// (core-phase5 D6, R8): its grid follows it, and the view echoes it
     /// once as RESIZE when it differs from the last one it sent.
+    /// The far size is checked against the view's grid budget first, and an
+    /// over-budget one leaves the pane as it was (security review M4); the
+    /// RESIZE carries the far size, never the grid's minimum (2x4).
     #[cfg(unix)]
-    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) {
-        if self.io.view_size().is_none() {
-            return;
+    pub(crate) fn follow_view_size(&self, rows: u16, cols: u16) -> bool {
+        if !self.io.follow_far_size(rows, cols) {
+            return false;
         }
         let (_, _, cell_width_px, cell_height_px) = self.current_size.get();
         self.resize_grid(rows, cols, cell_width_px, cell_height_px);
+        true
     }
 
     /// The herdr-core terminal this pane shows, saved with the pane (D10).

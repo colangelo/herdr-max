@@ -286,6 +286,15 @@ impl App {
             return self.handle_api_worktree_remove_finished(*result);
         }
 
+        // A view's pane whose far address holds another program now is
+        // bound to it afresh, not ended (security review M3).
+        #[cfg(unix)]
+        if let AppEvent::PaneDied { pane_id, .. } = &ev {
+            if self.rebind_replaced_view_pane(*pane_id) {
+                return Vec::new();
+            }
+        }
+
         let mut worktree_restore_updates = Vec::new();
         if let AppEvent::PaneDied {
             pane_id,

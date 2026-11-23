@@ -45,7 +45,10 @@ fn view_border_label(
         .filter(|&(rows, cols)| (rows, cols) != (inner.height, inner.width))
         .map(|(rows, cols)| format!("{cols}x{rows} there"));
     let read_only = terminal.view_read_only.then_some("read-only");
-    if size.is_none() && read_only.is_none() {
+    let held = terminal
+        .view_input_held
+        .then_some("another terminal now: click to type");
+    if size.is_none() && read_only.is_none() && held.is_none() {
         return label;
     }
     let parts: Vec<&str> = label
@@ -53,6 +56,7 @@ fn view_border_label(
         .into_iter()
         .chain(size.as_deref())
         .chain(read_only)
+        .chain(held)
         .collect();
     Some(parts.join(" · "))
 }

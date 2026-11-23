@@ -376,6 +376,39 @@ struct ViewIo {
     read_only: bool,
     /// The size (rows, cols) last attached at or sent as RESIZE.
     sent: Mutex<(u16, u16)>,
+    /// The far terminal the pane first attached to (security review M3):
+    /// a reattach takes only that one, never another at its address.
+    instance: ViewInstance,
+    /// Set when the terminal at the address is another one now (a far core
+    /// reset gave the address to another program): the stream ends instead
+    /// of attaching it, and the view binds the pane afresh, with its input
+    /// held until a person's new click or focus.
+    replaced: AtomicBool,
+}
+
+/// What tells one far terminal from another at the same address: the far
+/// herdr's launch label and the program's pid, as core reported them at
+/// the first attach. Either missing is not compared.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewInstance {
+    launch: Value,
+    pid: u32,
+}
+
+impl ViewInstance {
+    fn of(record: &Value) -> Self {
+        Self {
+            launch: record["labels"][LAUNCH_LABEL].clone(),
+            pid: core_pid(&record["pid"]),
+        }
+    }
+
+    /// Whether `record` is this terminal: the same launch label and pid
+    /// where the first attach had them.
+    fn matches(&self, record: &Value) -> bool {
+        (self.launch.is_null() || record["labels"][LAUNCH_LABEL] == self.launch)
+            && (self.pid == 0 || core_pid(&record["pid"]) == self.pid)
+    }
 }
 
 impl Shared {
@@ -908,9 +941,22 @@ impl StartedCore {
             channel = observed["channel"].as_u64().unwrap_or(0) as u32;
             warn!(pane = pane_id.raw(), %address, "herdr-core's path to the machine takes no automatic input; the view is read-only");
         }
+        // The terminal this pane is bound to (review M3), as the attach
+        // answer describes it, or as core lists it when that has no record.
+        let instance = if first["terminal"].is_object() {
+            ViewInstance::of(&first["terminal"])
+        } else {
+            client
+                .call("terminal.get", json!({"terminal": address}), CALL_TIMEOUT)
+                .map(|record| ViewInstance::of(&record))
+                .unwrap_or(ViewInstance {
+                    launch: Value::Null,
+                    pid: 0,
+                })
+        };
         let link = crate::core_machine::panes::link(&machine);
         link.set_connected(true);
-        debug!(pane = pane_id.raw(), %address, rows, cols, read_only, "view attached");
+        debug!(pane = pane_id.raw(), %address, rows, cols, read_only, ?instance, "view attached");
         Ok(Self {
             shared: Arc::new(Shared {
                 pane_id,
@@ -937,6 +983,8 @@ impl StartedCore {
                 view: Some(ViewIo {
                     read_only,
                     sent: Mutex::new((rows, cols)),
+                    instance,
+                    replaced: AtomicBool::new(false),
                 }),
             }),
             events_rx,
@@ -1036,6 +1084,15 @@ impl CorePaneIo {
         self.shared.view.as_ref().is_some_and(|view| view.read_only)
     }
 
+    /// A view's pane whose far address now holds another terminal than the
+    /// one it attached to (review M3): its stream ended for that.
+    pub(crate) fn view_replaced(&self) -> bool {
+        self.shared
+            .view
+            .as_ref()
+            .is_some_and(|view| view.replaced.load(Ordering::Acquire))
+    }
+
     /// Whether this is a view server's pane.
     pub(crate) fn is_view(&self) -> bool {
         self.shared.view.is_some()
@@ -1102,6 +1159,12 @@ impl CorePaneIo {
         cell_height_px: u32,
         replies: Vec<Bytes>,
     ) {
+        // A view's grid follows the far size, clamped to the pane minimum
+        // here; that grid size is never the view's RESIZE (`follow_far_size`
+        // sends the far size itself).
+        if self.shared.view.is_some() {
+            return;
+        }
         *lock(&self.shared.size) = (rows, cols);
         let _ = self.queue(WriteCmd::Resize {
             rows,
@@ -1109,6 +1172,29 @@ impl CorePaneIo {
             cell: (cell_width_px, cell_height_px),
             replies,
         });
+    }
+
+    /// A view's pane takes the far terminal's new size (core-phase5 D6
+    /// Size, R8): it is the size the grid keeps, and the view echoes it,
+    /// exactly as core gave it, as RESIZE when it differs from the last one
+    /// sent. False, and nothing changes, for any other pane or for a size
+    /// over the view's grid budget (security review M4).
+    pub(crate) fn follow_far_size(&self, rows: u16, cols: u16) -> bool {
+        if self.shared.view.is_none() {
+            return false;
+        }
+        if !crate::view::far_size_fits(rows, cols) {
+            warn!(pane = self.shared.pane_id.raw(), terminal = %self.shared.address, rows, cols, "a far size over the view's budget; the pane keeps its last size");
+            return false;
+        }
+        *lock(&self.shared.size) = (rows, cols);
+        let _ = self.queue(WriteCmd::Resize {
+            rows,
+            cols,
+            cell: (0, 0),
+            replies: Vec::new(),
+        });
+        true
     }
 
     /// Stops this pane's streams and threads without ending the program (a
@@ -1232,7 +1318,20 @@ pub(crate) fn view_far_size(connector: &Connector, address: &str) -> Result<(u16
             .and_then(|value| u16::try_from(value).ok())
             .filter(|value| *value > 0)
     };
-    Ok((far("rows").unwrap_or(24), far("cols").unwrap_or(80)))
+    let (rows, cols) = (far("rows").unwrap_or(24), far("cols").unwrap_or(80));
+    // Checked before any grid is built at it (security review M4).
+    if !crate::view::far_size_fits(rows, cols) {
+        return Err(CoreError::Rpc {
+            kind: "too_large".into(),
+            message: format!(
+                "{address} is {cols}x{rows}, larger than a view shows ({}x{} and {} cells at most)",
+                crate::view::MAX_FAR_COLS,
+                crate::view::MAX_FAR_ROWS,
+                crate::view::MAX_FAR_CELLS
+            ),
+        });
+    }
+    Ok((rows, cols))
 }
 
 /// Queues a finished terminal's last screen and its exit for the parser.
@@ -1326,8 +1425,11 @@ fn spawn_writer(
 /// so core records it and emits no event; no FACTS frame, no FOCUS frame,
 /// no DATA ever.
 fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>) {
+    // Input typed for a far terminal goes to no other one (review M3): once
+    // the address holds another program, nothing is sent.
+    let replaced = || view.replaced.load(Ordering::Acquire);
     let typed = |bytes: &Bytes| {
-        if !view.read_only {
+        if !view.read_only && !replaced() {
             let _ = shared.send(kind::AUTOMATIC_INPUT, bytes.to_vec());
         }
     };
@@ -1344,6 +1446,10 @@ fn view_writer(shared: &Shared, view: &ViewIo, mut rx: mpsc::Receiver<WriteCmd>)
                 let result = if view.read_only {
                     Err(std::io::Error::other(
                         "this view is read-only: herdr-core's path takes no automatic input",
+                    ))
+                } else if replaced() {
+                    Err(std::io::Error::other(
+                        "the far terminal at this address is another program now",
                     ))
                 } else {
                     shared
@@ -1734,6 +1840,14 @@ fn machine_reattach_check(
         json!({"terminal": shared.address}),
         CALL_TIMEOUT,
     ) {
+        // A view takes only the far terminal it first attached to: another
+        // at the address ends this stream, and the view binds the pane
+        // afresh with its input held (security review M3).
+        Ok(record) if record["state"] == "live" && view_replaced(shared, &record) => {
+            Some(ReattachOutcome::Gone(ChildExitReason::Suspended(
+                SuspendCause::TerminalGone,
+            )))
+        }
         // Only the pane's own terminal, shown by its launch label, is
         // attached or ended; any other at the address is waited out
         // (security review M2, third read 1).
@@ -1761,6 +1875,24 @@ fn machine_reattach_check(
     }
 }
 
+/// For a view's pane: whether `record` is another terminal than the one it
+/// first attached to; if so, marks the pane replaced (review M3).
+fn view_replaced(shared: &Shared, record: &Value) -> bool {
+    let Some(view) = &shared.view else {
+        return false;
+    };
+    if view.instance.matches(record) {
+        return false;
+    }
+    warn!(
+        pane = shared.pane_id.raw(),
+        terminal = %shared.address,
+        "the far terminal at this address is another program now; the view binds it afresh"
+    );
+    view.replaced.store(true, Ordering::Release);
+    true
+}
+
 /// Attaches the pane's stream again, after core said its terminal is live.
 fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
     let (rows, cols) = *lock(&shared.size);
@@ -1776,6 +1908,12 @@ fn attach_again(shared: &Shared, client: &CoreClient) -> ReattachOutcome {
             client.forget_stream(channel);
             debug!(pane = shared.pane_id.raw(), terminal = %shared.address, "the attached terminal is not labelled for the pane's launch; detached, retrying");
             ReattachOutcome::Unreachable
+        }
+        Ok(attach) if attach["terminal"].is_object() && view_replaced(shared, &attach["terminal"]) => {
+            let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
+            let _ = client.send(&Frame::new(channel, kind::CLOSE, Vec::new()));
+            client.forget_stream(channel);
+            ReattachOutcome::Gone(ChildExitReason::Suspended(SuspendCause::TerminalGone))
         }
         Ok(attach) => {
             let channel = attach["channel"].as_u64().unwrap_or(0) as u32;
@@ -2994,9 +3132,9 @@ mod tests {
         .expect("sent");
         // A view sends no terminal reply, nor a resize's report (H1).
         pane.write_terminal_response(|| Some(Bytes::from_static(b"\x1b[0n")));
-        // The view's own rect is not the far size: the runtime resizes to the
-        // far size only, so a repeat of the attach size sends nothing.
-        pane.resize(30, 100, 8, 16, Vec::new());
+        // The grid's own resizes (its rect, its 2x4 minimum) never reach the
+        // wire (item 6 of PR D's second read); only the far size does, and a
+        // repeat of the attach size sends nothing.
         pane.resize(
             25,
             90,
@@ -3004,7 +3142,10 @@ mod tests {
             16,
             vec![Bytes::from_static(b"\x1b[48;25;90;400;720t")],
         );
-        pane.resize(25, 90, 8, 16, Vec::new());
+        pane.resize(2, 4, 8, 16, Vec::new());
+        assert!(pane.follow_far_size(30, 100));
+        assert!(pane.follow_far_size(25, 90));
+        assert!(pane.follow_far_size(25, 90));
         std::thread::sleep(Duration::from_millis(200));
         let frames = stream_frames(&core);
         let kinds: Vec<u8> = frames.iter().map(|(kind, _)| *kind).collect();
@@ -3044,6 +3185,120 @@ mod tests {
             pane.kept_on_drop(),
             "dropping a view's pane leaves the far program"
         );
+    }
+
+    // M3 (security review): a view's pane is bound to the far terminal it
+    // first attached to, by its launch label and pid. After the stream
+    // drops, the same terminal is attached again and typing goes on; once
+    // the address holds another program (a far core reset reused it), the
+    // stream ends instead, the pane says it was replaced, and no input
+    // reaches that program.
+    #[test]
+    fn a_view_reattaches_only_the_far_terminal_it_attached_to() {
+        let core = FakeCore::start();
+        let address = "view-bound/t1".to_string();
+        core.add_terminal(json!({"address": address, "state": "live", "cols": 80, "rows": 24,
+            "pid": 100, "labels": {"herdr.launch": "launch-1"}}));
+        let (exit_tx, exits) = std_mpsc::channel();
+        let pane = StartedCore::view(
+            PaneId::from_raw(42),
+            "herdr".into(),
+            address.clone(),
+            (24, 80),
+            reconnecting(&core),
+        )
+        .expect("view")
+        .into_pane(
+            Box::new(|_: &[u8]| PtyReadResult {
+                terminal_responses: Vec::new(),
+            }),
+            Box::new(move |reason| {
+                let _ = exit_tx.send(reason);
+            }),
+            Box::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("pane");
+        let attaches = |core: &FakeCore| {
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.attach")
+                .count()
+        };
+        // The same terminal: attached again, not replaced.
+        drop_stream(&core);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attaches(&core) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(attaches(&core), 2, "{:?}", core.methods());
+        assert_eq!(exits.recv_timeout(NO_EXIT).ok(), None);
+        assert!(!pane.view_replaced());
+
+        // Another program at the address: the stream ends, nothing attaches.
+        core.add_terminal(json!({"address": address, "state": "live", "cols": 80, "rows": 24,
+            "pid": 200, "labels": {"herdr.launch": "launch-2"}}));
+        core.close_stream(2, b"");
+        assert_eq!(
+            exits.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(ChildExitReason::Suspended(SuspendCause::TerminalGone))
+        );
+        assert!(pane.view_replaced());
+        assert_eq!(attaches(&core), 2, "the other program is never attached");
+        let typed_before = stream_frames(&core)
+            .iter()
+            .filter(|(kind, _)| *kind == kind::AUTOMATIC_INPUT)
+            .count();
+        let _ = pane.try_send_bytes(Bytes::from_static(b"stale"));
+        std::thread::sleep(Duration::from_millis(100));
+        let typed = stream_frames(&core)
+            .iter()
+            .filter(|(kind, _)| *kind == kind::AUTOMATIC_INPUT)
+            .count();
+        assert_eq!(typed, typed_before, "no input after the end");
+        pane.shutdown();
+    }
+
+    // M4 (security review): a far size over the view's grid budget is
+    // refused before a grid is built at it (attach) or resized to it (a size
+    // event); the pane keeps its last size and sends no RESIZE. A size under
+    // the grid's 2x4 minimum is echoed as it is, not as the minimum.
+    #[test]
+    fn a_far_size_over_the_budget_never_reaches_a_grid_or_the_wire() {
+        let core = FakeCore::start();
+        for (rows, cols) in [(65_535, 65_535), (1001, 80), (24, 1001), (600, 600)] {
+            let address = format!("view-huge/t{rows}x{cols}");
+            core.add_terminal(json!({"address": address, "state": "live", "cols": cols, "rows": rows}));
+            let refused = view_far_size(&connector_to(&core), &address);
+            assert!(
+                matches!(&refused, Err(CoreError::Rpc { kind, .. }) if kind == "too_large"),
+                "{rows}x{cols}: {refused:?}"
+            );
+        }
+        core.add_terminal(json!({"address": "view-huge/t1000x300", "state": "live", "cols": 1000, "rows": 300}));
+        assert_eq!(
+            view_far_size(&connector_to(&core), "view-huge/t1000x300").expect("in budget"),
+            (300, 1000)
+        );
+
+        let pane = view_pane(&core, "view-budget");
+        assert!(!pane.follow_far_size(65_535, 65_535));
+        assert!(!pane.follow_far_size(0, 80));
+        assert_eq!(pane.view_size(), Some((30, 100)), "the last good size");
+        assert!(pane.follow_far_size(1, 1));
+        std::thread::sleep(Duration::from_millis(200));
+        let resizes: Vec<(u16, u16)> = stream_frames(&core)
+            .into_iter()
+            .filter(|(kind, _)| *kind == kind::RESIZE)
+            .map(|(_, payload)| {
+                (
+                    u16::from_le_bytes([payload[0], payload[1]]),
+                    u16::from_le_bytes([payload[2], payload[3]]),
+                )
+            })
+            .collect();
+        assert_eq!(resizes, [(1, 1)], "only the far size, exactly");
+        pane.shutdown();
     }
 
     // H1 (core-phase5 D6): far output a view replays or streams can hold

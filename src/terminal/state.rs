@@ -271,6 +271,9 @@ pub struct TerminalState {
     /// and whether the view can type into it.
     pub view_far_size: Option<(u16, u16)>,
     pub view_read_only: bool,
+    /// A view server's pane whose far terminal changed under it (security
+    /// review M3): it takes no input until a person clicks or focuses it.
+    pub view_input_held: bool,
 }
 
 /// Why a pane without a runtime keeps its place (core-phase3 D1, D1b, D2).
@@ -445,6 +448,7 @@ impl TerminalState {
             core_unreachable_since: None,
             view_far_size: None,
             view_read_only: false,
+            view_input_held: false,
         }
     }
 
