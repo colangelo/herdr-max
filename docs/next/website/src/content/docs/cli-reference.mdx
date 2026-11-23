@@ -97,7 +97,7 @@ herdr machine status --core [<name>] [--json]
 herdr --machine <name> [--dial] <command>
 ```
 
-With `[experimental] runtime = "core"`. `machine add --core` and `machine login` need a terminal, because SSH and Herdr Core may ask there. `machine wake` keeps the link for 30 minutes by default, at most 12 hours. `machine status --core` reports each core machine's state, gate, leases, last connection and the far Herdr `--machine` found. `--machine` reaches a core machine when no saved SSH machine has that name; on a machine that is not connected it exits 75 unless `--dial` (or `HERDR_MACHINE_DIAL=1`) is given. A reply cut at 8 MiB or timed out exits 1 with nothing printed. See [Herdr Core machines](/docs/connecting-machines/#herdr-core-machines).
+With `[experimental] runtime = "core"`. `machine add --core` and `machine login` need a terminal, because SSH and Herdr Core may ask there. `machine wake` keeps the link for 30 minutes by default, at most 12 hours. `machine status --core` reports each core machine's state, gate, leases, last connection and the far Herdr `--machine` found. `--machine` reaches a core machine when no saved SSH machine has that name; on a machine that is not connected it exits 75 unless `--dial` is given on that call. A reply cut at 8 MiB or timed out exits 1 with nothing printed, and any failure after sending says the request may have run. Waits over the link end after 600 seconds; a `--timeout` over 590000 ms is refused. See [Herdr Core machines](/docs/connecting-machines/#herdr-core-machines).
 
 ## Shell completions
 
