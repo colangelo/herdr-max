@@ -470,6 +470,12 @@ struct LeaseRow {
 }
 
 #[derive(Debug, Serialize)]
+struct FarHerdrRow {
+    path: String,
+    version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct StatusRow {
     name: String,
     /// Core's state for it (`connected`, `connecting`, `unreachable`, ...),
@@ -486,6 +492,9 @@ struct StatusRow {
     last_dial: Option<f64>,
     /// Whether core reaches it through herdr's link command.
     herdr_link: bool,
+    /// The far herdr `--machine` found over the current link (D7), when
+    /// one did.
+    far_herdr: Option<FarHerdrRow>,
     target: Option<String>,
     session: Option<String>,
 }
@@ -631,6 +640,13 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
                     .flatten()
                     .map(|dial| dial.at),
                 herdr_link,
+                far_herdr: ours
+                    .then(|| super::fleet::cached_far_herdr(&dir))
+                    .flatten()
+                    .map(|far| FarHerdrRow {
+                        path: far.path,
+                        version: far.version,
+                    }),
                 target: target.as_ref().map(|target| target.target.clone()),
                 session: target.map(|target| target.session),
                 state,
