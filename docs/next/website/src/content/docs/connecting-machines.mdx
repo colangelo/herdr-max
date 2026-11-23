@@ -117,9 +117,76 @@ Default agent rows show a `machine` token when multiple machines are present. Ex
 
 Workspace, tab, pane IDs, and agent names are scoped to one server. Two machines may both contain `w1:p1` or an agent named `reviewer`. Selecting a machine in the UI does not retarget CLI commands running in an existing pane: they still use that pane's inherited session and socket. For remote automation, use `herdr --machine <label-or-id> agent list`, then pass the same prefix when controlling those remote IDs. The CLI uses the saved profile's SSH target and session directly; it does not need an open TUI. Without `--machine`, existing session/socket routing is unchanged. See [CLI reference](/docs/cli-reference/#saved-ssh-machines) for supported commands, update requirements, and remote path rules.
 
+## Herdr Core machines
+
+With `[experimental] runtime = "core"`, your Herdr Core can link to the Herdr Core of another Mac or Linux host, as a **core machine**. Panes can then run their programs there (see [Panes on a Herdr Core machine](#panes-on-a-herdr-core-machine)), and `herdr --machine <name>` reaches that host's own Herdr through the same link. Saved SSH machines, `herdr --remote` and their `--machine` stay as they are, beside core machines: they are the fallback.
+
+Add a core machine from a terminal, as a person:
+
+```bash
+herdr machine add --core ac@workbox
+herdr machine add --core ac@workbox --name workbox --remote-session default
+```
+
+`--name` is the machine's name in Herdr Core (the SSH host by default), the first part of its terminals' addresses (`workbox/t7`). `--remote-session` is the Herdr Core session there (`default` by default). `--ssh-config <file>` reads that SSH config file instead of Herdr's managed one. Run it in a terminal: Herdr Core may ask there before it copies itself to the host, and SSH may prompt. Without a terminal, `machine add --core` refuses and prints the command for a person to run. Herdr never installs or updates Herdr Core on the other host.
+
+Herdr Core reaches the machine through `herdr core-link <name>`, which runs OpenSSH with no shared connection: every connection is a fresh SSH login, which can ask for Touch ID (1Password's SSH agent) or a Tailscale SSH check. It does not start Herdr Core on the other host: when Herdr Core is not running there, the link stays down until Herdr there starts it. (On a Linux host whose `nc` has no `-U`, the check falls back to the socket file, so after a crash there a connection can start Herdr Core under the SSH login.)
+
+### Dormancy
+
+A core machine's link is up only while someone uses it. Each of these keeps it for a while:
+
+- Input (a key, text, paste or mouse) in a Herdr client on this Mac: 10 minutes after the last one. A client started from a terminal counts as input when it starts.
+- `herdr machine add --core` and `herdr machine login`: 30 minutes.
+- `herdr machine wake <name> [--for <90s|30m|2h>]`: 30 minutes by default, at most 12 hours.
+- A `herdr --machine <name>` call: until it ends.
+
+After that the link closes and nothing goes to the machine: no polling, no keepalives, no reconnects. A server restart, a live handoff or a start of Herdr Core does not wake it. The first input, a `machine wake` or a `--machine --dial` call wakes it at once. While a machine is dormant, Herdr Core leaves its terminals out of its lists.
+
+### Status and the gate
+
+```bash
+herdr machine status --core [<name>] [--json]
+```
+
+For each core machine: `state` (Herdr Core's: `connected`, `connecting`, `unreachable`, `needs_login`), `gate`, the leases that keep the link and when they end (`leases`), the last connection (`last_dial`), and `far_herdr`, the other host's Herdr that `--machine` found over the current link. `gate` says whether a connection may be made now:
+
+| `gate` | Meaning | What reopens it |
+|---|---|---|
+| `open` | A connection may be made. | — |
+| `dormant` | Nothing keeps the link: no recent input, wake or call. | Input, `herdr machine wake <name>`, `herdr --machine <name> --dial`. |
+| `needs_check` | A Tailscale SSH check asked for a sign-in in the browser. | A person runs `herdr machine login <name>` in a terminal. |
+| `auth_stalled` | No answer 15 s after SSH started: a prompt nobody answered, such as Touch ID. | `herdr machine login <name>`. |
+| `auth_failed` | Authentication or the host key failed. | `herdr machine login <name>`. |
+| `far_core_down` | Herdr Core does not run on the other host. Reopens by itself after 5 minutes. | Start Herdr there, then `herdr machine wake <name>`. |
+| `retry_spent` | Two connections in a row ended without a link. | Input, `machine wake`, `machine login` or `--machine --dial`. |
+
+`herdr machine login <name>` runs SSH in your terminal, so a check, a Touch ID prompt or a host key is answered there, then reopens the gate and connects. A prompt nobody answers closes the gate in 15 s, so no unattended run waits on it or repeats it. Remove a core machine with `herdr machine rm --core <name>`; its programs there keep running.
+
+### `--machine` to a core machine
+
+`herdr --machine <name> <command>` reaches a core machine when no saved SSH machine has that label or ID (a saved machine with the same name wins). The request goes through Herdr Core's link to the other host's own Herdr API, so the reply is that Herdr's own, with its pane IDs, as with a saved SSH machine. The commands are the same as for [saved SSH machines](/docs/cli-reference/#saved-ssh-machines).
+
+```bash
+herdr --machine workbox pane list
+herdr --machine workbox --dial agent list
+```
+
+- **Connected:** the call rides the open link; no new SSH login.
+- **Not connected:** the call is refused with exit code 75, `workbox is dormant; reaching it opens ssh (a Touch ID or Tailscale check can prompt). Announce it, then rerun with --dial, or run herdr machine wake workbox.` Nothing is written and nothing connects.
+- **`--dial`** (or `HERDR_MACHINE_DIAL=1`): connects once, then sends the call. It is refused when the gate is `needs_check`, `auth_stalled` or `auth_failed` (run `herdr machine login`) or `far_core_down`.
+
+The other host's Herdr session is the one whose Herdr Core session the machine was added with: `default` reaches its default session, `herdr-<name>` its session `<name>`. Herdr finds its Herdr once per connection (the name this Herdr runs as, then `herdr`, on its `PATH` and in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`). A request is sent once and never repeated after a failure. A reply cut at 8 MiB, or one that timed out, is an error (exit code 1) and none of it is printed. A request over 8 MiB is refused before it is sent. Herdr's integration variables (`HERDR_ENV`, `HERDR_PANE_ID`, `HERDR_SOCKET_PATH` and the rest) are removed from what the other host's Herdr gets, even when its Herdr Core has them.
+
+### Announce a connection first
+
+Agents: a connection to a core machine can prompt on this Mac (Touch ID) or in the browser (a Tailscale SSH check). Before you pass `--dial` or run `herdr machine wake`, say so to the person, as for adding a machine. A `--machine` call on a connected machine opens no SSH and needs no announcement; one on a dormant machine is refused and connects nothing. A person at the terminal needs none.
+
+Herdr Core's own commands do not wake a dormant machine: `hc exec --on` and `hc run --on` fail at once, and `hc machine connect` fails at Herdr's link unless something keeps the link. Use `herdr --machine <name>` or `herdr machine wake <name>`, which follow the rules above.
+
 ## Panes on a Herdr Core machine
 
-With `[experimental] runtime = "core"`, a pane can run its program on another Mac or Linux host that your Herdr Core reaches as a core machine (`herdr machine add --core <target>`). The pane stays in this Herdr window, with an ID from this server. Only its program runs on the other host:
+With `[experimental] runtime = "core"`, a pane can run its program on another Mac or Linux host that your Herdr Core reaches as a [core machine](#herdr-core-machines) (`herdr machine add --core <target>`). The pane stays in this Herdr window, with an ID from this server. Only its program runs on the other host:
 
 ```bash
 herdr pane split --direction right --on ac-mbm5

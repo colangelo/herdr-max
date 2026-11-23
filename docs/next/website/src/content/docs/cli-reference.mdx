@@ -86,6 +86,19 @@ Requests and responses travel through the JSON API over non-interactive SSH; API
 
 Local pane IDs are not inherited by remote commands. Use explicit remote IDs; `--current` cannot refer to the caller's local pane. Remote worktree paths must be absolute, `~`, or start with `~/` (expanded on the server); plugin link paths must be absolute. The prefix targets one machine at a time; combined listings and routing through another TUI's connections are not included.
 
+## Herdr Core machines
+
+```bash
+herdr machine add --core <ssh-target> [--name <name>] [--remote-session <core-session>] [--ssh-config <file>]
+herdr machine rm --core <name>
+herdr machine login <name>
+herdr machine wake <name> [--for <90s|30m|2h>]
+herdr machine status --core [<name>] [--json]
+herdr --machine <name> [--dial] <command>
+```
+
+With `[experimental] runtime = "core"`. `machine add --core` and `machine login` need a terminal, because SSH and Herdr Core may ask there. `machine wake` keeps the link for 30 minutes by default, at most 12 hours. `machine status --core` reports each core machine's state, gate, leases, last connection and the far Herdr `--machine` found. `--machine` reaches a core machine when no saved SSH machine has that name; on a machine that is not connected it exits 75 unless `--dial` (or `HERDR_MACHINE_DIAL=1`) is given. A reply cut at 8 MiB or timed out exits 1 with nothing printed. See [Herdr Core machines](/docs/connecting-machines/#herdr-core-machines).
+
 ## Shell completions
 
 ```bash
