@@ -25,6 +25,12 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Timeout for checking the stable JSON API before attaching to the binary protocol socket.
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long a client waits for a server that holds the session's lock but
+/// does not answer on its client socket: a live handoff's replacement binds
+/// the sockets only once it has restored every pane, and a rolled-back one
+/// gives them back to the old server (fork issue 319).
+const LOCKED_SERVER_WAIT: Duration = Duration::from_secs(45);
+
 /// Private daemon-start hint used to seed a fresh headless server from the
 /// directory where the user ran `herdr`.
 pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
@@ -254,6 +260,85 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
     command
 }
 
+/// How a client found the session's server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerStart {
+    /// It started one, which now answers.
+    Spawned,
+    /// One was running already, and answers.
+    Running,
+}
+
+/// Starts the session's server unless one runs, and returns once its client
+/// socket answers. A server that holds the session's lock but does not answer
+/// yet (a live handoff between its two servers, or one still starting) is
+/// waited for, never doubled: a second server on the session would save over
+/// the first one's session (fork issue 319,
+/// https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/319).
+pub fn start_server_unless_running(
+    socket_path: &Path,
+    ready_timeout: Duration,
+) -> io::Result<ServerStart> {
+    start_server_unless_running_with(
+        socket_path,
+        ready_timeout,
+        LOCKED_SERVER_WAIT,
+        running_session_server,
+        || spawn_server_daemon().map(drop),
+    )
+}
+
+/// The server holding the active session's lock, as a client names it.
+fn running_session_server() -> Option<String> {
+    #[cfg(unix)]
+    {
+        crate::server::instance_lock::holder_at(&crate::server::instance_lock::lock_path())
+            .map(|holder| holder.to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn start_server_unless_running_with(
+    socket_path: &Path,
+    ready_timeout: Duration,
+    locked_wait: Duration,
+    running_server: impl Fn() -> Option<String>,
+    spawn: impl FnOnce() -> io::Result<()>,
+) -> io::Result<ServerStart> {
+    let deadline = std::time::Instant::now() + locked_wait;
+    let mut waiting = false;
+    loop {
+        if is_server_listening_at(socket_path)? {
+            return Ok(ServerStart::Running);
+        }
+        let Some(server) = running_server() else {
+            info!("no server running, spawning server daemon");
+            spawn()?;
+            wait_for_server_socket(socket_path, ready_timeout)?;
+            return Ok(ServerStart::Spawned);
+        };
+        if !waiting {
+            info!(%server, "the session's server does not answer yet; waiting for it");
+            waiting = true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{server} runs this session but has not answered on {} for {}s, so no second server was started; check {}",
+                    socket_path.display(),
+                    locked_wait.as_secs(),
+                    crate::session::data_dir().join("herdr-server.log").display()
+                ),
+            ));
+        }
+        std::thread::sleep(SOCKET_POLL_INTERVAL);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Socket readiness
 // ---------------------------------------------------------------------------
@@ -318,20 +403,19 @@ pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
     let socket_path = client_socket_path();
     info!(path = %socket_path.display(), "auto-detect launch starting");
 
-    let startup = is_server_listening().and_then(|listening| {
-        if listening {
-            info!("server already running, attaching as client");
-            if saved_federation {
-                Ok(())
-            } else {
-                validate_running_server_compatibility(false)
+    let startup = start_server_unless_running(&socket_path, SERVER_READY_TIMEOUT).and_then(
+        |start| match start {
+            ServerStart::Spawned => Ok(()),
+            ServerStart::Running => {
+                info!("server already running, attaching as client");
+                if saved_federation {
+                    Ok(())
+                } else {
+                    validate_running_server_compatibility(false)
+                }
             }
-        } else {
-            info!("no server running, spawning server daemon");
-            spawn_server_daemon()
-                .and_then(|_| wait_for_server_socket(&socket_path, SERVER_READY_TIMEOUT))
-        }
-    });
+        },
+    );
     if let Err(error) = startup {
         if !saved_federation {
             return Err(error);
@@ -577,6 +661,87 @@ test "$sid" = "$$"
         let result = wait_for_server_socket(&path, Duration::from_millis(50));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Fork issue 319: no answering socket, but a server holds the session
+    /// (a live handoff between its two servers): the client waits, and gives
+    /// up without starting a second server.
+    #[test]
+    fn a_client_never_starts_a_second_server_while_one_holds_the_session() {
+        let dir = unique_test_dir("locked-silent");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("herdr-server.lock");
+        let _held = crate::server::instance_lock::take_at(&lock, Duration::ZERO)
+            .unwrap()
+            .expect("the running server's lock");
+        let err = start_server_unless_running_with(
+            &dir.join("s.sock"),
+            Duration::from_secs(1),
+            Duration::from_millis(300),
+            || crate::server::instance_lock::holder_at(&lock).map(|holder| holder.to_string()),
+            || panic!("a second server was started"),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            err.to_string()
+                .contains(&format!("(pid {})", std::process::id())),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The locked server's replacement binds its socket: the client attaches.
+    #[test]
+    fn a_client_attaches_once_the_locked_server_answers() {
+        let dir = unique_test_dir("locked-answers");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("herdr-server.lock");
+        let _held = crate::server::instance_lock::take_at(&lock, Duration::ZERO)
+            .unwrap()
+            .expect("the running server's lock");
+        let socket = dir.join("s.sock");
+        let late = socket.clone();
+        let binder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let listener = UnixListener::bind(&late).unwrap();
+            std::thread::sleep(Duration::from_secs(1));
+            drop(listener);
+        });
+        let start = start_server_unless_running_with(
+            &socket,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            || crate::server::instance_lock::holder_at(&lock).map(|holder| holder.to_string()),
+            || panic!("a second server was started"),
+        )
+        .unwrap();
+        assert_eq!(start, ServerStart::Running);
+        binder.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_client_starts_a_server_when_none_holds_the_session() {
+        let dir = unique_test_dir("unlocked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("herdr-server.lock");
+        let socket = dir.join("s.sock");
+        let mut started = None;
+        let start = start_server_unless_running_with(
+            &socket,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            || crate::server::instance_lock::holder_at(&lock).map(|holder| holder.to_string()),
+            || {
+                started = Some(UnixListener::bind(&socket)?);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(start, ServerStart::Spawned);
+        assert!(started.is_some());
         let _ = std::fs::remove_dir_all(dir);
     }
 

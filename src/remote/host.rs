@@ -37,9 +37,13 @@ pub(crate) fn run_remote_client_bridge(args: &[String]) -> io::Result<()> {
     crate::platform::forward_remote_bridge_stdio(stream, idle_timeout)
 }
 
+/// The bridge waits for a server that holds the session but does not
+/// answer (a live handoff), and starts one only when none runs (fork issue
+/// 319: a bridge that reconnected mid-handoff started a second server).
 fn ensure_remote_server_running() -> io::Result<()> {
+    use crate::server::autodetect::{start_server_unless_running, ServerStart};
     let socket_path = crate::server::socket_paths::client_socket_path();
-    if crate::server::autodetect::is_server_listening()? {
+    if start_server_unless_running(&socket_path, Duration::from_secs(5))? == ServerStart::Running {
         let status = crate::api::read_runtime_status_at(
             &crate::api::socket_path(),
             Duration::from_millis(500),
@@ -57,7 +61,5 @@ fn ensure_remote_server_running() -> io::Result<()> {
             "remote herdr server needs one final update before this bridge can attach; rerun `herdr --remote` from an interactive terminal to approve it",
         ));
     }
-
-    crate::server::autodetect::spawn_server_daemon()?;
-    crate::server::autodetect::wait_for_server_socket(&socket_path, Duration::from_secs(5))
+    Ok(())
 }
