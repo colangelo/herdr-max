@@ -282,6 +282,11 @@ struct ClientStatusJson {
     remote_bridge_idle_timeout: bool,
     binary: String,
     session: Option<String>,
+    /// The Herdr Core session this herdr session's panes run in, so a fleet
+    /// CLI on another Mac can check that it reaches the herdr whose core it
+    /// was linked to (core-phase5 D7). Absent without a core backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    core_session: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -335,6 +340,7 @@ fn client_status_json() -> ClientStatusJson {
         remote_bridge_idle_timeout: crate::platform::REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED,
         binary: current_exe_label(),
         session: crate::session::active_name(),
+        core_session: Some(crate::pane::core_session_name()).filter(|name| !name.is_empty()),
     }
 }
 
