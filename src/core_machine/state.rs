@@ -136,8 +136,12 @@ impl MachineDir {
             .append(true)
             .mode(0o600)
             .open(&path);
+        // One write per line (fork issue 318): several processes append to
+        // this log, and a line written in pieces interleaves with another's,
+        // which reads as neither.
         if let Ok(mut file) = opened {
-            let _ = writeln!(file, "{:.3} pid={} {line}", now_unix(), std::process::id());
+            let whole = format!("{:.3} pid={} {line}\n", now_unix(), std::process::id());
+            let _ = file.write_all(whole.as_bytes());
         }
     }
 
@@ -786,6 +790,49 @@ pub(crate) mod tests {
             ssh_auth_sock: Some("/tmp/agent.sock".into()),
             via: None,
         }
+    }
+
+    // Fork issue 318: writers appending to one link.log at once never
+    // interleave within a line: each line is one write.
+    #[test]
+    fn link_log_lines_are_whole_under_concurrent_writers() {
+        let root = scratch("log-lines");
+        let dir = MachineDir::at(
+            &root,
+            &crate::core_machine::MachineName::parse("loop").unwrap(),
+        );
+        fs::create_dir_all(dir.path()).expect("machine dir");
+        let writers: Vec<_> = (0..8)
+            .map(|writer| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for line in 0..200 {
+                        dir.log(&format!("W{writer} line {line} {}", "x".repeat(64)));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        let log = fs::read_to_string(dir.log_path()).expect("log");
+        let mut lines = 0;
+        for line in log.lines() {
+            let mut fields = line.splitn(4, ' ');
+            let at = fields.next().unwrap_or_default();
+            assert!(at.parse::<f64>().is_ok(), "a whole line: {line:?}");
+            assert!(
+                fields.next().is_some_and(|pid| pid.starts_with("pid=")),
+                "{line:?}"
+            );
+            assert!(
+                fields.next().is_some_and(|writer| writer.starts_with('W')),
+                "{line:?}"
+            );
+            lines += 1;
+        }
+        assert_eq!(lines, 8 * 200);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
