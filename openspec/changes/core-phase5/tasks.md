@@ -1058,12 +1058,13 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   - M2 (P2): the far guarded close refuses a close that would close the pane's workspace
     (`would_close_workspace`), so a worktree group never closes implicitly; the view's own last-pane check stays.
   - M4: a forced close needs a confirmation minted only by a far `confirmation_required` to an unforced close of
-    the same pane and program, valid 120 s (`CONFIRM_FOR`), spent in the aim check just before the request.
+    the same pane and program, valid 120 s (`CONFIRM_FOR`), keyed by client and far pane, spent by the `commit` step that runs last in `send`
+    (after the aim check, the lease and the run's length), so nothing that refuses before the request spends it.
   - M5: D7 says any same-user socket client can send Far methods; a pane action goes only for a pane of the
     sending client's tab; a client's request id is taken once (`SeenActions`, last 256 per view).
   - M7: `CoreAt::by(deadline)` and `call_running_by`: the connect's hello, the version check and each call's
-    wait end by the action's deadline, a call with nothing left is not sent; `remove_running_leases` at the view
-    server's graceful end.
+    wait end by the action's deadline, a call with nothing left is not sent; `ViewRoute::end` at the view
+    server's graceful end (the running-lease list is the route's own, and no lease is written after it).
   - M8: a tab rename names the far tab by the document's own id (`ViewApp::far_tab`).
   - Delta re-check: `FarInstance::is_known` needs both the launch label and the pid; a far terminal id is
     checked against the core pattern (`view::doc::is_local_terminal`) before it becomes `<m>/<id>`; the four
@@ -1097,6 +1098,43 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   after); on a debug binary of e93511ca's code copied out of the shared target,
   `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (the guarded close and the rebind refusal above) and
   `core_view_live_test.sh` (V30_IDLE_SECS=20) 0. Not run: CI (not pushed), so Windows clippy is unchecked.
+  As built, after the independent review of 1b140192 (same issue; commits fix(server) d7d7c7ba, fix(view) c194d354,
+  fix(client) a7cb5b46, test(view) of item 6, fix(view) of item 7):
+  - Item 1: `pane.close_if_terminal` and `pane.split_if_terminal` are in `shell_locations_may_need_reconcile` and
+    `public_request_may_change_geometry` (and, with the guarded rename, in `shell_endpoint_claims_geometry`), so a
+    guarded close of a non-last tab's last pane no longer leaves far TUI clients on a stale tab or the tab's
+    geometry controller, and a guarded split reapplies the controlled geometry. Tests on a server over a fake core
+    (`server::headless::tests::guarded_actions`): the client's shell location and `tab_geometry_controllers` after
+    the close, the first pane's size after the split; both fail with the lists reverted.
+  - Items 2, 3, 5: the confirmation is spent by a `Commit` step at the point the request is sent (`send`'s last
+    refusal), not in the aim check, so a timeout, a failed `write_again` or a run too short to send leaves it; it
+    is keyed by (client, far pane), so another client of the view cannot spend or use it; the running-lease list
+    is per route and `ViewRoute::end` sets a flag under the list's lock, after which `write_again` fails, so an
+    action thread past the server's end sends nothing and leaves no lease. Tests: `the_commit_runs_only_where_the_request_is_sent`,
+    `an_action_running_past_the_servers_end_writes_no_lease_and_sends_nothing`,
+    `a_forced_close_not_sent_after_the_aim_check_keeps_the_confirmation` (the lease ends inside the check),
+    `a_confirmation_is_spent_only_by_the_client_who_was_asked`; each fails with its fix reverted. Not tested: a
+    check that times out (it takes the 10 s check share; the structure is the same as the failed lease write).
+  - Item 4: the sidebar agent menu in a view does not offer "Rename pane" for an agent outside the window's
+    current tab (the snapshot's focused tab); a menu with nothing left to offer is not opened. Call: a
+    tab-independent rename was not taken, since the view acts only on a pane of the client's own tab (M5) and
+    that rule is the design's.
+  - Item 6: `a_pane_outside_core_is_refused` uses a real PTY shell pane with its runtime present and fails with
+    the `core_terminal()` check skipped; `a_view_action_behind_a_running_one_is_refused_not_queued` drives
+    `dispatch_client_shell_actions` and fails with the `refuses_behind` wiring off;
+    `the_view_servers_end_removes_a_running_actions_lease` uses its own route's list, safe under plain `cargo test`
+    threads.
+  - Item 7: a far pane whose core run has a launch label but no pid (the program ended before the view
+    attached) is refused, now saying core shows no process for it and that it has ended
+    (`a_pane_whose_far_program_ended_before_the_view_attached_says_so`).
+  Gates, m4m, 2026-11-23, under the shared lock: targeted nextest runs green; `just check` 0 on 1f58f5ed
+  (clippy first caught a `type_complexity` on the confirmation map, fixed in that commit; only this tasks.md
+  changed after); `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 on a copy of the shared target's debug
+  herdr built from 1f58f5ed. One earlier run of that part failed at "the --dial lease did not come before the
+  dial": two writers' lines interleaved in the link log (a line read `17954475501795447550.830 ...`), so the
+  checker mis-parsed the CLI row; the rerun passed. A harness race in `core_fleet_live_test.sh`'s log parsing, to
+  be fixed on its own. Not run: CI (not pushed), so Windows clippy is unchecked; whole new items are
+  `cfg(unix)` or in unix-only modules.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
