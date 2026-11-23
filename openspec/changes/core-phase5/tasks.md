@@ -445,8 +445,8 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   Built: `cli/target.rs` `Route { Saved, Core }`: a selector that names a saved SSH machine (id or label) goes the
   old way, unchanged (D8); any other is looked up as a core machine (`fleet::open`), which needs herdr's state
   folder (a machine only core knows is refused, exit 2, as one herdr keeps no lease or gate for). `--dial` is a
-  prefix flag beside `--machine` (`herdr --machine m --dial pane list`), `HERDR_MACHINE_DIAL=1` the same. Connected:
-  the `cli-<pid>` lease (act 0, so it reopens nothing), the probe, then the requests. Not connected: without
+  prefix flag beside `--machine` (`herdr --machine m --dial pane list`), on each call (E.2a removed the
+  environment switch). Connected: the `cli-<pid>` lease as a keep lease (E.2a), the probe, then the requests. Not connected: without
   `--dial`, D7's message and exit 75, no lease, no dial; with it, refused (exit 1) over `needs_check`,
   `auth_stalled`, `auth_failed`, an unreadable gate or a `far_core_down` under 5 min, else the lease with the act
   (it reopens `retry_spent`), a `CLI --dial` line in `link.log`, one `dial_once` (D3a's rules), and a refusal if the
@@ -454,12 +454,12 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   that speaks herdr's API, one request per connection: each request line is one `machine.exec {on, argv: wrapper +
   [far herdr, --session S, remote-api-bridge], input, timeout}`, the reply's stdout goes back untouched. S, the far
   herdr session, is the one whose primary core the machine was added with (`default` for core's default, `X` for
-  `herdr-X` or `herdrdev-X`; a core session no herdr session uses is refused). Timeout: the request's own
-  `timeout_ms` plus 10 s, 60 to 600 s. A request over 8 MiB, `unavailable`, any other core refusal, a lost answer
+  `herdr-X` or `herdrdev-X`; a core session no herdr session uses is refused). Timeout (as amended by E.2a): the
+  status probe 9 s; the request's own `timeout_ms` plus 10 s, 60 to 600 s; none, 600 s. A request over 8 MiB, `unavailable`, any other core refusal, a lost answer
   (it may have run; not sent again), `truncated`, `timed_out` or a far exit other than 0 record a failure and close
   the connection with nothing written, so the CLI fails (exit 1) with that message through `remote_error`; the
-  status probe of a core route is never retried (`server_status`). The lease is written before the first exec,
-  again only when what is left would not cover the next call and a minute more, and removed when the CLI ends.
+  status probe of a core route is never retried (`server_status`). The lease is written before the first exec
+  and removed when the CLI ends (its life and renewal: E.2a).
   Supporting: `core_machines::call_running_at` and `CallError` (not sent, refused by kind, no answer), the fake
   core's `machine.exec` (`exec_reply`) and `hang_up_on`. Tests: V19 (the fake core drops the connection on
   `machine.exec`: one error saying it may have run, one exec), V37 (`truncated` and `timed_out` with exit code 0:
@@ -475,6 +475,57 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   whole CLI call (its status probe and its request), not one exec; a core retry that lands between the `--dial`
   lease and its connect can make core restart that dial (R4, D3a's accepted limit); the plan's `pane list --json`
   is `pane list` (it prints JSON and takes no `--json`).
+- [x] E.2a Independent review of E.1/E.2 (read-only, at cd1de8d4), every finding fixed at its root with a test that
+  fails on the old behaviour (each checked by reverting the fix):
+  - 2.1 lease life: the `cli-<pid>` lease lives 60 s past its last write and a renewer thread writes it every 30 s
+    while the CLI runs (was 120 s plus the call's timeout, up to 720 s after a killed CLI). SIGINT, SIGTERM and SIGHUP
+    run a cleanup (`platform::core_link::clean_up_on_termination`, signal-hook, one thread) that removes the lease
+    and the bridge folder, then end the CLI as the signal's default does; a renewal racing that exit writes nothing.
+    A SIGKILLed CLI's lease ends within 60 s, and the next CLI removes bridge folders of dead pids. Decision on D3's
+    "at most once a minute": that rule bounds a client's writes per input; a CLI writes twice a minute for its own
+    life only (one small file), and a lease bounded to a minute matters more (design D7 § The lease's life). Tests:
+    renewal, kind and removal; the life bound; a child process per signal (SIGTERM, SIGINT, SIGHUP: killed by it,
+    lease and folder gone); dead folders swept; loop: a waiting call's lease is a keep lease of at most 61 s, SIGTERM
+    exits 143 with the lease and folder gone.
+  - 2.2 decision: a **keep lease** (`<expiry> 0 keep`): core-link's watcher counts it (it keeps an up link), `admit`
+    does not (`newest_act` counts only leases that dial). A plain call on a connected machine writes one; `--dial`
+    writes a dialling lease with its act for its one connect, then turns it into a keep lease. Why not "no lease":
+    without one the watcher ends the link mid-call when the other leases run out (a 600 s wait). So core's retry
+    after a drop during the call meets no lease of the call's that admits it: D7's "No new ssh" holds (a lease of
+    another holder still admits it, as without the call). An older core-link that reads a keep lease as no lease only
+    ends such a link sooner. Status lists it as `cli-<pid>(keep)` and `dials: false`. Tests: parse, `admit` refuses
+    a keep lease alone (also after `dial_failed`), the watcher keeps the link on one, `prepare` on a connected
+    machine writes one and connects nothing; loop: a `--dial` call whose link is killed mid-request fails saying it
+    may have run, core's retry is refused as `Dormant`, one ssh in all.
+  - 2.3 `--dial` refuses `retry_spent` whose detail is `far_core_down` within 5 min, as `far_core_down`.
+  - 2.6 `HERDR_MACHINE_DIAL` removed (code, docs, design, the live script).
+  - 3.1 the status probe's run is 9 s and its core call 14 s (`CALL_MARGIN_SECS` 5, was 10), inside the CLI's 15 s
+    (`REMOTE_STATUS_TIMEOUT`, a test ties them); dropping the bridge releases the lease and the folder first and
+    waits at most 0.5 s for a request in flight (fake core `stall_on`: drop under 2 s, was 14 s+).
+  - 3.2 every failure after sending says `it may have run there, and it is not sent again` (far exit other than 0,
+    `timed_out`, an answer that does not parse); `truncated` says it ran.
+  - 3.3 no `timeout_ms` runs 600 s (core's longest; the old path waits however long); a `timeout_ms` over 590 000 is
+    refused unsent with the `--timeout` to use; documented with the exit for longer waits (loop, or a saved machine).
+  - 3.4 measured on a throwaway core (hc 0.1.21, direct `machine.exec`): input 8 388 608 bytes runs, 8 388 609 is
+    `invalid_params` ("at most 8 MB raw"): the check (`> 8 MiB`) was exact; comment fixed, boundary test added.
+  - 3.5 a request's failure is cleared when the next request starts.
+  - 3.6 measured with two throwaway cores and a `--via` relay: a link killed mid-`machine.exec` answers
+    `unavailable`, `lost the line to loop during the call` (hint "it may have happened there"); a far core stopped
+    mid-run answers `unavailable` too. So `unavailable` now says it may have run, with core's message.
+  - 4 the probe asks the far herdr about the session the requests go to, and `status client --json` reports
+    `core_session`; it must equal the machine's core session, else refused before any request. A far herdr too old to
+    report it is accepted for `default`/`herdr-X` and refused for `herdrdev*`.
+  - 5 the bridge folder's name carries a per-process random part (`RandomState`) and a taken name is skipped for a
+    fresh one (as `platform::fallback`); a start that fails after the folder was made removes it (a guard; not unit
+    tested: no way to make `set_permissions` or a thread spawn fail on demand).
+  - 6 with no passwd entry, a name core does not list stays an unknown selector (exit 2).
+  - 7.1 `far_herdr.json` is trusted 5 min on the same link (`probed_at`), then probed again, so a far herdr upgraded
+    in place is read within 5 min; 7.2 a far exit 2 (no `remote-api-bridge`) forgets it, as 126/127 do; 7.4
+    `write_atomic` writes a temporary file of its own process and write (`create_new`), never another writer's.
+  Limits: the keep lease needs core-link from this build to count (an older one ends such a link when the other
+  leases end); `--dial`'s keep switch comes after core answered `connected`, so a drop within that instant is still
+  admitted by the dialling lease; a request refused for its timeout is reported through `remote_error` like any
+  other bridge failure.
 - [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
   Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
   probe and `fleet.rs`'s `exec` and wrapper are what they will call.

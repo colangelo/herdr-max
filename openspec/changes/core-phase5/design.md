@@ -202,14 +202,15 @@ Alternatives:
 ### D3. Dormancy is a set of leases, one file per holder
 
 A lease is a file `leases/<holder>` holding an expiry time. The link may be up while any lease is in force. Each
-holder writes only its own file (write to `.new`, then rename), so no two processes write one file. A crashed
-holder's lease ends by its expiry.
+holder writes only its own file (write to a temporary file of its own, then rename), so no two processes write one
+file. A crashed holder's lease ends by its expiry. A **keep lease** (`<expiry> 0 keep`, PR E review) keeps a link that
+is up and admits no dial: core-link's watcher counts it, its admission does not (D7).
 
 | Holder | Writes | Expiry |
 |---|---|---|
 | a TUI client (`client-<pid>`), for every core machine | on human input (#260's `InputClock` events: key, text, paste, mouse), at most once a minute | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
 | a TUI client started by a person's command (`herdr --remote core:<m>`, `herdr` from a terminal) | also at its start; a client re-created by a reconnect or a live handoff does not | start + 10 min |
-| a fleet CLI call through the machine (`cli-<pid>`, D7) | before its `machine.connect` or `machine.exec`, removed after the reply | 120 s, longer by its own timeout |
+| a fleet CLI call through the machine (`cli-<pid>`, D7) | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect |
 | `herdr machine add --core`, `herdr machine login` (`manual`) | before they call hc (F8: both dial at once) | 30 min |
 | `herdr machine wake <name> [--for D]` (`manual`) | before it calls `machine.connect` | the given duration, 30 min by default, at most 12 h |
 
@@ -412,25 +413,47 @@ Alternatives:
   at most 600 s); streaming verbs stay unavailable as today. The argv carries D5's `env -u` wrapper (F6).
 - **`machine.exec` never dials (F7).** On a machine that is not `connected` it fails at once (`unavailable`, R10),
   and a lease alone would only let core's next background retry dial. So the CLI decides the dial itself:
-  - `connected`: write the `cli-<pid>` lease, `machine.exec`, remove the lease. No new ssh.
+  - `connected`: write the `cli-<pid>` lease as a keep lease, `machine.exec`, remove the lease. No new ssh, and
+    none after a drop during the call: core's retry meets no lease that admits a dial on the call's account (a
+    lease of any other holder still admits it, as it would without the call).
   - not connected, without `--dial`: refuse with exit 75 and `ac-mbm5 is dormant; reaching it opens ssh (a Touch
     ID or Tailscale check can prompt). Announce it, then rerun with --dial, or run herdr machine wake ac-mbm5.` No
     lease is written, nothing dials.
-  - not connected, with `--dial` (or `HERDR_MACHINE_DIAL=1`): refuse when the gate is closed (D10, naming the class
-    and `herdr machine login`); else write the lease, post a wake to D3a's dialer and wait for it (20 s at most),
-    then `machine.exec`.
+  - not connected, with `--dial`: refuse when the gate is closed (D10, naming the class and `herdr machine
+    login`) or the far core was found down within 5 min (`far_core_down`, or `retry_spent` over it); else write
+    the lease (one that admits a dial, with the act), post a wake to D3a's dialer and wait for it (20 s at most),
+    turn the lease into a keep lease, then `machine.exec`. The one announced dial is the connect; a drop after it
+    is not redialled on the call's account.
   This is stricter than the old remote, whose `--machine` dials silently on every call; the house rule wants
-  every dial announced, and an agent cannot pass `--dial` without deciding to.
+  every dial announced, and an agent cannot pass `--dial` without deciding to. There is no environment switch for
+  it (PR E review: `HERDR_MACHINE_DIAL=1` let every agent of a shell dial without deciding, and was removed).
+- **The lease's life (PR E review).** The `cli-<pid>` lease lives 60 s past its last write and the CLI writes it
+  every 30 s while it runs, so its life follows the process: SIGINT, SIGTERM and SIGHUP remove it (and the bridge
+  folder) before the CLI ends as the signal's default does, and a SIGKILL leaves one that ends within a minute (the
+  watcher ends the link 5 s later at most). This replaces "120 s, longer by its own timeout", up to 720 s after a
+  killed CLI. A long call writes twice a minute, not D3's once a minute for clients: the client rule bounds writes
+  per input, and a CLI's renewals are one small file per 30 s for its own life only.
 - **Cut and timed-out replies are errors (F12).** `machine.exec` cuts stdout at 8 MiB with `truncated: true` and
   exit code 0 (roundtable: 9 000 000 bytes → 8 388 608). The CLI treats `truncated: true` or `timed_out: true` as
   a failure: exit 1, `the reply from <m> was cut at 8 MiB` (or `timed out after <n> s`), and prints none of the
-  partial output as a result. A request over 8 MiB raw is refused before it is sent.
+  partial output as a result. A request over 8 MiB raw (8 388 608 bytes: core's own input limit, measured; its
+  schema says "8 MB") is refused before it is sent. Every failure after sending says the request may have run:
+  no answer, `timed_out`, a far exit other than 0, and core's `unavailable`, which core also answers for a link lost
+  during the run (`lost the line to <m> during the call`, hc 0.1.21).
+- **Timeouts.** The status probe's run is 9 s and its core call 14 s, inside the CLI's 15 s probe; a request with
+  `timeout_ms` runs that long and 10 s more (at least 60 s); one with none (a wait with no `--timeout`, which the
+  old remote waits out however long) runs core's longest, 600 s, then fails as timed out. A `timeout_ms` over
+  590 000 is refused before it is sent. A CLI that leaves with a request in flight does not wait for it.
 - In a view (D6), new tab, split, close pane, rename and agent start become the same `machine.exec` calls of the far
   side's CLI, argv only, never a shell line built from names. The far side's herdr changes its layout and
   republishes; the view follows the document.
 - The remote herdr path and its capabilities are read once per link establishment (`machine.exec` of `<bin> status
-  client --json`, the same probe `attach.rs` uses). A missing verb disables that action with a notice; it never
-  disconnects the view.
+  client --json`, the same probe `attach.rs` uses), again when the answer is 5 min old (so a far herdr upgraded in
+  place is read anew) and when the far herdr exits 2, 126 or 127 (no `remote-api-bridge`, or gone). A missing verb
+  disables that action with a notice; it never disconnects the view. The probe asks the far herdr for the session
+  the requests go to, and `status client --json` reports `core_session`, the core session that herdr session uses:
+  it must be the one the machine was added with, so a release `herdr` there is never sent a debug build's
+  `herdrdev-X` session's requests (an older far herdr that does not report it is taken for a release build).
 
 ### D8. Fallback and selection
 
