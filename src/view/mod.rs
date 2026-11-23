@@ -60,6 +60,85 @@ pub(crate) fn log_file_name(machine: &MachineName) -> String {
     format!("herdr-view-{machine}.log")
 }
 
+/// The view server's lock and record for `machine`, beside its socket: the
+/// running view holds an exclusive `flock` on it for its whole life and
+/// writes its version and pid into it (`ViewRecord`).
+pub(crate) fn lock_path(machine: &MachineName) -> PathBuf {
+    crate::session::data_dir().join(format!("herdr-view-{machine}.lock"))
+}
+
+/// What a running view says of itself in its lock file (D6 Lifetime): the
+/// build it runs, so a client of another build restarts it, and its pid,
+/// for that restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ViewRecord {
+    pub version: String,
+    pub pid: u32,
+}
+
+/// The lock a view server holds while it runs; dropped with the process.
+pub(crate) struct ViewLock {
+    _file: std::fs::File,
+}
+
+static HELD: OnceLock<ViewLock> = OnceLock::new();
+
+/// Takes the view's lock for `machine` at `path`, before anything else in
+/// the process writes to the view's log or socket (review L3.4): two views
+/// started at once (two clients racing to start one) are one view and one
+/// that exits at once, touching neither. `Ok(None)` when another view holds
+/// it. The record is written once the lock is taken.
+pub(crate) fn take_lock_at(path: &std::path::Path) -> std::io::Result<Option<ViewLock>> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    if !crate::platform::core_link::lock_exclusive_within(&file, std::time::Duration::ZERO)? {
+        return Ok(None);
+    }
+    let record = ViewRecord {
+        version: crate::build_info::version(),
+        pid: std::process::id(),
+    };
+    file.set_len(0)?;
+    file.write_all(
+        serde_json::to_string(&record)
+            .map_err(std::io::Error::other)?
+            .as_bytes(),
+    )?;
+    Ok(Some(ViewLock { _file: file }))
+}
+
+/// Takes and keeps the lock of the view of `machine` for this process's
+/// life; false when another view of it runs.
+pub(crate) fn hold_lock(machine: &MachineName) -> std::io::Result<bool> {
+    match take_lock_at(&lock_path(machine))? {
+        Some(lock) => Ok(HELD.set(lock).is_ok()),
+        None => Ok(false),
+    }
+}
+
+/// The record of the view whose lock is at `path`, while one holds it.
+pub(crate) fn running_view_at(path: &std::path::Path) -> Option<ViewRecord> {
+    let file = std::fs::File::open(path).ok()?;
+    if crate::platform::core_link::lock_exclusive_within(&file, std::time::Duration::ZERO)
+        .unwrap_or(false)
+    {
+        // Nobody holds it: no view runs (the lock goes with the file).
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// The configuration a view server runs with: the user's, with every core
 /// publisher off (D6: no spaces, extras, status mirror or label writes; the
 /// far herdr owns those documents and labels).
@@ -101,6 +180,38 @@ mod tests {
         assert_eq!(parse_view_flag(&args(&["--handoff-import"])).unwrap(), None);
         assert!(parse_view_flag(&args(&["--view"])).is_err());
         assert!(parse_view_flag(&args(&["--view", "../x"])).is_err());
+    }
+
+    // L3.4, M2: one view per machine holds the lock; a second start gets
+    // none (and so writes no log and binds no socket); the holder's record
+    // names its build and pid while it holds the lock, nothing after.
+    #[test]
+    fn one_view_holds_the_lock_and_records_its_build() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-view-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let path = dir.join("herdr-view-loop.lock");
+        assert_eq!(running_view_at(&path), None, "no file: no view");
+        let held = take_lock_at(&path).expect("lock").expect("first takes it");
+        assert!(
+            take_lock_at(&path).expect("lock").is_none(),
+            "a racing second start gets no lock"
+        );
+        assert_eq!(
+            running_view_at(&path),
+            Some(ViewRecord {
+                version: crate::build_info::version(),
+                pid: std::process::id(),
+            })
+        );
+        drop(held);
+        assert_eq!(running_view_at(&path), None, "released: no view runs");
+        assert!(take_lock_at(&path).expect("lock").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

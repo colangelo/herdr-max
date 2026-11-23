@@ -40,6 +40,20 @@ pub fn run_server() -> io::Result<()> {
     #[cfg(unix)]
     match &view {
         Some(machine) => {
+            // The view's lock first: a second view of the machine, started
+            // in a race, leaves before it touches the log or the socket
+            // (review L3.4).
+            match crate::view::hold_lock(machine) {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!("error: a view of {machine} is already running");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("error: could not take the lock of the view of {machine}: {err}");
+                    std::process::exit(1);
+                }
+            }
             crate::logging::init_file_logging(&crate::view::log_file_name(machine));
         }
         None => init_logging(),

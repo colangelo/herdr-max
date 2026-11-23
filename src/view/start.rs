@@ -2,7 +2,9 @@
 //! transport and `herdr --remote core:<machine>` reach a view through its
 //! client socket and start one when none listens there. It runs in the
 //! background like the primary server, exits 10 min after its last client,
-//! and dials nothing by starting: its first client's lease decides that.
+//! and dials nothing by starting, nor on a client's attach: a person's input
+//! in it does (D3, review M3). A client of a newer build restarts it (D6
+//! Lifetime: it keeps no state).
 
 use std::io;
 use std::path::PathBuf;
@@ -78,7 +80,14 @@ pub(crate) fn listening(machine: &MachineName) -> bool {
 pub(crate) fn ensure_running(machine: &MachineName) -> io::Result<PathBuf> {
     let socket = super::socket_path(machine);
     if listening(machine) {
-        return Ok(socket);
+        let lock = super::lock_path(machine);
+        let Some(running) = stale_view(&lock, &crate::build_info::version()) else {
+            return Ok(socket);
+        };
+        // D6 Lifetime: the view keeps no state, so a client of a newer
+        // build restarts it instead of a handoff.
+        tracing::info!(%machine, old = %running.version, pid = running.pid, "restarting the view server on this build");
+        stop_view(&lock, &running)?;
     }
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
@@ -104,9 +113,132 @@ pub(crate) fn ensure_running(machine: &MachineName) -> io::Result<PathBuf> {
     Ok(socket)
 }
 
+/// The running view whose lock is at `lock`, when a client of build `mine`
+/// restarts it (`replaces`); `None` to use it as it is.
+fn stale_view(lock: &std::path::Path, mine: &str) -> Option<super::ViewRecord> {
+    super::running_view_at(lock).filter(|running| replaces(mine, &running.version))
+}
+
+/// Whether a client of build `mine` restarts a view running build
+/// `running` (D6 Lifetime, review M2): when they differ and `mine` is not
+/// the older one, so two clients of two builds do not restart one view in
+/// turn. Versions are `<major>.<minor>.<patch>[-<channel>.<build>]`; a build
+/// number counts within one base version, and when the two cannot be
+/// ordered the client's build wins.
+pub(crate) fn replaces(mine: &str, running: &str) -> bool {
+    if mine == running {
+        return false;
+    }
+    match (version_key(mine), version_key(running)) {
+        (Some(mine), Some(running)) => mine >= running,
+        _ => true,
+    }
+}
+
+/// A version's order: its base, then the leading number of its build id
+/// (`161` of `0.9.3-ac-beta.161-rabiot`), 0 without one.
+fn version_key(version: &str) -> Option<((u64, u64, u64), u64)> {
+    let (base, rest) = version.split_once('-').unwrap_or((version, ""));
+    let mut parts = base.split('.').map(|part| part.parse::<u64>().ok());
+    let base = (parts.next()??, parts.next()??, parts.next()??);
+    if parts.next().is_some() {
+        return None;
+    }
+    let build = rest
+        .rsplit_once('.')
+        .map(|(_, build)| build)
+        .unwrap_or("")
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(0);
+    Some((base, build))
+}
+
+/// Ends the view whose lock is at `lock` (it holds it, so `pid` is that
+/// view's): SIGTERM, then SIGKILL after 5 s; it is gone when the lock is
+/// free. A view's end detaches its panes and changes nothing on the
+/// machine (D6).
+fn stop_view(lock: &std::path::Path, running: &super::ViewRecord) -> io::Result<()> {
+    use crate::platform::core_link::{signal, Signal};
+    let gone_within = |wait: std::time::Duration| {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if super::running_view_at(lock).is_none() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    signal(running.pid, Signal::Term);
+    if gone_within(std::time::Duration::from_secs(5)) {
+        return Ok(());
+    }
+    if super::running_view_at(lock).is_some_and(|still| still.pid == running.pid) {
+        signal(running.pid, Signal::Kill);
+    }
+    if gone_within(std::time::Duration::from_secs(2)) {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "the view server {} did not exit for its restart",
+            running.pid
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // M2: a client of a newer build restarts the view; one of the same or
+    // an older build uses it, so two builds never restart a view in turn.
+    #[test]
+    fn a_newer_client_build_replaces_the_running_view() {
+        assert!(!replaces("0.9.5", "0.9.5"));
+        assert!(replaces("0.9.6", "0.9.5"));
+        assert!(!replaces("0.9.5", "0.9.6"));
+        assert!(replaces(
+            "0.9.5-ac-beta.162-pippo",
+            "0.9.5-ac-beta.161-rabiot"
+        ));
+        assert!(!replaces(
+            "0.9.5-ac-beta.161-rabiot",
+            "0.9.5-ac-beta.162-pippo"
+        ));
+        assert!(replaces("0.10.0", "0.9.9-ac-beta.900"));
+        assert!(
+            replaces("0.9.5-ac-beta.161-b", "0.9.5-ac-beta.161-a"),
+            "same order, other build: the client's"
+        );
+        assert!(replaces("weird", "0.9.5"), "unordered: the client's");
+    }
+
+    // M2: a running view of an older build is the one a client restarts;
+    // one of the client's build, or none running, is not.
+    #[test]
+    fn a_client_restarts_only_an_older_running_view() {
+        let dir = std::env::temp_dir().join(format!("herdr-view-stale-{}", std::process::id()));
+        let lock = dir.join("herdr-view-loop.lock");
+        assert_eq!(stale_view(&lock, "0.9.5"), None, "no view runs");
+        let held = super::super::take_lock_at(&lock)
+            .expect("lock")
+            .expect("held");
+        let mine = crate::build_info::version();
+        assert_eq!(stale_view(&lock, &mine), None, "the same build is used");
+        std::fs::write(&lock, r#"{"version":"0.0.1","pid":4000000}"#).expect("an old record");
+        assert_eq!(
+            stale_view(&lock, &mine).map(|running| running.version),
+            Some("0.0.1".to_string()),
+            "an older view is restarted"
+        );
+        drop(held);
+        assert_eq!(stale_view(&lock, &mine), None, "it ended");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // V21's routing part (D8): only `core:<machine>` is a view; every other
     // `--remote` target is the old remote's, unchanged, and starts no view.
