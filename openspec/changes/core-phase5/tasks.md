@@ -888,9 +888,42 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   with their fixes reverted; `just check` 0 on 88af72b3 (5888 + 158 tests; windows-lint skipped on macOS);
   `CORE_MACHINE_PARTS="link lease fleet" core_machine_live_test.sh` 0 on a debug binary built from 88af72b3 and
   copied out of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`).
-- [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
-  Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
-  probe and `fleet.rs`'s `exec` and wrapper are what they will call.
+- [x] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
+  Built (design call: the far herdr's API through the fleet CLI's reviewed path, not its CLI verbs; D7 as built):
+  `view::policy` gains `Far` for `tab.create`, `pane.split`, `pane.close`, `workspace.rename`, `tab.rename` and
+  `pane.rename`, advertised and, in `server/headless/endpoint_requests.rs` (`take_view_action`), not dispatched:
+  `app/view_actions.rs` turns the client's ids into the far ones through the view's layout (`ViewApp::far_pane`,
+  the far workspace and tab ids), drops cwd, env, `on` and focus, and sends the request line off the loop through
+  `core_machine/fleet/view.rs` `send`: the route check (M5), not connected → refused with nothing written, sent or
+  dialled, the view's `cli-<pid>` keep lease (before the probe and again before the request, removed after; no
+  renewer or signal handler in the view server), `far_herdr`, then `FarRoute::send` with the far bridge argv
+  (`fleet.rs` refactor: `check_request_line` and `FarRoute` out of the bridge's handler, unchanged). One action at a
+  time per view, 20 s each. The far reply is the client's answer (a result this build reads, else `ok`; a far error
+  with its code, so a close's `confirmation_required` still asks; far text escaped); `unknown_method` from an older
+  far herdr becomes `<m>'s herdr does not take <method>; update Herdr there`. A pane's close in a view is now the
+  far close (D5), tab and workspace closes still detach. `agent.start` is no client method, so a view has none to
+  send (an agent starts by typing in a far pane, or `herdr --machine <m> agent start`).
+  Tests: units `v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line` (V20: the exec's argv is exactly the
+  wrapper and far bridge, no shell, no element with the name; the input is the line byte for byte, its label the
+  name as one string; no `machine.connect`; no lease left), `an_action_on_a_dormant_machine_refuses_and_dials_nothing`,
+  `a_far_refusal_comes_back_as_the_reply`, `the_actions_lease_keeps_the_link_and_admits_no_dial`,
+  `a_machine_herdr_did_not_add_gets_nothing` (fleet::view); `v20_a_name_goes_far_as_one_json_string`,
+  `each_action_names_the_far_targets_and_nothing_of_this_mac` (all five actions' far requests),
+  `a_split_with_no_target_splits_the_focused_far_pane`, `a_target_the_view_does_not_show_is_refused_unsent`,
+  `a_missing_far_verb_is_the_actions_refusal`, `far_answers_become_the_clients`, `a_primary_server_sends_nothing_far`
+  (app::view_actions); `only_d7s_structural_actions_go_to_the_far_herdr` and the pinned allowlist (view::policy);
+  `a_views_structural_action_is_never_done_here` (headless: a split in a view is sent on, not refused or done, and
+  an unknown target comes back `view_action_failed`); `a_far_refusal_in_a_view_is_a_notice_and_the_view_stays`
+  (client: `unknown_method` is the action's notice, the view online and shown). Live: `core_fleet_live_test.sh`
+  gains E.3/V20: over herdr's own link (the far herdr now on the core runtime with the spaces document), a TUI
+  client of `--remote core:<m>` types `prefix c` and `$(touch x); w` into the view's new-tab prompt: the far herdr
+  has that one new tab with that exact label, the request went through the far bridge, the view's layout follows,
+  no file `x` appears, no lease is left. `core_view_live_test.sh` V17: that loop is `hc machine add --via`, which
+  herdr's link does not reach, so the view's pane close is refused with the notice and the far program and pane
+  stay. Limits: the view does not move to a new tab or pane (focus stays where it was; the far screen keeps its
+  own); a missing verb is asked again on each try (one exec each, so an update there shows at once); tab and
+  workspace closes in a view still detach; a request answered by a far herdr that is not this build gets an `ok`
+  for a result this build does not read.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a

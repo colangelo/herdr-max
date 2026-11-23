@@ -228,7 +228,7 @@ client's 10 min, `machine wake`'s 12 h, each with 5 s for clocks) or whose act i
 | Holder | Writes | Expiry |
 |---|---|---|
 | a TUI client (`client-<pid>`), for every core machine its own primary core lists as herdr's own `core-link` and its own core session added (`primary.json`; a folder of an older build counts) | on a person's input (#260's `InputClock` events: key, text, paste, click, drag, scroll; a bare pointer motion is none, #312 M7), at most once a minute; never at its start (review M3); not by the old remote's local client (`--remote <host>`), which has no core machine to allow (#312 item 2); a view's client (`--remote core:<m>`) does | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
-| a fleet CLI call through the machine (`cli-<pid>`, D7) | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect |
+| a fleet CLI call through the machine (`cli-<pid>`, D7); a view's structural action (E.3) under the view's pid | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP; a view's action writes it before the far herdr probe and again before the request, on a connected machine only, and removes it after (no renewer and no signal handler in a view: each part ends within 35 s) | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect; a view's is always a keep lease |
 | `herdr machine add --core`, `herdr machine login` (`manual`) | before they call hc (F8: both dial at once) | 30 min |
 | `herdr machine wake <name> [--for D]` (`manual`) | before it calls `machine.connect` | the given duration, 30 min by default, at most 12 h |
 
@@ -382,10 +382,10 @@ The role is one type, `enum ServerRole { Primary, View(MachineName) }`, read at 
 | Status | detection, hooks, 7501 | the terminal's 7501 record from core (ac-mbm5's herdr mirrors its verdict there); no detection |
 | Persistence, orphan scan, spaces publisher, status mirror | yes | none |
 | JSON API socket | yes | none; the fleet uses `--machine` (D7) |
-| Close | ends the program | detaches; the program and the far side's pane stay |
+| Close | ends the program | a tab's or workspace's close detaches: the programs and the far side's panes stay. A pane's close is sent to the far herdr (D7, E.3) and closes the far pane there: a person's close (D5) |
 | Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below); no terminal replies at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, resize reports): the far herdr answers its own programs (review H1). Bound to the far terminal, not the pane id (#312 M3): a pane attaches to one terminal instance (its `herdr.launch` label and pid at the first attach) and a reattach takes only that one; when the far layout puts another address under a pane id, or the address holds another program, the pane takes no input until a person clicks or focuses it, and its border says so |
 | Output | this Mac's | far data, as a pane on a machine (D5): inline Kitty graphics only, no OSC 52, OSC 7 never a folder here; replayed history included |
-| Local actions | as today | one allowlist (`view::policy`, #312 M2), the same for the welcome's advertised methods and the dispatch: focus, zoom, scroll, copy, selection, the view's own screen clear, seen marks, closes (detaches) and a config reload; refused before dispatch: every far layout change (create, split, move, swap, resize, rename, pin, sync, presets, respawn) and everything that runs, writes or reads on this Mac (custom commands, plugin actions, all four worktree methods, `agent.message`, links, scrollback edit, todos, tasks, integrations, dismissals); an unclassified method is refused and fails a test. Also no clipboard image staging, no tab-bar status command (a far folder as a local cwd, M1), no release notes or announcement, no palette send; a config reload keeps the history |
+| Local actions | as today | one allowlist (`view::policy`, #312 M2), the same for the welcome's advertised methods and the dispatch: focus, zoom, scroll, copy, selection, the view's own screen clear, seen marks, tab and workspace closes (detaches) and a config reload; sent to the far herdr instead of dispatched (D7, E.3): `tab.create`, `pane.split`, `pane.close` and the workspace, tab and pane renames; refused before dispatch: every other far layout change (workspace create, move, swap, resize, pin, sync, presets, respawn) and everything that runs, writes or reads on this Mac (custom commands, plugin actions, all four worktree methods, `agent.message`, links, scrollback edit, todos, tasks, integrations, dismissals); an unclassified method is refused and fails a test. Also no clipboard image staging, no tab-bar status command (a far folder as a local cwd, M1), no release notes or announcement, no palette send; a config reload keeps the history |
 | Wake | — | only for a person's input in the view (a key, text, paste, click, drag or scroll; not a pointer motion), once per input, with a lease in force (D3); never on a client's attach or on a state read (review M3); `machine.connect` through D3a's dialer |
 | Notice | — | the view's own line, joined to the config diagnostic in the snapshot's `config_diagnostic`, never in its place |
 | Lifetime | as today | started on demand by the endpoint transport; exits 10 min after its last client; stateless, so a herdr update needs no handoff: a client of a newer build restarts it (the view's build, pid and process start token are in `herdr-view-<m>.lock`, which it holds with `flock` for its life, opened with no-follow as a private regular file and read from the locked inode; a restart signals the pid only while its start token matches, #312 M8; review M2); `herdr server --view <m> --restart` ends a running view of any build first (after a rollback an older client never restarts a newer view); a racing second start finds the lock held and exits before it touches the log or the socket (L3.4). The role comes from the arguments main parsed, so a session named `server` cannot change it (M6) |
@@ -497,6 +497,22 @@ Alternatives:
 - In a view (D6), new tab, split, close pane, rename and agent start become the same `machine.exec` calls of the far
   side's CLI, argv only, never a shell line built from names. The far side's herdr changes its layout and
   republishes; the view follows the document.
+  As built (E.3): the far side's API, not its CLI verbs, through the fleet path above (`core_machine::fleet::view`):
+  one `machine.exec` of the `env -u` wrapper and `<far herdr> --session S remote-api-bridge --request`, the request
+  line as its input, after the same route check (M5) and far herdr probe. The argv is fixed, so a name is never an
+  argv element at all: it is one JSON string of the request, which neither a shell nor an option parser reads (CLI
+  verbs would have put the name in the argv, where a name like `--force` reads as an option; and they need a
+  mapping per verb). The view turns the client's ids into the far ones through its own layout, so only what the
+  far document showed can be named, and sends nothing of this Mac (no folder, environment, `on` or far focus: the
+  far screen keeps its focus, and the view does not move to a new tab or pane; it shows on the next document).
+  A machine that is not connected refuses at once with nothing written, sent or dialled (`<m> is dormant: press a
+  key in one of its panes to wake it, then do this again`); a key in a pane of the view is the wake (D6). On a
+  connected one the view's `cli-<pid>` keep lease holds the link for the call. Actions run one at a time per view,
+  each within 20 s (the client waits 60 s for an endpoint command, a stale probe takes up to 30 s). The far reply is
+  the client's answer, far text escaped (M1); a far herdr without the method answers `unknown_method`, which the
+  client shows as `<m>'s herdr does not take <method>; update Herdr there`, as that action's notice, the view
+  connected; it is asked again on the next try, so an update there takes effect at once. `agent.start` is no client
+  method: in a view an agent starts by typing in a far pane, or with `herdr --machine <m> agent start`.
 - The remote herdr path and its capabilities are read once per link establishment (`machine.exec` of `<bin> status
   client --json`, the same probe `attach.rs` uses), again when the answer is 5 min old (so a far herdr upgraded in
   place is read anew) and after any request through it fails there (as built, E.2b: a far herdr whose
@@ -712,10 +728,10 @@ in-process test server of core-backend. No test dials a real Mac.
 | V14 | the view never resizes the far side | loop: far-side herdr pane at 100x30, view pane 160x50; type 50 keys, paste, click and focus the view's pane; resize the far side to 90x25 and type again | D6 size, R7 (F5) | far-side terminal stays 100x30, then 90x25; every key reaches the program; the view sent no DATA and no FOCUS frame, only AUTOMATIC_INPUT, CREDIT and one RESIZE per changed far size; view's grid follows |
 | V15 | view layout follows the far side | loop: far-side herdr creates a tab and splits; view open | D6 layout | the view shows the new tab and split within 2 s of the `doc` event |
 | V16 | a bad far-side document | fake core: oversized, deep, wrong-typed, unknown fields | D11 | last good layout kept; one warn; unknown fields ignored |
-| V17 | view close is a detach | loop | D6 close | far-side program and pane unchanged |
+| V17 | view close never ends a far program by itself | loop | D6 close | far-side program and pane unchanged when the view stops, and when a pane's close in a view of a machine herdr's link does not reach is refused with a notice (E.3: a pane's close over herdr's link is the far close) |
 | V18 | `--machine` over the link equals the old path | loop: `herdr --machine loop pane list --json` with the far side as a saved herdr machine (fake ssh) and as a core machine | D7 | identical JSON |
 | V19 | no retry after send | fake core drops the link after `machine.exec` is sent | D7 | one error, no second exec |
-| V20 | structural actions in a view use argv | unit: a workspace named `$(touch x); w` | D7, D11 | argv contains the name as one element; no shell |
+| V20 | structural actions in a view use argv | unit: a workspace named `$(touch x); w` | D7, D11 | as built (E.3): the argv is the fixed wrapper and far bridge, with no shell and no element built from the name; the name is one JSON string of the request input, byte for byte; live, a new tab of that name from a view is that far tab and no file `x` appears |
 | V21 | the old remote unchanged | the existing `src/remote` and endpoint suites; `--remote <host>` against fake ssh | D8 | green; no core call made |
 | V22 | `[remote] prefer` and the both-present notice | unit | D8 | resolution as D8; one notice |
 | V23 | herdr never installs or updates hc | architecture test over `src/` | D9 | no `machine.update`, no `--install`, no `hc update` |
