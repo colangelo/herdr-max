@@ -111,7 +111,7 @@ impl EndpointCatalog {
         let mut catalog = Self::load_from_paths(&catalog_path(), &selection_path())?;
         #[cfg(unix)]
         {
-            catalog.core = crate::core_machine::command::linked_machines();
+            catalog.core = crate::core_machine::command::linked_machines_of_primary();
         }
         Ok(catalog)
     }

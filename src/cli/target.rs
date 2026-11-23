@@ -93,7 +93,7 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
         }
         let profiles = EndpointCatalog::load_profiles().map_err(io::Error::other)?;
         #[cfg(unix)]
-        let core_machines: Vec<String> = crate::core_machine::command::linked_machines()
+        let core_machines: Vec<String> = crate::core_machine::command::linked_machines_of_primary()
             .into_iter()
             .map(|machine| machine.name.to_string())
             .collect();

@@ -631,6 +631,42 @@ pub(crate) fn linked_machines() -> Vec<LinkedMachine> {
     linked_machines_in(&root, now_unix())
 }
 
+/// The linked core machines that this herdr session's primary core lists
+/// now: the ones a TUI shows as view endpoints and `--machine` can take
+/// (core-phase5 D6, D8). A folder whose machine the primary does not list
+/// (another session's, a scratch core's) is left out, and so is everything
+/// when no primary core runs or it does not answer within a second. One
+/// `machine.list` on the running primary; it never starts a core or dials.
+pub(crate) fn linked_machines_of_primary() -> Vec<LinkedMachine> {
+    let linked = linked_machines();
+    if linked.is_empty() {
+        return linked;
+    }
+    let listed = match core::call_running_primary("machine.list", json!({}), Duration::from_secs(1))
+    {
+        Ok(Some(listed)) => listed,
+        Ok(None) => return Vec::new(),
+        Err(err) => {
+            tracing::debug!(%err, "machine.list failed; no core machine views");
+            return Vec::new();
+        }
+    };
+    listed_by_core(linked, &listed)
+}
+
+fn listed_by_core(linked: Vec<LinkedMachine>, listed: &Value) -> Vec<LinkedMachine> {
+    let names: Vec<&str> = listed["machines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|machine| machine["name"].as_str())
+        .collect();
+    linked
+        .into_iter()
+        .filter(|machine| names.contains(&machine.name.as_str()))
+        .collect()
+}
+
 fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
     status_rows(root, None, now)
         .into_iter()
@@ -799,6 +835,22 @@ mod tests {
         );
         assert_eq!(sh_quote("/Apps/My herdr/herdr"), "'/Apps/My herdr/herdr'");
         assert_eq!(sh_quote("/a'b"), r"'/a'\''b'");
+    }
+
+    // A folder of a machine the primary does not list is no view endpoint.
+    #[test]
+    fn only_machines_the_primary_lists_are_views() {
+        let machine = |name: &str| LinkedMachine {
+            name: MachineName::parse(name).unwrap(),
+            gate: "open".into(),
+            target: None,
+        };
+        let kept = listed_by_core(
+            vec![machine("ac-mbm5"), machine("t41389-stale")],
+            &json!({"machines": [{"name": "ac-mbm5", "state": "connected"}]}),
+        );
+        assert_eq!(kept, [machine("ac-mbm5")]);
+        assert!(listed_by_core(vec![machine("ac-mbm5")], &json!({})).is_empty());
     }
 
     // V22's notice part (D8): a saved machine and a core machine on one host
