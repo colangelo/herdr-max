@@ -1088,11 +1088,15 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   before the next request; the view's `prefix x` reaches the far pane as `pane.close_if_terminal` and closes it;
   a far pane whose program the hook respawns after the view's check (t3 to t4) is refused by the far herdr
   (`terminal_mismatch`) and stays, its new program live, no lease left.
-  Gates, m4m, 2026-11-23, under the shared lock: targeted tests green (265: view actions, view, fleet view,
-  endpoint commands, schema, operations, view policy, client commands, core client, guarded panes); clippy
-  `--all-targets -D warnings` clean on macOS; on a debug binary of e93511ca copied out of the shared target,
+  Gates, m4m, 2026-11-23, under the shared lock: targeted tests green (view actions, view, fleet view, endpoint
+  commands, schema, operations, view policy, client commands, core client, guarded panes); revert checks: the far
+  check off fails `a_guarded_action_acts_only_on_the_program_it_names`, the deadline not passed to core fails
+  `a_core_that_does_not_answer_holds_no_call_past_the_deadline` (5 s), the end's lease removal off fails
+  `the_view_servers_end_removes_a_running_actions_lease`; clippy `--all-targets -D warnings` clean on macOS;
+  `just check` 0 on 3e651c26 (6024 + 158 tests; windows-lint skipped on macOS; only this tasks.md changed
+  after); on a debug binary of e93511ca's code copied out of the shared target,
   `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (the guarded close and the rebind refusal above) and
-  `core_view_live_test.sh` (V30_IDLE_SECS=20) 0.
+  `core_view_live_test.sh` (V30_IDLE_SECS=20) 0. Not run: CI (not pushed), so Windows clippy is unchecked.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
