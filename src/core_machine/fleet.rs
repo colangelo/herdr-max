@@ -77,7 +77,7 @@ pub(crate) const PING_EXEC_SECS: u64 = 9;
 pub(crate) const CALL_MARGIN_SECS: u64 = 5;
 /// The `cli-<pid>` lease (D3): in force this long past its last write,
 /// written again this often while the CLI runs.
-const LEASE_LIFE_SECS: f64 = 60.0;
+const LEASE_LIFE_SECS: f64 = super::state::CLI_LEASE_SECS;
 const LEASE_RENEW: Duration = Duration::from_secs(30);
 /// How often the lease's renewer reads the wall clock. Its waits are on
 /// the monotonic clock, which stops while the Mac sleeps; the lease's
@@ -517,6 +517,12 @@ impl LeaseKeeper {
                     };
                     if state.released {
                         break;
+                    }
+                    // A `--dial` grant is written once: core-link uses it
+                    // up for the one dial (M4), and a renewal must not
+                    // give it back. Its minute outlasts the dial's wait.
+                    if matches!(state.used_for, LeaseUse::Dial { .. }) {
+                        continue;
                     }
                     // Due by the wall clock, which a sleep moves on (or
                     // set back: then too).

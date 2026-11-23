@@ -130,10 +130,12 @@ now() { python3 -I -c 'import time; print(time.time())'; }
 # Seconds from now, as a lease's expiry.
 plus() { python3 -I -c 'import sys,time; print(f"{time.time() + float(sys.argv[1]):.3f}")' "$1"; }
 # write_lease <machine> <holder> <expires_at> <input_at>: the lease file
-# interface (D3), written then renamed as herdr writes it.
+# interface (D3), written then renamed as herdr writes it. A cli-<pid>
+# lease names its kind, dial, and lives a minute at most (M4).
 write_lease() {
-  local leases="$LINK_ROOT/$1/leases"
-  printf '%s %s\n' "$3" "$4" > "$leases/$2.new" && mv "$leases/$2.new" "$leases/$2"
+  local leases="$LINK_ROOT/$1/leases" kind=""
+  [[ "$2" == cli-* ]] && kind=" dial"
+  printf '%s %s%s\n' "$3" "$4" "$kind" > "$leases/$2.new" && mv "$leases/$2.new" "$leases/$2"
 }
 # Waits until the link log of $1 has more than $3 lines matching $2.
 log_count() { grep -c " $2" "$(link_log "$1")" 2>/dev/null || true; }
@@ -250,7 +252,7 @@ link_bare() {
 }
 # A dial by hand is a person's act: a fresh lease first.
 link() {
-  write_lease "$D" "cli-$$" "$(plus 120)" "$(now)"
+  write_lease "$D" "cli-$$" "$(plus 60)" "$(now)"
   link_bare "$1"
 }
 ok_line="sh -c 'exit 0'"
@@ -285,7 +287,7 @@ wait_for "the first dial holds dial.lock" 5 locked "$locked_before"
 wait_for "the first dial's ssh" 5 sh -c "tail -n 1 '$SSH_LOG' | grep -q mode=slow"
 before="$(ssh_starts direct-target)"
 # The lease first, outside the timed refusal.
-write_lease "$D" "cli-$$" "$(plus 120)" "$(now)"
+write_lease "$D" "cli-$$" "$(plus 60)" "$(now)"
 started="$(now)"
 code=0; link_bare "$ok_line" 2>/dev/null || code=$?
 elapsed="$(since "$started")"

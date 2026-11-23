@@ -182,15 +182,19 @@ impl MachineDir {
     /// Writes `leases/<holder>` with its expiry and the time of the human
     /// act behind it (write, then rename): each holder writes only its own
     /// file (D3).
+    /// A `cli-<pid>` lease names its kind, `dial` (security review
+    /// 2026-11-23 M4); the other holders keep the two-field form an older
+    /// core-link reads.
     pub(crate) fn write_lease(
         &self,
         holder: &LeaseHolder,
         expires_at: f64,
         input_at: f64,
     ) -> io::Result<()> {
+        let kind = if holder.is_cli() { " dial" } else { "" };
         write_atomic(
             &self.leases_dir().join(holder.as_str()),
-            format!("{expires_at:.3} {input_at:.3}\n").as_bytes(),
+            format!("{expires_at:.3} {input_at:.3}{kind}\n").as_bytes(),
         )
     }
 
@@ -205,6 +209,21 @@ impl MachineDir {
         )
     }
 
+    /// Turns every fleet CLI lease in force that admits a dial into a keep
+    /// lease with the same expiry: core-link does this under `dial.lock`
+    /// for the dial it admitted, so one `--dial` grant gives one ssh start,
+    /// however core retries (security review 2026-11-23 M4).
+    pub(crate) fn consume_cli_grants(&self, now: f64) -> io::Result<usize> {
+        let mut consumed = 0;
+        for lease in self.leases() {
+            if lease.holder.is_cli() && lease.dials && lease.in_force(now) {
+                self.write_keep_lease(&lease.holder, lease.expires_at)?;
+                consumed += 1;
+            }
+        }
+        Ok(consumed)
+    }
+
     /// Removes a holder's own lease (a CLI call's, after its reply).
     pub(crate) fn remove_lease(&self, holder: &LeaseHolder) -> io::Result<()> {
         match fs::remove_file(self.leases_dir().join(holder.as_str())) {
@@ -214,16 +233,29 @@ impl MachineDir {
     }
 
     /// Every lease file that parses, in force or not; `.new` files are
-    /// writes in progress, and a file that does not parse is no lease.
+    /// writes in progress, and a file that does not parse, or is not one
+    /// of its holder's (`Lease::parse`), is no lease. At most
+    /// `LEASE_FILES_READ` files of at most `LEASE_FILE_BYTES` are read (M4).
     pub(crate) fn leases(&self) -> Vec<Lease> {
+        use std::io::Read as _;
         let Ok(entries) = fs::read_dir(self.leases_dir()) else {
             return Vec::new();
         };
+        let now = now_unix();
         let mut leases: Vec<Lease> = entries
             .flatten()
+            .take(LEASE_FILES_READ)
             .filter_map(|entry| {
                 let holder = LeaseHolder::parse(entry.file_name().to_str()?).ok()?;
-                let text = fs::read_to_string(entry.path()).ok()?;
+                let mut text = String::new();
+                fs::File::open(entry.path())
+                    .ok()?
+                    .take(LEASE_FILE_BYTES + 1)
+                    .read_to_string(&mut text)
+                    .ok()?;
+                if text.len() as u64 > LEASE_FILE_BYTES {
+                    return None;
+                }
                 let modified = || {
                     entry
                         .metadata()
@@ -234,7 +266,7 @@ impl MachineDir {
                         .ok()
                         .map(|at| at.as_secs_f64())
                 };
-                Lease::parse(holder, &text, modified)
+                Lease::parse(holder, &text, modified, now)
             })
             .collect();
         leases.sort_by(|a, b| a.holder.cmp(&b.holder));
@@ -505,6 +537,23 @@ impl LeaseHolder {
         &self.0
     }
 
+    /// A fleet CLI call's holder, `cli-<pid>`.
+    pub(crate) fn is_cli(&self) -> bool {
+        self.0.starts_with("cli-")
+    }
+
+    /// The longest a lease of this holder lives past its write: a fleet
+    /// CLI's minute, a client's #260 dormancy, `machine wake`'s 12 h.
+    fn max_life(&self) -> f64 {
+        if self.is_cli() {
+            CLI_LEASE_SECS
+        } else if self.0.starts_with("client-") {
+            super::presence::CLIENT_LEASE_SECS
+        } else {
+            MAX_WAKE_SECS
+        }
+    }
+
     /// The pid of a `client-<pid>` holder.
     pub(crate) fn client_pid(&self) -> Option<u32> {
         self.0.strip_prefix("client-")?.parse().ok()
@@ -541,13 +590,17 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
-    /// `<expires_at> <input_at>`, or `<expires_at> <input_at> keep` for a
-    /// lease that admits no dial; a file with the expiry alone (PR A's
-    /// form) takes its modification time as the act.
+    /// `<expires_at> <input_at>`, or with a kind, `<expires_at> <input_at>
+    /// dial` or `keep` for a lease that admits no dial; a file with the
+    /// expiry alone (PR A's form) takes its modification time as the act.
+    /// Refused as no lease (security review 2026-11-23 M4): a `cli-<pid>`
+    /// lease with no kind, an expiry further than its holder's longest life
+    /// from `now`, and an act in the future (each with 5 s for clocks).
     fn parse(
         holder: LeaseHolder,
         text: &str,
         modified: impl FnOnce() -> Option<f64>,
+        now: f64,
     ) -> Option<Self> {
         let mut fields = text.split_ascii_whitespace();
         let number = |raw: &str| raw.parse::<f64>().ok().filter(|at| at.is_finite());
@@ -557,11 +610,17 @@ impl Lease {
             None => modified()?,
         };
         let dials = match fields.next() {
-            None => true,
+            None if holder.is_cli() => return None,
+            None | Some("dial") => true,
             Some("keep") => false,
             Some(_) => return None,
         };
         if fields.next().is_some() {
+            return None;
+        }
+        if expires_at > now + holder.max_life() + LEASE_CLOCK_SLACK
+            || input_at > now + LEASE_CLOCK_SLACK
+        {
             return None;
         }
         Some(Self {
@@ -596,6 +655,16 @@ pub(crate) fn newest_act(leases: &[Lease], now: f64) -> Option<f64> {
 pub(crate) fn holds_link(leases: &[Lease], now: f64) -> bool {
     leases.iter().any(|lease| lease.in_force(now))
 }
+
+/// How long a fleet CLI call's `cli-<pid>` lease lives past each write
+/// (D7, E.2a 2.1): written again every 30 s while the CLI runs.
+pub(crate) const CLI_LEASE_SECS: f64 = 60.0;
+/// What a lease's times may be off by, for clocks and the write itself.
+const LEASE_CLOCK_SLACK: f64 = 5.0;
+/// The most lease files read, and the most bytes of each: a lease is one
+/// short line, and a machine has a handful of holders (M4).
+const LEASE_FILES_READ: usize = 256;
+const LEASE_FILE_BYTES: u64 = 128;
 
 /// How long a `manual` lease from `machine add --core` or `machine login`
 /// lasts, and `machine wake`'s default (D3).
@@ -872,6 +941,72 @@ pub(crate) mod tests {
         assert!(!holds_link(&leases, 3_000.0), "expired");
         fs::write(dir.leases_dir().join("cli-43"), "9e9 0 maybe").expect("unknown kind");
         assert_eq!(dir.leases().len(), 1, "an unknown kind is no lease");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// M4: a `cli-<pid>` lease names its kind; any lease whose expiry is
+    /// beyond its holder's longest life, or whose act is in the future, is
+    /// no lease; a lease file over 128 bytes neither.
+    #[test]
+    fn leases_are_bounded_by_their_holders_kind() {
+        let root = scratch("lease-bounds");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let now = now_unix();
+        let lease = |name: &str, text: String| {
+            fs::write(dir.leases_dir().join(name), text).expect("write");
+            let found = dir
+                .leases()
+                .into_iter()
+                .find(|lease| lease.holder.as_str() == name);
+            let _ = fs::remove_file(dir.leases_dir().join(name));
+            found
+        };
+        // Written by herdr: a CLI's grant names `dial`.
+        dir.write_lease(&LeaseHolder::cli(42), now + 60.0, now)
+            .expect("grant");
+        assert!(fs::read_to_string(dir.leases_dir().join("cli-42"))
+            .expect("read")
+            .trim_end()
+            .ends_with(" dial"));
+        assert!(dir.leases()[0].dials);
+        dir.remove_lease(&LeaseHolder::cli(42)).expect("remove");
+        assert!(
+            lease("cli-43", format!("{:.3} {now:.3}", now + 60.0)).is_none(),
+            "no kind"
+        );
+        assert!(
+            lease("cli-43", format!("{:.3}", now + 60.0)).is_none(),
+            "PR A's form"
+        );
+        assert!(lease("cli-43", format!("{:.3} {now:.3} dial", now + 60.0)).is_some());
+        assert!(
+            lease("cli-43", format!("{:.3} {now:.3} dial", now + 600.0)).is_none(),
+            "10 min"
+        );
+        assert!(lease("client-7", format!("{:.3} {now:.3}", now + 600.0)).is_some());
+        assert!(
+            lease("client-7", format!("{:.3} {now:.3}", now + 3_600.0)).is_none(),
+            "1 h"
+        );
+        assert!(lease("manual", format!("{:.3} {now:.3}", now + MAX_WAKE_SECS)).is_some());
+        assert!(lease(
+            "manual",
+            format!("{:.3} {now:.3}", now + 2.0 * MAX_WAKE_SECS)
+        )
+        .is_none());
+        assert!(
+            lease("manual", format!("{:.3} {:.3}", now + 60.0, now + 3_600.0)).is_none(),
+            "a future act"
+        );
+        assert!(
+            lease(
+                "manual",
+                format!("{:.3} {now:.3}{}", now + 60.0, " ".repeat(200))
+            )
+            .is_none(),
+            "200 bytes"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

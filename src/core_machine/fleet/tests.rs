@@ -281,15 +281,24 @@ fn the_cli_lease_is_renewed_while_it_runs_and_removed() {
     assert!(leases[0].dials);
     let first = leases[0].expires_at;
     assert!(first - now_unix() <= 2.0, "{}", first - now_unix());
+    // M4: the `--dial` grant is written once, never renewed, so core-link
+    // can use it up: here as core-link does, under its lock.
     std::thread::sleep(Duration::from_millis(350));
-    let renewed = dir.leases()[0].clone();
-    assert!(renewed.expires_at > first, "renewed while it runs");
-    assert_eq!(renewed.input_at, 77.0, "a renewal is no new act");
-    // After `--dial`'s connect it only keeps the link.
-    keeper.keep_only().expect("keep");
-    assert!(!dir.leases()[0].dials);
+    assert_eq!(dir.leases()[0], leases[0], "a dial grant was written again");
+    assert_eq!(dir.consume_cli_grants(now_unix()).expect("use"), 1);
     std::thread::sleep(Duration::from_millis(250));
-    assert!(!dir.leases()[0].dials, "renewals keep it a keep lease");
+    assert!(!dir.leases()[0].dials, "a used grant was given back");
+    // After `--dial`'s connect it only keeps the link, renewed.
+    keeper.keep_only().expect("keep");
+    let kept = dir.leases()[0].clone();
+    assert!(!kept.dials);
+    std::thread::sleep(Duration::from_millis(250));
+    let renewed = dir.leases()[0].clone();
+    assert!(
+        renewed.expires_at > kept.expires_at,
+        "renewed while it runs"
+    );
+    assert!(!renewed.dials, "renewals keep it a keep lease");
     drop(keeper);
     assert!(!lease_file.exists(), "the lease outlived the CLI");
     std::thread::sleep(Duration::from_millis(250));
@@ -1125,15 +1134,16 @@ fn jumped_clock() -> f64 {
 }
 
 /// #310: a sleep stops the monotonic clock the renewer waits on, not the
-/// wall clock the lease's expiry is in. After a 45 s jump of the wall
-/// clock (a sleep), the lease is written again within a tick, not after
-/// another 30 s of waking time.
+/// wall clock the lease's expiry is in. After a jump of the wall clock
+/// past the renewal (a sleep; here 9 s over an 8 s renewal, so the lease
+/// stays within its life as `leases` reads it), the lease is written
+/// again within a tick, not after another renewal of waking time.
 #[test]
 fn the_lease_is_renewed_soon_after_a_sleep() {
     let (root, dir) = machine_dir("fleet-sleep");
     let timing = LeaseTiming {
-        life: 60.0,
-        renew: Duration::from_secs(30),
+        life: 10.0,
+        renew: Duration::from_secs(8),
         tick: Duration::from_millis(20),
         clock: jumped_clock,
     };
@@ -1147,13 +1157,13 @@ fn the_lease_is_renewed_soon_after_a_sleep() {
         before,
         "renewed before it was due"
     );
-    CLOCK_JUMP.store(45.0_f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
+    CLOCK_JUMP.store(9.0_f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while dir.leases()[0].expires_at < before + 45.0 && std::time::Instant::now() < deadline {
+    while dir.leases()[0].expires_at < before + 9.0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
-        dir.leases()[0].expires_at >= before + 45.0,
+        dir.leases()[0].expires_at >= before + 9.0,
         "not renewed after the wall clock moved on"
     );
     drop(keeper);

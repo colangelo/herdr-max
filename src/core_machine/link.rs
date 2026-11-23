@@ -195,6 +195,33 @@ pub(crate) fn run(args: &[String]) -> i32 {
         "LOCKED after {:.3}s",
         started.elapsed().as_secs_f64()
     ));
+    // Admitted again under the lock: a dial that waited for it saw the
+    // files of before the other dial (security review 2026-11-23 M4).
+    // Then this dial uses up every fleet CLI `--dial` grant in force, so
+    // one grant gives one ssh start, whichever dial takes it first.
+    let gate = match dir.read_gate() {
+        Ok(gate) => gate,
+        Err(err) => {
+            dir.log(&format!("REFUSE unreadable gate: {err}"));
+            return EXIT_REFUSED;
+        }
+    };
+    let now = now_unix();
+    if let Err(refusal) = admit(line, gate.as_ref(), &dir.leases(), now) {
+        dir.log(&format!("REFUSE {refusal:?} under the lock"));
+        eprintln!("herdr-link: {name}: {}", refusal.describe());
+        return EXIT_REFUSED;
+    }
+    match dir.consume_cli_grants(now) {
+        Ok(0) => {}
+        Ok(grants) => dir.log(&format!(
+            "GRANT used: {grants} CLI --dial lease(s) now keep"
+        )),
+        Err(err) => {
+            dir.log(&format!("REFUSE grant: {err}"));
+            return EXIT_REFUSED;
+        }
+    }
 
     let config = match ssh::write_link_config(&dir, &target, &account.home) {
         Ok(path) => path,
@@ -595,6 +622,43 @@ mod tests {
         );
         let both = [keep[0].clone(), lease(1e10, 50.0)];
         assert_eq!(admit(LINE, None, &both, 100.0), Ok(()));
+    }
+
+    /// M4: a fleet CLI's `--dial` grant gives one dial: the dial that
+    /// takes it turns it into a keep lease, so core's retry, or a second
+    /// dial after a drop, is refused on its account; other leases stay.
+    #[test]
+    fn a_cli_dial_grant_is_used_once() {
+        use crate::core_machine::state::LeaseHolder;
+        let root = crate::core_machine::state::tests::scratch("grant-once");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let now = now_unix();
+        let cli = LeaseHolder::cli(42);
+        dir.write_lease(&cli, now + 60.0, now).expect("grant");
+        dir.write_lease(&LeaseHolder::client(7), now + 60.0, now - 100.0)
+            .expect("client");
+        assert_eq!(admit(LINE, None, &dir.leases(), now), Ok(()));
+        assert_eq!(dir.consume_cli_grants(now).expect("consume"), 1);
+        let leases = dir.leases();
+        let mine = leases
+            .iter()
+            .find(|lease| lease.holder == cli)
+            .expect("kept");
+        assert!(!mine.dials && mine.in_force(now), "{mine:?}");
+        assert!(
+            leases.iter().any(|lease| lease.dials),
+            "the client's lease went too"
+        );
+        dir.remove_lease(&LeaseHolder::client(7))
+            .expect("client gone");
+        assert_eq!(
+            admit(LINE, None, &dir.leases(), now),
+            Err(Refusal::Dormant),
+            "a used grant admitted another dial"
+        );
+        assert_eq!(dir.consume_cli_grants(now).expect("again"), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// D7 (2.2): the watcher keeps an up link while a keep lease holds,
