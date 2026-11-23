@@ -39,6 +39,10 @@ pub(crate) struct ViewApp {
     /// attach: a completion of another generation is an obsolete one
     /// (review M5), detached at once.
     attaching: HashMap<String, u64>,
+    /// Generations of the attaches whose blocking thread has not reported
+    /// yet, the layout's or not: a dropped address's attach still holds its
+    /// thread, so the slots count these (#312 follow-up), not `attaching`.
+    running: HashSet<u64>,
     next_attach: u64,
     /// Attaches waiting for one of the `MAX_ATTACHING` slots.
     waiting: Vec<(String, PaneId)>,
@@ -65,6 +69,7 @@ impl ViewApp {
             far_panes: HashMap::new(),
             terminals: HashMap::new(),
             attaching: HashMap::new(),
+            running: HashSet::new(),
             next_attach: 0,
             waiting: Vec::new(),
             far_sizes: HashMap::new(),
@@ -508,6 +513,8 @@ impl App {
         let Some(view) = self.view.as_mut() else {
             return false;
         };
+        // Its thread is done, whichever attach it was: the slot is free.
+        view.running.remove(&generation);
         if view.attaching.get(address) != Some(&generation) {
             return false;
         }
@@ -521,7 +528,7 @@ impl App {
         let Some(mut view) = self.view.take() else {
             return;
         };
-        while view.attaching.len() < MAX_ATTACHING && !view.waiting.is_empty() {
+        while view.running.len() < MAX_ATTACHING && !view.waiting.is_empty() {
             let (address, pane_id) = view.waiting.remove(0);
             let unattached = view
                 .terminals
@@ -539,7 +546,7 @@ impl App {
         if view.attaching.contains_key(&address) {
             return;
         }
-        if view.attaching.len() >= MAX_ATTACHING {
+        if view.running.len() >= MAX_ATTACHING {
             if !view.waiting.iter().any(|(waiting, _)| *waiting == address) {
                 view.waiting.push((address, pane_id));
             }
@@ -548,6 +555,7 @@ impl App {
         view.next_attach += 1;
         let generation = view.next_attach;
         view.attaching.insert(address.clone(), generation);
+        view.running.insert(generation);
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             // The server loop always runs on its runtime; only a unit test
             // gets here, and its attach stays under way.
@@ -1097,8 +1105,58 @@ mod tests {
             {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [block("w3:p1", "t1")]}}
         ]))));
         let view = app.view.as_ref().unwrap();
-        assert!(view.waiting.is_empty(), "{:?}", view.waiting);
+        // Only the shown terminal waits or attaches; the dropped attaches
+        // still hold their slots until they report (#312 follow-up).
+        assert!(
+            view.waiting.iter().all(|(address, _)| address == "loop/t1"),
+            "{:?}",
+            view.waiting
+        );
         assert!(view.attaching.keys().all(|address| address == "loop/t1"));
+    }
+
+    // #312 follow-up: the slots count attaches whose thread still runs. A
+    // layout that drops its terminals while their attaches block leaves
+    // those threads running, so new terminals wait until they report.
+    #[test]
+    fn dropped_attaches_hold_their_slots_until_they_report() {
+        let mut app = app();
+        let children = |from: usize| -> Vec<serde_json::Value> {
+            (from..from + MAX_ATTACHING)
+                .map(|n| block(&format!("w3:p{n}"), &format!("t{n}")))
+                .collect()
+        };
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": children(1)}}
+        ]))));
+        let dropped: Vec<(String, u64)> = app
+            .view
+            .as_ref()
+            .unwrap()
+            .attaching
+            .iter()
+            .map(|(address, generation)| (address.clone(), *generation))
+            .collect();
+        assert_eq!(dropped.len(), MAX_ATTACHING);
+        app.apply_view_layout(&layout(one_space(json!([
+            {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": children(100)}}
+        ]))));
+        let view = app.view.as_ref().unwrap();
+        assert!(
+            view.attaching.is_empty(),
+            "no slot is free: {:?}",
+            view.attaching
+        );
+        assert_eq!(view.waiting.len(), MAX_ATTACHING);
+        let (address, generation) = dropped[0].clone();
+        app.handle_view_event(ViewEvent::AttachFailed {
+            address,
+            generation,
+            reason: "far core away".into(),
+        });
+        let view = app.view.as_ref().unwrap();
+        assert_eq!(view.attaching.len(), 1, "one dropped attach reported");
+        assert_eq!(view.waiting.len(), MAX_ATTACHING - 1);
     }
 
     #[test]
