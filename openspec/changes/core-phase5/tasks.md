@@ -888,7 +888,7 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   with their fixes reverted; `just check` 0 on 88af72b3 (5888 + 158 tests; windows-lint skipped on macOS);
   `CORE_MACHINE_PARTS="link lease fleet" core_machine_live_test.sh` 0 on a debug binary built from 88af72b3 and
   copied out of the shared target, with shortened waits (`V3_SECS=150`, `V38_SECS=300`).
-- [x] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
+- [x] E.3 View actions (new tab, split, close pane, rename) through `machine.exec`, names as JSON data, never argv or a shell line; V20
   Built (design call: the far herdr's API through the fleet CLI's reviewed path, not its CLI verbs; D7 as built):
   `view::policy` gains `Far` for `tab.create`, `pane.split`, `pane.close`, `workspace.rename`, `tab.rename` and
   `pane.rename`, advertised and, in `server/headless/endpoint_requests.rs` (`take_view_action`), not dispatched:
@@ -923,12 +923,50 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   stay. Limits: the view does not move to a new tab or pane (focus stays where it was; the far screen keeps its
   own); a missing verb is asked again on each try (one exec each, so an update there shows at once); tab and
   workspace closes in a view still detach; a request answered by a far herdr that is not this build gets an `ok`
-  for a result this build does not read.
-  Gates, m4m, 2026-11-23, under the shared lock: targeted `view core_machine` tests green; `just check` 0 on 1c456e75
-  (5980 + 158 tests; windows-lint skipped on macOS); on a debug binary of 1c456e75 copied out of the shared target,
-  `core_view_live_test.sh` (V30_IDLE_SECS=20) and `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0, nothing
-  left in the passwd home's state. Not run: the panes, link and lease parts (nothing in them changed), the bench (no
-  render, layout, PTY or detection work added), CI (not pushed).
+  for a result this build does not read; `prefix x` in a view now ends the far program (D6).
+  First gates (before the review): `just check` 0 on 1c456e75; the live parts below 0 on its debug binary.
+  Review fixes (independent review of E.3, 2026-11-23; commits 2d3c93dc, 59004533, 4c96d2d2, c758b75c, 0a0fda3d):
+  - M1: an older far herdr answers a method it lacks with `invalid_request` ("unknown variant `<method>`, expected
+    one of ..."; only retired `pane.graphics.*` give `unknown_method`): both are the missing verb, shown as `<m>'s
+    herdr does not take <method>; update Herdr there`, never the far method list. Tests feed the real shape from
+    `api::unparsed_request_response`, the API's own code path (now one function).
+  - M2: a close, split or rename of a held pane is refused; a forced close goes only to the pane and far terminal
+    whose unforced close the far herdr asked to confirm (`ViewApp::note_close_asked`), so a confirmation opened
+    before a hold reaches nothing else; just before the request the far document is read again and must show the
+    same terminal under that far pane id (`still_aimed`). Left: a far change between that read and the far
+    herdr's handling (milliseconds); the far API has no check by terminal.
+  - M4: every pane whose public id moved, or that took an id another pane had, is held (`hold_moved_public_ids`),
+    and a pane the far herdr has no number for (`w3:x<n>`) is refused.
+  - M3: one deadline, 45 s from the moment the view takes the action (`VIEW_ACTION_BUDGET`, a compile-time check
+    holds it 10 s under the client's 60 s): a second action is refused at once (`try_lock`), the probe runs 12 s,
+    the aim check's `doc.get` 5 s, the request what is left, 15 s at most, not sent under 5 s. The client lane
+    keeps one command per endpoint by design, so that client's other commands wait 45 s at worst, never a retry.
+  - M5: `fleet::view::send` takes a `ViewRoute` (core, machine state, lease holder, far document reader), set per
+    view (`ViewApp::set_route` in tests); `FakeCore` answers `machine.exec` per call (`exec_handler`). Live:
+    `core_fleet_live_test.sh` closes the view's new tab's pane with `prefix x` over herdr's own link.
+  - L1-L4: a reply with neither result nor error, or a non-object error, is `view_action_failed` "may have run";
+    only `confirmation_required` passes on, every other far code (`stale_target`, `stale_content`, unknown) is
+    `view_action_failed`, shown; `cwd`, `env` or `on` is refused, not stripped; ids left out resolve against the
+    sending client's own tab (`client_own_tab`, no server-focus fallback), refused when it has none.
+  - L5-L7: the client test takes the real welcome list and the view's real answer; the lease test reads the
+    lease during the request after a probe that removed the first write; docs below and in D6/D7/V20, docs/next
+    (a pane close in a view ends the far program, a tab or workspace close still detaches).
+  Tests (each failed with its fix reverted, checked on m4m): `a_missing_far_verb_is_the_actions_refusal`,
+  `far_answers_become_the_clients` (L1, L2), `a_far_refusal_in_a_view_is_a_notice_and_the_view_stays` (also fails
+  with `tab.create` not `Far`), `an_action_on_a_held_pane_is_refused`,
+  `a_confirmed_close_reaches_only_the_pane_it_was_asked_for`, `a_pane_number_the_view_gave_never_reaches_another_far_pane`,
+  `the_far_pane_is_checked_again_before_the_request`, `a_folder_an_environment_or_a_machine_is_refused_not_dropped`,
+  `ids_left_out_resolve_against_the_clients_own_tab`, `a_views_close_reaches_the_far_pane_it_aimed_at`
+  (app::view_actions); `the_request_runs_under_a_keep_lease_written_again_after_the_probe`,
+  `a_second_action_while_one_runs_is_refused_at_once` (hangs with a blocking lock), `an_action_ends_within_its_deadline`,
+  `a_failed_aim_check_sends_nothing`, `v20_...` now asserts the 15 s run (fleet::view);
+  `a_view_action_resolves_left_out_ids_against_the_clients_own_tab` (headless).
+  Gates, m4m, 2026-11-23, under the shared lock: targeted `view core_machine` tests green; `just check` 0 on
+  0a0fda3d (6000 + 158 tests; windows-lint skipped on macOS; only this tasks.md changed after); on a debug binary of
+  0a0fda3d copied out of the shared target, `core_view_live_test.sh` (V30_IDLE_SECS=20) and
+  `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (with the M5 close: far pane w1:p2, t2, its program ended,
+  the other far panes as they were), nothing left in the passwd home's state. Not run: the panes, link and lease
+  parts (nothing in them changed), the bench (no render, layout, PTY or detection work added), CI (not pushed).
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
