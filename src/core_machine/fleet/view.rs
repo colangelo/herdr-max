@@ -78,6 +78,11 @@ pub(crate) type TerminalReader = Arc<dyn Fn(&str) -> Result<Value, String> + Sen
 /// The check run just before the request (`send`).
 pub(crate) type AimCheck = Box<dyn FnOnce() -> Result<(), String> + Send>;
 
+/// What happens at the point the request is sent, after every step that can
+/// still refuse it: the person's one-use confirmation is spent here (fork
+/// issue 316, review item 2). `Err` sends nothing.
+pub(crate) type Commit = Box<dyn FnOnce() -> Result<(), String> + Send>;
+
 /// Where a view's actions go: the primary core, herdr's machine state, the
 /// view's lease holder and the far document's and terminals' readers. A
 /// test points them at a fake core and a scratch folder. Clones share one
@@ -91,6 +96,7 @@ pub(crate) struct ViewRoute {
     layout: LayoutReader,
     terminal: TerminalReader,
     busy: Arc<Mutex<()>>,
+    leases: Arc<RunningLeases>,
 }
 
 impl ViewRoute {
@@ -108,6 +114,7 @@ impl ViewRoute {
                     .map_err(|err| err.to_string())
             }),
             busy: Arc::default(),
+            leases: Arc::default(),
         }
     }
 
@@ -122,6 +129,7 @@ impl ViewRoute {
             layout,
             terminal: Arc::new(|_| Err("no far terminal in this test".into())),
             busy: Arc::default(),
+            leases: Arc::default(),
         }
     }
 
@@ -129,6 +137,20 @@ impl ViewRoute {
     pub(crate) fn with_terminal(mut self, terminal: TerminalReader) -> Self {
         self.terminal = terminal;
         self
+    }
+
+    /// The view server's graceful end: removes the lease of every action
+    /// still running of this route, and no action of it writes one again
+    /// (fork issue 316, M7 and review item 5). Those actions' threads do not
+    /// outlive the process to remove their own.
+    pub(crate) fn end(&self) {
+        let mut book = self.leases.book();
+        book.ended = true;
+        for (dir, holder) in book.running.drain(..) {
+            if let Err(err) = dir.remove_lease(&holder) {
+                tracing::warn!(%err, "could not remove a running view action's lease");
+            }
+        }
     }
 
     /// The far document as core has it now.
@@ -149,7 +171,9 @@ impl ViewRoute {
 /// far pane the person aimed at is still that one (review M2), else nothing
 /// is sent; it gets `VIEW_CHECK_SECS`, never more than the deadline leaves
 /// less the shortest request, and one that has not answered by then sends
-/// nothing (E.3 review, item 7).
+/// nothing (E.3 review, item 7). `commit` runs last of all, once the lease
+/// is written and the run is known: it spends what the request spends, so
+/// anything that refuses before spends nothing.
 /// Everything ends by `deadline`.
 pub(crate) fn send(
     route: &ViewRoute,
@@ -157,6 +181,7 @@ pub(crate) fn send(
     line: &[u8],
     deadline: Instant,
     check: AimCheck,
+    commit: Commit,
 ) -> Result<Vec<u8>, String> {
     let not_sent = |why: String| format!("{why}; nothing was sent to {name}");
     let _one = match route.busy.try_lock() {
@@ -222,7 +247,7 @@ pub(crate) fn send(
     if left(deadline) < Duration::from_secs(before_probe) {
         return Err(out_of_time());
     }
-    let lease = KeepLease::write(&dir, &route.holder)
+    let lease = KeepLease::write(&dir, &route.holder, &route.leases)
         .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
     let far = far_herdr_within(core, name, &dir, &session, &target.session, VIEW_PROBE_SECS)?;
     if left(deadline)
@@ -245,6 +270,7 @@ pub(crate) fn send(
         .write_again()
         .map_err(|err| not_sent(format!("{name}: could not write the lease: {err}")))?;
     let run = request_secs(left(deadline)).ok_or_else(out_of_time)?;
+    commit().map_err(not_sent)?;
     let argv = bridge_argv(&far, &session);
     FarRoute {
         core,
@@ -309,7 +335,7 @@ fn not_connected(name: &MachineName, state: &str) -> String {
 /// The view's `cli-<pid>` keep lease for one action: written before the
 /// probe and again before the request, removed when the action ends, and
 /// by the view server's graceful end while an action still runs
-/// (`remove_running_leases`, fork issue 316 M7). No renewer runs: the
+/// (`ViewRoute::end`, fork issue 316 M7). No renewer runs: the
 /// whole action ends within its 45 s (an aim check unwaited past its share
 /// ends on its own 5 s calls), and a view killed during one leaves a lease
 /// that keeps an up link a minute at most and admits no dial. No
@@ -318,38 +344,57 @@ fn not_connected(name: &MachineName, state: &str) -> String {
 struct KeepLease<'a> {
     dir: &'a MachineDir,
     holder: &'a LeaseHolder,
+    leases: &'a RunningLeases,
 }
 
-/// The leases of the actions running now, for the view server's end.
-static RUNNING_LEASES: Mutex<Vec<(MachineDir, LeaseHolder)>> = Mutex::new(Vec::new());
+/// The leases of the actions running now, and whether the view server has
+/// ended: after that no lease is written. One per route (so one per view
+/// server), never a process-wide list.
+#[derive(Default)]
+struct RunningLeases(Mutex<LeaseBook>);
 
-fn running_leases() -> std::sync::MutexGuard<'static, Vec<(MachineDir, LeaseHolder)>> {
-    match RUNNING_LEASES.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+#[derive(Default)]
+struct LeaseBook {
+    running: Vec<(MachineDir, LeaseHolder)>,
+    ended: bool,
 }
 
-/// Removes the lease of every view action still running: the view server
-/// ends (its loop returned), and those actions' threads do not outlive the
-/// process to remove their own (fork issue 316, M7).
-pub(crate) fn remove_running_leases() {
-    for (dir, holder) in running_leases().drain(..) {
-        if let Err(err) = dir.remove_lease(&holder) {
-            tracing::warn!(%err, "could not remove a running view action's lease");
+impl RunningLeases {
+    fn book(&self) -> std::sync::MutexGuard<'_, LeaseBook> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 }
 
 impl<'a> KeepLease<'a> {
-    fn write(dir: &'a MachineDir, holder: &'a LeaseHolder) -> io::Result<Self> {
-        let lease = Self { dir, holder };
-        running_leases().push((dir.clone(), holder.clone()));
+    fn write(
+        dir: &'a MachineDir,
+        holder: &'a LeaseHolder,
+        leases: &'a RunningLeases,
+    ) -> io::Result<Self> {
+        let lease = Self {
+            dir,
+            holder,
+            leases,
+        };
+        lease
+            .leases
+            .book()
+            .running
+            .push((dir.clone(), holder.clone()));
         lease.write_again()?;
         Ok(lease)
     }
 
+    /// Written under the list's lock, so a server end that removed the
+    /// leases cannot be followed by a write (review item 5).
     fn write_again(&self) -> io::Result<()> {
+        let book = self.leases.book();
+        if book.ended {
+            return Err(io::Error::other("the view server is ending"));
+        }
         self.dir
             .write_keep_lease(self.holder, now_unix() + VIEW_LEASE_SECS)
     }
@@ -358,12 +403,13 @@ impl<'a> KeepLease<'a> {
 impl Drop for KeepLease<'_> {
     fn drop(&mut self) {
         {
-            let mut running = running_leases();
-            if let Some(at) = running
+            let mut book = self.leases.book();
+            if let Some(at) = book
+                .running
                 .iter()
                 .position(|(dir, holder)| dir.path() == self.dir.path() && holder == self.holder)
             {
-                running.remove(at);
+                book.running.remove(at);
             }
         }
         if let Err(err) = self.dir.remove_lease(self.holder) {

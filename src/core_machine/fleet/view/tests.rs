@@ -99,6 +99,20 @@ fn fine() -> AimCheck {
     Box::new(|| Ok(()))
 }
 
+/// A commit with nothing to spend.
+fn spent() -> Commit {
+    Box::new(|| Ok(()))
+}
+
+/// A commit that counts its calls.
+fn counted(calls: &Arc<std::sync::atomic::AtomicUsize>) -> Commit {
+    let calls = Arc::clone(calls);
+    Box::new(move || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+}
+
 fn tab_create(id: &str) -> Vec<u8> {
     format!(
         "{}\n",
@@ -123,7 +137,15 @@ fn v20_a_name_reaches_the_far_herdr_as_data_never_a_shell_line() {
     core.set_machine("loop", "connected");
     let (root, dir) = added("view-v20");
 
-    let reply = send(&route(&core, &root), &machine(), &line, soon(), fine()).expect("sent");
+    let reply = send(
+        &route(&core, &root),
+        &machine(),
+        &line,
+        soon(),
+        fine(),
+        spent(),
+    )
+    .expect("sent");
     assert_eq!(reply, far_reply);
 
     let sent = execs(&core);
@@ -181,6 +203,7 @@ fn an_action_on_a_dormant_machine_refuses_and_dials_nothing() {
         &tab_create("view:2"),
         soon(),
         fine(),
+        spent(),
     )
     .expect_err("refused");
     assert!(err.contains("loop is dormant: press a key"), "{err}");
@@ -213,6 +236,7 @@ fn a_far_refusal_comes_back_as_the_reply() {
         &tab_create("view:3"),
         soon(),
         fine(),
+        spent(),
     )
     .expect("a reply");
     assert_eq!(reply, far_reply);
@@ -254,6 +278,7 @@ fn the_request_runs_under_a_keep_lease_written_again_after_the_probe() {
         &tab_create("view:5"),
         soon(),
         fine(),
+        spent(),
     )
     .expect("sent");
     assert_eq!(execs(&core).len(), 2, "the probe and the request");
@@ -291,6 +316,7 @@ fn a_machine_herdr_did_not_add_gets_nothing() {
         &tab_create("view:4"),
         soon(),
         fine(),
+        spent(),
     )
     .expect_err("refused");
     assert!(err.contains("herdr here did not add loop"), "{err}");
@@ -308,7 +334,15 @@ fn a_second_action_while_one_runs_is_refused_at_once() {
     let route = route(&core, &root);
     let running = route.busy.lock().expect("the first action");
     let started = Instant::now();
-    let err = send(&route, &machine(), &tab_create("view:6"), soon(), fine()).expect_err("refused");
+    let err = send(
+        &route,
+        &machine(),
+        &tab_create("view:6"),
+        soon(),
+        fine(),
+        spent(),
+    )
+    .expect_err("refused");
     assert!(started.elapsed() < Duration::from_secs(2), "no wait");
     assert!(
         err.contains("another action on loop from this view is still running")
@@ -334,6 +368,7 @@ fn an_action_ends_within_its_deadline() {
         &tab_create("view:7"),
         Instant::now() + Duration::from_secs(20),
         fine(),
+        spent(),
     )
     .expect_err("out of time");
     assert!(
@@ -367,6 +402,7 @@ fn a_failed_aim_check_sends_nothing() {
         &tab_create("view:8"),
         soon(),
         Box::new(|| Err("pane w3:p2 shows another terminal there now".into())),
+        spent(),
     )
     .expect_err("refused");
     assert!(
@@ -393,10 +429,18 @@ fn one_views_running_action_does_not_refuse_anothers() {
         &tab_create("view:9"),
         soon(),
         fine(),
+        spent(),
     )
     .expect("another view's route is free");
-    let err = send(&busy, &machine(), &tab_create("view:10"), soon(), fine())
-        .expect_err("the same view's is not");
+    let err = send(
+        &busy,
+        &machine(),
+        &tab_create("view:10"),
+        soon(),
+        fine(),
+        spent(),
+    )
+    .expect_err("the same view's is not");
     assert!(err.contains("is still running"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -422,6 +466,7 @@ fn the_probe_of_a_view_action_runs_within_its_budget() {
         &tab_create("view:11"),
         soon(),
         fine(),
+        spent(),
     )
     .expect("sent");
     let sent = execs(&core);
@@ -449,6 +494,7 @@ fn an_aim_check_that_does_not_answer_sends_nothing() {
             std::thread::sleep(Duration::from_secs(40));
             Ok(())
         }),
+        spent(),
     )
     .expect_err("out of time");
     let took = started.elapsed();
@@ -481,6 +527,7 @@ fn a_core_that_does_not_answer_holds_no_call_past_the_deadline() {
         &tab_create("view:20"),
         Instant::now() + Duration::from_secs(1),
         fine(),
+        spent(),
     )
     .expect_err("no answer");
     assert!(
@@ -510,7 +557,8 @@ fn a_core_that_does_not_answer_holds_no_call_past_the_deadline() {
 
 // Fork issue 316, M7: the view server's graceful end removes the lease of
 // an action still running, whose thread will not outlive the process to
-// remove its own.
+// remove its own. The list is the route's own, so tests in one process do
+// not share it.
 #[test]
 fn the_view_servers_end_removes_a_running_actions_lease() {
     let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
@@ -518,9 +566,10 @@ fn the_view_servers_end_removes_a_running_actions_lease() {
     let (root, dir) = added("view-end-lease");
     let (release, held) = std::sync::mpsc::channel::<()>();
     let route = route(&core, &root);
+    let running_route = route.clone();
     let running = std::thread::spawn(move || {
         send(
-            &route,
+            &running_route,
             &machine(),
             &tab_create("view:21"),
             soon(),
@@ -528,6 +577,7 @@ fn the_view_servers_end_removes_a_running_actions_lease() {
                 let _ = held.recv();
                 Err("the view ended".into())
             }),
+            spent(),
         )
     });
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -535,10 +585,104 @@ fn the_view_servers_end_removes_a_running_actions_lease() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(dir.leases().len(), 1, "the running action's lease");
-    remove_running_leases();
+    route.end();
     assert!(dir.leases().is_empty(), "removed at the server's end");
     let _ = release.send(());
     let _ = running.join();
     assert!(execs(&core).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// Fork issue 316, review item 5: an action thread still running after the
+// server's end must not write its lease again: nothing is sent, no lease is
+// left, and nothing is spent.
+#[test]
+fn an_action_running_past_the_servers_end_writes_no_lease_and_sends_nothing() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, dir) = added("view-end-after");
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let route = route(&core, &root);
+    let running_route = route.clone();
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = counted(&commits);
+    let running = std::thread::spawn(move || {
+        send(
+            &running_route,
+            &machine(),
+            &tab_create("view:22"),
+            soon(),
+            Box::new(move || {
+                let _ = held.recv();
+                Ok(())
+            }),
+            counted,
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir.leases().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    route.end();
+    let _ = release.send(());
+    let err = running
+        .join()
+        .expect("joined")
+        .expect_err("the lease cannot be written again");
+    assert!(err.contains("could not write the lease"), "{err}");
+    assert!(err.contains("nothing was sent to loop"), "{err}");
+    assert!(execs(&core).is_empty(), "nothing was sent");
+    assert!(dir.leases().is_empty(), "no lease written after the end");
+    assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// Fork issue 316, review item 2: what the request spends (the person's
+// confirmation) is spent once, where the request goes, and by nothing that
+// refuses before it.
+#[test]
+fn the_commit_runs_only_where_the_request_is_sent() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, _dir) = added("view-commit");
+    let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let route = route(&core, &root);
+
+    let err = send(
+        &route,
+        &machine(),
+        &tab_create("view:23"),
+        soon(),
+        Box::new(|| Err("aimed elsewhere".into())),
+        counted(&commits),
+    )
+    .expect_err("refused by the check");
+    assert!(err.contains("aimed elsewhere"), "{err}");
+    assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let err = send(
+        &route,
+        &machine(),
+        &tab_create("view:24"),
+        soon(),
+        fine(),
+        Box::new(|| Err("the confirmation is gone".into())),
+    )
+    .expect_err("refused by the commit");
+    assert!(err.contains("the confirmation is gone"), "{err}");
+    assert!(err.contains("nothing was sent to loop"), "{err}");
+    assert!(execs(&core).is_empty(), "a refused commit sends nothing");
+
+    send(
+        &route,
+        &machine(),
+        &tab_create("view:25"),
+        soon(),
+        fine(),
+        counted(&commits),
+    )
+    .expect("sent");
+    assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(execs(&core).len(), 1);
     let _ = std::fs::remove_dir_all(&root);
 }

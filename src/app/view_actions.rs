@@ -46,7 +46,7 @@ use crate::api::schema::{
     PaneSplitIfTerminalParams, PaneTerminalExpectation, Request, ResponseResult, SuccessResponse,
     TabCreateParams, TabRenameParams, WorkspaceRenameParams,
 };
-use crate::core_machine::fleet::view::{ViewRoute, VIEW_ACTION_BUDGET};
+use crate::core_machine::fleet::view::{AimCheck, Commit, ViewRoute, VIEW_ACTION_BUDGET};
 use crate::core_machine::MachineName;
 use crate::layout::PaneId;
 use crate::view::instance::FarInstance;
@@ -88,49 +88,55 @@ pub(crate) struct Aimed {
 /// The most closes waiting for a person's confirmation a view keeps.
 const MAX_CLOSE_ASKED: usize = 32;
 
-/// The person's confirmations of far closes, by far pane (review M2, M4):
-/// one is minted only when the far herdr answered `confirmation_required`
-/// to a close without `force` of that pane and program, lasts
-/// `CONFIRM_FOR`, and is spent by the one forced close it lets through,
-/// just before its request (the aim check). Shared with an action's thread:
-/// a send refused before the request (busy, not connected, the aim check)
-/// leaves it in place (E.3 review, item 9).
+/// The person's confirmations of far closes, by client and far pane (review
+/// M2, M4): one is minted only when the far herdr answered
+/// `confirmation_required` to a close without `force` of that pane and
+/// program by that client, lasts `CONFIRM_FOR`, and is spent by that
+/// client's one forced close it lets through, at the point the request is
+/// sent (`ViewRoute`'s `send` calls the spend last of all). Another client
+/// of the same view cannot spend it (fork issue 316, review item 3).
+/// Shared with an action's thread: a send refused before the request (busy,
+/// not connected, the aim check, a timeout, the lease) leaves it in place
+/// (E.3 review, item 9).
 #[derive(Clone, Default)]
-pub(crate) struct CloseAsked(Arc<Mutex<HashMap<String, (Aimed, Instant)>>>);
+pub(crate) struct CloseAsked(Arc<Mutex<HashMap<(u64, String), (Aimed, Instant)>>>);
 
 impl CloseAsked {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Aimed, Instant)>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<(u64, String), (Aimed, Instant)>> {
         match self.0.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    /// The far herdr asked to confirm the close of `aimed` at `now`.
-    fn mint(&self, aimed: &Aimed, now: Instant) {
+    /// The far herdr asked `client` to confirm the close of `aimed` at `now`.
+    fn mint(&self, client: u64, aimed: &Aimed, now: Instant) {
         let mut asked = self.map();
+        let key = (client, aimed.far_pane.clone());
         asked.retain(|_, (_, until)| *until > now);
-        if asked.len() >= MAX_CLOSE_ASKED && !asked.contains_key(&aimed.far_pane) {
+        if asked.len() >= MAX_CLOSE_ASKED && !asked.contains_key(&key) {
             asked.clear();
         }
-        asked.insert(aimed.far_pane.clone(), (aimed.clone(), now + CONFIRM_FOR));
+        asked.insert(key, (aimed.clone(), now + CONFIRM_FOR));
     }
 
-    /// Whether a confirmation of exactly `aimed` is there at `now`.
-    fn was_asked(&self, aimed: &Aimed, now: Instant) -> bool {
+    /// Whether a confirmation of exactly `aimed` by `client` is there at
+    /// `now`.
+    fn was_asked(&self, client: u64, aimed: &Aimed, now: Instant) -> bool {
         self.map()
-            .get(&aimed.far_pane)
+            .get(&(client, aimed.far_pane.clone()))
             .is_some_and(|(asked, until)| asked == aimed && *until > now)
     }
 
-    /// Spends the confirmation of `aimed`, if it is there at `now`.
-    fn spend(&self, aimed: &Aimed, now: Instant) -> bool {
+    /// Spends `client`'s confirmation of `aimed`, if it is there at `now`.
+    fn spend(&self, client: u64, aimed: &Aimed, now: Instant) -> bool {
         let mut asked = self.map();
+        let key = (client, aimed.far_pane.clone());
         let there = asked
-            .get(&aimed.far_pane)
+            .get(&key)
             .is_some_and(|(asked, until)| asked == aimed && *until > now);
         if there {
-            asked.remove(&aimed.far_pane);
+            asked.remove(&key);
         }
         there
     }
@@ -469,7 +475,7 @@ impl App {
         }
         let action = match self
             .view_far_action(&request.method, client_tab)
-            .and_then(|action| self.confirmed_close(action))
+            .and_then(|action| self.confirmed_close(action, client))
         {
             Ok(action) => action,
             Err(why) => {
@@ -496,37 +502,40 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("herdr-view-action".into())
             .spawn(move || {
-                let check = {
+                let check: AimCheck = {
                     let (route, machine, aimed) = (route.clone(), machine.clone(), aimed.clone());
-                    let close_asked = close_asked.clone();
                     Box::new(move || {
-                        still_aimed(&route, &machine, aimed.as_ref(), closing.is_some())?;
-                        // M4: the request goes now, so the person's
-                        // confirmation is spent now, once. Refused before
-                        // it, the confirmation stays for the next try (E.3
-                        // review, item 9).
-                        match (closing, aimed.as_ref()) {
-                            (Some(true), Some(aimed))
-                                if !close_asked.spend(aimed, Instant::now()) =>
-                            {
-                                Err(format!(
-                                    "the close you confirmed of pane {} on {machine} was sent already or waited over {} s; close it again",
-                                    aimed.far_pane,
-                                    CONFIRM_FOR.as_secs()
-                                ))
-                            }
-                            _ => Ok(()),
+                        still_aimed(&route, &machine, aimed.as_ref(), closing.is_some())
+                    })
+                };
+                // M4: the person's confirmation is spent where the request
+                // is sent, once: a timeout, a lease that could not be
+                // written or a run too short to send leave it for the next
+                // try (E.3 review, item 9; issue 316 review, item 2).
+                let spend: Commit = {
+                    let (close_asked, machine, aimed) =
+                        (close_asked.clone(), machine.clone(), aimed.clone());
+                    Box::new(move || match (closing, aimed.as_ref()) {
+                        (Some(true), Some(aimed))
+                            if !close_asked.spend(client, aimed, Instant::now()) =>
+                        {
+                            Err(format!(
+                                "the close you confirmed of pane {} on {machine} was sent already or waited over {} s; close it again",
+                                aimed.far_pane,
+                                CONFIRM_FOR.as_secs()
+                            ))
                         }
+                        _ => Ok(()),
                     })
                 };
                 let reply = crate::core_machine::fleet::view::send(
-                    &route, &machine, &line, deadline, check,
+                    &route, &machine, &line, deadline, check, spend,
                 );
                 // M4: a confirmation is minted only when the far herdr asks
                 // for one, for the pane and program the close aimed at.
                 if let (Ok(reply), Some(false), Some(aimed)) = (&reply, closing, aimed.as_ref()) {
                     if far_error_code(reply).as_deref() == Some(CONFIRMATION_REQUIRED) {
-                        close_asked.mint(aimed, Instant::now());
+                        close_asked.mint(client, aimed, Instant::now());
                     }
                 }
                 let _ = thread_respond.send(client_reply(
@@ -550,7 +559,7 @@ impl App {
     /// be lost) goes only to the far pane, terminal and program whose
     /// confirmation the far herdr asked for, within `CONFIRM_FOR` (review
     /// M2, M4). The confirmation is spent just before the request.
-    fn confirmed_close(&mut self, action: FarAction) -> Result<FarAction, String> {
+    fn confirmed_close(&mut self, action: FarAction, client: u64) -> Result<FarAction, String> {
         let (Method::PaneCloseIfTerminal(params), Some(aimed)) = (&action.method, &action.aimed)
         else {
             return Ok(action);
@@ -558,7 +567,7 @@ impl App {
         let Some(view) = self.view.as_ref() else {
             return Ok(action);
         };
-        if !params.force || view.close_asked.was_asked(aimed, Instant::now()) {
+        if !params.force || view.close_asked.was_asked(client, aimed, Instant::now()) {
             return Ok(action);
         }
         Err(format!(

@@ -67,6 +67,9 @@ fn app() -> App {
     app
 }
 
+/// The client whose actions the tests take.
+const CLIENT: u64 = 1;
+
 /// The client's window shows the far tab w3:t1.
 const FIRST_TAB: ClientTab = Some((0, 0));
 
@@ -364,11 +367,11 @@ fn an_action_on_a_held_pane_is_refused() {
 
 /// The far herdr answered `confirmation_required` to `asked`'s close now.
 fn far_asked_to_confirm(app: &App, asked: &FarAction) {
-    app.view
-        .as_ref()
-        .unwrap()
-        .close_asked
-        .mint(asked.aimed.as_ref().expect("aimed"), Instant::now());
+    app.view.as_ref().unwrap().close_asked.mint(
+        CLIENT,
+        asked.aimed.as_ref().expect("aimed"),
+        Instant::now(),
+    );
 }
 
 // Review M2: a close the far herdr asked to confirm goes, forced, only to
@@ -382,19 +385,22 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
         .view_far_action(&close("w3:p2", false), FIRST_TAB)
         .unwrap();
     // M4: a close without force mints no confirmation on its own.
-    let asked = app.confirmed_close(asked).expect("not forced: sent");
+    let asked = app
+        .confirmed_close(asked, CLIENT)
+        .expect("not forced: sent");
     let forced = app
         .view_far_action(&close("w3:p2", true), FIRST_TAB)
         .unwrap();
     assert!(
-        app.confirmed_close(forced).is_err(),
+        app.confirmed_close(forced, CLIENT).is_err(),
         "the far herdr asked for no confirmation"
     );
     far_asked_to_confirm(&app, &asked);
     let forced = app
         .view_far_action(&close("w3:p2", true), FIRST_TAB)
         .unwrap();
-    app.confirmed_close(forced).expect("the same pane: sent");
+    app.confirmed_close(forced, CLIENT)
+        .expect("the same pane: sent");
 
     let asked = app
         .view_far_action(&close("w3:p2", false), FIRST_TAB)
@@ -415,7 +421,9 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
     let forced = app
         .view_far_action(&close("w3:p2", true), FIRST_TAB)
         .unwrap();
-    let err = app.confirmed_close(forced).expect_err("another terminal");
+    let err = app
+        .confirmed_close(forced, CLIENT)
+        .expect_err("another terminal");
     assert!(err.contains("close it again"), "{err}");
 
     // E.3 review, item 1: the same far pane and address, another program
@@ -431,13 +439,15 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
     let forced = app
         .view_far_action(&close("w3:p2", true), FIRST_TAB)
         .unwrap();
-    let err = app.confirmed_close(forced).expect_err("another program");
+    let err = app
+        .confirmed_close(forced, CLIENT)
+        .expect_err("another program");
     assert!(err.contains("another pane or program"), "{err}");
 
     let forced = app
         .view_far_action(&close("w3:p1", true), FIRST_TAB)
         .unwrap();
-    assert!(app.confirmed_close(forced).is_err(), "never asked");
+    assert!(app.confirmed_close(forced, CLIENT).is_err(), "never asked");
 }
 
 /// The public id the view gives the `nth` pane (from 0) of workspace w3
@@ -1351,10 +1361,90 @@ fn a_confirmation_expires() {
     let aimed = asked.aimed.expect("aimed");
     let close_asked = app.view.as_ref().unwrap().close_asked.clone();
     let then = Instant::now();
-    close_asked.mint(&aimed, then);
-    assert!(close_asked.was_asked(&aimed, then + CONFIRM_FOR / 2));
-    assert!(!close_asked.was_asked(&aimed, then + CONFIRM_FOR));
-    assert!(!close_asked.spend(&aimed, then + CONFIRM_FOR));
-    assert!(close_asked.spend(&aimed, then), "still there, then spent");
-    assert!(!close_asked.spend(&aimed, then), "once");
+    close_asked.mint(CLIENT, &aimed, then);
+    assert!(close_asked.was_asked(CLIENT, &aimed, then + CONFIRM_FOR / 2));
+    assert!(!close_asked.was_asked(CLIENT, &aimed, then + CONFIRM_FOR));
+    assert!(!close_asked.spend(CLIENT, &aimed, then + CONFIRM_FOR));
+    assert!(
+        close_asked.spend(CLIENT, &aimed, then),
+        "still there, then spent"
+    );
+    assert!(!close_asked.spend(CLIENT, &aimed, then), "once");
+}
+
+// Fork issue 316, review item 3: a confirmation is its client's. Another
+// client of the same view cannot send, or spend, the close the first one
+// was asked to confirm.
+#[test]
+fn a_confirmation_is_spent_only_by_the_client_who_was_asked() {
+    let mut app = app();
+    let asked = app
+        .view_far_action(&close("w3:p2", false), FIRST_TAB)
+        .unwrap();
+    far_asked_to_confirm(&app, &asked);
+    let aimed = asked.aimed.clone().expect("aimed");
+    let other = CLIENT + 1;
+    let forced = app
+        .view_far_action(&close("w3:p2", true), FIRST_TAB)
+        .unwrap();
+    let err = app
+        .confirmed_close(forced, other)
+        .expect_err("another client's close");
+    assert!(err.contains("close it again"), "{err}");
+    let close_asked = app.view.as_ref().unwrap().close_asked.clone();
+    assert!(!close_asked.spend(other, &aimed, Instant::now()));
+    assert!(close_asked.was_asked(CLIENT, &aimed, Instant::now()));
+    let forced = app
+        .view_far_action(&close("w3:p2", true), FIRST_TAB)
+        .unwrap();
+    app.confirmed_close(forced, CLIENT).expect("the asked one");
+}
+
+// Fork issue 316, review item 2, the wiring: a forced close whose request is
+// not sent after the aim check passed (the view server ended meanwhile, so
+// the lease cannot be written again) leaves the confirmation for the next
+// try; before, the aim check spent it.
+#[test]
+fn a_forced_close_not_sent_after_the_aim_check_keeps_the_confirmation() {
+    let core =
+        FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_asks_to_confirm)));
+    core.set_machine("loop", "connected");
+    let (root, _dir) = added("view-forward-keeps");
+    let mut app = app();
+    let route_cell: Arc<std::sync::OnceLock<ViewRoute>> = Arc::default();
+    let ends = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (cell, end_now) = (Arc::clone(&route_cell), Arc::clone(&ends));
+    let route = ViewRoute::at(
+        &core.socket,
+        root.clone(),
+        Arc::new(move |_| {
+            if end_now.load(Ordering::SeqCst) {
+                if let Some(route) = cell.get() {
+                    route.end();
+                }
+            }
+            Ok(far_doc())
+        }),
+    )
+    .with_terminal(as_attached());
+    let _ = route_cell.set(route.clone());
+    app.view.as_mut().unwrap().set_route(route);
+    let asked = forward(&mut app, "endpoint:1", close("w3:p2", false));
+    assert_eq!(asked["error"]["code"], "confirmation_required", "{asked}");
+
+    ends.store(true, Ordering::SeqCst);
+    let refused = forward(&mut app, "endpoint:2", close("w3:p2", true));
+    assert_eq!(refused["error"]["code"], NOT_DONE, "{refused}");
+    assert_eq!(execs_of(&core), 1, "only the first, unforced request");
+    let aimed = app
+        .view_far_action(&close("w3:p2", true), FIRST_TAB)
+        .unwrap()
+        .aimed
+        .expect("aimed");
+    let close_asked = app.view.as_ref().unwrap().close_asked.clone();
+    assert!(
+        close_asked.was_asked(CLIENT, &aimed, Instant::now()),
+        "the confirmation is kept"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

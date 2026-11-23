@@ -223,12 +223,15 @@ fn run_view_server(machine: crate::core_machine::MachineName) -> io::Result<()> 
             };
             server.serve_as_view(presence);
             info!(%machine, client_socket = %socket.display(), "herdr view server started");
-            server.run().await
+            let result = server.run().await;
+            // An action still running has a lease its thread will not
+            // remove now, and writes none again (fork issue 316, M7).
+            if let Some(view) = server.app.view.as_mut() {
+                view.route().end();
+            }
+            result
         })
     });
-    // An action still running has a lease its thread will not remove now
-    // (fork issue 316, M7).
-    crate::core_machine::fleet::view::remove_running_leases();
     crate::logging::shutdown("server");
     result
 }
