@@ -21,6 +21,7 @@ pub(crate) fn visible_line(text: &str) -> Cow<'_, str> {
 /// backslash escaped too (`\\`), so far text cannot spell an escape that
 /// this function would have written. Apply it once to a string, at the
 /// point it is printed.
+#[cfg(unix)]
 pub(crate) fn far_line(text: &str) -> Cow<'_, str> {
     escape(text, true)
 }
@@ -106,6 +107,7 @@ mod tests {
 
     /// #310: a literal backslash in far text is escaped, so `\x1b` as text
     /// differs from an escaped ESC; and `far_text` keeps real newlines.
+    #[cfg(unix)]
     #[test]
     fn far_line_escapes_its_backslashes_once() {
         assert_eq!(far_line("\\x1b"), "\\\\x1b");
