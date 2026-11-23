@@ -673,8 +673,20 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   the `rebind_replaced_view_pane` path is covered by its parts' tests (no unit test drives a replaced runtime
   through the App, which needs a real core). Per-machine leases stay a later refinement.
 - [ ] D.9 Check for D.8: targeted tests, `just check` 0, `core_view_live_test.sh`, `core_machine_live_test.sh`
-  lease part
-  (gates below)
+  lease part; CI after the push
+  Local, m4m, 2026-11-23, under the shared lock, code head faffba19 (later commits are scripts and openspec
+  only), based on origin/master 136d563d (PR D): every new test failed with its fix reverted and passed with it
+  (M1, M2, M3, M4 with item 6, M5, M7 and items 1, 2, 3, 5, M8; M6's unit test cannot fail on the old code, whose
+  fault was in the raw arguments, so its proof is the live check). `just check` 0 (5924 + 158 tests;
+  windows-lint skipped on macOS as the justfile says). Live, a debug binary of faffba19 copied out of the shared
+  target: `core_view_live_test.sh` with V30_IDLE_SECS=20 (shortened) passed, M6's new check included (a view in
+  session `server` made only its lock, log and socket); a `--remote core:` tab on a view a newer client restarted
+  ended with it (item 4's question). `core_machine_live_test.sh` with `CORE_MACHINE_PARTS="link lease"`,
+  V3_SECS=60 and V38_SECS=120 (shortened) passed: the link part, V2, V7, V3, V38, the client part (its first key in
+  a pane of this Mac wrote the lease and started no dial, item 1), V33's wake and view parts (the view's first key
+  dialled, connected 8.19 s after its start). Each run left one pane-anchor helper of a scratch server whose
+  folder was gone; stopped by hand. Not run: the panes and fleet parts, `core_live_test.sh`, the bench (no render
+  or PTY path gained work beyond one hold lookup per view input event), CI (not pushed).
 
 ## PR E. Actions and the fleet CLI over the link
 
