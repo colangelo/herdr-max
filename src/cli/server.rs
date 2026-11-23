@@ -290,27 +290,37 @@ fn agent_manifest_update_error_response(err: &str) -> serde_json::Value {
 }
 
 fn print_agent_manifest_status(response: &serde_json::Value) {
+    print!("{}", agent_manifest_status_text(response));
+}
+
+/// The manifest status as printed. Far strings go through `target::shown`.
+fn agent_manifest_status_text(response: &serde_json::Value) -> String {
+    use super::target::shown;
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let result = &response["result"];
     let last_check = result["last_check_unix"]
         .as_u64()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "never".to_string());
-    let last_result = result["last_result"].as_str().unwrap_or("not checked");
-    println!("last check: {last_check}");
-    println!("result: {last_result}");
-    println!();
+    let last_result = shown(result["last_result"].as_str().unwrap_or("not checked"));
+    let _ = writeln!(out, "last check: {last_check}");
+    let _ = writeln!(out, "result: {last_result}");
+    let _ = writeln!(out);
 
     let Some(manifests) = result["manifests"].as_array() else {
-        return;
+        return out;
     };
     for manifest in manifests {
-        let agent = manifest["agent"].as_str().unwrap_or("-");
-        let source = manifest["source_kind"].as_str().unwrap_or("-");
-        let active_version = manifest["active_version"].as_str().unwrap_or("-");
-        let remote_version = manifest["cached_remote_version"].as_str().unwrap_or("-");
-        let remote_result = manifest["remote_update_result"]
-            .as_str()
-            .unwrap_or("not checked");
+        let agent = shown(manifest["agent"].as_str().unwrap_or("-"));
+        let source = shown(manifest["source_kind"].as_str().unwrap_or("-"));
+        let active_version = shown(manifest["active_version"].as_str().unwrap_or("-"));
+        let remote_version = shown(manifest["cached_remote_version"].as_str().unwrap_or("-"));
+        let remote_result = shown(
+            manifest["remote_update_result"]
+                .as_str()
+                .unwrap_or("not checked"),
+        );
         let local_override_shadowing_remote = manifest["local_override_shadowing_remote"]
             .as_bool()
             .unwrap_or(false);
@@ -321,17 +331,19 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
         } else {
             " "
         };
-        println!(
+        let _ = writeln!(
+            out,
             "{marker} {agent:<9} {source:<14} active {active_version:<14} remote {remote_version:<14} {remote_result}"
         );
         if let Some(error) = manifest["remote_update_error"].as_str() {
-            println!("  {error}");
+            let _ = writeln!(out, "  {}", shown(error));
         } else if local_override_shadowing_remote {
-            println!("  local override shadows cached remote rules");
+            let _ = writeln!(out, "  local override shadows cached remote rules");
         } else if let Some(warning) = manifest["warning"].as_str() {
-            println!("  {warning}");
+            let _ = writeln!(out, "  {}", shown(warning));
         }
     }
+    out
 }
 
 pub(super) fn live_handoff_command() -> clap::Command {
@@ -440,8 +452,35 @@ fn print_server_help() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::cli) mod tests {
     use super::*;
+
+    fn far_manifests_response() -> serde_json::Value {
+        use crate::cli::target::FAR_CONTROLS as F;
+        serde_json::json!({"result": {
+            "last_check_unix": 5, "last_result": F,
+            "manifests": [
+                {"agent": F, "source_kind": F, "active_version": F,
+                 "cached_remote_version": F, "remote_update_result": F,
+                 "remote_update_error": F},
+                {"agent": "claude", "warning": F}
+            ]
+        }})
+    }
+
+    /// `server agent-manifests` as printed, for the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        agent_manifest_status_text(&far_manifests_response())
+    }
+
+    #[test]
+    fn a_remote_manifest_status_prints_escaped_and_a_local_one_raw() {
+        use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+        assert_escaped(&as_remote(walk_text));
+        let local = walk_text();
+        assert!(local.contains(&format!("result: {FAR_CONTROLS}")));
+        assert!(local.contains(&format!("  {FAR_CONTROLS}")));
+    }
 
     #[test]
     fn server_status_hint_points_at_the_status_command_and_keeps_the_flags() {
