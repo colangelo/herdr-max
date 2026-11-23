@@ -1317,3 +1317,48 @@ fn a_kept_probe_counts_only_from_a_private_file() {
     assert_eq!(cached_far_herdr(&dir), None, "a symlink");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// M5: stale herdr state and a machine core lists under the same name
+/// that is not herdr's link (re-added by hand, another via, another
+/// session): refused before any lease, connect or exec.
+#[test]
+fn a_same_name_machine_that_is_not_herdrs_link_gets_nothing() {
+    for record in [
+        json!({"state": "connected", "via": false, "target": "loop"}),
+        json!({"state": "connected", "via": true, "target": "/bin/other-tool loop"}),
+        json!({"state": "connected", "via": true, "target": "/bin/herdr core-link loop",
+               "session": "someone-else"}),
+        json!({"state": "unreachable"}),
+    ] {
+        let core = FakeCore::start();
+        core.set_machine_record("loop", record.clone());
+        let (root, dir) = machine_dir("fleet-not-ours");
+        dir.write_target(&crate::core_machine::state::Target {
+            target: "ac@loop".into(),
+            session: "default".into(),
+            ssh: "/usr/bin/ssh".into(),
+            ssh_config: None,
+            ssh_auth_sock: None,
+        })
+        .expect("target");
+        match prepare(&CoreAt::at(&core.socket), &machine(), &dir, true) {
+            Lookup::Refused { code: 1, message } => {
+                assert!(
+                    message.contains("is not the one herdr added"),
+                    "{record}: {message}"
+                )
+            }
+            _ => panic!("{record}: not refused"),
+        }
+        assert!(dir.leases().is_empty(), "{record}: a lease was written");
+        assert!(
+            !core
+                .methods()
+                .iter()
+                .any(|method| method == "machine.exec" || method == "machine.connect"),
+            "{record}: {:?}",
+            core.methods()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

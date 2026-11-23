@@ -168,21 +168,32 @@ impl CoreAt {
     }
 }
 
-impl CoreLink for CoreAt {
-    fn state(&self, machine: &MachineName) -> Result<Option<String>, String> {
-        let Some(reply) = self
+impl CoreAt {
+    /// Core's record of `machine` in `machine.list`, `None` when core does
+    /// not list it or is not running.
+    fn record(&self, machine: &MachineName) -> Result<Option<Value>, String> {
+        let Some(mut reply) = self
             .call("machine.list", json!({}), Duration::from_secs(5))
             .map_err(|err| err.to_string())?
         else {
             return Ok(None);
         };
         Ok(reply["machines"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|record| record["name"] == machine.as_str())
-            .and_then(|record| record["state"].as_str())
-            .map(str::to_string))
+            .as_array_mut()
+            .and_then(|records| {
+                records
+                    .iter_mut()
+                    .find(|record| record["name"] == machine.as_str())
+            })
+            .map(Value::take))
+    }
+}
+
+impl CoreLink for CoreAt {
+    fn state(&self, machine: &MachineName) -> Result<Option<String>, String> {
+        Ok(self
+            .record(machine)?
+            .and_then(|record| record["state"].as_str().map(str::to_string)))
     }
 
     fn connect(&self, machine: &MachineName, timeout: Duration) -> Result<String, String> {
@@ -269,8 +280,8 @@ fn prepare(core: &CoreAt, name: &MachineName, dir: &MachineDir, dial: bool) -> L
             ),
         );
     };
-    let state = match core.state(name) {
-        Ok(Some(state)) => state,
+    let record = match core.record(name) {
+        Ok(Some(record)) => record,
         Ok(None) => {
             return refused(
                 1,
@@ -281,6 +292,22 @@ fn prepare(core: &CoreAt, name: &MachineName, dir: &MachineDir, dial: bool) -> L
         }
         Err(err) => return refused(1, format!("herdr-core did not list its machines: {err}")),
     };
+    // herdr's state is joined to core's record by name: a machine core
+    // lists under that name must be the one herdr added, reached through
+    // `herdr core-link <name>` in the session herdr linked, before any
+    // lease or exec (security review 2026-11-23 M5).
+    if !super::command::runs_herdr_link(&record, name, &target.session) {
+        return refused(
+            1,
+            format!(
+                "herdr-core's machine {name} is not the one herdr added (it is not reached through \
+                 herdr core-link {name} in session {}); remove it and add it again with \
+                 herdr machine add --core",
+                target.session
+            ),
+        );
+    }
+    let state = record["state"].as_str().unwrap_or("unknown").to_string();
     let now = now_unix();
     let holder = LeaseHolder::cli(std::process::id());
     let lease = if state == "connected" {

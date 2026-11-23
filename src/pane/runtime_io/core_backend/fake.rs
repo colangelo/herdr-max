@@ -86,8 +86,8 @@ struct Shared {
     terminals: std::collections::HashMap<String, Value>,
     /// Addresses core no longer knows: `terminal.get` answers `not_found`.
     gone: std::collections::HashSet<String>,
-    /// Machines by name and the state `machine.list` gives them.
-    machines: std::collections::BTreeMap<String, String>,
+    /// Machines by name and the record `machine.list` gives them.
+    machines: std::collections::BTreeMap<String, Value>,
     /// The client closed its connection.
     client_gone: bool,
     /// `terminal.run` calls not answered yet, and the most there were.
@@ -223,10 +223,19 @@ impl FakeCore {
 
     /// Lists `name` in `machine.list` with `state` (`connected`,
     /// `connecting`, `unreachable`, ...).
+    /// The record is one herdr's `machine add --core` makes: reached
+    /// through `herdr core-link <name>`.
     pub(crate) fn set_machine(&self, name: &str, state: &str) {
-        lock(&self.shared)
-            .machines
-            .insert(name.to_string(), state.to_string());
+        self.set_machine_record(
+            name,
+            json!({"state": state, "via": true, "target": format!("/bin/herdr core-link {name}")}),
+        );
+    }
+
+    /// Lists `name` in `machine.list` with `record` as its fields.
+    pub(crate) fn set_machine_record(&self, name: &str, mut record: Value) {
+        record["name"] = json!(name);
+        lock(&self.shared).machines.insert(name.to_string(), record);
     }
 
     /// Core forgets the terminal, as after its holder was lost and swept.
@@ -437,11 +446,7 @@ fn answer(
         ),
         "doc.get" => (Ok(json!({"value": config.doc_value})), None),
         "machine.list" => {
-            let machines: Vec<Value> = lock(shared)
-                .machines
-                .iter()
-                .map(|(name, state)| json!({"name": name, "state": state}))
-                .collect();
+            let machines: Vec<Value> = lock(shared).machines.values().cloned().collect();
             (Ok(json!({"machines": machines})), None)
         }
         "terminal.kill" => {

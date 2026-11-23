@@ -677,6 +677,21 @@ pub(crate) fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
         .collect()
 }
 
+/// Whether core's `machine.list` record of `name` is the link herdr's
+/// `machine add --core` made: reached `via` a command that ends in
+/// `core-link <name>`, and, when the record names its session, in
+/// `session` (D1, M5).
+pub(crate) fn runs_herdr_link(record: &Value, name: &MachineName, session: &str) -> bool {
+    let through_link = record["via"] == true
+        && record["target"]
+            .as_str()
+            .is_some_and(|via| via.ends_with(&format!(" core-link {name}")));
+    let in_session = record["session"]
+        .as_str()
+        .is_none_or(|listed| listed == session);
+    through_link && in_session
+}
+
 fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> {
     let mut names: Vec<MachineName> = std::fs::read_dir(root)
         .into_iter()
@@ -715,10 +730,11 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
                 }
             };
             let herdr_link = core_record.is_some_and(|record| {
-                record["via"] == true
-                    && record["target"]
-                        .as_str()
-                        .is_some_and(|via| via.ends_with(&format!(" core-link {name}")))
+                runs_herdr_link(
+                    record,
+                    &name,
+                    target.as_ref().map_or("", |target| target.session.as_str()),
+                )
             });
             StatusRow {
                 gate: gate.as_ref().map(|gate| {
