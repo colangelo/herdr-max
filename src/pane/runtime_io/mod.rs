@@ -95,6 +95,7 @@ pub struct CoreProgramRun {
 /// label. `kill_through_it` keeps the connection the check read it on for
 /// the pane's kill, so a close never kills through another connection.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))] // only the Unix-only core backend reads pid, launch and kill_through_it
 pub struct CoreRunCheck<'a> {
     pub terminal: &'a str,
     pub pid: u32,

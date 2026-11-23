@@ -1202,7 +1202,7 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   The same fleet part on a binary with the far live check reverted failed there: the guarded close over the reused
   address closed the pane (`{"type":"closed"}`). Two failed runs before were a copy made over a binary macOS had
   run, killed on start for its stale signature (each run's binary now gets a fresh path). Not run: CI (not pushed),
-  so Windows clippy is unchecked; new whole items are `cfg(unix)`, or two cfg variants of one item.
+  so Windows clippy is unchecked; new whole items are `cfg(unix)`, or two cfg variants of one item, except `CoreRunCheck`, built on every OS but read in full only by the Unix core backend, so it carries `cfg_attr(not(unix), allow(dead_code))` (PR 102 CI: Windows clippy red before that).
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
