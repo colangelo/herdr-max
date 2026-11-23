@@ -36,8 +36,18 @@ hc_far2() {
 
 # The core-link part's cleanup, then this part's.
 eval "$(declare -f link_cleanup | sed '1s/link_cleanup/link_cleanup_a/')"
+# The view server V33's view part starts (it would exit 10 min after its last
+# client): its pid from its log, checked to be a herdr before the signal.
+stop_test_view() {
+  local log="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.log" pid
+  [[ -s "$log" ]] || return 0
+  pid="$(grep -o 'herdr starting.*pid=[0-9]*' "$log" | tail -n 1 | sed 's/.*pid=//')"
+  [[ -n "$pid" ]] && ps -o comm= -p "$pid" 2>/dev/null | grep -q herdr && kill "$pid" 2>/dev/null
+  return 0
+}
 link_cleanup() {
   set +e
+  stop_test_view
   [[ -n "$V38_PID" ]] && kill "$V38_PID" 2>/dev/null
   [[ -n "$CLIENT_PID" ]] && kill -9 "$CLIENT_PID" 2>/dev/null
   [[ -s "$SSHD2/server.pid" ]] && kill "$(cat "$SSHD2/server.pid")" 2>/dev/null
@@ -355,7 +365,9 @@ wait_for "the client's lease" 5 test -f "$CLIENT_LEASE"
 wait_for "$L connected by the client's wake" 4 state_is "$L" connected
 connected_after="$(since "$client_start")"
 le "$(mtime "$CLIENT_LEASE")" "$(log_time "$L" START $((starts_before + 1)))" \
-  || fail "the client's lease came after the dial it led to"
+  || { echo "lease mtime $(mtime "$CLIENT_LEASE"), client start $client_start; link log since:" >&2
+       awk -v t="$client_start" '$1 >= t - 5' "$(link_log "$L")" >&2
+       fail "the client's lease came after the dial it led to"; }
 lease_text="$(cat "$CLIENT_LEASE")"
 sleep 8   # keys from 4 s on, every 0.5 s
 [[ "$(cat "$CLIENT_LEASE")" == "$lease_text" ]] || fail "the client wrote its lease again within the minute"
@@ -412,23 +424,23 @@ python3 -I "$BASE/client_pty.py" 10 30 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u 
   XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" SHELL=/bin/sh \
   "$HERDR_BIN" --session "$SESSION" --remote "core:$L" >"$BASE/view-client.out" 2>/dev/null &
 view_runner=$!
-VIEW_LOG="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.log"
 wait_for "the view server" 15 test -S "$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.sock"
 wait_for "$L connected by the view's first client" 10 state_is "$L" connected
 view_lease="$(ls -t "$LINK_ROOT/$L"/leases/client-* 2>/dev/null | head -n 1)"
 [[ -n "$view_lease" ]] || fail "V33: the view's client wrote no lease"
-le "$(mtime "$view_lease")" "$(log_time "$L" START $((starts_before + 1)))" \
-  || fail "V33: the view client's lease came after the dial it led to"
-ge "$(mtime "$view_lease")" "$view_start" || fail "V33: the lease is not this client's"
-[[ "$(log_count "$L" "EXEC")" -gt "$execs_before" ]] || fail "V33: the START after the view's lease did not dial"
+lease_at="$(mtime "$view_lease")"
+ge "$lease_at" "$view_start" || fail "V33: the lease is not this client's"
+# Core's own retries keep coming (refused, no lease): what counts is that no
+# dial ran between the view's start and its client's lease, and one did after.
+execs_between() { awk -v a="$1" -v b="$2" '$1 >= a && $1 < b && $3 == "EXEC"' "$(link_log "$L")" | wc -l | tr -d ' '; }
+[[ "$(execs_between "$view_start" "$lease_at")" == 0 ]] || fail "V33: a dial ran before the view client's lease"
+[[ "$(execs_between "$lease_at" 9999999999)" -ge 1 ]] || fail "V33: no dial followed the view client's lease"
+[[ "$(log_count "$L" "EXEC")" -gt "$execs_before" ]] || fail "V33: the view's wake did not dial"
 echo "ok: V33 the view's first client wrote its lease before the START it led to, which dialled; $L connected $(since "$view_start")s after"
 wait "$view_runner" || true
 rm -f "$view_lease"
 # The view server exits 10 min after its last client; this test ends it now.
-view_pid="$(grep -o 'herdr starting.*pid=[0-9]*' "$VIEW_LOG" | tail -n 1 | sed 's/.*pid=//')"
-if [[ -n "$view_pid" ]] && ps -o comm= -p "$view_pid" 2>/dev/null | grep -q herdr; then
-  kill "$view_pid"
-fi
+stop_test_view
 
 run_herdr machine rm --core "$L" >"$BASE/rm.out" 2>&1 || fail "machine rm --core $L failed: $(tail -n 5 "$BASE/rm.out")"
 [[ ! -e "$LINK_ROOT/$L" && "$(machine_state "$L")" == absent ]] || fail "machine rm --core left $L"
