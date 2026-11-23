@@ -114,6 +114,7 @@ core-live-test:
     cargo build --locked
     bash scripts/core_live_test.sh
     bash scripts/core_machine_live_test.sh
+    bash scripts/core_view_live_test.sh
     cargo build --release --locked
     bash scripts/core_default_session_live_test.sh
 
