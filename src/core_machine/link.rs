@@ -634,10 +634,15 @@ mod tests {
         let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
         dir.create().expect("create");
         let now = now_unix();
-        let cli = LeaseHolder::cli(42);
+        // Live holders: a lease of a process that no longer runs is no lease (PR D, H7).
+        let cli = LeaseHolder::cli(std::process::id());
         dir.write_lease(&cli, now + 60.0, now).expect("grant");
-        dir.write_lease(&LeaseHolder::client(7), now + 60.0, now - 100.0)
-            .expect("client");
+        dir.write_lease(
+            &LeaseHolder::client(std::process::id()),
+            now + 60.0,
+            now - 100.0,
+        )
+        .expect("client");
         assert_eq!(admit(LINE, None, &dir.leases(), now), Ok(()));
         assert_eq!(dir.consume_cli_grants(now).expect("consume"), 1);
         let leases = dir.leases();
@@ -650,7 +655,7 @@ mod tests {
             leases.iter().any(|lease| lease.dials),
             "the client's lease went too"
         );
-        dir.remove_lease(&LeaseHolder::client(7))
+        dir.remove_lease(&LeaseHolder::client(std::process::id()))
             .expect("client gone");
         assert_eq!(
             admit(LINE, None, &dir.leases(), now),

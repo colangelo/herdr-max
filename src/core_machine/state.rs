@@ -1030,9 +1030,16 @@ pub(crate) mod tests {
             let _ = fs::remove_file(dir.leases_dir().join(name));
             found
         };
+        // Live holders: a lease of a process that no longer runs is no lease (PR D, H7).
+        let pid = std::process::id();
+        let (cli, client) = (format!("cli-{pid}"), format!("client-{pid}"));
         for (name, life, text_kind) in [
-            ("cli-43", CLI_LEASE_SECS, " dial"),
-            ("client-7", super::super::presence::CLIENT_LEASE_SECS, ""),
+            (cli.as_str(), CLI_LEASE_SECS, " dial"),
+            (
+                client.as_str(),
+                super::super::presence::CLIENT_LEASE_SECS,
+                "",
+            ),
             ("manual", MAX_WAKE_SECS, ""),
             ("manual", MAX_WAKE_SECS, " keep"),
         ] {

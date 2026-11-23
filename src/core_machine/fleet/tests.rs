@@ -266,8 +266,10 @@ fn dial_refusals_follow_the_gate() {
 #[test]
 fn the_cli_lease_is_renewed_while_it_runs_and_removed() {
     let (root, dir) = machine_dir("fleet-lease");
-    let holder = LeaseHolder::cli(4242);
-    let lease_file = dir.leases_dir().join("cli-4242");
+    // A live holder: a lease of a process that no longer runs is no lease (PR D, H7).
+    let pid = std::process::id();
+    let holder = LeaseHolder::cli(pid);
+    let lease_file = dir.leases_dir().join(format!("cli-{pid}"));
     let keeper = LeaseKeeper::start_with(
         dir.clone(),
         holder.clone(),
