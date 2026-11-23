@@ -221,6 +221,20 @@ A pane on a machine lacks what Herdr learns from this Mac's processes:
 
 The other host's own Herdr never claims, lists, or ends these panes, and this Herdr never adopts that host's own panes.
 
+To start a pane on a machine from the TUI, right-click a pane: the menu lists **Split right on** each core machine Herdr added, with its gate (`open`, `dormant`, or why it is closed). The menu offers machines only while the server advertises `spawn_on_machine`, and only for this Mac's own server, not for another machine you are viewing.
+
+## View another Mac's Herdr through Herdr Core
+
+`herdr --remote core:<machine>` shows the other Mac's own Herdr workspaces, tabs and panes through the Herdr Core machine link, instead of Herdr's own SSH. Each core machine Herdr added also appears as a machine in the sidebar. Both start a view server for that machine on this Mac when none runs; it stops 10 minutes after its last window closes.
+
+The view follows the other Herdr's layout as it publishes it to its Herdr Core (`[experimental] core_spaces_doc = true` there): a new tab, a split, or a rename there shows here within a second or two. Typing, pasting and clicking reach the other Mac's programs, but the view never takes their size: it shows each pane at the size the other Mac gives it, cropped or padded, with that size in the pane border when it differs. Programs there get no focus reports from the view, and an agent's `hc send` to such a terminal cannot see that you are typing in the view. Herdr's own agent status there shows here as that Herdr reports it to Herdr Core; the view runs no detection of its own. When the link does not take automatic input, the view is read-only and says so in the pane border.
+
+A view starts no program on this Mac: new tabs, splits and workspaces made in the view are refused (use the other Mac's Herdr, or `--on`). Closing a pane in the view, or closing the view, only stops showing it: the program and the pane stay on the other Mac. Panes that do not run in Herdr Core there are not shown.
+
+A view of a dormant machine says so and wakes it with your next key, as other panes on a machine do. It reads the machine's state only while a window is attached and the machine is away or you type, so an idle view sends nothing.
+
+The saved machines of [Add a machine](#add-a-machine) keep working unchanged. When one is the same Mac as a core machine, both are shown, and the client says so once. `[remote] prefer` decides which path `herdr --machine <name>` takes when both share the name: `ssh` (the saved machine, the default) or `core`. This build does not run CLI commands through the Herdr Core link yet: a name that takes the `core` path is refused with the `herdr --remote core:<name>` command to view it.
+
 ## Updates and saved data
 
 Saved profiles contain only an opaque ID, label, SSH target, explicit remote session, and enabled state. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH.
