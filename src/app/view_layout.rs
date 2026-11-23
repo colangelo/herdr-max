@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ratatui::layout::Direction;
 
-use super::view_actions::CloseAsked;
+use super::view_actions::{CloseAsked, SeenActions};
 use super::App;
 use crate::core_machine::MachineName;
 use crate::layout::{Node, PaneId, TileLayout};
@@ -81,6 +81,13 @@ pub(crate) struct ViewApp {
     /// `force`: a forced close (the person confirmed) goes only to that
     /// same pane, terminal and program (review M2).
     pub(crate) close_asked: CloseAsked,
+    /// The (client, request id) pairs the view took actions for (fork
+    /// issue 316, M5): a request id is taken once.
+    pub(crate) seen_actions: SeenActions,
+    /// The far herdr's own tab id (`w3:t2`, as its document named it) of
+    /// each tab, by the view's public tab id (M8): a tab's rename names the
+    /// far tab by the far id, never one the view derives.
+    far_tabs: HashMap<String, String>,
     /// Where the view's structural actions go (E.3): the primary core and
     /// herdr's own machine state unless a test points it elsewhere. Kept
     /// for the view's life: its one-at-a-time lock is this route's.
@@ -113,6 +120,8 @@ impl ViewApp {
             view_numbers: HashMap::new(),
             next_view_number: HashMap::new(),
             close_asked: CloseAsked::default(),
+            seen_actions: SeenActions::default(),
+            far_tabs: HashMap::new(),
             route: None,
         }
     }
@@ -130,6 +139,11 @@ impl ViewApp {
         address
             .strip_prefix(self.machine.as_str())
             .and_then(|rest| rest.strip_prefix('/'))
+    }
+
+    /// The far herdr's id of the tab the view shows as `tab_id` (M8).
+    pub(crate) fn far_tab(&self, tab_id: &str) -> Option<&str> {
+        self.far_tabs.get(tab_id).map(String::as_str)
     }
 
     /// Whether `pane_id` takes no input now (review M3, M4): neither does
@@ -213,6 +227,8 @@ struct Build<'a> {
     /// Addresses in this layout, and the ones that need an attach.
     used: HashSet<String>,
     to_attach: Vec<(String, PaneId)>,
+    /// The far tab ids of this layout, by the view's public tab id (M8).
+    far_tabs: HashMap<String, String>,
 }
 
 impl Build<'_> {
@@ -442,6 +458,7 @@ impl App {
             folder: PathBuf::new(),
             used: HashSet::new(),
             to_attach: Vec::new(),
+            far_tabs: HashMap::new(),
         };
         let mut workspaces = Vec::with_capacity(layout.spaces.len());
         for space in &layout.spaces {
@@ -451,7 +468,9 @@ impl App {
         }
         let used = std::mem::take(&mut build.used);
         let to_attach = std::mem::take(&mut build.to_attach);
+        let far_tabs = std::mem::take(&mut build.far_tabs);
         drop(build);
+        view.far_tabs = far_tabs;
 
         // Far panes no longer listed: their streams detach (a view never
         // ends a far program, D6).
@@ -879,6 +898,10 @@ fn view_workspace(
             active_tab = tabs.len();
         }
         next_tab = next_tab.max(view_tab.number + 1);
+        build.far_tabs.insert(
+            public_tab_id_for_number(&space.id, view_tab.number),
+            view_tab.id.clone(),
+        );
         tabs.push(Tab {
             custom_name: (!view_tab.name.is_empty()).then(|| view_tab.name.clone()),
             number: view_tab.number,

@@ -19,6 +19,21 @@
 //! program the pane attached to). A view never closes the last pane of a
 //! far workspace: the far herdr would close the workspace, and a worktree
 //! group's parent with it (security review of E.3, M2 P2).
+//!
+//! Fork issue 316 (M1, M2): the far herdr checks the program again, in the
+//! same turn of its loop as the action. A pane's close, split and rename go
+//! as `pane.close_if_terminal`, `pane.split_if_terminal` and
+//! `pane.rename_if_terminal`, naming the far terminal, pid and launch label
+//! the pane attached to; a far herdr whose pane shows another program
+//! refuses (`terminal_mismatch`), and a far guarded close never closes a
+//! workspace (`would_close_workspace`). An older far herdr does not know
+//! those methods and refuses them unparsed, so no pane action reaches a far
+//! herdr that cannot check it: the person is told to update Herdr there.
+//! A pane action goes only for a pane of the tab the sending client's window
+//! shows, and a client's request id is taken once (M5). A forced close goes
+//! only with a one-use confirmation minted when the far herdr answered
+//! `confirmation_required` for the same pane and program, within
+//! `CONFIRM_FOR` (M4).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,9 +42,9 @@ use std::time::Instant;
 
 use super::App;
 use crate::api::schema::{
-    ErrorBody, ErrorResponse, Method, PaneCloseParams, PaneRenameParams, PaneRightClickTarget,
-    PaneSplitParams, Request, ResponseResult, SuccessResponse, TabCreateParams, TabRenameParams,
-    WorkspaceRenameParams,
+    ErrorBody, ErrorResponse, Method, PaneCloseIfTerminalParams, PaneRenameIfTerminalParams,
+    PaneSplitIfTerminalParams, PaneTerminalExpectation, Request, ResponseResult, SuccessResponse,
+    TabCreateParams, TabRenameParams, WorkspaceRenameParams,
 };
 use crate::core_machine::fleet::view::{ViewRoute, VIEW_ACTION_BUDGET};
 use crate::core_machine::MachineName;
@@ -47,6 +62,13 @@ const NOT_DONE: &str = "view_action_failed";
 /// (review L2). Every other far code becomes `NOT_DONE`, shown.
 const PASSED_ON: &[&str] = &["confirmation_required"];
 
+/// The far code that asks the person to confirm a close.
+const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+
+/// How long the person's answer to a far `confirmation_required` may take:
+/// a forced close after it is not sent (M4).
+pub(crate) const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The far pane, terminal and program a pane action aims at (review M2,
 /// E.3 review item 1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,54 +79,93 @@ pub(crate) struct Aimed {
     pub(crate) terminal: String,
     /// The far program the pane attached to there.
     pub(crate) instance: FarInstance,
+    /// What the far herdr checks before it acts (fork issue 316, M1): the
+    /// terminal, pid and launch label of `instance`.
+    pub(crate) expect: PaneTerminalExpectation,
     pane_id: PaneId,
 }
 
 /// The most closes waiting for a person's confirmation a view keeps.
 const MAX_CLOSE_ASKED: usize = 32;
 
-/// The closes the far herdr was asked for without `force`, by far pane
-/// (review M2). Shared with an action's thread: a forced close's record
-/// goes only once the far herdr answered it, so a send refused before it
-/// (busy, not connected, the aim check) leaves the person's confirmation
-/// in place (E.3 review, item 9).
+/// The person's confirmations of far closes, by far pane (review M2, M4):
+/// one is minted only when the far herdr answered `confirmation_required`
+/// to a close without `force` of that pane and program, lasts
+/// `CONFIRM_FOR`, and is spent by the one forced close it lets through,
+/// just before its request (the aim check). Shared with an action's thread:
+/// a send refused before the request (busy, not connected, the aim check)
+/// leaves it in place (E.3 review, item 9).
 #[derive(Clone, Default)]
-pub(crate) struct CloseAsked(Arc<Mutex<HashMap<String, Aimed>>>);
+pub(crate) struct CloseAsked(Arc<Mutex<HashMap<String, (Aimed, Instant)>>>);
 
 impl CloseAsked {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Aimed>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Aimed, Instant)>> {
         match self.0.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    /// The far herdr is asked to close `aimed` without `force`.
-    fn note(&self, aimed: &Aimed) {
+    /// The far herdr asked to confirm the close of `aimed` at `now`.
+    fn mint(&self, aimed: &Aimed, now: Instant) {
         let mut asked = self.map();
+        asked.retain(|_, (_, until)| *until > now);
         if asked.len() >= MAX_CLOSE_ASKED && !asked.contains_key(&aimed.far_pane) {
             asked.clear();
         }
-        asked.insert(aimed.far_pane.clone(), aimed.clone());
+        asked.insert(aimed.far_pane.clone(), (aimed.clone(), now + CONFIRM_FOR));
     }
 
-    /// Whether the close of exactly `aimed` was asked for.
-    fn was_asked(&self, aimed: &Aimed) -> bool {
-        self.map().get(&aimed.far_pane) == Some(aimed)
+    /// Whether a confirmation of exactly `aimed` is there at `now`.
+    fn was_asked(&self, aimed: &Aimed, now: Instant) -> bool {
+        self.map()
+            .get(&aimed.far_pane)
+            .is_some_and(|(asked, until)| asked == aimed && *until > now)
     }
 
-    /// The far herdr answered the forced close of `aimed`: its record is
-    /// spent.
-    fn spend(&self, aimed: &Aimed) {
+    /// Spends the confirmation of `aimed`, if it is there at `now`.
+    fn spend(&self, aimed: &Aimed, now: Instant) -> bool {
         let mut asked = self.map();
-        if asked.get(&aimed.far_pane) == Some(aimed) {
+        let there = asked
+            .get(&aimed.far_pane)
+            .is_some_and(|(asked, until)| asked == aimed && *until > now);
+        if there {
             asked.remove(&aimed.far_pane);
         }
+        there
     }
 
     /// Keeps the records of the panes in `live`.
     pub(crate) fn retain(&self, live: &HashSet<PaneId>) {
-        self.map().retain(|_, aimed| live.contains(&aimed.pane_id));
+        self.map()
+            .retain(|_, (aimed, _)| live.contains(&aimed.pane_id));
+    }
+}
+
+/// The most request ids a view remembers (M5).
+const MAX_SEEN_ACTIONS: usize = 256;
+
+/// The (client, request id) pairs of the actions a view took, newest last
+/// (M5): a client's request id is taken once, so a request sent again (by
+/// any program that can reach the view's socket) is refused, not done twice.
+#[derive(Default)]
+pub(crate) struct SeenActions(std::collections::VecDeque<(u64, String)>);
+
+impl SeenActions {
+    /// Takes `(client, id)`: false when it was taken before.
+    fn take(&mut self, client: u64, id: &str) -> bool {
+        if self
+            .0
+            .iter()
+            .any(|(seen, seen_id)| *seen == client && seen_id == id)
+        {
+            return false;
+        }
+        if self.0.len() >= MAX_SEEN_ACTIONS {
+            self.0.pop_front();
+        }
+        self.0.push_back((client, id.to_string()));
+        true
     }
 }
 
@@ -126,8 +187,12 @@ impl App {
     /// far screen keeps its focus; a request that names a folder, an
     /// environment or a machine is refused, review L3). Ids left out
     /// resolve against `client_tab`, the sending client's own tab (review
-    /// L4). `Err` when a target is not one the far document showed, is held
-    /// or has no far number, or the method is not one a view sends there.
+    /// L4). A pane's close, split and rename go as their guarded methods,
+    /// naming the far program for the far herdr to check (fork issue 316,
+    /// M1), and only for a pane of `client_tab` (M5). `Err` when a target is
+    /// not one the far document showed, is held, has no far number, is not
+    /// in the client's tab or not attached to a program known in full, or
+    /// the method is not one a view sends there.
     pub(crate) fn view_far_action(
         &self,
         method: &Method,
@@ -158,7 +223,24 @@ impl App {
                 .ok_or_else(|| format!("no workspace of {machine} is open in this view"))?;
             Ok((index, ws.id.clone()))
         };
-        let far_pane = |id: &str, pane: PaneId| -> Result<Aimed, String> {
+        let far_pane = |id: &str, ws: usize, pane: PaneId| -> Result<Aimed, String> {
+            // M5: a person acts on a pane the window shows; a request for
+            // another (from any program that reaches the view's socket) is
+            // not one.
+            let shown = client_tab.is_some_and(|(shown_ws, shown_tab)| {
+                shown_ws == ws
+                    && self
+                        .state
+                        .workspaces
+                        .get(ws)
+                        .and_then(|workspace| workspace.tabs.get(shown_tab))
+                        .is_some_and(|tab| tab.panes.contains_key(&pane))
+            });
+            if !shown {
+                return Err(format!(
+                    "pane {id} is not in the tab this window shows; click it, then do this again"
+                ));
+            }
             let far = view.far_pane(pane).ok_or_else(|| unknown("pane", id))?;
             if !far_numbered(far) {
                 return Err(format!(
@@ -170,7 +252,13 @@ impl App {
                     "pane {id} shows another terminal of {machine} than before: click it to see it, then do this again"
                 ));
             }
-            let terminal = view.far_terminal(pane).ok_or_else(|| unknown("pane", id))?;
+            // Only the far core's own terminal (`t7`) goes into an address
+            // (`<machine>/t7`) and a request (security delta re-check of PR
+            // 100, item 2).
+            let terminal = view
+                .far_terminal(pane)
+                .filter(|terminal| crate::view::doc::is_local_terminal(terminal))
+                .ok_or_else(|| unknown("pane", id))?;
             let not_attached = || {
                 format!(
                     "pane {id} is not attached to its program on {machine} yet, so a view cannot tell which program it would reach; wait until it shows, then do this again"
@@ -185,16 +273,18 @@ impl App {
                 .far_instance(pane)
                 .filter(|instance| instance.is_known() && !replaced)
                 .ok_or_else(not_attached)?;
+            let expect = instance.expectation(terminal).ok_or_else(not_attached)?;
             Ok(Aimed {
                 far_pane: far.to_string(),
                 terminal: terminal.to_string(),
                 instance: instance.clone(),
+                expect,
                 pane_id: pane,
             })
         };
         let far_pane_id = |id: &str| -> Result<(usize, Aimed), String> {
             let (ws, pane) = self.parse_pane_id(id).ok_or_else(|| unknown("pane", id))?;
-            Ok((ws, far_pane(id, pane)?))
+            Ok((ws, far_pane(id, ws, pane)?))
         };
         let nothing_of_this_mac = |cwd: bool, env: bool, on: bool| -> Result<(), String> {
             if cwd || env || on {
@@ -251,20 +341,23 @@ impl App {
                             .map(|tab| tab.layout.focused())
                             .ok_or_else(no_tab)?;
                         let id = self.public_pane_id(ws, pane).unwrap_or_default();
-                        (ws, far_pane(&id, pane)?)
+                        (ws, far_pane(&id, ws, pane)?)
                     }
                 };
+                if let Some(id) = params.workspace_id.as_deref() {
+                    if far_workspace(Some(id))?.0 != ws {
+                        return Err(format!(
+                            "pane {} is not in workspace {id} of {machine}",
+                            aimed.far_pane
+                        ));
+                    }
+                }
                 FarAction {
-                    method: Method::PaneSplit(PaneSplitParams {
-                        workspace_id: Some(self.state.workspaces[ws].id.clone()),
-                        target_pane_id: Some(aimed.far_pane.clone()),
+                    method: Method::PaneSplitIfTerminal(PaneSplitIfTerminalParams {
+                        pane_id: aimed.far_pane.clone(),
                         direction: params.direction.clone(),
                         ratio: params.ratio,
-                        cwd: None,
-                        focus: false,
-                        right_click: PaneRightClickTarget::default(),
-                        env: HashMap::new(),
-                        on: None,
+                        expect: aimed.expect.clone(),
                     }),
                     aimed: Some(aimed),
                 }
@@ -284,9 +377,10 @@ impl App {
                     ));
                 }
                 FarAction {
-                    method: Method::PaneClose(PaneCloseParams {
+                    method: Method::PaneCloseIfTerminal(PaneCloseIfTerminalParams {
                         pane_id: aimed.far_pane.clone(),
                         force: params.force,
+                        expect: aimed.expect.clone(),
                     }),
                     aimed: Some(aimed),
                 }
@@ -302,8 +396,12 @@ impl App {
                 let (ws, tab) = self
                     .parse_tab_id(&params.tab_id)
                     .ok_or_else(|| unknown("tab", &params.tab_id))?;
+                // M8: the far herdr's own id of the tab, as its document
+                // named it, never one this view derives.
                 let tab_id = self
                     .public_tab_id(ws, tab)
+                    .and_then(|tab_id| view.far_tab(&tab_id))
+                    .map(str::to_string)
                     .ok_or_else(|| unknown("tab", &params.tab_id))?;
                 FarAction {
                     method: Method::TabRename(TabRenameParams {
@@ -316,9 +414,10 @@ impl App {
             Method::PaneRename(params) => {
                 let (_, aimed) = far_pane_id(&params.pane_id)?;
                 FarAction {
-                    method: Method::PaneRename(PaneRenameParams {
+                    method: Method::PaneRenameIfTerminal(PaneRenameIfTerminalParams {
                         pane_id: aimed.far_pane.clone(),
                         label: params.label.clone(),
+                        expect: aimed.expect.clone(),
                     }),
                     aimed: Some(aimed),
                 }
@@ -336,24 +435,38 @@ impl App {
     /// off the loop (D7, E.3), and answers `respond_to` with the far reply
     /// or why there is none, within `VIEW_ACTION_BUDGET` of now (review
     /// M3). Never dials: a machine that is not connected refuses at once.
-    /// `client_tab` is the sending client's own tab (review L4).
+    /// `client_tab` is the sending client's own tab (review L4), `client`
+    /// the sending client, whose request id is taken once (M5).
     pub(crate) fn forward_view_action(
         &mut self,
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
+        client: u64,
         client_tab: ClientTab,
     ) {
         let deadline = Instant::now() + VIEW_ACTION_BUDGET;
         let id = request.id.clone();
         let method_name = request.method.operation().name;
-        let Some((machine, route, close_asked)) = self
-            .view
-            .as_mut()
-            .map(|view| (view.machine.clone(), view.route(), view.close_asked.clone()))
-        else {
+        let Some((machine, route, close_asked, fresh)) = self.view.as_mut().map(|view| {
+            let fresh = view.seen_actions.take(client, &id);
+            (
+                view.machine.clone(),
+                view.route(),
+                view.close_asked.clone(),
+                fresh,
+            )
+        }) else {
             let _ = respond_to.send(error_response(id, NOT_DONE, "this is not a view"));
             return;
         };
+        if !fresh {
+            let _ = respond_to.send(error_response(
+                id.clone(),
+                NOT_DONE,
+                format!("request {id} was taken before; nothing was sent to {machine}"),
+            ));
+            return;
+        }
         let action = match self
             .view_far_action(&request.method, client_tab)
             .and_then(|action| self.confirmed_close(action))
@@ -366,9 +479,10 @@ impl App {
             }
         };
         let closing = match &action.method {
-            Method::PaneClose(params) => Some(params.force),
+            Method::PaneCloseIfTerminal(params) => Some(params.force),
             _ => None,
         };
+        let far_method = action.method.operation().name;
         let line = match far_request_line(action.method) {
             Ok(line) => line,
             Err(why) => {
@@ -384,20 +498,44 @@ impl App {
             .spawn(move || {
                 let check = {
                     let (route, machine, aimed) = (route.clone(), machine.clone(), aimed.clone());
+                    let close_asked = close_asked.clone();
                     Box::new(move || {
-                        still_aimed(&route, &machine, aimed.as_ref(), closing.is_some())
+                        still_aimed(&route, &machine, aimed.as_ref(), closing.is_some())?;
+                        // M4: the request goes now, so the person's
+                        // confirmation is spent now, once. Refused before
+                        // it, the confirmation stays for the next try (E.3
+                        // review, item 9).
+                        match (closing, aimed.as_ref()) {
+                            (Some(true), Some(aimed))
+                                if !close_asked.spend(aimed, Instant::now()) =>
+                            {
+                                Err(format!(
+                                    "the close you confirmed of pane {} on {machine} was sent already or waited over {} s; close it again",
+                                    aimed.far_pane,
+                                    CONFIRM_FOR.as_secs()
+                                ))
+                            }
+                            _ => Ok(()),
+                        }
                     })
                 };
                 let reply = crate::core_machine::fleet::view::send(
                     &route, &machine, &line, deadline, check,
                 );
-                // The far herdr answered a forced close: the person's
-                // confirmation is spent. Refused before the request, it
-                // stays for the next try (E.3 review, item 9).
-                if let (Ok(_), Some(true), Some(aimed)) = (&reply, closing, aimed.as_ref()) {
-                    close_asked.spend(aimed);
+                // M4: a confirmation is minted only when the far herdr asks
+                // for one, for the pane and program the close aimed at.
+                if let (Ok(reply), Some(false), Some(aimed)) = (&reply, closing, aimed.as_ref()) {
+                    if far_error_code(reply).as_deref() == Some(CONFIRMATION_REQUIRED) {
+                        close_asked.mint(aimed, Instant::now());
+                    }
                 }
-                let _ = thread_respond.send(client_reply(&machine, method_name, thread_id, reply));
+                let _ = thread_respond.send(client_reply(
+                    &machine,
+                    method_name,
+                    far_method,
+                    thread_id,
+                    reply,
+                ));
             });
         if let Err(err) = spawned {
             let _ = respond_to.send(error_response(
@@ -408,22 +546,19 @@ impl App {
         }
     }
 
-    /// A close without `force` is noted with the far pane, terminal and
-    /// program it aims at; a forced one (the person confirmed what the far
-    /// herdr said would be lost) goes only to that same one (review M2).
-    /// The record stays until the far herdr answers the forced close.
+    /// A forced close (the person confirmed what the far herdr said would
+    /// be lost) goes only to the far pane, terminal and program whose
+    /// confirmation the far herdr asked for, within `CONFIRM_FOR` (review
+    /// M2, M4). The confirmation is spent just before the request.
     fn confirmed_close(&mut self, action: FarAction) -> Result<FarAction, String> {
-        let (Method::PaneClose(params), Some(aimed)) = (&action.method, &action.aimed) else {
+        let (Method::PaneCloseIfTerminal(params), Some(aimed)) = (&action.method, &action.aimed)
+        else {
             return Ok(action);
         };
         let Some(view) = self.view.as_ref() else {
             return Ok(action);
         };
-        if !params.force {
-            view.close_asked.note(aimed);
-            return Ok(action);
-        }
-        if view.close_asked.was_asked(aimed) {
+        if !params.force || view.close_asked.was_asked(aimed, Instant::now()) {
             return Ok(action);
         }
         Err(format!(
@@ -467,6 +602,14 @@ fn still_aimed(
         return Ok(());
     };
     let far_pane = &aimed.far_pane;
+    // Only the far core's own terminal goes into a core address (security
+    // delta re-check of PR 100, item 2), and only a program known in full is
+    // one to check (item 1).
+    if !crate::view::doc::is_local_terminal(&aimed.terminal) || !aimed.instance.is_known() {
+        return Err(format!(
+            "pane {far_pane} of {machine} is not bound to a program the view can name"
+        ));
+    }
     let document = route.far_layout(machine).map_err(|err| {
         format!("could not read {machine}'s layout to check pane {far_pane}: {err}")
     })?;
@@ -558,16 +701,25 @@ fn missing_verb(code: &str, message: &str, method_name: &str) -> bool {
             && message.contains(&format!("unknown variant `{method_name}`")))
 }
 
+/// The far error code of `reply`, if it is an API error.
+fn far_error_code(reply: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(reply).ok()?;
+    value["error"]["code"].as_str().map(str::to_string)
+}
+
 /// The client's answer to a far action: the far result (one this build
 /// reads, else a plain `ok`), the far error, or why there is no reply. A
-/// far herdr that does not know the method (an older build) is a missing
-/// verb: that action is refused with a notice, nothing else changes (D7).
+/// far herdr that does not know the method sent there (`far_method`, an
+/// older build) is a missing verb: that action is refused with a notice,
+/// nothing else changes (D7); for a guarded pane action, the far herdr
+/// cannot check the program, so nothing was done (fork issue 316, M1).
 /// A far error passes its code on only when the client's handling of it is
 /// known (`PASSED_ON`); a reply that is neither a result nor an error, or
 /// an error that is no object, may have run there (review L1, L2).
 fn client_reply(
     machine: &MachineName,
     method_name: &str,
+    far_method: &str,
     id: String,
     reply: Result<Vec<u8>, String>,
 ) -> String {
@@ -598,13 +750,16 @@ fn client_reply(
             .get("message")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        if missing_verb(code, message, method_name) {
+        if missing_verb(code, message, far_method) {
+            let what = if far_method == method_name {
+                format!("{machine}'s herdr does not take {method_name}")
+            } else {
+                format!("{machine}'s herdr cannot check which program a pane runs before {method_name}, so nothing was done")
+            };
             return error_response(
                 id,
                 "unknown_method",
-                format!(
-                    "{machine}'s herdr does not take {method_name}; update Herdr there to do this from a view"
-                ),
+                format!("{what}; update Herdr there to do this from a view"),
             );
         }
         if PASSED_ON.contains(&code) {
@@ -647,6 +802,7 @@ pub(crate) fn client_answer_for_test(
 ) -> String {
     client_reply(
         machine,
+        method_name,
         method_name,
         "endpoint:test".into(),
         Ok(reply.to_vec()),

@@ -4,7 +4,8 @@
 //! (`t2`) to another program, so the address alone names no program: the
 //! stream's reattach takes only this one, and a structural action on the
 //! pane is sent only while core still shows this one there (E.3 review,
-//! item 1).
+//! item 1), and only with both parts known, for the far herdr to check
+//! again (fork issue 316, M1).
 
 use serde_json::Value;
 
@@ -13,7 +14,8 @@ use serde_json::Value;
 pub(crate) const LAUNCH_LABEL: &str = "herdr.launch";
 
 /// What tells one far terminal from another at the same address. Either
-/// part missing is not compared.
+/// part missing is not compared by the stream's reattach; a structural
+/// action needs both (`expectation`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FarInstance {
     launch: Value,
@@ -45,10 +47,29 @@ impl FarInstance {
             && (self.pid == 0 || pid(&record["pid"]) == self.pid)
     }
 
-    /// Whether this tells a program apart at all: an instance with neither
-    /// part matches every record, so it vouches for none.
+    /// Whether this tells a program apart for a structural action: both
+    /// the launch label and the pid known (security delta re-check of PR
+    /// 100, item 1). With one part only, `matches` compares that part, so
+    /// another program with the same pid, or another run's terminal that
+    /// kept the label, would pass.
     pub(crate) fn is_known(&self) -> bool {
-        !self.launch.is_null() || self.pid != 0
+        self.launch.is_string() && self.pid != 0
+    }
+
+    /// What a guarded far pane action names for the far herdr to check
+    /// (`pane.close_if_terminal` and the others, fork issue 316): the far
+    /// core's address of the terminal, the pid and the launch label. `None`
+    /// unless both parts are known.
+    pub(crate) fn expectation(
+        &self,
+        terminal: &str,
+    ) -> Option<crate::api::schema::PaneTerminalExpectation> {
+        let launch = self.launch.as_str().filter(|_| self.pid != 0)?;
+        Some(crate::api::schema::PaneTerminalExpectation {
+            terminal: terminal.to_string(),
+            pid: self.pid,
+            launch: launch.to_string(),
+        })
     }
 }
 
@@ -76,5 +97,26 @@ mod tests {
         assert_eq!(unknown, FarInstance::unknown());
         assert!(!unknown.is_known(), "it would match any program");
         assert!(unknown.matches(&json!({"pid": 5})));
+        assert_eq!(unknown.expectation("t1"), None);
+        let expect = first.expectation("t7").expect("both parts");
+        assert_eq!(
+            (expect.terminal.as_str(), expect.pid, expect.launch.as_str()),
+            ("t7", 100, "l1")
+        );
+    }
+
+    // Security delta re-check of PR 100, item 1: an attach that learned only
+    // the label or only the pid vouches for no program. Either half alone
+    // matches another program that shares it, so neither is known, and no
+    // structural action names it.
+    #[test]
+    fn a_one_sided_instance_is_not_known() {
+        let label_only = FarInstance::of(&json!({"labels": {LAUNCH_LABEL: "l1"}}));
+        let pid_only = FarInstance::of(&json!({"pid": 100}));
+        let not_a_label = FarInstance::of(&json!({"pid": 100, "labels": {LAUNCH_LABEL: 7}}));
+        for one_sided in [label_only, pid_only, not_a_label] {
+            assert!(!one_sided.is_known(), "{one_sided:?}");
+            assert_eq!(one_sided.expectation("t1"), None, "{one_sided:?}");
+        }
     }
 }

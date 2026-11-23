@@ -495,7 +495,7 @@ fn public_number(raw: &str) -> Option<usize> {
 }
 
 /// A terminal of the far core itself: `t` and digits, as core numbers them.
-fn is_local_terminal(address: &str) -> bool {
+pub(crate) fn is_local_terminal(address: &str) -> bool {
     address.strip_prefix('t').is_some_and(|digits| {
         !digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit())
     })

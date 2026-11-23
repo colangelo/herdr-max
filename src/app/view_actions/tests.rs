@@ -3,7 +3,10 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::api::schema::{PaneTarget, SplitDirection};
+use crate::api::schema::{
+    PaneCloseParams, PaneRenameParams, PaneRightClickTarget, PaneSplitParams, PaneTarget,
+    SplitDirection,
+};
 use crate::core_machine::fleet::view::tests::{added, far_ok, input_of};
 use crate::pane::FakeCore;
 
@@ -178,16 +181,22 @@ fn each_action_names_the_far_targets_and_nothing_of_this_mac() {
             on: None,
         }),
     );
-    assert_eq!(split["method"], "pane.split");
+    // Fork issue 316, M1: a pane action goes as its guarded method, naming
+    // the far program the pane attached to, for the far herdr to check.
+    assert_eq!(split["method"], "pane.split_if_terminal");
     assert_eq!(
         split["params"],
-        json!({"workspace_id": "w3", "target_pane_id": "w3:p2", "direction": "down",
-               "ratio": 0.25, "focus": false, "right_click": "herdr"})
+        json!({"pane_id": "w3:p2", "direction": "down", "ratio": 0.25,
+               "expect": {"terminal": "t2", "pid": 102, "launch": "launch-t2"}})
     );
 
-    let close = far(&app, close("w3:p3", true));
-    assert_eq!(close["method"], "pane.close");
-    assert_eq!(close["params"], json!({"pane_id": "w3:p3", "force": true}));
+    let close = far_in(&app, close("w3:p3", true), Some((0, 1)));
+    assert_eq!(close["method"], "pane.close_if_terminal");
+    assert_eq!(
+        close["params"],
+        json!({"pane_id": "w3:p3", "force": true,
+               "expect": {"terminal": "t3", "pid": 102, "launch": "launch-t3"}})
+    );
 
     let tab_rename = far(
         &app,
@@ -203,10 +212,11 @@ fn each_action_names_the_far_targets_and_nothing_of_this_mac() {
     );
 
     let pane_rename = far(&app, pane_rename("w3:p1"));
-    assert_eq!(pane_rename["method"], "pane.rename");
+    assert_eq!(pane_rename["method"], "pane.rename_if_terminal");
     assert_eq!(
         pane_rename["params"],
-        json!({"pane_id": "w3:p1", "label": "server"})
+        json!({"pane_id": "w3:p1", "label": "server",
+               "expect": {"terminal": "t1", "pid": 102, "launch": "launch-t1"}})
     );
 }
 
@@ -263,9 +273,9 @@ fn ids_left_out_resolve_against_the_clients_own_tab() {
     // This server's focus is on w3:t1 (another client moved it there).
     app.state.workspaces[0].active_tab = 0;
     let request = far_in(&app, split(None), Some((0, 1)));
-    assert_eq!(request["params"]["target_pane_id"], "w3:p3");
+    assert_eq!(request["params"]["pane_id"], "w3:p3");
     let request = far_in(&app, split(None), FIRST_TAB);
-    assert_eq!(request["params"]["target_pane_id"], "w3:p1");
+    assert_eq!(request["params"]["pane_id"], "w3:p1");
     let tab = Method::TabCreate(TabCreateParams {
         workspace_id: None,
         cwd: None,
@@ -352,6 +362,15 @@ fn an_action_on_a_held_pane_is_refused() {
     assert_eq!(action.aimed.expect("aimed").terminal, "t9");
 }
 
+/// The far herdr answered `confirmation_required` to `asked`'s close now.
+fn far_asked_to_confirm(app: &App, asked: &FarAction) {
+    app.view
+        .as_ref()
+        .unwrap()
+        .close_asked
+        .mint(asked.aimed.as_ref().expect("aimed"), Instant::now());
+}
+
 // Review M2: a close the far herdr asked to confirm goes, forced, only to
 // the pane and terminal it was asked for; a confirmation opened before
 // the far layout changed under it is refused, even once the pane's hold is
@@ -362,7 +381,16 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
     let asked = app
         .view_far_action(&close("w3:p2", false), FIRST_TAB)
         .unwrap();
-    app.confirmed_close(asked).expect("asked");
+    // M4: a close without force mints no confirmation on its own.
+    let asked = app.confirmed_close(asked).expect("not forced: sent");
+    let forced = app
+        .view_far_action(&close("w3:p2", true), FIRST_TAB)
+        .unwrap();
+    assert!(
+        app.confirmed_close(forced).is_err(),
+        "the far herdr asked for no confirmation"
+    );
+    far_asked_to_confirm(&app, &asked);
     let forced = app
         .view_far_action(&close("w3:p2", true), FIRST_TAB)
         .unwrap();
@@ -371,7 +399,7 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
     let asked = app
         .view_far_action(&close("w3:p2", false), FIRST_TAB)
         .unwrap();
-    app.confirmed_close(asked).expect("asked");
+    far_asked_to_confirm(&app, &asked);
     let doc = json!({"spaces": [{"id": "w3", "name": "api", "folder": "/far/api", "herdr_max": 1, "tabs": [
         {"id": "w3:t1", "root": {"id": "w3:t1", "type": "row", "children": [block("w3:p1", "t1"), block("w3:p2", "t9")]}},
         {"id": "w3:t2", "name": "logs", "root": {"id": "w3:t2", "type": "row", "children": [block("w3:p3", "t3")]}}
@@ -395,7 +423,7 @@ fn a_confirmed_close_reaches_only_the_pane_it_was_asked_for() {
     let asked = app
         .view_far_action(&close("w3:p2", false), FIRST_TAB)
         .unwrap();
-    app.confirmed_close(asked).expect("asked");
+    far_asked_to_confirm(&app, &asked);
     app.view.as_mut().unwrap().bind_instance_for_test(
         "loop/t9",
         FarInstance::of(&json!({"pid": 999, "labels": {"herdr.launch": "after-reset"}})),
@@ -700,6 +728,7 @@ fn a_missing_far_verb_is_the_actions_refusal() {
     let answer = reply(&client_reply(
         &machine,
         "pane.rename_v9",
+        "pane.rename_v9",
         "endpoint:1".into(),
         Ok(real),
     ));
@@ -715,6 +744,7 @@ fn a_missing_far_verb_is_the_actions_refusal() {
     let answer = reply(&client_reply(
         &machine,
         "pane.graphics.clear",
+        "pane.graphics.clear",
         "endpoint:2".into(),
         Ok(retired),
     ));
@@ -726,6 +756,7 @@ fn a_missing_far_verb_is_the_actions_refusal() {
     let answer = reply(&client_reply(
         &machine,
         "pane.rename",
+        "pane.rename_if_terminal",
         "endpoint:3".into(),
         Ok(other),
     ));
@@ -749,6 +780,7 @@ fn far_answers_become_the_clients() {
         reply(&client_reply(
             &machine,
             "pane.close",
+            "pane.close_if_terminal",
             "endpoint:2".into(),
             Ok(text.to_vec()),
         ))
@@ -820,6 +852,7 @@ fn far_answers_become_the_clients() {
     let failed = reply(&client_reply(
         &machine,
         "tab.create",
+        "tab.create",
         "endpoint:7".into(),
         Err("loop is dormant: press a key in one of its panes to wake it\u{1b}[2J".into()),
     ));
@@ -877,6 +910,7 @@ fn a_views_close_reaches_the_far_pane_it_aimed_at() {
             method: close("w3:p2", false),
         },
         respond_to,
+        1,
         FIRST_TAB,
     );
     assert_eq!(
@@ -890,8 +924,12 @@ fn a_views_close_reaches_the_far_pane_it_aimed_at() {
         .collect();
     assert_eq!(execs.len(), 1);
     let sent = input_of(&execs[0]["params"]);
-    assert_eq!(sent["method"], "pane.close");
+    assert_eq!(sent["method"], "pane.close_if_terminal");
     assert_eq!(sent["params"]["pane_id"], "w3:p2");
+    assert_eq!(
+        sent["params"]["expect"],
+        json!({"terminal": "t2", "pid": 102, "launch": "launch-t2"})
+    );
     assert_ne!(sent["params"]["force"], true);
     assert_eq!(
         layout_reads.load(Ordering::SeqCst),
@@ -901,15 +939,16 @@ fn a_views_close_reaches_the_far_pane_it_aimed_at() {
     assert!(dir.leases().is_empty());
 
     // Held: refused on the loop, nothing sent.
-    let pane = view_pane(&app, "w3:p3");
+    let pane = view_pane(&app, "w3:p1");
     app.hold_view_input_for_test(pane);
     let (respond_to, rx) = std::sync::mpsc::channel();
     app.forward_view_action(
         Request {
             id: "endpoint:2".into(),
-            method: close("w3:p3", false),
+            method: close("w3:p1", false),
         },
         respond_to,
+        1,
         FIRST_TAB,
     );
     let refused = answer_of(&rx);
@@ -940,6 +979,7 @@ fn forward(app: &mut App, id: &str, method: Method) -> Value {
             method,
         },
         respond_to,
+        1,
         FIRST_TAB,
     );
     answer_of(&rx)
@@ -978,25 +1018,38 @@ fn a_view_action_is_refused_when_the_far_layout_changed_under_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// E.3 review, item 9: a forced close refused before its request (here the
-// machine is dormant) keeps the person's confirmation, so the next try
-// still goes; once the far herdr answered it, the confirmation is spent.
+/// A far herdr that asks to confirm every close without `force`.
+fn far_asks_to_confirm(params: &Value) -> Value {
+    let request = input_of(params);
+    if request["method"] == "pane.close_if_terminal" && request["params"]["force"] != true {
+        let error = json!({"id": request["id"], "error": {"code": "confirmation_required",
+            "message": "this pane still has 1 open todo"}});
+        return crate::core_machine::fleet::view::tests::ran(format!("{error}\n").as_bytes());
+    }
+    far_ok(params)
+}
+
+// E.3 review, item 9, and M4: the far herdr's `confirmation_required` mints
+// the person's confirmation; a forced close refused before its request
+// (here the machine is dormant) keeps it, so the next try still goes; the
+// one forced close that goes spends it.
 #[test]
 fn a_refused_forced_close_keeps_the_persons_confirmation() {
-    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
-    core.set_machine("loop", "dormant");
+    let core =
+        FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_asks_to_confirm)));
+    core.set_machine("loop", "connected");
     let (root, _dir) = added("view-forward-confirm");
     let mut app = app();
     app.view.as_mut().unwrap().set_route(
         ViewRoute::at(&core.socket, root.clone(), Arc::new(|_| Ok(far_doc())))
             .with_terminal(as_attached()),
     );
-    let asked = app
-        .view_far_action(&close("w3:p2", false), FIRST_TAB)
-        .unwrap();
-    app.confirmed_close(asked).expect("asked");
+    let asked = forward(&mut app, "endpoint:1", close("w3:p2", false));
+    assert_eq!(asked["error"]["code"], "confirmation_required", "{asked}");
+    assert_eq!(execs_of(&core), 1);
 
-    let refused = forward(&mut app, "endpoint:1", close("w3:p2", true));
+    core.set_machine("loop", "dormant");
+    let refused = forward(&mut app, "endpoint:2", close("w3:p2", true));
     assert!(
         refused["error"]["message"]
             .as_str()
@@ -1004,13 +1057,13 @@ fn a_refused_forced_close_keeps_the_persons_confirmation() {
             .contains("loop is dormant"),
         "{refused}"
     );
-    assert_eq!(execs_of(&core), 0);
+    assert_eq!(execs_of(&core), 1);
 
     core.set_machine("loop", "connected");
-    let done = forward(&mut app, "endpoint:2", close("w3:p2", true));
-    assert_eq!(done, json!({"id": "endpoint:2", "result": {"type": "ok"}}));
-    assert_eq!(execs_of(&core), 1, "the confirmed close went");
-    let again = forward(&mut app, "endpoint:3", close("w3:p2", true));
+    let done = forward(&mut app, "endpoint:3", close("w3:p2", true));
+    assert_eq!(done, json!({"id": "endpoint:3", "result": {"type": "ok"}}));
+    assert_eq!(execs_of(&core), 2, "the confirmed close went");
+    let again = forward(&mut app, "endpoint:4", close("w3:p2", true));
     assert!(
         again["error"]["message"]
             .as_str()
@@ -1018,6 +1071,290 @@ fn a_refused_forced_close_keeps_the_persons_confirmation() {
             .contains("close it again"),
         "{again}"
     );
-    assert_eq!(execs_of(&core), 1, "spent: nothing more sent");
+    assert_eq!(execs_of(&core), 2, "spent: nothing more sent");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// Fork issue 316, M5: a pane action is a person's act on a pane the window
+// shows. A close, split or rename of a pane of another tab (sent by any
+// program that reaches the view's socket) is refused, and so is one from a
+// client that shows no tab.
+#[test]
+fn a_pane_action_goes_only_for_a_pane_of_the_clients_tab() {
+    let app = app();
+    for method in [
+        close("w3:p3", false),
+        split(Some("w3:p3")),
+        pane_rename("w3:p3"),
+    ] {
+        let err = app
+            .view_far_action(&method, FIRST_TAB)
+            .expect_err("another tab");
+        assert!(err.contains("is not in the tab this window shows"), "{err}");
+        let err = app.view_far_action(&method, None).expect_err("no tab");
+        assert!(err.contains("is not in the tab this window shows"), "{err}");
+        assert!(app.view_far_action(&method, Some((0, 1))).is_ok());
+    }
+}
+
+// Fork issue 316, M5: a client's request id is taken once; the same request
+// sent again is refused with nothing sent. Another client's same id is its
+// own.
+#[test]
+fn a_request_sent_again_is_refused() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, _dir) = added("view-forward-again");
+    let mut app = app();
+    app.view.as_mut().unwrap().set_route(
+        ViewRoute::at(&core.socket, root.clone(), Arc::new(|_| Ok(far_doc())))
+            .with_terminal(as_attached()),
+    );
+    let send = |app: &mut App, client: u64| {
+        let (respond_to, rx) = std::sync::mpsc::channel();
+        app.forward_view_action(
+            Request {
+                id: "endpoint:1".into(),
+                method: pane_rename("w3:p1"),
+            },
+            respond_to,
+            client,
+            FIRST_TAB,
+        );
+        answer_of(&rx)
+    };
+    assert!(send(&mut app, 1)["result"].is_object());
+    assert_eq!(execs_of(&core), 1);
+    let again = send(&mut app, 1);
+    assert_eq!(again["error"]["code"], NOT_DONE);
+    assert!(
+        again["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was taken before"),
+        "{again}"
+    );
+    assert_eq!(execs_of(&core), 1, "nothing more sent");
+    assert!(send(&mut app, 2)["result"].is_object(), "another client's");
+    assert_eq!(execs_of(&core), 2);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// Security delta re-check of PR 100, the missing tests: an attach that
+// learned nothing of the far program, or only half of it, binds no program
+// a pane action could name, at `view_far_action` and again at `still_aimed`.
+#[test]
+fn an_unknown_or_one_sided_instance_takes_no_action() {
+    let mut app = app();
+    for instance in [
+        FarInstance::unknown(),
+        FarInstance::of(&json!({"pid": 102})),
+        FarInstance::of(&json!({"labels": {"herdr.launch": "launch-t2"}})),
+    ] {
+        app.view
+            .as_mut()
+            .unwrap()
+            .bind_instance_for_test("loop/t2", instance.clone());
+        for method in [
+            close("w3:p2", false),
+            split(Some("w3:p2")),
+            pane_rename("w3:p2"),
+        ] {
+            let err = app
+                .view_far_action(&method, FIRST_TAB)
+                .expect_err("not known in full");
+            assert!(err.contains("is not attached to its program"), "{err}");
+        }
+    }
+
+    let machine = MachineName::parse("loop").unwrap();
+    attached(&mut app, "t2");
+    let mut aimed = app
+        .view_far_action(&pane_rename("w3:p2"), FIRST_TAB)
+        .unwrap()
+        .aimed
+        .expect("aimed");
+    let route = ViewRoute::at(
+        std::path::Path::new("/nonexistent"),
+        std::path::PathBuf::from("/nonexistent"),
+        Arc::new(|_| Ok(far_doc())),
+    )
+    .with_terminal(Arc::new(|_| {
+        // The far core shows the pid only: a one-sided instance would
+        // pass on it.
+        Ok(json!({"state": "live", "pid": 102}))
+    }));
+    aimed.instance = FarInstance::of(&json!({"pid": 102}));
+    let err = still_aimed(&route, &machine, Some(&aimed), false).expect_err("one-sided");
+    assert!(
+        err.contains("not bound to a program the view can name"),
+        "{err}"
+    );
+}
+
+// Security delta re-check of PR 100, item 2: only the far core's own
+// terminal id (`t` and digits) goes into the core address `machine/id`.
+#[test]
+fn a_far_terminal_id_that_is_no_core_terminal_is_refused() {
+    let app = app();
+    let machine = MachineName::parse("loop").unwrap();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&asked);
+    let route = ViewRoute::at(
+        std::path::Path::new("/nonexistent"),
+        std::path::PathBuf::from("/nonexistent"),
+        Arc::new(|_| Ok(far_doc())),
+    )
+    .with_terminal(Arc::new(move |address| {
+        seen.lock().unwrap().push(address.to_string());
+        Ok(record("t2"))
+    }));
+    let mut aimed = app
+        .view_far_action(&pane_rename("w3:p2"), FIRST_TAB)
+        .unwrap()
+        .aimed
+        .expect("aimed");
+    for odd in ["t2/../x", "other/t2", "", "t"] {
+        aimed.terminal = odd.into();
+        assert!(still_aimed(&route, &machine, Some(&aimed), false).is_err());
+    }
+    assert!(asked.lock().unwrap().is_empty(), "no address was built");
+}
+
+// Security delta re-check of PR 100, the missing tests: a far document
+// that cannot be read, or does not parse, just before the request sends
+// nothing.
+#[test]
+fn a_far_document_that_does_not_read_sends_nothing() {
+    let app = app();
+    let machine = MachineName::parse("loop").unwrap();
+    let aimed = app
+        .view_far_action(&pane_rename("w3:p2"), FIRST_TAB)
+        .unwrap()
+        .aimed
+        .expect("aimed");
+    let route_with = |layout: crate::core_machine::fleet::view::LayoutReader| {
+        ViewRoute::at(
+            std::path::Path::new("/nonexistent"),
+            std::path::PathBuf::from("/nonexistent"),
+            layout,
+        )
+        .with_terminal(as_attached())
+    };
+    let err = still_aimed(
+        &route_with(Arc::new(|_| Err("core went away".into()))),
+        &machine,
+        Some(&aimed),
+        false,
+    )
+    .expect_err("unread");
+    assert!(err.contains("could not read loop's layout"), "{err}");
+    let err = still_aimed(
+        &route_with(Arc::new(|_| Ok(json!({"spaces": "not a list"})))),
+        &machine,
+        Some(&aimed),
+        false,
+    )
+    .expect_err("unparsed");
+    assert!(err.contains("loop's layout does not read"), "{err}");
+}
+
+// Security delta re-check of PR 100, the missing tests: a view pane whose
+// far address holds another program now (the stream saw it, `view_replaced`)
+// takes no action until it is bound afresh.
+#[test]
+fn a_replaced_view_pane_takes_no_action() {
+    let core = FakeCore::start();
+    std::env::set_var("HC_SOCKET", &core.socket);
+    core.add_terminal(
+        json!({"address": "loop/t2", "state": "live", "cols": 80, "rows": 24,
+        "pid": 102, "labels": {"herdr.launch": "launch-t2"}}),
+    );
+    // Projected with no runtime, so the view attaches nothing itself: the
+    // one stream is this test's.
+    let mut app = app();
+    let tokio = tokio::runtime::Runtime::new().expect("a runtime");
+    let _entered = tokio.enter();
+    let pane = view_pane(&app, "w3:p2");
+    let runtime = crate::terminal::TerminalRuntime::view_core(
+        pane,
+        "loop/t2".into(),
+        0,
+        app.event_tx.clone(),
+        app.render_notify.clone(),
+        app.render_dirty.clone(),
+    )
+    .expect("attached");
+    let terminal_id = app
+        .state
+        .pane_terminal(pane)
+        .expect("a terminal")
+        .id
+        .clone();
+    app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+    assert!(app
+        .view_far_action(&pane_rename("w3:p2"), FIRST_TAB)
+        .is_ok());
+
+    core.add_terminal(
+        json!({"address": "loop/t2", "state": "live", "cols": 80, "rows": 24,
+        "pid": 4242, "labels": {"herdr.launch": "after-a-reset"}}),
+    );
+    core.close_stream(1, b"");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let replaced = |app: &App| {
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .is_some_and(crate::terminal::TerminalRuntime::view_replaced)
+    };
+    while !replaced(&app) && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(replaced(&app));
+    let err = app
+        .view_far_action(&pane_rename("w3:p2"), FIRST_TAB)
+        .expect_err("replaced");
+    assert!(err.contains("is not attached to its program"), "{err}");
+    for (_, runtime) in app.terminal_runtimes.drain() {
+        runtime.shutdown();
+    }
+}
+
+// M8: a tab's rename names the far tab by the id the far document gave
+// it.
+#[test]
+fn a_tab_rename_names_the_far_tab_by_the_documents_id() {
+    let app = app();
+    let rename = far(
+        &app,
+        Method::TabRename(TabRenameParams {
+            tab_id: "w3:t2".into(),
+            label: "tail".into(),
+        }),
+    );
+    assert_eq!(rename["params"]["tab_id"], "w3:t2");
+    assert_eq!(
+        app.view.as_ref().unwrap().far_tab("w3:t1"),
+        Some("w3:t1"),
+        "every projected tab has its far id"
+    );
+}
+
+// M4: a confirmation the far herdr asked for lasts `CONFIRM_FOR`; a forced
+// close after it is refused, as if never asked.
+#[test]
+fn a_confirmation_expires() {
+    let app = app();
+    let asked = app
+        .view_far_action(&close("w3:p2", false), FIRST_TAB)
+        .unwrap();
+    let aimed = asked.aimed.expect("aimed");
+    let close_asked = app.view.as_ref().unwrap().close_asked.clone();
+    let then = Instant::now();
+    close_asked.mint(&aimed, then);
+    assert!(close_asked.was_asked(&aimed, then + CONFIRM_FOR / 2));
+    assert!(!close_asked.was_asked(&aimed, then + CONFIRM_FOR));
+    assert!(!close_asked.spend(&aimed, then + CONFIRM_FOR));
+    assert!(close_asked.spend(&aimed, then), "still there, then spent");
+    assert!(!close_asked.spend(&aimed, then), "once");
 }

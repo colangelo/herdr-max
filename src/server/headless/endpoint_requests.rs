@@ -206,7 +206,7 @@ impl HeadlessServer {
         }
         let client_tab = self.client_own_tab(client_id);
         self.app
-            .forward_view_action(message.request, message.respond_to, client_tab);
+            .forward_view_action(message.request, message.respond_to, client_id, client_tab);
         None
     }
 
