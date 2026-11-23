@@ -924,6 +924,11 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   own); a missing verb is asked again on each try (one exec each, so an update there shows at once); tab and
   workspace closes in a view still detach; a request answered by a far herdr that is not this build gets an `ok`
   for a result this build does not read.
+  Gates, m4m, 2026-11-23, under the shared lock: targeted `view core_machine` tests green; `just check` 0 on 1c456e75
+  (5980 + 158 tests; windows-lint skipped on macOS); on a debug binary of 1c456e75 copied out of the shared target,
+  `core_view_live_test.sh` (V30_IDLE_SECS=20) and `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0, nothing
+  left in the passwd home's state. Not run: the panes, link and lease parts (nothing in them changed), the bench (no
+  render, layout, PTY or detection work added), CI (not pushed).
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
