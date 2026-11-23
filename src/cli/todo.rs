@@ -93,7 +93,7 @@ fn format_todo_line(todo: &serde_json::Value, show_pane: bool) -> String {
     let done = todo["done"].as_bool().unwrap_or(false);
     let marker = if done { " " } else { "*" };
     let id = todo["id"].as_u64().unwrap_or(0);
-    let priority = todo["priority"].as_str().unwrap_or("normal");
+    let priority = super::target::shown(todo["priority"].as_str().unwrap_or("normal"));
     let text = super::target::shown(todo["text"].as_str().unwrap_or(""));
 
     let mut line = String::from(marker);
@@ -120,7 +120,7 @@ mod far_output_tests {
 
     fn todo() -> serde_json::Value {
         json!({"id": 3, "pane_id": FAR_CONTROLS, "text": FAR_CONTROLS,
-               "priority": "normal", "link_label": FAR_CONTROLS, "link_alive": true})
+               "priority": FAR_CONTROLS, "link_label": FAR_CONTROLS, "link_alive": true})
     }
 
     #[test]
