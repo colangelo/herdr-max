@@ -34,6 +34,9 @@ pub(crate) struct ViewApp {
     attaching: HashSet<String>,
     /// Far sizes (rows, cols) as core last reported them.
     far_sizes: HashMap<String, (u16, u16)>,
+    /// The view's notice line (dormant, waking, nothing published), shown
+    /// beside the config diagnostic, never in its place.
+    notice: Option<String>,
 }
 
 impl ViewApp {
@@ -45,6 +48,7 @@ impl ViewApp {
             terminals: HashMap::new(),
             attaching: HashSet::new(),
             far_sizes: HashMap::new(),
+            notice: None,
         }
     }
 
@@ -144,6 +148,12 @@ struct Kept {
 }
 
 impl App {
+    /// The view's notice line, `None` in the primary server or while all is
+    /// well.
+    pub(crate) fn view_notice(&self) -> Option<&str> {
+        self.view.as_ref()?.notice.as_deref()
+    }
+
     /// Why an action that would run something on this Mac, with the far
     /// side's ids or folders, is refused in a view (core-phase5 D6, review
     /// M4.1, L4.3); `None` in the primary server.
@@ -154,8 +164,6 @@ impl App {
         })
     }
 
-    /// Turns this server into the view of `machine` (D6): no layout until the
-    /// far document is read; the watcher thread follows the machine.
     /// Turns this server into the view of `machine` (D6): no layout until the
     /// far document is read; the watcher thread follows the machine.
     pub(crate) fn start_view(
@@ -171,8 +179,9 @@ impl App {
         match event {
             ViewEvent::Layout(layout) => self.apply_view_layout(&layout),
             ViewEvent::Notice(notice) => {
-                self.config_diagnostic_deadline = None;
-                self.state.config_diagnostic = notice;
+                if let Some(view) = self.view.as_mut() {
+                    view.notice = notice;
+                }
             }
             ViewEvent::FarSize {
                 address,
@@ -691,13 +700,26 @@ mod tests {
         });
         let terminal = app.state.terminals.values().next().unwrap();
         assert_eq!(terminal.view_far_size, Some((30, 100)));
+        // The notice is the view's own: a config diagnostic stays.
+        app.state.config_diagnostic = Some("config: unknown key".into());
         app.handle_view_event(ViewEvent::Notice(Some(
             "loop is dormant: press a key to wake it".into(),
         )));
         assert_eq!(
-            app.state.config_diagnostic.as_deref(),
+            app.view_notice(),
             Some("loop is dormant: press a key to wake it")
         );
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("config: unknown key")
+        );
+        assert_eq!(
+            crate::view::with_notice(app.state.config_diagnostic.clone(), app.view_notice())
+                .as_deref(),
+            Some("config: unknown key\nloop is dormant: press a key to wake it")
+        );
+        app.handle_view_event(ViewEvent::Notice(None));
+        assert_eq!(app.view_notice(), None);
     }
 
     #[test]

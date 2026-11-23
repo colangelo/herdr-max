@@ -644,6 +644,15 @@ impl HeadlessServer {
                 } else {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
+                // A view's notice goes beside the config diagnostic, never
+                // in its place (core-phase5 D6).
+                #[cfg(unix)]
+                {
+                    candidate.config_diagnostic = crate::view::with_notice(
+                        candidate.config_diagnostic.take(),
+                        self.app.view_notice(),
+                    );
+                }
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)

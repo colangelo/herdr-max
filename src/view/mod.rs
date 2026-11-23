@@ -60,6 +60,16 @@ pub(crate) fn log_file_name(machine: &MachineName) -> String {
     format!("herdr-view-{machine}.log")
 }
 
+/// A view's warning line for its clients: the config diagnostic and the
+/// view's notice, both, one per line (neither replaces the other).
+pub(crate) fn with_notice(config: Option<String>, notice: Option<&str>) -> Option<String> {
+    match (config, notice) {
+        (Some(config), Some(notice)) => Some(format!("{config}\n{notice}")),
+        (config, None) => config,
+        (None, Some(notice)) => Some(notice.to_owned()),
+    }
+}
+
 /// The view server's lock and record for `machine`, beside its socket: the
 /// running view holds an exclusive `flock` on it for its whole life and
 /// writes its version and pid into it (`ViewRecord`).
