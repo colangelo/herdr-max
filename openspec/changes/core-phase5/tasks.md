@@ -1135,6 +1135,63 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   checker mis-parsed the CLI row; the rerun passed. A harness race in `core_fleet_live_test.sh`'s log parsing, to
   be fixed on its own. Not run: CI (not pushed), so Windows clippy is unchecked; whole new items are
   `cfg(unix)` or in unix-only modules.
+- [x] E.3c The far herdr reads the program live, and a view acts only on what the window showed (security review
+  of PR 101, ac/security 2a29aae, P2 M1-M2 and P3 M3-M8; https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/317,
+  and the live test's link.log race, https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/318), D7 "As built
+  (E.3c)"
+  As built:
+  - M1 (P2): `CorePaneIo::check_live_run` reads `terminal.get` on the pane's current connection and checks it live
+    with the request's pid and launch label, for the guarded close, split and rename (`program_live` in
+    `src/app/api/guarded_panes.rs`), before any layout change; a close keeps that connection (`KillPin`), and
+    `kill` then goes through it only, after the same check, and refuses when it closed; `end_program` sweeps a
+    guarded kill's session only once core confirmed the end. hc 0.1.21 measured on a throwaway session: no address
+    reuse within one core server except a kept terminal's new program (same labels, new pid); a restart and a
+    state-wiped start with live holders keep the programs; a wiped start without holders counts from `t1`. No
+    conditional kill in hc: the residual is a kept terminal replaced within the check's one round trip.
+  - M2 (P2): `ViewApp` keeps a binding (public id, far address, far program) and revision per pane
+    (`note_bindings`, at each projection, rebind and attach); the snapshot's JSON-only `view_binding`; the client
+    sends `EndpointViewAction {binding, confirms}` as the request's `view` member (`endpoint_request_with_view`)
+    only when the snapshot had one; the server decodes it beside the request (`EndpointRequestHead.view`) into
+    `ViewSender`; `view_far_action` refuses a pane changed since (`rebound_since`) or a client with no revision.
+    Holds are a set of held clients per pane (`hold` takes the connected clients; `note_client`/`forget_client`
+    from the server's connect and disconnect); a click releases only for a client whose window shows the pane, a
+    focus only for the client whose request it is (`set_view_acting_client`). `refuses_behind` refuses a view
+    action behind any command in flight or queued.
+  - M3: `CloseAsked` keeps the client's id of the refused close; `ClientForceConfirmation.confirms` carries it into
+    the forced close's `view.confirms`; `was_asked`/`spend` need it; `forget_client` drops it.
+  - M4: `PaneTerminalExpectation.tab` (required; never released); `pane_showing` refuses another tab and an alias.
+  - M5: `SeenActions` per client (256 each), dropped at disconnect; the window in D7.
+  - M6: `CoreClient::connect_by`, `connect_at_by`, `call_by`, `send_by`, `read_hello_by`, `connect_unix_by`;
+    `call_running_by` uses them.
+  - M7: `KeepLease::write` refuses once ended, under the book's lock; `ViewRoute::ended_on_drop` (`RouteEnd`) held
+    by the view server for its run (`bootstrap.rs`).
+  - M8: the D7 line on `force` from any far API caller.
+  - #318: `MachineDir::log` formats the line and appends it in one write; the live `--dial` check reads only whole
+    rows and fails on a line that is none.
+  Tests (each fails with its fix reverted, checked): `a_reused_address_after_a_core_reconnect_is_refused` (two
+  fake core connections, the address reused: refused, no `terminal.kill`, the pane intact),
+  `a_guarded_kill_goes_only_through_the_connection_it_checked_on`,
+  `a_pane_action_from_a_window_that_showed_an_older_binding_is_refused` (two clients, revisions before and after
+  a rebind; held per client), `a_held_view_pane_takes_no_input_until_a_person_clicks_it` (two server clients),
+  `a_view_action_waits_behind_no_other_command` (behind a focus in flight and one queued),
+  `a_close_to_a_view_says_what_the_window_showed_and_which_close_it_confirms` (client),
+  `a_forced_close_answers_only_the_prompt_it_names`, `a_clients_confirmation_and_holds_go_when_it_disconnects`,
+  `a_pane_moved_to_another_tab_is_refused` (same workspace, and across workspaces with an alias),
+  `a_slow_core_holds_no_step_past_the_deadline` (a dripped hello, a stalled version, a blocked write),
+  `a_panic_leaves_no_lease_behind` (the server unwinding, and an action thread), `a_guarded_close_never_closes_a_worktree_group`
+  (both `confirm_close` settings), `a_floating_pane_beside_the_last_tiled_one_closes_nothing`,
+  `link_log_lines_are_whole_under_concurrent_writers`; with `an_endpoint_request_carries_its_view_member_beside_the_request`
+  and `a_view_action_goes_with_what_its_window_showed` for the wire. The last pane of one of several tabs is
+  `a_guarded_close_of_a_tabs_last_pane_reconciles_the_far_clients` and the real PTY pane `a_pane_outside_core_is_refused`
+  (E.3b), not duplicated. Not failing with a fix reverted, by design: the book closed to writes before the push
+  (a write after the end already failed at `write_again`; the change keeps it off the list), and the action
+  thread's own unwind (`KeepLease`'s drop, unchanged).
+  Live: `core_fleet_live_test.sh` ends with a far core killed with its holders and started without its state: a
+  far pane whose program outlives the holder attaches to the program core gives its address now, and a guarded
+  close naming the program it showed is refused (`terminal_mismatch`), the new program kept. The far API is called
+  with the request a view would send: a view's own request travels through the far core being reset (its
+  `machine.exec`), so it cannot be held across that reset; between the view's check and the request the far
+  herdr's own check is E.3b's live part.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a
