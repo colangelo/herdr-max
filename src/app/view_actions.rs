@@ -99,10 +99,13 @@ const MAX_CLOSE_ASKED: usize = 32;
 /// not connected, the aim check, a timeout, the lease) leaves it in place
 /// (E.3 review, item 9).
 #[derive(Clone, Default)]
-pub(crate) struct CloseAsked(Arc<Mutex<HashMap<(u64, String), (Aimed, Instant)>>>);
+pub(crate) struct CloseAsked(Arc<Mutex<AskedMap>>);
+
+/// A confirmation by (client, far pane): the aim and when it lapses.
+type AskedMap = HashMap<(u64, String), (Aimed, Instant)>;
 
 impl CloseAsked {
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<(u64, String), (Aimed, Instant)>> {
+    fn map(&self) -> std::sync::MutexGuard<'_, AskedMap> {
         match self.0.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
