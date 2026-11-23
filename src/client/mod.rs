@@ -271,8 +271,6 @@ fn run_client_with_mode(
         endpoint_keybindings,
         remote_image_paste_key,
         shell_config,
-        #[cfg(unix)]
-        person_started: !reconnecting && std::env::var_os(reexec::REEXEC_ENV_VAR).is_none(),
     };
 
     crate::logging::startup("client");
@@ -740,7 +738,7 @@ async fn run_client_loop(
     #[cfg(unix)]
     let mut input_clock = endpoint::InputClock::new(std::time::Instant::now());
     #[cfg(unix)]
-    let mut presence = crate::core_machine::presence::ClientPresence::start(config.person_started);
+    let mut presence = crate::core_machine::presence::ClientPresence::start();
     // Local shut down for a live handoff and has not come back online since.
     let mut local_handed_off = false;
     if federated {

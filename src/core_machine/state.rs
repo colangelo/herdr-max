@@ -493,6 +493,22 @@ impl LeaseHolder {
     pub(crate) fn client_pid(&self) -> Option<u32> {
         self.0.strip_prefix("client-")?.parse().ok()
     }
+
+    /// The pid of a `client-<pid>` or `cli-<pid>` holder; `None` for
+    /// `manual`, which no process holds.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.client_pid()
+            .or_else(|| self.0.strip_prefix("cli-")?.parse().ok())
+    }
+
+    /// Whether the holder can still hold its lease: `manual` always, a
+    /// client or a CLI call while its process runs (review H7). A pid the
+    /// system gave again to another process keeps the lease to its expiry,
+    /// which is where a time-only lease ended anyway.
+    fn alive(&self) -> bool {
+        self.pid()
+            .is_none_or(crate::platform::core_link::process_alive)
+    }
 }
 
 /// One lease: in force until `expires_at`; `input_at` is the time of the
@@ -540,8 +556,11 @@ impl Lease {
         })
     }
 
+    /// Before its expiry and while its holder runs: a client that quit or
+    /// crashed, or a CLI call killed before it removed its lease, allows
+    /// the link no longer (review H7).
     pub(crate) fn in_force(&self, now: f64) -> bool {
-        self.expires_at > now
+        self.expires_at > now && self.holder.alive()
     }
 }
 
@@ -772,7 +791,8 @@ pub(crate) mod tests {
         dir.create().expect("create");
         dir.write_lease(&LeaseHolder::manual(), 2_000.0, 100.0)
             .expect("manual");
-        dir.write_lease(&LeaseHolder::cli(42), 3_000.0, 200.0)
+        let me = std::process::id();
+        dir.write_lease(&LeaseHolder::cli(me), 3_000.0, 200.0)
             .expect("cli");
         fs::write(dir.leases_dir().join("manual.new"), "9 9").expect("in progress");
         fs::write(dir.leases_dir().join("Bad Name"), "9 9").expect("bad");
@@ -783,7 +803,7 @@ pub(crate) mod tests {
             leases,
             vec![
                 Lease {
-                    holder: LeaseHolder::cli(42),
+                    holder: LeaseHolder::cli(me),
                     expires_at: 3_000.0,
                     input_at: 200.0,
                     dials: true,
@@ -799,8 +819,8 @@ pub(crate) mod tests {
         assert_eq!(newest_act(&leases, 1_000.0), Some(200.0));
         assert_eq!(newest_act(&leases, 2_500.0), Some(200.0));
         assert_eq!(newest_act(&leases, 3_000.0), None, "both expired");
-        dir.remove_lease(&LeaseHolder::cli(42)).expect("remove");
-        dir.remove_lease(&LeaseHolder::cli(42))
+        dir.remove_lease(&LeaseHolder::cli(me)).expect("remove");
+        dir.remove_lease(&LeaseHolder::cli(me))
             .expect("remove twice");
         assert_eq!(dir.leases().len(), 1);
         let _ = fs::remove_dir_all(&root);
@@ -813,13 +833,15 @@ pub(crate) mod tests {
         let root = scratch("keep");
         let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
         dir.create().expect("create");
-        dir.write_keep_lease(&LeaseHolder::cli(42), 3_000.0)
+        // A running holder: a gone one's lease is not in force (H7).
+        let me = std::process::id();
+        dir.write_keep_lease(&LeaseHolder::cli(me), 3_000.0)
             .expect("keep");
         let leases = dir.leases();
         assert_eq!(
             leases,
             vec![Lease {
-                holder: LeaseHolder::cli(42),
+                holder: LeaseHolder::cli(me),
                 expires_at: 3_000.0,
                 input_at: 0.0,
                 dials: false,
@@ -957,9 +979,55 @@ pub(crate) mod tests {
             assert_eq!(lease.input_at.fract(), 0.0);
             assert_eq!(lease.expires_at, lease.input_at + 600.0);
         }
-        // A dead holder's lease ends by its expiry alone.
         assert_eq!(newest_act(&leases, 3_199.0 + 600.0), None);
-        assert!(newest_act(&leases, 3_199.0 + 599.0).is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // H7: a lease is in force before its expiry and while its holder runs.
+    // A client or CLI call that is gone allows the link no longer; `manual`
+    // has no process and ends by its expiry alone.
+    #[test]
+    fn a_gone_holders_lease_is_not_in_force() {
+        let root = scratch("lease-holder");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let me = std::process::id();
+        // A pid that cannot be a process here (above macOS's and Linux's
+        // pid limits).
+        let gone = 4_000_000_u32;
+        assert!(!crate::platform::core_link::process_alive(gone));
+        for holder in [
+            LeaseHolder::client(gone),
+            LeaseHolder::cli(gone),
+            LeaseHolder::client(me),
+            LeaseHolder::cli(me),
+            LeaseHolder::manual(),
+        ] {
+            dir.write_lease(&holder, 2_000.0, 100.0).expect("write");
+        }
+        let in_force: Vec<String> = dir
+            .leases()
+            .into_iter()
+            .filter(|lease| lease.in_force(1_000.0))
+            .map(|lease| lease.holder.as_str().to_string())
+            .collect();
+        assert_eq!(
+            in_force,
+            [
+                format!("cli-{me}"),
+                format!("client-{me}"),
+                "manual".to_string()
+            ]
+        );
+        assert!(dir.leases().iter().all(|lease| !lease.in_force(2_000.0)));
+        dir.remove_lease(&LeaseHolder::client(me)).expect("remove");
+        dir.remove_lease(&LeaseHolder::cli(me)).expect("remove");
+        dir.remove_lease(&LeaseHolder::manual()).expect("remove");
+        assert_eq!(
+            newest_act(&dir.leases(), 1_000.0),
+            None,
+            "only gone holders left"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

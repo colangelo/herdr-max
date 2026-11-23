@@ -606,7 +606,8 @@ mod tests {
         dir.create().expect("create");
         assert!(!leased(&dir));
         dir.write_keep_lease(
-            &crate::core_machine::state::LeaseHolder::cli(42),
+            // A running holder: a gone one's lease is not in force (H7).
+            &crate::core_machine::state::LeaseHolder::cli(std::process::id()),
             now_unix() + 60.0,
         )
         .expect("keep");

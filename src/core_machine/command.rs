@@ -622,15 +622,6 @@ pub(crate) fn same_host_pairs(
     pairs
 }
 
-/// The core machines herdr links, by name; empty when the state root
-/// cannot be read.
-pub(crate) fn linked_machines() -> Vec<LinkedMachine> {
-    let Ok(root) = passwd_machines_root() else {
-        return Vec::new();
-    };
-    linked_machines_in(&root, now_unix())
-}
-
 /// The linked core machines that this herdr session's primary core lists
 /// now: the ones a TUI shows as view endpoints and `--machine` can take
 /// (core-phase5 D6, D8). A folder whose machine the primary does not list
@@ -638,7 +629,10 @@ pub(crate) fn linked_machines() -> Vec<LinkedMachine> {
 /// when no primary core runs or it does not answer within a second. One
 /// `machine.list` on the running primary; it never starts a core or dials.
 pub(crate) fn linked_machines_of_primary() -> Vec<LinkedMachine> {
-    let linked = linked_machines();
+    let Ok(root) = passwd_machines_root() else {
+        return Vec::new();
+    };
+    let linked = linked_machines_in(&root, now_unix());
     if linked.is_empty() {
         return linked;
     }
@@ -654,7 +648,7 @@ pub(crate) fn linked_machines_of_primary() -> Vec<LinkedMachine> {
     listed_by_core(linked, &listed)
 }
 
-fn listed_by_core(linked: Vec<LinkedMachine>, listed: &Value) -> Vec<LinkedMachine> {
+pub(crate) fn listed_by_core(linked: Vec<LinkedMachine>, listed: &Value) -> Vec<LinkedMachine> {
     let names: Vec<&str> = listed["machines"]
         .as_array()
         .into_iter()
@@ -667,7 +661,7 @@ fn listed_by_core(linked: Vec<LinkedMachine>, listed: &Value) -> Vec<LinkedMachi
         .collect()
 }
 
-fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
+pub(crate) fn linked_machines_in(root: &Path, now: f64) -> Vec<LinkedMachine> {
     status_rows(root, None, now)
         .into_iter()
         .filter(|row| row.target.is_some())
