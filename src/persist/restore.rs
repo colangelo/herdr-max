@@ -890,7 +890,7 @@ fn restore_tab(
                     todo_links,
                 );
                 terminal.restore_error = None;
-                terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(waiting));
+                terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(*waiting));
                 panes.insert(*id, PaneState::new(terminal.id.clone()));
                 terminals.push(terminal);
                 continue;
@@ -1171,7 +1171,17 @@ enum CoreRestore {
     /// Its program may run where core does not answer, or several live
     /// terminals are labelled for the pane: start nothing, and hold the
     /// link (security review M3, Sol H5).
-    Waiting(crate::terminal::state::CoreWaiting),
+    Waiting(Box<crate::terminal::state::CoreWaiting>),
+}
+
+#[cfg(all(unix, test))]
+impl CoreRestore {
+    fn waiting(self) -> Option<crate::terminal::state::CoreWaiting> {
+        match self {
+            Self::Waiting(waiting) => Some(*waiting),
+            _ => None,
+        }
+    }
 }
 
 /// After the saved terminal did not attach: wait while the program may run
@@ -1247,11 +1257,11 @@ fn restore_core_pane(
         Err(failure) => failure,
     };
     let waiting = |link: &crate::pane::CoreTerminalLink, why| {
-        CoreRestore::Waiting(CoreWaiting {
+        CoreRestore::Waiting(Box::new(CoreWaiting {
             link: link.clone(),
             public_pane_id: public_pane_id.map(str::to_string),
             why,
-        })
+        }))
     };
     // A pane on a machine waits for the machine, and is never started fresh
     // nor searched for in this Mac's terminals (core-phase5 D5, F1).
@@ -4176,7 +4186,7 @@ mod core_restore_tests {
             crate::terminal::TerminalId::alloc(),
             "/".into(),
         );
-        terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(waiting));
+        terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(*waiting));
         assert_eq!(terminal.held_core_link(), Some(link), "the save keeps it");
         assert!(!started_anything(&core), "{:?}", core.methods());
     }
@@ -4338,10 +4348,13 @@ mod core_restore_tests {
         let _ = crate::pane::core_session_answers("herdrdev-h6");
         assert!(matches!(
             restore_with(&link, "w1-p2", crate::platform::process_start),
-            CoreRestore::Waiting(CoreWaiting {
-                why: CoreWaitReason::Unreachable,
-                ..
-            })
+            CoreRestore::Waiting(waiting) if matches!(
+                *waiting,
+                CoreWaiting {
+                    why: CoreWaitReason::Unreachable,
+                    ..
+                }
+            )
         ));
 
         // The same session with no socket: no core, so nothing to find.
@@ -4447,8 +4460,8 @@ mod core_restore_tests {
             launch: None,
             machine_cwd: None,
         };
-        match restore(&link, "w1-p2") {
-            CoreRestore::Waiting(CoreWaiting {
+        match restore(&link, "w1-p2").waiting() {
+            Some(CoreWaiting {
                 link: held,
                 why: CoreWaitReason::Conflict(found),
                 ..
