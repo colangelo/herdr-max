@@ -205,8 +205,19 @@ A lease is a file `leases/<holder>` holding an expiry time. The link may be up w
 holder writes only its own file (write to a temporary file of its own, then rename), so no two processes write one
 file. A lease is in force before its expiry and, for a `client-<pid>` or `cli-<pid>` holder, while that process
 runs: a client that quit or crashed, or a CLI call killed before it removed its file, allows the link no longer
-(review H7 of PR D). A pid the system gave again to another process keeps the lease to its expiry, no later than a
-time-only lease; `manual` has no process and ends by its expiry. A **keep lease** (`<expiry> 0 keep`, PR E review)
+(review H7 of PR D). A pid the system gave again to a process that started after the lease file was last written
+holds no lease (#312, review M7: the process start time against the file's modification time, a second of slack),
+and a holder name whose digits overflow `pid_t` is no holder; `manual` has no process and ends by its expiry.
+
+**The lease means "a person is at this Mac and can answer Touch ID"** (recorded after PR D's review, agreed with
+herdr). So a client's lease is per Mac, not per pane: a key in any local pane leases every machine this session's
+primary core added and lists, because a dial a lease admits may prompt on this Mac, and the person who just typed
+is there to answer it. With two Macs this costs nothing: m4m has one machine to allow. The lease allows; it does
+not wake (#312, item 1 of PR D's second read): the lease write dials nothing, input in a pane on a machine or in a
+view of it wakes that one machine through the process that received it (its wake waits up to 3 s for the person's
+lease, which the client writes for the same input off its own thread), and other machines connect only at core's
+own retry while the lease is in force. Per-machine leases (the machine a person types to) are a later refinement,
+worth it once one Mac links several machines. A **keep lease** (`<expiry> 0 keep`, PR E review)
 keeps a link that is up and admits no dial: core-link's watcher counts it, its admission does not (D7).
 As built after the security
 review of PR E (M4, tasks E.2b): a `cli-<pid>` lease names its kind (`<expiry> <act> dial` or `... keep`) and one
@@ -216,7 +227,7 @@ client's 10 min, `machine wake`'s 12 h, each with 5 s for clocks) or whose act i
 
 | Holder | Writes | Expiry |
 |---|---|---|
-| a TUI client (`client-<pid>`), for every core machine its own primary core lists | on human input (#260's `InputClock` events: key, text, paste, mouse), at most once a minute; never at its start (review M3) | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
+| a TUI client (`client-<pid>`), for every core machine its own primary core lists as herdr's own `core-link` and its own core session added (`primary.json`; a folder of an older build counts) | on a person's input (#260's `InputClock` events: key, text, paste, click, drag, scroll; a bare pointer motion is none, #312 M7), at most once a minute; never at its start (review M3); not by the old remote's local client (`--remote <host>`), which has no core machine to allow (#312 item 2); a view's client (`--remote core:<m>`) does | last input + 10 min (`REMOTE_DORMANT_AFTER`) |
 | a fleet CLI call through the machine (`cli-<pid>`, D7) | before its `machine.connect` or `machine.exec`, every 30 s while the CLI runs, removed when it ends and on SIGINT, SIGTERM or SIGHUP | last write + 60 s; a keep lease (D7) except for `--dial`'s own connect |
 | `herdr machine add --core`, `herdr machine login` (`manual`) | before they call hc (F8: both dial at once) | 30 min |
 | `herdr machine wake <name> [--for D]` (`manual`) | before it calls `machine.connect` | the given duration, 30 min by default, at most 12 h |
@@ -224,7 +235,8 @@ client's 10 min, `machine wake`'s 12 h, each with 5 s for clocks) or whose act i
 Not holders: a herdr server, a restore or a live handoff (a 3 a.m. beta install must not wake ac-mbm5), a client's
 start (opening herdr, or `herdr --remote core:<m>`, dials no machine until a person types; review M3), a client
 whose environment sets `HERDR_NO_MACHINE_LEASES` (every test and live-script client that is not itself under a
-lease test, H7), the phone, Herdr.app and agents' own `hc` calls. A client writes into the folders of the
+lease test, H7; `herdr machine status` says so when its environment sets it, #312 M7), the phone, Herdr.app and
+agents' own `hc` calls. A client writes into the folders of the
 machines its own primary core lists only, never every folder under the passwd home (another session's, a scratch
 core's or a test's machine is not its to allow, H7). They see the machine `unreachable` while it is dormant, which
 the docs state. The first input after dormancy (any herdr server receiving input for a pane on that machine, or a
@@ -233,7 +245,9 @@ person's input in a view of it, D6) also calls `machine.connect`, so wake does n
 **A lease comes before every connect (F8).** No herdr code calls `machine.connect`, `hc machine add` or `hc
 machine login` without a lease in force for that machine, written by itself or checked: without one, core-link
 refuses (exit 75) and the caller would report a failure for a machine that is only dormant. The wake path is
-"input → the client writes its lease → the server or view server is told → D3a's dialer calls `machine.connect`";
+"input in a pane on the machine or in a view of it → the client writes its lease, the server or view server that got
+the input waits for it (at most 3 s) → D3a's dialer calls `machine.connect`" (#312: the lease write itself dials
+nothing);
 a view server whose clients have not written a lease shows "dormant, press a key to wake" and dials nothing; a
 client attaching to it writes none (review M3).
 
@@ -369,12 +383,13 @@ The role is one type, `enum ServerRole { Primary, View(MachineName) }`, read at 
 | Persistence, orphan scan, spaces publisher, status mirror | yes | none |
 | JSON API socket | yes | none; the fleet uses `--machine` (D7) |
 | Close | ends the program | detaches; the program and the far side's pane stay |
-| Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below); no terminal replies at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, resize reports): the far herdr answers its own programs (review H1) |
+| Input | DATA frames | AUTOMATIC_INPUT frames only, never DATA or FOCUS (Size below); no terminal replies at all (DA, DSR, `?u`, OSC 10/11, XTVERSION, mode 2031/2048, resize reports): the far herdr answers its own programs (review H1). Bound to the far terminal, not the pane id (#312 M3): a pane attaches to one terminal instance (its `herdr.launch` label and pid at the first attach) and a reattach takes only that one; when the far layout puts another address under a pane id, or the address holds another program, the pane takes no input until a person clicks or focuses it, and its border says so |
 | Output | this Mac's | far data, as a pane on a machine (D5): inline Kitty graphics only, no OSC 52, OSC 7 never a folder here; replayed history included |
-| Local actions | as today | refused: custom commands and plugin actions (they would run here with the far ids), `worktree.create` and `worktree.remove`, a config reload's history clear |
+| Local actions | as today | one allowlist (`view::policy`, #312 M2), the same for the welcome's advertised methods and the dispatch: focus, zoom, scroll, copy, selection, the view's own screen clear, seen marks, closes (detaches) and a config reload; refused before dispatch: every far layout change (create, split, move, swap, resize, rename, pin, sync, presets, respawn) and everything that runs, writes or reads on this Mac (custom commands, plugin actions, all four worktree methods, `agent.message`, links, scrollback edit, todos, tasks, integrations, dismissals); an unclassified method is refused and fails a test. Also no clipboard image staging, no tab-bar status command (a far folder as a local cwd, M1), no release notes or announcement, no palette send; a config reload keeps the history |
 | Wake | — | only for a person's input in the view (a key, text, paste, click, drag or scroll; not a pointer motion), once per input, with a lease in force (D3); never on a client's attach or on a state read (review M3); `machine.connect` through D3a's dialer |
 | Notice | — | the view's own line, joined to the config diagnostic in the snapshot's `config_diagnostic`, never in its place |
-| Lifetime | as today | started on demand by the endpoint transport; exits 10 min after its last client; stateless, so a herdr update needs no handoff: a client of a newer build restarts it (the view's build and pid are in `herdr-view-<m>.lock`, which it holds with `flock` for its life; review M2); a racing second start finds the lock held and exits before it touches the log or the socket (L3.4) |
+| Lifetime | as today | started on demand by the endpoint transport; exits 10 min after its last client; stateless, so a herdr update needs no handoff: a client of a newer build restarts it (the view's build, pid and process start token are in `herdr-view-<m>.lock`, which it holds with `flock` for its life, opened with no-follow as a private regular file and read from the locked inode; a restart signals the pid only while its start token matches, #312 M8; review M2); `herdr server --view <m> --restart` ends a running view of any build first (after a rollback an older client never restarts a newer view); a racing second start finds the lock held and exits before it touches the log or the socket (L3.4). The role comes from the arguments main parsed, so a session named `server` cannot change it (M6) |
+| Far data bounds | — | the document parser's limits (D11), plus #312 M4/M5: a far size over 1000 rows, 1000 columns or 300 000 cells is refused before a grid is built or resized (attach fails and says why; a size event keeps the last size; the RESIZE echoed is the far size itself, never the grid's 2x4 minimum); at most one layout read per 500 ms; one size and one status per terminal per watcher tick; at most 8 attaches at once, each tagged by a generation so an obsolete one is detached; sizes kept only for shown terminals |
 
 **Size (F5).** Two herdr servers now view one terminal, and core gives the size to the active viewer. The
 roundtable measured the first draft's follow-size (attach at the far size, echo every `size` event) to fail three

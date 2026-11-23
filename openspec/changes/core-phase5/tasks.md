@@ -547,7 +547,9 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   attach. Limits: V21 has no failing-before test (the old path's core call needs a linked folder under the real
   passwd home to happen at all; the split is by construction); a key in any pane of the primary still leases
   every machine its primary lists (D3 row 1), so typing locally allows, and through core's retry dials, every
-  linked machine; narrowing leases to the machine a person types to is a later decision. Two different builds
+  linked machine; narrowing leases to the machine a person types to is a later decision. (Understated when
+  written, found by PR D's second read: the lease writer also posted a wake to every listed machine's dialer, so
+  any input, a pointer motion included, dialled every dormant linked Mac at once; D.8 item 1 removes that wake.) Two different builds
   with the same order (`0.9.5-ac-beta.161-a` and `-b`) can still restart one view in turn; an older client uses a
   newer view as it is.
 - [ ] D.6 Check: `just check` 0, `just core-live-test` 0, CI green
@@ -584,6 +586,95 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   of PR E's `--dial` ordering check, a core retry's START counted as the dial's, fixed in the script (a2608dde).
   `just bench-render-scale` (5-min load near 100): active panes 268 us at 1 pane, 326 at 15 (1.22x; 1.20x
   before), background workspaces 259 and 266 (1.03x); D.7 adds one `Option` join per client snapshot.
+
+- [x] D.8 Follow-ups of the view's security review (security ac/security 7eff725,
+  `docs/reviews/2026-11-23-herdr-view.md`, M1-M8) and of PR D's second read (items 1-6), Gitea #312
+  Built:
+  M1 (far folders stay far): `handle_tab_bar_status_tasks` runs no status command in a view and
+  `next_tab_bar_status_deadline` has none due (`App::is_view`); `worktree.list` and `worktree.open` are refused
+  like create and remove (`worktrees/deferred.rs`), with no git read started. Tests `a_view_runs_no_tab_bar_status_command`,
+  `a_view_makes_no_worktree` (list and open added).
+  M2 (one allowlist): `view::policy::classify` names every client-shell method `Allowed`, `FarLayout` or `Local`;
+  `advertised_client_shell_method_names` filters the welcome by it, and `handle_client_shell_endpoint_request`
+  refuses (`refused_in_view`) every method the view does not take, before dispatch (`App::view_method_refusal`;
+  an unclassified method is refused). Allowed: `client_shell.surface.set`, `server.reload_config`,
+  `notification.{list,mark_seen,clear}`, `workspace.focus`, `tab.focus`, `pane.{focus,focus_direction,zoom,scroll,
+  scroll_application,clear,clear_scrollback,selection.read,copy_motion,copy_search,input.set,mark_seen,close}`,
+  `tab.close`, `workspace.close` (closes are detaches; clear and clear_scrollback touch the view's own grid only).
+  Why the rest: layout and names are the far herdr's (D6), and links (open a URL here, resolve a path against a
+  far folder), the scrollback editor (a file and an editor here), todos, tasks, issues, asks, integrations and
+  dismissals are this Mac's. A view also stages no clipboard image (`ServerEvent::ClientClipboardImage`), clears
+  this Mac's release notes and announcement at `start_view`, and the palette offers no send where `agent.message`
+  is not advertised (so no Note through the local `note_command`). Tests `view::policy::tests` (every method
+  classified, the allowlist pinned, welcome = dispatch), `headless::tests::view_policy` (the named methods through
+  the real dispatch: refused, nothing in flight, no editor; an allowed one dispatched; no image staged),
+  `palette::an_endpoint_without_agent_message_offers_no_send_or_note`.
+  M3 (input bound to the terminal): `ViewIo::instance` pins the far terminal's `herdr.launch` label and pid at the
+  first attach; `machine_reattach_check` and `attach_again` take only that instance, and another program at the
+  address ends the stream (`view_replaced`, the writer sends nothing after); `App::rebind_replaced_view_pane`
+  binds the pane afresh. `ViewApp::bound`/`held`: a pane whose far terminal changed (another address under its
+  far id, or a replaced instance) takes no input in `route_synced_pane_input` or `pane.scroll_application` until a
+  mouse press in it (not forwarded) or `pane.focus`/`pane.focus_direction` onto it; the border says `another
+  terminal now: click to type` (`TerminalState::view_input_held`). Tests
+  `pane_io::a_view_reattaches_only_the_far_terminal_it_attached_to`,
+  `view_layout::a_pane_whose_far_terminal_changes_holds_its_input_until_focused`,
+  `sync_input::a_held_view_pane_takes_no_input_until_a_person_clicks_it`.
+  M4 (grid budget): `view::far_size_fits`, 1000 rows, 1000 columns, 300 000 cells (a 6K display at a 6x12 px font
+  is about 1000x280; a few MB of grid a pane; the document allows 256 panes). Refused, never clamped (a clamp would
+  draw wrongly and reach core as the RESIZE): `view_far_size` fails the attach with `too_large`, and
+  `CorePaneIo::follow_far_size` and `App::follow_view_size` ignore a larger size event, keeping the last one.
+  Item 6 (part): a view's grid resize (rect, the 2x4 minimum) never reaches the wire; `follow_far_size` sends the
+  far size itself. Tests `pane_io::a_far_size_over_the_budget_never_reaches_a_grid_or_the_wire`, the updated
+  `a_view_pane_never_takes_the_far_terminals_size`, `view_layout::far_sizes_are_bounded_and_kept_only_for_shown_terminals`.
+  M5 (churn): sizes kept only for shown terminals; `LAYOUT_EVERY` 500 ms between layout reads (the last document
+  still arrives); one far size and one status per terminal per tick (`coalesce`); `MAX_ATTACHING` 8 at once, the
+  rest wait; each attach has a generation and a completion of another is detached. Tests
+  `watch::far_churn_is_coalesced`, `view_layout::far_attaches_are_capped_and_obsolete_ones_are_detached`.
+  M6: `run_server` takes main's parsed arguments and `view::requested_view` reads the role from them. Tests
+  `view::a_session_named_server_does_not_change_the_role`; live (view part) a view in session `server` makes no
+  primary socket or session file.
+  M7 and items 1, 2, 5 (leases): the client's writer posts no wake; `MachineLink::dial_in` waits up to 3 s
+  (`LEASE_GRACE`) for the person's lease; a bare pointer motion (crossterm `Moved`, SGR motion with no button)
+  writes no lease (`events_are_person_acts`, `sgr_mouse_is_person_act`; #260's dormancy wake still counts it);
+  `presence::writes_leases`: none for a remote client whose target is not `core:`; `lease_pass` needs the
+  primary's record to be herdr's own `core-link` (`managed_by_herdr`) and the folder's `primary.json` (new,
+  written by `machine add --core`) to name this session's core, or be absent (an older build's folder);
+  `LeaseHolder::parse` needs a positive `pid_t`; `MachineDir::leases` drops a lease whose pid now runs a process
+  started after the file was last written (`platform::process_started_at`, macOS `proc_bsdinfo`, Linux
+  `/proc/<pid>/stat` plus `btime`); `herdr machine status` prints `leases off here: HERDR_NO_MACHINE_LEASES is set`
+  (stderr with `--json`). Tests `presence::a_client_leases_only_its_own_primarys_herdr_links`,
+  `only_local_and_view_clients_write_leases`, `state::a_reused_pids_lease_is_no_ones`, `holders_are_the_three_kinds`
+  (overflow), `panes::a_wake_waits_briefly_for_the_persons_lease`, `client::person_act_tests`,
+  `command::machine_status_names_the_lease_opt_out`; live (lease part) the first key in a local pane writes the
+  lease and starts no dial.
+  M8 and items 4, 6 (lock and restart): `view::open_lock` opens with `O_NOFOLLOW`, only a regular file of this
+  account in a folder no one else writes; `running_view_at` reads at most 4 KiB from the locked inode; a probe
+  that fails (no flock, `ENOTSUP`) says so once and counts as no view; `ViewRecord::start` holds the process start
+  token and `stop_view` signals only while `names_its_process`; `herdr server --view <m> --restart`
+  (`view::start::stop_running`) ends a running view of any build first. Tests
+  `view::a_symlinked_or_shared_lock_is_refused`, `a_record_names_only_the_process_that_wrote_it`,
+  `start::a_restart_never_signals_a_process_that_reused_the_views_pid`.
+  Item 3: `catalog_reload::watch_core_machines` reads the primary's linked machines every 30 s and the client adds
+  or retires view endpoints (`ClientLoopEvent::CoreMachines`, Local supervised once one shows); an empty listing
+  removes none. Test `catalog_reload::core_machine_tests`.
+  Design: D3 records why a key in any local pane leases every machine (a person at this Mac can answer Touch ID;
+  per Mac, not per pane; free with two Macs), and that leases allow, not wake; D6's table has the allowlist, the
+  input binding, the far data bounds, the lock and `--restart`.
+  Limits: the far pane identity is checked by instance at reattach, not against the document's far pane id (the
+  far herdr's `herdr.pane_id` label can change on a move); a terminal attached before this build's first attach
+  record (no launch label and no pid) is not compared; a record of an older view build has no start token, so its
+  restart still trusts the held lock and a live pid; a view lock path replaced under a running view splits it
+  across inodes (the private folder keeps others out; the account's own processes are trusted); per-pane grid
+  budget only, no aggregate across the 256 panes; direct terminal attach (`TerminalHello`) to a view is not gated
+  separately (it types through the same AUTOMATIC_INPUT writer and the same binding); a view advertises no
+  `pane.link.activate`, so links in a view are copied, not opened; a click that releases a held pane is not sent;
+  pre-lock views (an unreleased PR D build) are not found by a client; the 30 s core poll runs one `machine.list`
+  per client; `writes_leases` reads the remote client's target from its environment, which a person can set;
+  the `rebind_replaced_view_pane` path is covered by its parts' tests (no unit test drives a replaced runtime
+  through the App, which needs a real core). Per-machine leases stay a later refinement.
+- [ ] D.9 Check for D.8: targeted tests, `just check` 0, `core_view_live_test.sh`, `core_machine_live_test.sh`
+  lease part
+  (gates below)
 
 ## PR E. Actions and the fleet CLI over the link
 
