@@ -1043,6 +1043,56 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   run: the panes, link and lease parts (nothing in them changed), the bench (no render, layout, PTY or detection
   work added: the numbering and hold change runs once per far document, the aim check off the loop), CI (not
   pushed).
+- [x] E.3b The far herdr checks a view's pane action (security review of PR 100, P2 M1-M2 and P3 M4-M8, and its
+  delta re-check; https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/316), D7 "As built (E.3b)"
+  As built:
+  - M1 (P2): the far API takes `pane.close_if_terminal`, `pane.split_if_terminal` and `pane.rename_if_terminal`
+    (`src/app/api/guarded_panes.rs`), each with `expect: {terminal, pid, launch}`, checked in the loop turn of the
+    action against the pane's primary-session core terminal and its run (`CoreProgramRun`: the launch label a
+    core pane's terminal carries, now kept for this Mac's panes too, and core's pid); a mismatch or a pane not in
+    core is `terminal_mismatch`, nothing done. New names, no client-shell admission: no endpoint advertisement,
+    no generation-1 fixture touched; an older far herdr refuses them unparsed, shown as "cannot check which
+    program a pane runs ...; update Herdr there". The view sends a pane's close, split and rename only as these;
+    `tab.create`, `workspace.rename` and `tab.rename` stay plain. The client refuses a view action while another
+    to that view is in flight or queued (`view_action_busy`, `EndpointCommands::refuses_behind`), never queued.
+  - M2 (P2): the far guarded close refuses a close that would close the pane's workspace
+    (`would_close_workspace`), so a worktree group never closes implicitly; the view's own last-pane check stays.
+  - M4: a forced close needs a confirmation minted only by a far `confirmation_required` to an unforced close of
+    the same pane and program, valid 120 s (`CONFIRM_FOR`), spent in the aim check just before the request.
+  - M5: D7 says any same-user socket client can send Far methods; a pane action goes only for a pane of the
+    sending client's tab; a client's request id is taken once (`SeenActions`, last 256 per view).
+  - M7: `CoreAt::by(deadline)` and `call_running_by`: the connect's hello, the version check and each call's
+    wait end by the action's deadline, a call with nothing left is not sent; `remove_running_leases` at the view
+    server's graceful end.
+  - M8: a tab rename names the far tab by the document's own id (`ViewApp::far_tab`).
+  - Delta re-check: `FarInstance::is_known` needs both the launch label and the pid; a far terminal id is
+    checked against the core pattern (`view::doc::is_local_terminal`) before it becomes `<m>/<id>`; the four
+    missing tests below.
+  - Left on #316: M3 (a live-process confirmation for a view's close) needs a far process probe or a new far
+    confirmation code, not small; M6 (0700 socket folder or umask, peer-uid check) is pre-existing for every
+    herdr socket and needs a second local uid to use.
+  Tests: `a_guarded_action_acts_only_on_the_program_it_names`, `a_guarded_close_never_closes_a_workspace`,
+  `a_pane_outside_core_is_refused` (far side, fake core); `each_action_names_the_far_targets_and_nothing_of_this_mac`
+  (the guarded methods and `expect`), `a_pane_action_goes_only_for_a_pane_of_the_clients_tab`,
+  `a_request_sent_again_is_refused`, `a_refused_forced_close_keeps_the_persons_confirmation` (minted by the far
+  answer, kept when refused unsent, spent once), `a_confirmation_expires`, `a_confirmed_close_reaches_only_the_pane_it_was_asked_for`,
+  `an_unknown_or_one_sided_instance_takes_no_action` (unknown and one-sided at `view_far_action` and at
+  `still_aimed`), `a_replaced_view_pane_takes_no_action` (a real view stream that saw another program),
+  `a_far_document_that_does_not_read_sends_nothing`, `a_far_terminal_id_that_is_no_core_terminal_is_refused`,
+  `a_tab_rename_names_the_far_tab_by_the_documents_id`, `a_one_sided_instance_is_not_known`,
+  `a_core_that_does_not_answer_holds_no_call_past_the_deadline`, `the_view_servers_end_removes_a_running_actions_lease`,
+  `a_view_action_waits_behind_no_other_one`. Not failing with its fix reverted, by design: the terminal-pattern and
+  far-tab-id tests (the document parser already refuses another terminal id and gives each tab its canonical id;
+  both are defence in depth), and the four delta re-check tests of behaviour PR 100 already had.
+  Live: `core_fleet_live_test.sh`: the far wrapper logs each request's method and reply and can run a hook just
+  before the next request; the view's `prefix x` reaches the far pane as `pane.close_if_terminal` and closes it;
+  a far pane whose program the hook respawns after the view's check (t3 to t4) is refused by the far herdr
+  (`terminal_mismatch`) and stays, its new program live, no lease left.
+  Gates, m4m, 2026-11-23, under the shared lock: targeted tests green (265: view actions, view, fleet view,
+  endpoint commands, schema, operations, view policy, client commands, core client, guarded panes); clippy
+  `--all-targets -D warnings` clean on macOS; on a debug binary of e93511ca copied out of the shared target,
+  `CORE_MACHINE_PARTS=fleet core_machine_live_test.sh` 0 (the guarded close and the rebind refusal above) and
+  `core_view_live_test.sh` (V30_IDLE_SECS=20) 0.
 - [x] E.4 `docs/next`: core machines, dormancy, `machine status` gates, the announcement rule (S4a, S4b:
   `--dial` and `wake` are announced dials), that agents' own `hc --on` on a dormant machine fails, the fallback
   Done: `connecting-machines.mdx` § Herdr Core machines (add from a terminal, no install by herdr, every dial a

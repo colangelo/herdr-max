@@ -547,6 +547,44 @@ Alternatives:
   itself. Closing the rest needs the far herdr to check the terminal and program under its own lock (security
   review M1): a next change, a far request that names the expected terminal and instance, advertised so an older
   far herdr is never sent it.
+  As built (E.3b, fork issue 316): the far herdr checks it. A pane's close, split and rename go as their own
+  methods, `pane.close_if_terminal`, `pane.split_if_terminal` and `pane.rename_if_terminal`, each with
+  `expect: {terminal, pid, launch}`: the far core's address of the pane's terminal, the pid core reported and the
+  `herdr.launch` label, as the view's pane attached to them. The far herdr resolves the pane id, compares the
+  pane's terminal in its primary core session and the pid and launch label of its run (now kept for this Mac's
+  panes too, read from core at the start or the reattach) with all three, and acts, in one turn of its loop (the
+  API runs on the loop, so nothing changes between the check and the action); a mismatch, or a pane not in
+  core, is `terminal_mismatch` with nothing done. New methods rather than a field on the old ones (the stable
+  endpoint contract): an older far herdr would ignore a new field and close whatever pane has the id, but it
+  does not know these names and refuses the request unparsed, which the view shows as `<m>'s herdr cannot check
+  which program a pane runs before <method>, so nothing was done; update Herdr there`. So no pane action reaches
+  a far herdr without the check, and no capability probe is needed. They are no client-shell methods (no endpoint
+  advertisement, no generation-1 fixture changes); `tab.create` and the renames of a workspace and a tab name no
+  pane and stay the plain methods. A view sends a pane action only with both halves of the instance known: an
+  attach that learned only the label or only the pid vouches for no program (security delta re-check, item 1),
+  and only a far terminal id of the core pattern (`t` and digits) becomes a core address (item 2). The identity
+  comes from the client's displayed snapshot through the view in this sense: the client names the pane by the
+  id it shows, and a pane whose binding changed since the person saw it is held until a click (D6, M3), so the
+  binding the view sends is the one the window showed; the generation-1 `pane.close` of the client is unchanged.
+  The far guarded close is a close of one pane (M2): a close that would close the pane's workspace is
+  `would_close_workspace` there, so a worktree group never closes implicitly, whatever the view's own check saw.
+  Not queued (M1): the client refuses a view's structural action while another one to that view is in flight or
+  queued in its command lane (`view_action_busy`), instead of sending it later at whatever the pane shows then.
+  Left: a far rebind and the far herdr's own close are now one step; what remains is the person's own lag, the
+  far screen they read before pressing the key, which no check can close.
+  The person's confirmation (M4): one forced close per far `confirmation_required`. The view mints it only when
+  the far herdr answered `confirmation_required` to an unforced close of that pane and program, keeps it 120 s
+  (`CONFIRM_FOR`), and spends it in the step just before the request, after the aim check; refused before (busy,
+  not connected, the check), it stays. A forced close with none, an expired one or a spent one is refused,
+  `close it again`.
+  Same-user clients (M5): the view's client socket takes any process of this account, so any of them can send a
+  Far method, as any can type into a pane; the view's guards are what a person's window would do: a pane action
+  goes only for a pane of the tab the sending client's window shows, and a client's request id is taken once (a
+  request sent again is refused, nothing sent). The socket's own 0700 folder and peer-uid check (M6) are
+  pre-existing for every herdr socket and left on #316.
+  The deadline (M7) goes through each call to core: the connect's hello, the version check and each call's wait
+  fit in what is left, and a call with nothing left is not sent. The view server's graceful end removes the lease
+  of an action still running. A tab's rename names the far tab by the id the far document gave it (M8).
   Time (review M3): one deadline per action, 45 s from the moment the view takes it, inside the client's 60 s
   (a compile-time check holds them 10 s apart). A second action while one runs in that view is refused at once,
   never queued (the lock is the view's own route's, not the process's, item 8); core's `machine.list` takes 5 s
@@ -556,7 +594,8 @@ Alternatives:
   most; with less than 5 s left nothing is sent. The
   client's command lane holds one command per endpoint by design, so that client's other commands to the view wait
   for the action's answer, 45 s at worst; a client never times out on one and does it again.
-  The far reply is the client's answer, far text escaped (M1) and without a parser's method list. A far herdr
+  The far reply is the client's answer, far text escaped (M1) and without a parser's method list (`terminal_mismatch`
+  and `would_close_workspace` are shown that way). A far herdr
   without the method answers `invalid_request` naming it (``unknown variant `<method>`, expected one of ...``; only
   retired `pane.graphics.*` methods answer `unknown_method`); both are a missing verb, shown as `<m>'s herdr does
   not take <method>; update Herdr there`, that action's notice, the view connected; it is asked again on the next
