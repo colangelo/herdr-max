@@ -13,7 +13,10 @@
 # and V20 live: a new tab named `$(touch x); w` from a view of the machine
 # reaches the far herdr as that one name, through the same far bridge, and
 # no shell ran it; and `prefix x` in the view on that tab's pane closes
-# exactly that far pane, ending its program and no other (review M5).
+# exactly that far pane, ending its program and no other (review M5), as
+# the guarded `pane.close_if_terminal`; and a far pane whose program is
+# respawned between the view's own check and the request is refused by the
+# far herdr (`terminal_mismatch`) and stays (fork issue 316, M1).
 #
 # The far side is a scratch core on this Mac with its own herdr server,
 # reached through herdr's own link command and a fake `ssh` that runs the
@@ -40,6 +43,12 @@ F3_SOCK="$F3R/herdr-core/$FL_CORE.sock"
 FL_BIN="$BASE/flbin"
 FL_SSH_LOG="$BASE/fl-ssh.log"
 FL_FAR_LOG="$BASE/fl-far.log"
+# Each request line's method the far bridge got, each reply it gave, and a
+# script the far wrapper runs once just before the next request (to change
+# the far pane under a request already checked here).
+FL_FAR_REQ_LOG="$BASE/fl-far-requests.log"
+FL_FAR_REPLY_LOG="$BASE/fl-far-replies.log"
+FL_FAR_HOOK="$BASE/fl-far-hook.sh"
 FL_LOCAL_SOCK="$RUNTIME_DIR/herdr-core/$CORE_SESSION.sock"
 FL_FAR_API="$F3C/herdr-dev/sessions/$FL_SESSION/herdr.sock"
 FL_HC="$(command -v hc)"
@@ -155,6 +164,17 @@ printf 'onboarding = false\n\n[experimental]\nruntime = "core"\ncore_spaces_doc 
 cat > "$F3B/herdr" <<FAR
 #!/bin/sh
 printf '%s args=%s env=%s\n' "\$(date +%s)" "\$*" "\$(env | sed 's/=.*//' | grep '^HERDR_' | sort | tr '\n' ',')" >> "$FL_FAR_LOG"
+case "\$*" in
+  *"remote-api-bridge --request")
+    if [ -s "$FL_FAR_HOOK" ]; then /bin/sh "$FL_FAR_HOOK" >/dev/null 2>&1; : > "$FL_FAR_HOOK"; fi
+    line="\$(head -n 1)"
+    printf '%s\n' "\$line" | sed -n 's/^{"id":"[^"]*","method":"\([a-z_.]*\)".*/\1/p' >> "$FL_FAR_REQ_LOG"
+    reply="\$(printf '%s\n' "\$line" | "$HERDR_BIN" "\$@")"; code=\$?
+    printf '%s\n' "\$reply" >> "$FL_FAR_REPLY_LOG"
+    printf '%s\n' "\$reply"
+    exit \$code
+    ;;
+esac
 exec "$HERDR_BIN" "\$@"
 FAR
 chmod +x "$F3B/herdr"
@@ -385,9 +405,66 @@ fl_wait "the far program $FL_CLOSE_PID ending" 15 fl_program_ended
 [[ "$(fl_others)" == "$others_before" ]] \
   || fail "M5: another far pane or program changed: before '$others_before', after '$(fl_others)'"
 [[ "$(fl_cli_leases)" == 0 ]] || fail "M5: the close's lease outlived it: $(ls "$FL_DIR/leases")"
+[[ "$(tail -n 1 "$FL_FAR_REQ_LOG" 2>/dev/null)" == pane.close_if_terminal ]] \
+  || fail "#316 M1: the view's close reached the far herdr as '$(tail -n 1 "$FL_FAR_REQ_LOG" 2>/dev/null)', not pane.close_if_terminal"
+echo "ok: E.3 M5 prefix x in the view closed far pane $FL_CLOSE_PANE ($FL_CLOSE_ADDR, pid $FL_CLOSE_PID) through the far bridge as pane.close_if_terminal; its program ended; the other far panes and programs are as they were; no lease left"
+
+# --- #316 M1 live: a far pane whose program is respawned after the view's
+# own check (its document and Herdr Core's record still showed the program
+# the view attached to) and before the far herdr takes the request: the far
+# herdr checks the program again in the same step as the close and refuses
+# it (`terminal_mismatch`); the pane and its new program stay.
+fl_far_api() {
+  python3 -I - "$FL_FAR_API" "$1" "$2" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
+s.sendall((json.dumps({"id": "fl", "method": sys.argv[2], "params": json.loads(sys.argv[3])}) + "\n").encode())
+print(json.dumps(json.loads(s.makefile("rb").readline())))
+PY
+}
+fl_far_api tab.create '{"label":"rebind-316","focus":false}' >"$BASE/fl-rebind-tab.json" \
+  || fail "#316: could not make the far tab"
+fl_rebind_tab="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["tab"]["tab_id"])' "$BASE/fl-rebind-tab.json")" \
+  || fail "#316: no tab in $(cat "$BASE/fl-rebind-tab.json")"
+fl_rebind_pane() { fl_far_panes | awk -v tab="$fl_rebind_tab" '$2 == tab {print $1, $3}'; }
+fl_rebind_ready() { [[ "$(fl_rebind_pane | awk '{print $2}')" =~ ^t[0-9]+$ ]]; }
+fl_wait "the far rebind tab's core pane" 20 fl_rebind_ready
+read -r FL_REBIND_PANE FL_REBIND_ADDR < <(fl_rebind_pane)
+fl_far_api pane.send_input "{\"pane_id\":\"$FL_REBIND_PANE\",\"text\":\"echo REBIND-$$\",\"keys\":[\"Enter\"]}" >/dev/null \
+  || fail "#316: could not type into the far pane"
+for _ in 1 2 3 4 5 6 7 8; do
+  fl_view_has "REBIND-$$" && break
+  fl_tm send-keys -t flview C-b n
+  sleep 1
+done
+fl_wait "the view showing the far rebind pane" 20 fl_view_has "REBIND-$$"
+# The view must have attached it (a pane still attaching takes no action).
+sleep 2
+cat > "$FL_FAR_HOOK" <<HOOK
+"$FL_PY" -I - "$FL_FAR_API" "$FL_REBIND_PANE" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
+s.sendall((json.dumps({"id": "hook", "method": "pane.respawn", "params": {"pane_id": sys.argv[2], "force": True}}) + "\\n").encode())
+s.makefile("rb").readline()
+PY
+HOOK
+replies="$(wc -l <"$FL_FAR_REPLY_LOG" 2>/dev/null | tr -d ' ' || echo 0)"
+fl_tm send-keys -t flview C-b x
+fl_hook_ran() { [[ ! -s "$FL_FAR_HOOK" ]]; }
+fl_wait "the far wrapper's respawn just before the request" 30 fl_hook_ran
+fl_refused() { tail -n +"$((replies + 1))" "$FL_FAR_REPLY_LOG" 2>/dev/null | grep -q '"code":"terminal_mismatch"'; }
+fl_wait "the far herdr's terminal_mismatch" 30 fl_refused
+[[ "$(tail -n 1 "$FL_FAR_REQ_LOG")" == pane.close_if_terminal ]] \
+  || fail "#316: the refused close went as '$(tail -n 1 "$FL_FAR_REQ_LOG")'"
+read -r still_pane still_addr < <(fl_rebind_pane) || true
+[[ "$still_pane" == "$FL_REBIND_PANE" ]] || fail "#316: the far pane $FL_REBIND_PANE was closed though its program changed"
+[[ "$still_addr" =~ ^t[0-9]+$ && "$still_addr" != "$FL_REBIND_ADDR" ]] \
+  || fail "#316: the hook did not respawn the far pane ($FL_REBIND_ADDR, now '$still_addr')"
+[[ -n "$(fl_term_pid "$still_addr")" ]] || fail "#316: the far pane's new program $still_addr is not live"
+[[ "$(fl_cli_leases)" == 0 ]] || fail "#316: the refused close's lease outlived it: $(ls "$FL_DIR/leases")"
 fl_tm kill-server >/dev/null 2>&1
 fl_stop_view
-echo "ok: E.3 M5 prefix x in the view closed far pane $FL_CLOSE_PANE ($FL_CLOSE_ADDR, pid $FL_CLOSE_PID) through the far bridge; its program ended; the other far panes and programs are as they were; no lease left"
+echo "ok: #316 M1 a far pane respawned between the view's check and the request ($FL_REBIND_ADDR -> $still_addr) is refused by the far herdr (terminal_mismatch) and stays; no lease left"
 # The far layout changed: the link's answer is read again, and checked
 # against the far herdr's own, for the comparisons below.
 fleet_cli --machine "$FT" pane list >"$BASE/fl-core.json" 2>"$BASE/fl-core.err" \
