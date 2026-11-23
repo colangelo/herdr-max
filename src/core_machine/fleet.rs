@@ -1310,27 +1310,8 @@ impl Bridge {
         if line.is_empty() {
             return;
         }
-        // One whole request line at the far API's own limit, or nothing
-        // is sent (M6).
-        if line.len() > REQUEST_LIMIT + 1 {
-            self.fail(format!(
-                "the request is over the Herdr API's 1 MiB line limit, so it was not sent to {}",
-                self.name
-            ));
-            return;
-        }
-        if !line.ends_with(b"\n") {
-            self.fail(format!(
-                "the request is not one whole line, so it was not sent to {}",
-                self.name
-            ));
-            return;
-        }
-        if request_id(&line).is_none() {
-            self.fail(format!(
-                "the request has no id to match a reply to, so it was not sent to {}",
-                self.name
-            ));
+        if let Err(why) = check_request_line(&self.name, &line) {
+            self.fail(why);
             return;
         }
         let timeout = match exec_timeout(&line) {
@@ -1340,26 +1321,78 @@ impl Bridge {
                 return;
             }
         };
-        match exec(&self.core, &self.name, &self.argv, Some(&line), timeout) {
-            Ok(ran) if ran.code == Some(0) => {
-                // A far side that ended well with no whole reply line (an
-                // API that closed first) may still have run the request
-                // (#310): a failure, never an empty success.
-                if let Err(why) = whole_reply(&line, &ran.stdout) {
-                    forget_far_herdr(&self.dir);
-                    self.fail(format!(
-                        "herdr on {} ({}) {why}; {MAY_HAVE_RUN}",
-                        self.name, self.far_path
-                    ));
-                    return;
-                }
+        let far = FarRoute {
+            core: &self.core,
+            name: &self.name,
+            dir: &self.dir,
+            argv: &self.argv,
+            far_path: &self.far_path,
+        };
+        match far.send(&line, timeout) {
+            Ok(reply) => {
                 if let Err(err) = write_all_by(
                     &connection,
-                    &ran.stdout,
+                    &reply,
                     std::time::Instant::now() + BRIDGE_IO_WAIT,
                 ) {
                     tracing::debug!(%err, "the fleet CLI did not take its reply");
                 }
+            }
+            Err(why) => self.fail(why),
+        }
+    }
+}
+
+/// One whole request line at the far API's own limit, with an id to match
+/// its reply, or nothing is sent (M6).
+fn check_request_line(name: &MachineName, line: &[u8]) -> Result<(), String> {
+    if line.len() > REQUEST_LIMIT + 1 {
+        return Err(format!(
+            "the request is over the Herdr API's 1 MiB line limit, so it was not sent to {name}"
+        ));
+    }
+    if !line.ends_with(b"\n") {
+        return Err(format!(
+            "the request is not one whole line, so it was not sent to {name}"
+        ));
+    }
+    if request_id(line).is_none() {
+        return Err(format!(
+            "the request has no id to match a reply to, so it was not sent to {name}"
+        ));
+    }
+    Ok(())
+}
+
+/// Where one API request line goes: the far herdr's one-request bridge
+/// (`bridge_argv`) through `machine.exec`. The fleet CLI's bridge and a
+/// view's structural actions (E.3) both send through it.
+struct FarRoute<'a> {
+    core: &'a CoreAt,
+    name: &'a MachineName,
+    dir: &'a MachineDir,
+    argv: &'a [String],
+    far_path: &'a str,
+}
+
+impl FarRoute<'_> {
+    /// Sends `line` once and returns the far side's one reply line, or why
+    /// there is none, saying whether the request may have run.
+    fn send(&self, line: &[u8], timeout: u64) -> Result<Vec<u8>, String> {
+        let name = self.name;
+        match exec(self.core, name, self.argv, Some(line), timeout) {
+            Ok(ran) if ran.code == Some(0) => {
+                // A far side that ended well with no whole reply line (an
+                // API that closed first) may still have run the request
+                // (#310): a failure, never an empty success.
+                if let Err(why) = whole_reply(line, &ran.stdout) {
+                    forget_far_herdr(self.dir);
+                    return Err(format!(
+                        "herdr on {name} ({}) {why}; {MAY_HAVE_RUN}",
+                        self.far_path
+                    ));
+                }
+                Ok(ran.stdout)
             }
             Ok(ran) => {
                 // Any far exit but 0 forgets the probe, so the next call
@@ -1368,18 +1401,17 @@ impl Bridge {
                 // `remote-api-bridge` (2) or no `--request` (an older herdr
                 // answers that with its usage, exit 1, #310), or it failed
                 // for its own reason, which costs one probe.
-                forget_far_herdr(&self.dir);
+                forget_far_herdr(self.dir);
                 let code = ran
                     .code
                     .map_or_else(|| "a signal".to_string(), |code| format!("exit {code}"));
-                self.fail(format!(
-                    "herdr on {} ({}) ended with {code}: {}; {MAY_HAVE_RUN}",
-                    self.name,
+                Err(format!(
+                    "herdr on {name} ({}) ended with {code}: {}; {MAY_HAVE_RUN}",
                     self.far_path,
                     ran.stderr_tail()
-                ));
+                ))
             }
-            Err(failure) => self.fail(failure.for_request()),
+            Err(failure) => Err(failure.for_request()),
         }
     }
 }
