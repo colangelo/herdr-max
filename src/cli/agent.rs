@@ -739,7 +739,7 @@ mod fork_regression_tests {
 }
 
 #[cfg(test)]
-mod far_output_tests {
+pub(in crate::cli) mod far_output_tests {
     use super::*;
 
     use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
@@ -758,6 +758,11 @@ mod far_output_tests {
                 "state": FAR_CONTROLS, "matched": true, "priority": 1,
                 "evidence": {"region_preview": FAR_CONTROLS, "contains": [FAR_CONTROLS]}}]
         })
+    }
+
+    /// `agent explain` as printed, for the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        agent_explain_text(&explain(), true)
     }
 
     #[test]

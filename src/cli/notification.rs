@@ -75,7 +75,7 @@ fn list_text(response: &serde_json::Value) -> Option<String> {
 }
 
 #[cfg(test)]
-mod far_output_tests {
+pub(in crate::cli) mod far_output_tests {
     use super::*;
 
     use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
@@ -86,6 +86,11 @@ mod far_output_tests {
             "id": 1, "read": false, "posted_at_unix": 0,
             "kind": FAR_CONTROLS, "title": FAR_CONTROLS, "context": FAR_CONTROLS
         }]}})
+    }
+
+    /// `notification list` as printed, for the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        list_text(&response()).unwrap()
     }
 
     #[test]

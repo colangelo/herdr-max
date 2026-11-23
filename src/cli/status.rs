@@ -473,7 +473,7 @@ fn print_status_help() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::cli) mod tests {
     use super::*;
 
     fn running_server(
@@ -499,6 +499,26 @@ mod tests {
 
     /// security review 2026-11-23 M1: a far server's version, core state
     /// and macOS services context show their controls as escapes.
+    /// `status server` as printed for a far server, for the all-commands walk.
+    pub(in crate::cli) fn walk_text() -> String {
+        let mut server = running_server(Some(crate::cli::target::FAR_CONTROLS), None);
+        if let ServerRuntimeStatus::Running {
+            macos_services,
+            core,
+            ..
+        } = &mut server
+        {
+            *macos_services = Some(crate::api::schema::MacosServicesInfo {
+                context: crate::cli::target::FAR_CONTROLS.into(),
+                reachable: true,
+            });
+            *core = Some(crate::cli::target::FAR_CONTROLS.into());
+        }
+        let mut text = server_status_lines(&server, crate::cli::target::FAR_CONTROLS).join("\n");
+        text.push('\n');
+        text
+    }
+
     #[test]
     fn far_status_strings_print_their_controls_escaped() {
         let osc52 = "\x1b]52;c;aGk=\x07";
