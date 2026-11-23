@@ -235,7 +235,7 @@ impl MachineDir {
     /// Every lease file that parses, in force or not; `.new` files are
     /// writes in progress, and a file that does not parse, or is not one
     /// of its holder's (`Lease::parse`), is no lease. At most
-    /// `LEASE_FILES_READ` files of at most `LEASE_FILE_BYTES` are read (M4).
+    /// `LEASE_FILES_READ` holder-named files of at most `LEASE_FILE_BYTES` are read (M4).
     pub(crate) fn leases(&self) -> Vec<Lease> {
         use std::io::Read as _;
         let Ok(entries) = fs::read_dir(self.leases_dir()) else {
@@ -244,9 +244,14 @@ impl MachineDir {
         let now = now_unix();
         let mut leases: Vec<Lease> = entries
             .flatten()
-            .take(LEASE_FILES_READ)
             .filter_map(|entry| {
                 let holder = LeaseHolder::parse(entry.file_name().to_str()?).ok()?;
+                Some((entry, holder))
+            })
+            // The cap counts holder-named files only: temporaries and
+            // strays must not push a live lease out of the read.
+            .take(LEASE_FILES_READ)
+            .filter_map(|(entry, holder)| {
                 let mut text = String::new();
                 fs::File::open(entry.path())
                     .ok()?
@@ -352,6 +357,11 @@ pub(crate) struct Target {
     /// passes theirs, and herdr's own core start drops it.
     #[serde(default)]
     pub ssh_auth_sock: Option<PathBuf>,
+    /// The `--via` command line `machine add --core` gave core: this
+    /// herdr's own path and `core-link <name>`. Core's record of the machine
+    /// must carry exactly it (#310, M5). Absent in a target written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// An ssh destination herdr passes as one argument: no option (`-...`),
@@ -394,6 +404,11 @@ impl Target {
         if !self.ssh.is_absolute() || !absolute(&self.ssh_config) || !absolute(&self.ssh_auth_sock)
         {
             return Err(invalid("target.json: paths must be absolute".into()));
+        }
+        if self.via.as_ref().is_some_and(|via| {
+            via.is_empty() || via.len() > 4096 || via.chars().any(char::is_control)
+        }) {
+            return Err(invalid("target.json: via is not a command line".into()));
         }
         Ok(())
     }
@@ -554,9 +569,13 @@ impl LeaseHolder {
         }
     }
 
-    /// The pid of a `client-<pid>` holder.
-    pub(crate) fn client_pid(&self) -> Option<u32> {
-        self.0.strip_prefix("client-")?.parse().ok()
+    /// The pid of a `client-<pid>` or `cli-<pid>` holder.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        let rest = self
+            .0
+            .strip_prefix("client-")
+            .or_else(|| self.0.strip_prefix("cli-"))?;
+        rest.parse().ok()
     }
 
     /// The pid of a `client-<pid>` or `cli-<pid>` holder; `None` for
@@ -594,8 +613,9 @@ impl Lease {
     /// dial` or `keep` for a lease that admits no dial; a file with the
     /// expiry alone (PR A's form) takes its modification time as the act.
     /// Refused as no lease (security review 2026-11-23 M4): a `cli-<pid>`
-    /// lease with no kind, an expiry further than its holder's longest life
-    /// from `now`, and an act in the future (each with 5 s for clocks).
+    /// lease with no kind and an act in the future (5 s for clocks). An
+    /// expiry further than its holder's longest life from `now` is clamped
+    /// to that life, not refused (a clock stepped back must not kill it).
     fn parse(
         holder: LeaseHolder,
         text: &str,
@@ -618,11 +638,12 @@ impl Lease {
         if fields.next().is_some() {
             return None;
         }
-        if expires_at > now + holder.max_life() + LEASE_CLOCK_SLACK
-            || input_at > now + LEASE_CLOCK_SLACK
-        {
+        if input_at > now + LEASE_CLOCK_SLACK {
             return None;
         }
+        // A wall clock stepped back (after a wake) leaves an expiry past
+        // the holder's longest life: keep the lease, cap it.
+        let expires_at = expires_at.min(now + holder.max_life());
         Some(Self {
             holder,
             expires_at,
@@ -697,6 +718,7 @@ pub(crate) mod tests {
             ssh: "/usr/bin/ssh".into(),
             ssh_config: None,
             ssh_auth_sock: Some("/tmp/agent.sock".into()),
+            via: None,
         }
     }
 
@@ -980,21 +1002,8 @@ pub(crate) mod tests {
             "PR A's form"
         );
         assert!(lease("cli-43", format!("{:.3} {now:.3} dial", now + 60.0)).is_some());
-        assert!(
-            lease("cli-43", format!("{:.3} {now:.3} dial", now + 600.0)).is_none(),
-            "10 min"
-        );
         assert!(lease("client-7", format!("{:.3} {now:.3}", now + 600.0)).is_some());
-        assert!(
-            lease("client-7", format!("{:.3} {now:.3}", now + 3_600.0)).is_none(),
-            "1 h"
-        );
         assert!(lease("manual", format!("{:.3} {now:.3}", now + MAX_WAKE_SECS)).is_some());
-        assert!(lease(
-            "manual",
-            format!("{:.3} {now:.3}", now + 2.0 * MAX_WAKE_SECS)
-        )
-        .is_none());
         assert!(
             lease("manual", format!("{:.3} {:.3}", now + 60.0, now + 3_600.0)).is_none(),
             "a future act"
@@ -1007,6 +1016,63 @@ pub(crate) mod tests {
             .is_none(),
             "200 bytes"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// #310: a wall clock stepped back leaves an expiry past the holder's
+    /// longest life; the lease is kept with its expiry clamped to
+    /// `now + max_life`, not refused. A future act is still refused.
+    #[test]
+    fn an_expiry_past_the_longest_life_is_clamped_not_refused() {
+        let root = scratch("clamp");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        let now = now_unix();
+        let lease = |name: &str, text: String| {
+            fs::write(dir.leases_dir().join(name), text).expect("write");
+            let found = dir
+                .leases()
+                .into_iter()
+                .find(|lease| lease.holder.as_str() == name);
+            let _ = fs::remove_file(dir.leases_dir().join(name));
+            found
+        };
+        for (name, life, text_kind) in [
+            ("cli-43", CLI_LEASE_SECS, " dial"),
+            ("client-7", super::super::presence::CLIENT_LEASE_SECS, ""),
+            ("manual", MAX_WAKE_SECS, ""),
+            ("manual", MAX_WAKE_SECS, " keep"),
+        ] {
+            let found = lease(name, format!("{:.3} {now:.3}{text_kind}", now + 3.0 * life))
+                .unwrap_or_else(|| panic!("{name} refused"));
+            assert!(
+                found.expires_at <= now_unix() + life,
+                "{name}: {}",
+                found.expires_at
+            );
+            assert!(found.in_force(now), "{name}");
+        }
+        assert!(
+            lease("manual", format!("{:.3} {:.3}", now + 60.0, now + 3_600.0)).is_none(),
+            "a future act"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// #310: temporaries, unparseable names and expired leases do not
+    /// count toward the read cap, so a live lease among them is found.
+    #[test]
+    fn strays_do_not_push_a_live_lease_out_of_the_read() {
+        let root = scratch("cap");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        for n in 0..(LEASE_FILES_READ * 16) {
+            fs::write(dir.leases_dir().join(format!("stray-{n:04}.new")), "x").expect("stray");
+        }
+        dir.write_lease(&LeaseHolder::manual(), now_unix() + 60.0, now_unix())
+            .expect("live");
+        let holders: Vec<_> = dir.leases().into_iter().map(|l| l.holder).collect();
+        assert_eq!(holders, vec![LeaseHolder::manual()]);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1077,8 +1143,9 @@ pub(crate) mod tests {
         ] {
             assert!(LeaseHolder::parse(bad).is_err(), "{bad}");
         }
-        assert_eq!(LeaseHolder::client(7).client_pid(), Some(7));
-        assert_eq!(LeaseHolder::cli(7).client_pid(), None);
+        assert_eq!(LeaseHolder::client(7).pid(), Some(7));
+        assert_eq!(LeaseHolder::cli(7).pid(), Some(7));
+        assert_eq!(LeaseHolder::manual().pid(), None);
     }
 
     /// V5: two clients and a CLI writer, each writing only its own lease

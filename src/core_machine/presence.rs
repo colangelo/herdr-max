@@ -182,13 +182,13 @@ fn lease_pass(
     written
 }
 
-/// Removes the lease files of clients that no longer run, so the folder
-/// does not fill with them (such a lease is no longer in force). A live
-/// client's file is never touched: only its own process writes it (D3).
+/// Removes the expired lease files (`client-` and `cli-`) of processes that no longer run, so the
+/// folder does not fill with them. A live client's file is never touched:
+/// only its own process writes it (D3).
 fn prune_dead_clients(dir: &MachineDir, own_pid: u32) {
     let now = now_unix();
     for lease in dir.leases() {
-        let Some(pid) = lease.holder.client_pid() else {
+        let Some(pid) = lease.holder.pid() else {
             continue;
         };
         if pid != own_pid && !lease.in_force(now) && !crate::platform::core_link::process_alive(pid)
@@ -308,7 +308,7 @@ mod tests {
         assert!(!left.contains(&format!("client-{dead}")), "{left:?}");
         assert!(left.contains(&format!("client-{parent}")), "{left:?}");
         assert!(left.contains(&format!("client-{me}")), "{left:?}");
-        assert!(left.contains(&format!("cli-{dead}")), "{left:?}");
+        assert!(!left.contains(&format!("cli-{dead}")), "{left:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
