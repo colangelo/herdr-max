@@ -75,6 +75,12 @@ pub(crate) const CALL_MARGIN_SECS: u64 = 5;
 /// written again this often while the CLI runs.
 const LEASE_LIFE_SECS: f64 = 60.0;
 const LEASE_RENEW: Duration = Duration::from_secs(30);
+/// How often the lease's renewer reads the wall clock. Its waits are on
+/// the monotonic clock, which stops while the Mac sleeps; the lease's
+/// expiry is wall-clock time, which does not. So it looks this often and
+/// renews once the wall clock says a renewal is due: after a sleep the
+/// lease is written within this long of the wake (#310).
+const LEASE_TICK: Duration = Duration::from_secs(1);
 /// The probe of the far herdr: a few local programs there.
 const PROBE_SECS: u64 = 30;
 const PROBE_MARK: &str = "herdr-probe-v1";
@@ -399,11 +405,14 @@ pub(crate) enum LeaseUse {
     Keep,
 }
 
-/// How long a lease lives past each write, and how often it is written.
+/// How long a lease lives past each write, how often it is written, how
+/// often the renewer reads the clock, and the wall clock itself.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LeaseTiming {
     pub life: f64,
     pub renew: Duration,
+    pub tick: Duration,
+    pub clock: fn() -> f64,
 }
 
 impl Default for LeaseTiming {
@@ -411,6 +420,8 @@ impl Default for LeaseTiming {
         Self {
             life: LEASE_LIFE_SECS,
             renew: LEASE_RENEW,
+            tick: LEASE_TICK,
+            clock: now_unix,
         }
     }
 }
@@ -447,7 +458,7 @@ impl LeaseInner {
         if !leftovers.contains(&self.path()) {
             return Ok(());
         }
-        let expires_at = now_unix() + self.timing.life;
+        let expires_at = (self.timing.clock)() + self.timing.life;
         match used_for {
             LeaseUse::Dial { act } => self.dir.write_lease(&self.holder, expires_at, act),
             LeaseUse::Keep => self.dir.write_keep_lease(&self.holder, expires_at),
@@ -498,15 +509,24 @@ impl LeaseKeeper {
         std::thread::Builder::new()
             .name("herdr-fleet-lease".into())
             .spawn(move || {
+                let timing = renewer.timing;
+                let mut written_at = (timing.clock)();
                 let mut state = lock(&renewer.state);
                 while !state.released {
-                    state = match renewer.renew.wait_timeout(state, renewer.timing.renew) {
+                    state = match renewer.renew.wait_timeout(state, timing.tick) {
                         Ok((state, _)) => state,
                         Err(poisoned) => poisoned.into_inner().0,
                     };
                     if state.released {
                         break;
                     }
+                    // Due by the wall clock, which a sleep moves on (or
+                    // set back: then too).
+                    let now = (timing.clock)();
+                    if now - written_at < timing.renew.as_secs_f64() && now >= written_at {
+                        continue;
+                    }
+                    written_at = now;
                     if let Err(err) = renewer.write(state.used_for) {
                         tracing::warn!(%err, "could not renew the fleet CLI's lease");
                     }

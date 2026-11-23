@@ -15,6 +15,8 @@ fn quick() -> LeaseTiming {
     LeaseTiming {
         life: 2.0,
         renew: Duration::from_millis(100),
+        tick: Duration::from_millis(20),
+        ..LeaseTiming::default()
     }
 }
 use crate::pane::FakeCore;
@@ -999,4 +1001,47 @@ fn an_empty_reply_is_a_failure_that_may_have_run() {
         drop(link);
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// The wall clock as a test moves it: `now_unix` plus a jump.
+static CLOCK_JUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn jumped_clock() -> f64 {
+    now_unix() + f64::from_bits(CLOCK_JUMP.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// #310: a sleep stops the monotonic clock the renewer waits on, not the
+/// wall clock the lease's expiry is in. After a 45 s jump of the wall
+/// clock (a sleep), the lease is written again within a tick, not after
+/// another 30 s of waking time.
+#[test]
+fn the_lease_is_renewed_soon_after_a_sleep() {
+    let (root, dir) = machine_dir("fleet-sleep");
+    let timing = LeaseTiming {
+        life: 60.0,
+        renew: Duration::from_secs(30),
+        tick: Duration::from_millis(20),
+        clock: jumped_clock,
+    };
+    let holder = LeaseHolder::cli(std::process::id());
+    let keeper =
+        LeaseKeeper::start_with(dir.clone(), holder, LeaseUse::Keep, timing).expect("lease");
+    let before = dir.leases()[0].expires_at;
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        dir.leases()[0].expires_at,
+        before,
+        "renewed before it was due"
+    );
+    CLOCK_JUMP.store(45.0_f64.to_bits(), std::sync::atomic::Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while dir.leases()[0].expires_at < before + 45.0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        dir.leases()[0].expires_at >= before + 45.0,
+        "not renewed after the wall clock moved on"
+    );
+    drop(keeper);
+    let _ = std::fs::remove_dir_all(&root);
 }
