@@ -107,7 +107,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.pin`, `workspace.unpin`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.sync`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.mark_seen`, `pane.close`, `pane.respawn`, `pane.respawn_agent`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.sync`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_hint`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.clear`, `pane.clear_scrollback`, `pane.mark_seen`, `pane.close`, `pane.close_if_terminal`, `pane.split_if_terminal`, `pane.rename_if_terminal`, `pane.respawn`, `pane.respawn_agent`, `pane.wait_for_output` |
 | Popup | `popup.close`, `plugin.popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio`, `layout.balance`, `layout.set_preset`, `layout.apply_preset` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.message`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.pin`, `agent.unpin`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -740,6 +740,18 @@ Worktree commands also emit lifecycle events. `worktree.create` emits `workspace
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
 
 `pane.close`, `tab.close` and `workspace.close` never open a confirmation dialog on a client. A close that would drop open todos returns `confirmation_required`, names the todos in its message, and changes nothing. With `"force": true` the close goes ahead and the result is `{"type": "closed", "closed_todos": [{"pane_id": ..., "todos": [...]}]}`, listing the open todos of every pane it closed (an empty list when there were none). For `pane.close` and `tab.close`, `force` also answers the worktree group confirmation; `workspace.close` still needs `close_group` for a group.
+
+### Pane actions bound to a program
+
+`pane.close_if_terminal`, `pane.split_if_terminal` and `pane.rename_if_terminal` do what `pane.close`, `pane.split` and `pane.rename` do, only while the pane still runs the program the caller names. A view of this Herdr on another Mac sends them (see [Connecting machines](/docs/connecting-machines/)). `expect` names the program: `terminal` is the pane's terminal in this server's primary Herdr Core session, as the `herdr-app` document names it (`t7`), `pid` is the pid Herdr Core reports for its program, and `launch` is the terminal's `herdr.launch` label. Herdr compares all three with the pane that `pane_id` names, in the same step as the action. When any of them differs, or the pane does not run in Herdr Core, the request fails with `terminal_mismatch` and changes nothing.
+
+```json
+{"id":"req_1","method":"pane.close_if_terminal","params":{"pane_id":"w3:p4","expect":{"terminal":"t7","pid":4242,"launch":"f3a9..."}}}
+{"id":"req_2","method":"pane.split_if_terminal","params":{"pane_id":"w3:p4","direction":"right","ratio":0.5,"expect":{"terminal":"t7","pid":4242,"launch":"f3a9..."}}}
+{"id":"req_3","method":"pane.rename_if_terminal","params":{"pane_id":"w3:p4","label":"server","expect":{"terminal":"t7","pid":4242,"launch":"f3a9..."}}}
+```
+
+`pane.close_if_terminal` closes that one pane only. When the pane is the last one of its workspace, the close would also close the workspace (and, for a worktree group's parent, the whole group), so it fails with `would_close_workspace` and closes nothing. Open todos are handled as for `pane.close`: `confirmation_required`, then `"force": true`. `pane.split_if_terminal` starts the new pane in the target pane's folder, with no caller environment, and does not focus it. These are separate methods so that an older server, which does not know them, rejects the request instead of acting on whatever pane has the id at that moment.
 
 ## Agent view queries
 
