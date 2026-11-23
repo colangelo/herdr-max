@@ -1,6 +1,8 @@
 //! The view's one allowlist of client methods (core-phase5 D6, security
 //! review M2). A view shows the far herdr and forwards a person's input to
-//! it; it changes nothing on the far Mac or on this one beyond that. The
+//! it; the far layout changes only through the far herdr's own API, for the
+//! few structural actions sent there (D7, E.3: new tab, split, close pane,
+//! rename), and nothing on this Mac changes beyond the view itself. The
 //! same table decides what the endpoint welcome advertises and what the
 //! server's dispatch takes, so a client never sees a method the view then
 //! refuses, and a client that sends one anyway is refused before dispatch.
@@ -16,6 +18,10 @@ pub(crate) enum ViewMethod {
     /// (focus, zoom, scroll, copy, seen marks, a detach), or forwards a
     /// person's input.
     Allowed,
+    /// A structural action the view sends to the far herdr's API through
+    /// the machine (D7, E.3, `core_machine::fleet::view`): the far herdr
+    /// changes its layout and republishes it, and the view follows.
+    Far,
     /// Changes the far herdr's layout, names or programs, which the far
     /// herdr owns: the view would diverge from it, or start a program here.
     FarLayout,
@@ -26,7 +32,7 @@ pub(crate) enum ViewMethod {
 
 /// The class of the client method `name`, `None` when it has none yet.
 pub(crate) fn classify(name: &str) -> Option<ViewMethod> {
-    use ViewMethod::{Allowed, FarLayout, Local};
+    use ViewMethod::{Allowed, Far, FarLayout, Local};
     Some(match name {
         // The view's own presentation and the person's input.
         "client_shell.surface.set"
@@ -48,31 +54,34 @@ pub(crate) fn classify(name: &str) -> Option<ViewMethod> {
         | "pane.copy_search"
         | "pane.input.set"
         | "pane.mark_seen"
-        // A close in a view is a detach (D6): the far program and pane stay,
-        // and the next far document shows them again.
-        | "pane.close"
+        // A tab or workspace close in a view is a detach (D6): the far
+        // programs and panes stay, and the next far document shows them
+        // again.
         | "tab.close"
         | "workspace.close" => Allowed,
+        // Sent to the far herdr, which does them there (D7, E.3). A pane's
+        // close is a person's close of the far pane (D5).
+        "tab.create"
+        | "pane.split"
+        | "pane.close"
+        | "workspace.rename"
+        | "tab.rename"
+        | "pane.rename" => Far,
         // The far herdr's layout, names and programs.
         "workspace.create"
         | "workspace.pin"
         | "workspace.unpin"
-        | "workspace.rename"
         | "workspace.move"
         | "workspace.move_block"
-        | "tab.create"
-        | "tab.rename"
         | "tab.sync"
         | "tab.move"
         | "agent.pin"
         | "agent.unpin"
-        | "pane.split"
         | "pane.swap"
         | "pane.move"
         | "pane.sync"
         | "pane.sync_pair"
         | "pane.resize"
-        | "pane.rename"
         | "pane.respawn"
         | "layout.set_split_ratio"
         | "layout.balance"
@@ -119,16 +128,22 @@ pub(crate) fn classify(name: &str) -> Option<ViewMethod> {
     })
 }
 
-/// Whether a view takes the client method `name`; an unclassified one is
-/// refused.
+/// Whether a view takes the client method `name`, itself or by sending it
+/// to the far herdr; an unclassified one is refused.
 pub(crate) fn allows(name: &str) -> bool {
-    classify(name) == Some(ViewMethod::Allowed)
+    matches!(classify(name), Some(ViewMethod::Allowed | ViewMethod::Far))
+}
+
+/// Whether a view sends the client method `name` to the far herdr instead
+/// of doing it itself (D7, E.3).
+pub(crate) fn goes_far(name: &str) -> bool {
+    classify(name) == Some(ViewMethod::Far)
 }
 
 /// Why a view refuses the client method `name`, `None` when it takes it.
 pub(crate) fn refusal(machine: &crate::core_machine::MachineName, name: &str) -> Option<String> {
     let why = match classify(name)? {
-        ViewMethod::Allowed => return None,
+        ViewMethod::Allowed | ViewMethod::Far => return None,
         ViewMethod::FarLayout => format!("{machine}'s herdr owns its layout; do this there"),
         ViewMethod::Local => format!("it would run or write on this Mac, not on {machine}"),
     };
@@ -181,7 +196,11 @@ mod tests {
     // named refusals among the rest.
     #[test]
     fn a_view_takes_only_its_presentation_and_input() {
-        let allowed: Vec<&str> = all().iter().copied().filter(|name| allows(name)).collect();
+        let allowed: Vec<&str> = all()
+            .iter()
+            .copied()
+            .filter(|name| classify(name) == Some(ViewMethod::Allowed))
+            .collect();
         assert_eq!(
             allowed,
             [
@@ -191,7 +210,6 @@ mod tests {
                 "notification.mark_seen",
                 "pane.clear",
                 "pane.clear_scrollback",
-                "pane.close",
                 "pane.copy_motion",
                 "pane.copy_search",
                 "pane.focus",
@@ -218,12 +236,59 @@ mod tests {
             "worktree.open",
             "worktree.create",
             "worktree.remove",
-            "pane.split",
             "release_notes.dismiss",
         ] {
             assert!(!allows(refused), "{refused}");
         }
         assert!(!allows("a.method.nobody.classified"));
+    }
+
+    // E.3: exactly D7's structural actions moved from refused (or, for a
+    // pane's close, from a detach) to the far herdr; every other far layout
+    // change is still refused.
+    #[test]
+    fn only_d7s_structural_actions_go_to_the_far_herdr() {
+        let far: Vec<&str> = all()
+            .iter()
+            .copied()
+            .filter(|name| goes_far(name))
+            .collect();
+        assert_eq!(
+            far,
+            [
+                "pane.close",
+                "pane.rename",
+                "pane.split",
+                "tab.create",
+                "tab.rename",
+                "workspace.rename",
+            ]
+        );
+        for name in &far {
+            assert!(allows(name), "{name} is advertised");
+        }
+        for still_refused in [
+            "workspace.create",
+            "workspace.move",
+            "workspace.pin",
+            "tab.move",
+            "tab.sync",
+            "pane.swap",
+            "pane.move",
+            "pane.resize",
+            "pane.respawn",
+            "layout.apply_preset",
+        ] {
+            assert_eq!(
+                classify(still_refused),
+                Some(ViewMethod::FarLayout),
+                "{still_refused}"
+            );
+            assert!(!allows(still_refused), "{still_refused}");
+        }
+        // `agent.start` is no client method: in a view an agent starts by
+        // typing in a far pane, or with `herdr --machine <m> agent start`.
+        assert!(!all().contains(&"agent.start"));
     }
 
     // M2: the welcome advertises the same list the dispatch takes.

@@ -176,14 +176,41 @@ impl HeadlessServer {
             self.record_client_input(client_id);
         }
         let foreground_changed = self.promote_client_to_foreground(client_id);
-        foreground_changed
-            | self.handle_client_shell_api_request(
-                client_id,
-                api::ApiRequestMessage {
-                    request: *request,
-                    respond_to,
-                    response_write_complete: None,
-                },
-            )
+        let message = api::ApiRequestMessage {
+            request: *request,
+            respond_to,
+            response_write_complete: None,
+        };
+        let Some(message) = self.take_view_action(message) else {
+            return foreground_changed;
+        };
+        foreground_changed | self.handle_client_shell_api_request(client_id, message)
+    }
+
+    /// In a view, a structural action goes to the far herdr (core-phase5
+    /// D7, E.3), and its answer comes back through `respond_to`, off the
+    /// loop: `None`. Any other request, and every request outside a view,
+    /// is handed back for this server to do.
+    #[cfg(unix)]
+    fn take_view_action(
+        &mut self,
+        message: api::ApiRequestMessage,
+    ) -> Option<api::ApiRequestMessage> {
+        if self.app.view.is_none()
+            || !crate::view::policy::goes_far(message.request.method.operation().name)
+        {
+            return Some(message);
+        }
+        self.app
+            .forward_view_action(message.request, message.respond_to);
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn take_view_action(
+        &mut self,
+        message: api::ApiRequestMessage,
+    ) -> Option<api::ApiRequestMessage> {
+        Some(message)
     }
 }

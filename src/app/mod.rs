@@ -47,6 +47,8 @@ mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
 #[cfg(unix)]
+mod view_actions;
+#[cfg(unix)]
 pub(crate) mod view_layout;
 mod window_title;
 mod worktrees;

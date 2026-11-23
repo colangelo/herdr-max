@@ -79,6 +79,12 @@ impl ViewApp {
         }
     }
 
+    /// The far public pane id (`w3:p4`) of the view's pane `pane_id`, as
+    /// the far document named it.
+    pub(crate) fn far_pane(&self, pane_id: PaneId) -> Option<&str> {
+        self.far_panes.get(&pane_id).map(String::as_str)
+    }
+
     fn address(&self, terminal: &str) -> String {
         format!("{}/{terminal}", self.machine)
     }
