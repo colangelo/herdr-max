@@ -186,7 +186,9 @@ pub(crate) fn send(
             target.session
         ))
     })?;
-    let core = &route.core;
+    // Every call to core ends by the action's deadline: the connect, the
+    // hello and each call's wait (fork issue 316, M7).
+    let core = &route.core.by(deadline);
     let record = match core.record(name) {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -305,20 +307,44 @@ fn not_connected(name: &MachineName, state: &str) -> String {
 }
 
 /// The view's `cli-<pid>` keep lease for one action: written before the
-/// probe and again before the request, removed when the action ends. No
-/// renewer runs: the whole action ends within its 45 s (an aim check
-/// unwaited past its share ends on its own 5 s calls), and a view killed
-/// during one leaves a lease that keeps an up link a minute at most and
-/// admits no dial. No termination handler is put in the view server for it
-/// (the fleet CLI's would end the server on SIGHUP).
+/// probe and again before the request, removed when the action ends, and
+/// by the view server's graceful end while an action still runs
+/// (`remove_running_leases`, fork issue 316 M7). No renewer runs: the
+/// whole action ends within its 45 s (an aim check unwaited past its share
+/// ends on its own 5 s calls), and a view killed during one leaves a lease
+/// that keeps an up link a minute at most and admits no dial. No
+/// termination handler is put in the view server for it (the fleet CLI's
+/// would end the server on SIGHUP).
 struct KeepLease<'a> {
     dir: &'a MachineDir,
     holder: &'a LeaseHolder,
 }
 
+/// The leases of the actions running now, for the view server's end.
+static RUNNING_LEASES: Mutex<Vec<(MachineDir, LeaseHolder)>> = Mutex::new(Vec::new());
+
+fn running_leases() -> std::sync::MutexGuard<'static, Vec<(MachineDir, LeaseHolder)>> {
+    match RUNNING_LEASES.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Removes the lease of every view action still running: the view server
+/// ends (its loop returned), and those actions' threads do not outlive the
+/// process to remove their own (fork issue 316, M7).
+pub(crate) fn remove_running_leases() {
+    for (dir, holder) in running_leases().drain(..) {
+        if let Err(err) = dir.remove_lease(&holder) {
+            tracing::warn!(%err, "could not remove a running view action's lease");
+        }
+    }
+}
+
 impl<'a> KeepLease<'a> {
     fn write(dir: &'a MachineDir, holder: &'a LeaseHolder) -> io::Result<Self> {
         let lease = Self { dir, holder };
+        running_leases().push((dir.clone(), holder.clone()));
         lease.write_again()?;
         Ok(lease)
     }
@@ -331,6 +357,15 @@ impl<'a> KeepLease<'a> {
 
 impl Drop for KeepLease<'_> {
     fn drop(&mut self) {
+        {
+            let mut running = running_leases();
+            if let Some(at) = running
+                .iter()
+                .position(|(dir, holder)| dir.path() == self.dir.path() && holder == self.holder)
+            {
+                running.remove(at);
+            }
+        }
         if let Err(err) = self.dir.remove_lease(self.holder) {
             tracing::warn!(%err, "could not remove the view action's lease");
         }

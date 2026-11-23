@@ -145,16 +145,35 @@ fn refused(code: i32, message: impl Into<String>) -> Lookup {
 
 /// The primary core, or a test's fake, by its socket. Never starts a core.
 #[derive(Debug, Clone)]
-pub(crate) struct CoreAt(PathBuf);
+pub(crate) struct CoreAt {
+    socket: PathBuf,
+    /// Every call ends by this, when set: a view's action has one deadline
+    /// for all its calls (fork issue 316, M7).
+    deadline: Option<std::time::Instant>,
+}
 
 impl CoreAt {
     pub(crate) fn primary() -> Self {
-        Self(core::primary_socket())
+        Self {
+            socket: core::primary_socket(),
+            deadline: None,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn at(socket: &Path) -> Self {
-        Self(socket.to_path_buf())
+        Self {
+            socket: socket.to_path_buf(),
+            deadline: None,
+        }
+    }
+
+    /// The same core, every call of which ends by `deadline`.
+    pub(crate) fn by(&self, deadline: std::time::Instant) -> Self {
+        Self {
+            socket: self.socket.clone(),
+            deadline: Some(deadline),
+        }
     }
 
     fn call(
@@ -163,7 +182,7 @@ impl CoreAt {
         params: Value,
         timeout: Duration,
     ) -> Result<Option<Value>, CallError> {
-        core::call_running_at(&self.0, method, params, timeout)
+        core::call_running_by(&self.socket, method, params, timeout, self.deadline)
     }
 }
 

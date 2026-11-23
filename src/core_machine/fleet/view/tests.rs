@@ -465,3 +465,80 @@ fn an_aim_check_that_does_not_answer_sends_nothing() {
     assert!(execs(&core).is_empty() && dir.leases().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// Fork issue 316, M7: every call to core ends by the action's deadline,
+// its connect and wait included: a core that takes a call and never
+// answers holds the action no longer than what is left of it, not a
+// call's own 5 s.
+#[test]
+fn a_core_that_does_not_answer_holds_no_call_past_the_deadline() {
+    let core = FakeCore::start_with(|config| config.stall_on.push("machine.list"));
+    let (root, dir) = added("view-stalled-core");
+    let started = Instant::now();
+    let err = send(
+        &route(&core, &root),
+        &machine(),
+        &tab_create("view:20"),
+        Instant::now() + Duration::from_secs(1),
+        fine(),
+    )
+    .expect_err("no answer");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "waited {:?}",
+        started.elapsed()
+    );
+    assert!(err.contains("nothing was sent to loop"), "{err}");
+    assert!(execs(&core).is_empty() && dir.leases().is_empty());
+
+    // A call with no time left is not sent at all.
+    let before = core.requests().len();
+    let refused = core::call_running_by(
+        &core.socket,
+        "machine.list",
+        json!({}),
+        Duration::from_secs(5),
+        Some(Instant::now()),
+    );
+    assert!(
+        matches!(refused, Err(core::CallError::NotSent(_))),
+        "{refused:?}"
+    );
+    assert_eq!(core.requests().len(), before, "nothing reached core");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// Fork issue 316, M7: the view server's graceful end removes the lease of
+// an action still running, whose thread will not outlive the process to
+// remove its own.
+#[test]
+fn the_view_servers_end_removes_a_running_actions_lease() {
+    let core = FakeCore::start_with(|config| config.exec_handler = Some(Arc::new(far_ok)));
+    core.set_machine("loop", "connected");
+    let (root, dir) = added("view-end-lease");
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let route = route(&core, &root);
+    let running = std::thread::spawn(move || {
+        send(
+            &route,
+            &machine(),
+            &tab_create("view:21"),
+            soon(),
+            Box::new(move || {
+                let _ = held.recv();
+                Err("the view ended".into())
+            }),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir.leases().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(dir.leases().len(), 1, "the running action's lease");
+    remove_running_leases();
+    assert!(dir.leases().is_empty(), "removed at the server's end");
+    let _ = release.send(());
+    let _ = running.join();
+    assert!(execs(&core).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}

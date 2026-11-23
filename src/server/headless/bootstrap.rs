@@ -226,6 +226,9 @@ fn run_view_server(machine: crate::core_machine::MachineName) -> io::Result<()> 
             server.run().await
         })
     });
+    // An action still running has a lease its thread will not remove now
+    // (fork issue 316, M7).
+    crate::core_machine::fleet::view::remove_running_leases();
     crate::logging::shutdown("server");
     result
 }

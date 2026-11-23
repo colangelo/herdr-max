@@ -70,10 +70,38 @@ pub(crate) fn call_running_at(
     params: Value,
     timeout: Duration,
 ) -> Result<Option<Value>, CallError> {
-    let connected = match client::connect_at(socket) {
+    call_running_by(socket, method, params, timeout, None)
+}
+
+/// `call_running_at` that ends by `deadline` when one is given (fork issue
+/// 316, M7): the connect, the hello, the version check and the call's wait
+/// all fit in what is left, and a call with nothing left is not sent.
+pub(crate) fn call_running_by(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+    deadline: Option<std::time::Instant>,
+) -> Result<Option<Value>, CallError> {
+    let left =
+        || deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+    let connected = match left() {
+        None => client::connect_at(socket),
+        Some(left) => client::connect_at_within(socket, left),
+    };
+    let connected = match connected {
         Ok((connected, _)) => connected,
         Err(client::CoreError::NoCore(_)) => return Ok(None),
         Err(err) => return Err(CallError::NotSent(err.to_string())),
+    };
+    let timeout = match left() {
+        None => timeout,
+        Some(left) if left.is_zero() => {
+            return Err(CallError::NotSent(format!(
+                "no time left to send {method} to herdr-core"
+            )))
+        }
+        Some(left) => timeout.min(left),
     };
     connected
         .call(method, params, timeout)

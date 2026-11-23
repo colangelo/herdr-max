@@ -23,6 +23,8 @@ pub(crate) const MIN_CORE_VERSION: (u64, u64, u64) = (0, 1, 21);
 const PROTOCOL_GENERATION: u64 = 1;
 /// How long one frame's write may block before the connection is given up.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The longest a connect waits for core's hello, and for its version.
+const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 /// The longest `hello` reply line this client reads.
 const HELLO_LIMIT: u64 = 64 * 1024;
 
@@ -195,11 +197,32 @@ impl Drop for Handle {
 impl CoreClient {
     /// Connects to the core at `socket`, says hello and switches to framed
     /// mode. Refuses a socket another user could have placed or serves, and a
-    /// core of another protocol generation.
+    /// core of another protocol generation. Production callers connect
+    /// through `connect_at`, bounded (`connect_within`).
+    #[cfg(test)]
     pub(crate) fn connect(
         socket: &Path,
         on_event: Option<EventHandler>,
     ) -> Result<Self, CoreError> {
+        Self::connect_within(socket, on_event, HANDSHAKE_WAIT)
+    }
+
+    /// `connect` with the hello's write and read bounded by `wait` (at most
+    /// `HANDSHAKE_WAIT`): a caller with a deadline of its own (a view's
+    /// action, fork issue 316 M7) does not wait past it for a core that
+    /// accepts and does not answer.
+    pub(crate) fn connect_within(
+        socket: &Path,
+        on_event: Option<EventHandler>,
+        wait: Duration,
+    ) -> Result<Self, CoreError> {
+        let wait = wait.min(HANDSHAKE_WAIT);
+        if wait.is_zero() {
+            return Err(CoreError::Unavailable(format!(
+                "no time left to connect to {}",
+                socket.display()
+            )));
+        }
         let euid = unsafe { libc::geteuid() };
         check_socket_folder(socket, euid)?;
         let mut stream = UnixStream::connect(socket).map_err(|err| {
@@ -221,8 +244,8 @@ impl CoreClient {
             }
         }
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)))
+            .set_read_timeout(Some(wait))
+            .and_then(|()| stream.set_write_timeout(Some(wait.min(WRITE_TIMEOUT))))
             .map_err(|err| CoreError::Unavailable(err.to_string()))?;
         let hello =
             json!({"jsonrpc": "2.0", "id": 0, "method": "hello", "params": {"framed": true}});
@@ -749,14 +772,25 @@ pub(crate) fn core_start_command(
 /// [`MIN_CORE_VERSION`]. Returns core's `server.status` too. Never starts a
 /// core.
 pub(crate) fn connect_at(socket: &Path) -> Result<(CoreClient, Value), CoreError> {
+    connect_at_within(socket, HANDSHAKE_WAIT)
+}
+
+/// `connect_at` with its hello and version check bounded by `wait` in all
+/// (fork issue 316, M7).
+pub(crate) fn connect_at_within(
+    socket: &Path,
+    wait: Duration,
+) -> Result<(CoreClient, Value), CoreError> {
     if !socket.exists() {
         return Err(CoreError::NoCore(format!(
             "no herdr-core socket at {}",
             socket.display()
         )));
     }
-    let client = CoreClient::connect(socket, None)?;
-    let status = check_version(&client)?;
+    let started = std::time::Instant::now();
+    let client = CoreClient::connect_within(socket, None, wait)?;
+    let left = wait.saturating_sub(started.elapsed());
+    let status = check_version_within(&client, left)?;
     Ok((client, status))
 }
 
@@ -898,8 +932,19 @@ fn is_our_child(pid: u32) -> bool {
     pid != 0 && crate::platform::parent_pid(pid) == Some(std::process::id())
 }
 
+#[cfg(test)]
 fn check_version(client: &CoreClient) -> Result<Value, CoreError> {
-    let status = client.call("server.status", json!({}), Duration::from_secs(5))?;
+    check_version_within(client, HANDSHAKE_WAIT)
+}
+
+fn check_version_within(client: &CoreClient, wait: Duration) -> Result<Value, CoreError> {
+    let wait = wait.min(HANDSHAKE_WAIT);
+    if wait.is_zero() {
+        return Err(CoreError::Unavailable(
+            "no time left to ask herdr-core its version".into(),
+        ));
+    }
+    let status = client.call("server.status", json!({}), wait)?;
     let text = status["version"].as_str().unwrap_or_default();
     match parse_version(text) {
         Some(version) if version >= MIN_CORE_VERSION => Ok(status),
