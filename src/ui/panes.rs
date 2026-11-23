@@ -494,6 +494,14 @@ const CORE_STOPPED_PANE_NOTICE: &str =
 const CORE_UNREACHABLE_LINE: &str = " Herdr Core is not answering; the program keeps running ";
 
 /// The text a pane without a runtime shows in place (core-phase3 D1b, D2).
+/// What closing a pane that waits for its machine does: nothing reaches the
+/// machine, so its program runs on (third read, finding 2).
+fn machine_wait_close_notice(machine: &str) -> String {
+    format!(
+        "Closing the pane now sends nothing to {machine}: its program runs on there, and shows as an orphan of this session once {machine} is connected again."
+    )
+}
+
 fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow<'static, str> {
     use crate::terminal::state::{CoreWaitReason, PaneHold, ResumeBlock};
     match hold {
@@ -535,14 +543,16 @@ fn held_pane_notice(hold: &crate::terminal::state::PaneHold) -> std::borrow::Cow
                 machine,
                 dormant: true,
             } => format!(
-                "{machine} is dormant: no one used it for 10 minutes, so its link is closed. Press a key here to wake it; this pane attaches to its program there once it is connected."
+                "{machine} is dormant: no one used it for 10 minutes, so its link is closed. Press a key here to wake it; this pane attaches to its program there once it is connected. {}",
+                machine_wait_close_notice(machine)
             )
             .into(),
             CoreWaitReason::MachineAway {
                 machine,
                 dormant: false,
             } => format!(
-                "Waiting for {machine}: its link is down. This pane's program keeps running there and the pane attaches when {machine} is connected again; nothing starts here."
+                "Waiting for {machine}: its link is down. This pane's program keeps running there and the pane attaches when {machine} is connected again; nothing starts here. {}",
+                machine_wait_close_notice(machine)
             )
             .into(),
             CoreWaitReason::MachineMissing { machine } => format!(
@@ -1158,6 +1168,32 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::terminal::TerminalState;
     use crate::workspace::Workspace;
+
+    // Third read, finding 2: closing a pane that waits for its machine
+    // sends nothing there, and the wait says so, as the missing one does.
+    #[test]
+    fn a_machine_wait_says_closing_sends_nothing_there() {
+        use crate::terminal::state::{CoreWaitReason, CoreWaiting, PaneHold};
+        for dormant in [true, false] {
+            let hold = PaneHold::CoreWaiting(CoreWaiting {
+                link: crate::pane::CoreTerminalLink {
+                    session: "default".into(),
+                    address: "loop/t3".into(),
+                    ..Default::default()
+                },
+                public_pane_id: None,
+                why: CoreWaitReason::MachineAway {
+                    machine: "loop".into(),
+                    dormant,
+                },
+            });
+            let notice = held_pane_notice(&hold);
+            assert!(
+                notice.contains("Closing the pane now sends nothing to loop"),
+                "{notice}"
+            );
+        }
+    }
 
     fn render_view_pane_borders(
         app: &AppState,
