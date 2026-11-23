@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use super::name::MachineName;
 use super::ssh;
 use super::state::{
-    newest_act, next_gate, now_unix, DialRecord, Failure, Gate, GateClass, Lease, MachineDir,
+    holds_link, newest_act, next_gate, now_unix, DialRecord, Failure, Gate, GateClass, Lease,
+    MachineDir,
 };
 use crate::platform::core_link as sys;
 
@@ -411,9 +412,10 @@ impl Watch {
     }
 }
 
-/// Whether a lease is in force now.
+/// Whether a lease is in force now, one that only keeps the link included
+/// (a fleet CLI call's, D7).
 fn leased(dir: &MachineDir) -> bool {
-    newest_act(&dir.leases(), now_unix()).is_some()
+    holds_link(&dir.leases(), now_unix())
 }
 
 /// The watcher's loop, beside ssh (its parent after the exec).
@@ -542,6 +544,7 @@ mod tests {
             holder: crate::core_machine::state::LeaseHolder::manual(),
             expires_at,
             input_at,
+            dials: true,
         }
     }
 
@@ -575,6 +578,40 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// D7 (2.2): a fleet CLI's keep lease on a connected machine admits no
+    /// dial, so core's retry after a drop during the call is refused.
+    #[test]
+    fn a_keep_lease_alone_admits_no_dial() {
+        let keep = [Lease {
+            dials: false,
+            ..lease(1e10, 0.0)
+        }];
+        assert_eq!(admit(LINE, None, &keep, 100.0), Err(Refusal::Dormant));
+        assert_eq!(
+            admit(LINE, Some(&gate(GateClass::DialFailed, 90.0)), &keep, 100.0),
+            Err(Refusal::Dormant)
+        );
+        let both = [keep[0].clone(), lease(1e10, 50.0)];
+        assert_eq!(admit(LINE, None, &both, 100.0), Ok(()));
+    }
+
+    /// D7 (2.2): the watcher keeps an up link while a keep lease holds,
+    /// so a fleet CLI call is not cut when every other lease ends.
+    #[test]
+    fn a_keep_lease_keeps_the_link_up() {
+        let root = crate::core_machine::state::tests::scratch("keep-link");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        assert!(!leased(&dir));
+        dir.write_keep_lease(
+            &crate::core_machine::state::LeaseHolder::cli(42),
+            now_unix() + 60.0,
+        )
+        .expect("keep");
+        assert!(leased(&dir));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// V1's unit half: no lease, or only expired ones, is no dial.

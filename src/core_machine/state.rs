@@ -194,6 +194,17 @@ impl MachineDir {
         )
     }
 
+    /// Writes `leases/<holder>` as a lease that holds a link while it is up
+    /// and admits no dial (`<expires_at> 0 keep`): a fleet CLI call on a
+    /// connected machine (D7), so a drop during the call is never redialled
+    /// on its account.
+    pub(crate) fn write_keep_lease(&self, holder: &LeaseHolder, expires_at: f64) -> io::Result<()> {
+        write_atomic(
+            &self.leases_dir().join(holder.as_str()),
+            format!("{expires_at:.3} 0 keep\n").as_bytes(),
+        )
+    }
+
     /// Removes a holder's own lease (a CLI call's, after its reply).
     pub(crate) fn remove_lease(&self, holder: &LeaseHolder) -> io::Result<()> {
         match fs::remove_file(self.leases_dir().join(holder.as_str())) {
@@ -487,16 +498,19 @@ impl LeaseHolder {
 /// One lease: in force until `expires_at`; `input_at` is the time of the
 /// human act that wrote it (an input, a person's command), which is what
 /// reopens `retry_spent` (D2 step 9). A renewal that is no new act keeps
-/// its `input_at`.
+/// its `input_at`. A lease that does not `dial` only holds a link that is
+/// up (D7): core-link admits no dial on it, the watcher keeps the link.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Lease {
     pub holder: LeaseHolder,
     pub expires_at: f64,
     pub input_at: f64,
+    pub dials: bool,
 }
 
 impl Lease {
-    /// `<expires_at> <input_at>`; a file with the expiry alone (PR A's
+    /// `<expires_at> <input_at>`, or `<expires_at> <input_at> keep` for a
+    /// lease that admits no dial; a file with the expiry alone (PR A's
     /// form) takes its modification time as the act.
     fn parse(
         holder: LeaseHolder,
@@ -510,6 +524,11 @@ impl Lease {
             Some(raw) => number(raw)?,
             None => modified()?,
         };
+        let dials = match fields.next() {
+            None => true,
+            Some("keep") => false,
+            Some(_) => return None,
+        };
         if fields.next().is_some() {
             return None;
         }
@@ -517,6 +536,7 @@ impl Lease {
             holder,
             expires_at,
             input_at,
+            dials,
         })
     }
 
@@ -525,14 +545,21 @@ impl Lease {
     }
 }
 
-/// The time of the newest human act behind a lease in force, `None` when
-/// no lease is in force (dormant).
+/// The time of the newest human act behind a lease in force that admits a
+/// dial, `None` when no such lease is in force (dormant: core-link dials
+/// nothing).
 pub(crate) fn newest_act(leases: &[Lease], now: f64) -> Option<f64> {
     leases
         .iter()
-        .filter(|lease| lease.in_force(now))
+        .filter(|lease| lease.dials && lease.in_force(now))
         .map(|lease| lease.input_at)
         .reduce(f64::max)
+}
+
+/// Whether any lease is in force, one that only keeps a link included:
+/// what keeps an up link up (D2 step 7).
+pub(crate) fn holds_link(leases: &[Lease], now: f64) -> bool {
+    leases.iter().any(|lease| lease.in_force(now))
 }
 
 /// How long a `manual` lease from `machine add --core` or `machine login`
@@ -750,6 +777,7 @@ pub(crate) mod tests {
         fs::write(dir.leases_dir().join("manual.new"), "9 9").expect("in progress");
         fs::write(dir.leases_dir().join("Bad Name"), "9 9").expect("bad");
         fs::write(dir.leases_dir().join("client-7"), "9 9 9").expect("three fields");
+        fs::write(dir.leases_dir().join("cli-7.12-0.new"), "9 9").expect("a write in progress");
         let leases = dir.leases();
         assert_eq!(
             leases,
@@ -758,11 +786,13 @@ pub(crate) mod tests {
                     holder: LeaseHolder::cli(42),
                     expires_at: 3_000.0,
                     input_at: 200.0,
+                    dials: true,
                 },
                 Lease {
                     holder: LeaseHolder::manual(),
                     expires_at: 2_000.0,
                     input_at: 100.0,
+                    dials: true,
                 },
             ]
         );
@@ -773,6 +803,37 @@ pub(crate) mod tests {
         dir.remove_lease(&LeaseHolder::cli(42))
             .expect("remove twice");
         assert_eq!(dir.leases().len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// D7 (2.2): a keep lease holds an up link but admits no dial, so a
+    /// drop during a fleet CLI call is never redialled on its account.
+    #[test]
+    fn a_keep_lease_holds_the_link_and_admits_no_dial() {
+        let root = scratch("keep");
+        let dir = MachineDir::at(&root, &MachineName::parse("loop").expect("name"));
+        dir.create().expect("create");
+        dir.write_keep_lease(&LeaseHolder::cli(42), 3_000.0)
+            .expect("keep");
+        let leases = dir.leases();
+        assert_eq!(
+            leases,
+            vec![Lease {
+                holder: LeaseHolder::cli(42),
+                expires_at: 3_000.0,
+                input_at: 0.0,
+                dials: false,
+            }]
+        );
+        assert_eq!(
+            newest_act(&leases, 1_000.0),
+            None,
+            "no dial on a keep lease"
+        );
+        assert!(holds_link(&leases, 1_000.0));
+        assert!(!holds_link(&leases, 3_000.0), "expired");
+        fs::write(dir.leases_dir().join("cli-43"), "9e9 0 maybe").expect("unknown kind");
+        assert_eq!(dir.leases().len(), 1, "an unknown kind is no lease");
         let _ = fs::remove_dir_all(&root);
     }
 

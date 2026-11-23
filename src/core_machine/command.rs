@@ -467,6 +467,9 @@ struct LeaseRow {
     /// `retry_spent` failure reopens the gate (D2 step 9).
     input_at: f64,
     in_force: bool,
+    /// False for a fleet CLI call's lease on a connected machine: it keeps
+    /// the link up and admits no dial (D7).
+    dials: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -552,7 +555,13 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
             .leases
             .iter()
             .filter(|lease| lease.in_force)
-            .map(|lease| lease.holder.clone())
+            .map(|lease| {
+                if lease.dials {
+                    lease.holder.clone()
+                } else {
+                    format!("{}(keep)", lease.holder)
+                }
+            })
             .collect();
         println!(
             "{}\t{}\tgate {}\tleases {}",
@@ -633,6 +642,7 @@ fn status_rows(root: &Path, listed: Option<&Value>, now: f64) -> Vec<StatusRow> 
                         expires_at: lease.expires_at,
                         input_at: lease.input_at,
                         in_force: lease.in_force(now),
+                        dials: lease.dials,
                     })
                     .collect(),
                 last_dial: ours
