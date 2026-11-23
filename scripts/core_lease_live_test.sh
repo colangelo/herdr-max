@@ -6,7 +6,8 @@
 # nothing), V3 (dormant means zero link bytes), V38 (a refusing far side
 # costs at most 2 dials) beside V3 on a second far core, then a TUI client
 # in a pty (its lease at start, the wake through its dialer, one write a
-# minute) and V33's wake part with `herdr machine wake`. Every time
+# minute), V33's wake part with `herdr machine wake` and its view part (a
+# view's first client through `--remote core:<machine>`, PR D). Every time
 # constant that is shortened is shortened through the lease files (the
 # interface herdr reads), never a test-only setting; the waits of V3 and
 # V38 are the design's 5 and 10 min unless V3_SECS or V38_SECS say less.
@@ -394,6 +395,40 @@ code=0; run_herdr machine wake "$L" >"$BASE/wake.out" 2>&1 || code=$?
 [[ "$code" == 1 ]] && grep -q "herdr machine login $L" "$BASE/wake.out" || fail "a wake over auth_failed did not refuse: $(cat "$BASE/wake.out")"
 [[ "$(log_count "$L" "START")" == "$starts_before" ]] || fail "a refused wake dialled"
 echo "ok: V35 machine wake reopened far_core_down and connected; a wake over auth_failed refuses and points to login"
+
+# --- V33 (view part, PR D): a view's first client, from dormant. `herdr
+# --remote core:<machine>` starts the view server; the person's client writes
+# its lease before any dial, and the dial that follows is a real one.
+rm -f "$LINK_ROOT/$L/gate.json"
+ends="$(log_count "$L" "LEASE END")"
+wait_for "the wake's 20 s lease ends" 30 more_in_log "$L" "LEASE END" "$ends"
+wait_for "$L unreachable before the view" 15 state_is "$L" unreachable
+starts_before="$(log_count "$L" "START")"
+execs_before="$(log_count "$L" "EXEC")"
+view_start="$(now)"
+python3 -I "$BASE/client_pty.py" 10 30 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH \
+  -u HERDR_SESSION -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION \
+  -u HERDR_CLIENT_REEXEC -u CLAUDECODE TERM=xterm-256color \
+  XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" SHELL=/bin/sh \
+  "$HERDR_BIN" --session "$SESSION" --remote "core:$L" >"$BASE/view-client.out" 2>/dev/null &
+view_runner=$!
+VIEW_LOG="$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.log"
+wait_for "the view server" 15 test -S "$CONFIG_HOME/herdr-dev/sessions/$SESSION/herdr-view-$L.sock"
+wait_for "$L connected by the view's first client" 10 state_is "$L" connected
+view_lease="$(ls -t "$LINK_ROOT/$L"/leases/client-* 2>/dev/null | head -n 1)"
+[[ -n "$view_lease" ]] || fail "V33: the view's client wrote no lease"
+le "$(mtime "$view_lease")" "$(log_time "$L" START $((starts_before + 1)))" \
+  || fail "V33: the view client's lease came after the dial it led to"
+ge "$(mtime "$view_lease")" "$view_start" || fail "V33: the lease is not this client's"
+[[ "$(log_count "$L" "EXEC")" -gt "$execs_before" ]] || fail "V33: the START after the view's lease did not dial"
+echo "ok: V33 the view's first client wrote its lease before the START it led to, which dialled; $L connected $(since "$view_start")s after"
+wait "$view_runner" || true
+rm -f "$view_lease"
+# The view server exits 10 min after its last client; this test ends it now.
+view_pid="$(grep -o 'herdr starting.*pid=[0-9]*' "$VIEW_LOG" | tail -n 1 | sed 's/.*pid=//')"
+if [[ -n "$view_pid" ]] && ps -o comm= -p "$view_pid" 2>/dev/null | grep -q herdr; then
+  kill "$view_pid"
+fi
 
 run_herdr machine rm --core "$L" >"$BASE/rm.out" 2>&1 || fail "machine rm --core $L failed: $(tail -n 5 "$BASE/rm.out")"
 [[ ! -e "$LINK_ROOT/$L" && "$(machine_state "$L")" == absent ]] || fail "machine rm --core left $L"
