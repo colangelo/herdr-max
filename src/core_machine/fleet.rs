@@ -1704,5 +1704,7 @@ fn remove_dead_folders(base: &Path) {
     }
 }
 
+pub(crate) mod view;
+
 #[cfg(test)]
 mod tests;
