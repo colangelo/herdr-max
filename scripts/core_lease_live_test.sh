@@ -334,8 +334,11 @@ time.sleep(1)
 try: os.kill(pid, signal.SIGKILL)
 except ProcessLookupError: pass
 PY
-last_refused="$(log_count "$L" "REFUSE")"
-wait_for "a refused retry to start the client after" 40 more_in_log "$L" "REFUSE" "$last_refused"
+# After a whole refused pair: the Windows line's START follows its POSIX
+# refusal by up to ~0.1 s, and counted between the two it would be taken
+# for the client's dial.
+last_refused="$(log_count "$L" "REFUSE NotPosixLine")"
+wait_for "a refused retry to start the client after" 40 more_in_log "$L" "REFUSE NotPosixLine" "$last_refused"
 client_start="$(now)"
 starts_before="$(log_count "$L" "START")"
 python3 -I "$BASE/client_pty.py" 12 4 env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH \
