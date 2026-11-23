@@ -555,6 +555,17 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   `auth_failed`) passed; nothing left running or in the passwd-home state. Not run: the panes and lease parts
   (V3, V38, V11 take 5, 10 and 15 min and nothing in them changed), `core_live_test.sh`, the default-session
   script, the bench (no render, layout, PTY or detection work added) and CI (not pushed).
+  After E.2a, m4m, 2026-11-23, under the shared lock: `just check` 0 (5838 + 158 tests; windows-lint skipped on
+  macOS) on 41095792; `core_machine_live_test.sh` with `CORE_MACHINE_PARTS="link lease fleet"` (default V3 300 s
+  and V38 600 s) passed on a debug binary of 681ccb49 copied out of the shared target (41095792 changes scripts
+  only): the link part, V2, V7, V3 (0 link bytes), V38, B.2/B.5, V33, V35 and the fleet part with E.2a's 2.1 and 2.2
+  checks. Earlier runs failed on test races, fixed in the scripts: V35's stale-socket dial (core's own retry
+  restarted by the test's connect, also with the base binary), B.5's order check (a Windows START counted as the
+  client's dial), V32's `--dial` landing on core's fast retries after a link ends (D3a's accepted limit). One V3
+  failure and one V38 failure were another session's debug client on this account (pid 26192), whose `client-<pid>`
+  lease writer (B.2) writes a fresh act into every machine folder under the passwd home's `herdr-dev` root, these
+  tests' folders included: it kept a link up in V3 and reopened `retry_spent` in V38. Not fixed here (B.2's
+  documented limit); the live tests share that root with every herdr-dev client of the account.
 
 ## R. Rollout (both Macs in one step)
 
