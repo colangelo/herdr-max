@@ -2675,7 +2675,7 @@ fn publish_output_requests(
             }
         }
         if !clipboard_writes.is_empty() {
-            debug!(
+            tracing::debug!(
                 pane = pane_id.raw(),
                 writes = clipboard_writes.len(),
                 "dropped clipboard writes from a program on another host"
