@@ -139,7 +139,7 @@ Herdr never ends a program on a machine by itself: only closing its pane does. A
 
 `herdr pane respawn` (and `--resume`) refuses a pane on a machine with `pane_on_machine`, whether it runs, waits or ended there, because a respawn starts its program on this Mac. `herdr pane respawn --if-idle` refuses it with `on_machine`, and a suspended pane on a machine is never started again here: it waits for its machine.
 
-A saved pane on a machine records its folder with its terminal and `/dev/null/herdr-pane-on-a-core-machine` as its `cwd`, a folder no host has. A Herdr build from before panes on machines therefore shows such a pane as "Saved directory is unavailable" and never starts it on this Mac; it also drops the pane's link from its next save, so after a downgrade the pane's program on the machine runs on without a pane. Close or move panes on a machine before you go back to such a build.
+A saved pane on a machine records its terminal and folder in a field of their own, `core_machine_terminal`, and `/dev/null/herdr-pane-on-a-core-machine` as its `cwd`, a folder no host has. A Herdr build from before panes on machines reads no terminal for such a pane, so it shows the pane as "Saved directory is unavailable" and never starts it, or attaches another terminal to it, on this Mac; it also drops the pane's link from its next save, so after a downgrade the pane's program on the machine runs on without a pane. Close or move panes on a machine before you go back to such a build.
 
 A pane on a machine lacks what Herdr learns from this Mac's processes:
 
