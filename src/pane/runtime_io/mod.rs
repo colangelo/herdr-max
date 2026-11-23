@@ -89,6 +89,19 @@ pub struct CoreProgramRun {
     pub pid: u32,
 }
 
+/// The program a guarded pane action names, checked against core's live
+/// record of the pane's terminal (core-phase5 D7, fork issue 317 M1): its
+/// address in the primary session (`t7`), its pid and its `herdr.launch`
+/// label. `kill_through_it` keeps the connection the check read it on for
+/// the pane's kill, so a close never kills through another connection.
+#[derive(Debug, Clone, Copy)]
+pub struct CoreRunCheck<'a> {
+    pub terminal: &'a str,
+    pub pid: u32,
+    pub launch: &'a str,
+    pub kill_through_it: bool,
+}
+
 impl CoreTerminalLink {
     /// The core machine the program runs on (`ac-mbm5` in `ac-mbm5/t7`),
     /// `None` on this Mac's own core and for an address that does not parse
@@ -671,6 +684,30 @@ impl PaneIo {
             #[cfg(unix)]
             PaneIo::Core(core) => Some(core.run()),
             _ => None,
+        }
+    }
+
+    /// Whether core shows this pane's terminal live now with the program
+    /// `check` names, read on the connection the pane's kill would use
+    /// (core-phase5 D7, fork issue 317 M1). `Err` says why not.
+    pub(super) fn check_core_run(&self, check: CoreRunCheck<'_>) -> Result<(), String> {
+        match self {
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.check_live_run(check),
+            _ => Err(format!(
+                "does not run in Herdr Core, so it shows no terminal {}",
+                check.terminal
+            )),
+        }
+    }
+
+    /// Drops the connection a passed `check_core_run` kept for the kill,
+    /// when the close it was for did not happen.
+    pub(super) fn release_core_kill(&self) {
+        match self {
+            #[cfg(unix)]
+            PaneIo::Core(core) => core.release_kill(),
+            _ => {}
         }
     }
 

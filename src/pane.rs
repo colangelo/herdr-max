@@ -28,6 +28,7 @@ pub(crate) use runtime_io::core_machines;
 pub(crate) use runtime_io::core_session_name;
 pub(crate) use runtime_io::set_preferred_runtime;
 pub(crate) use runtime_io::CoreProgramRun;
+pub(crate) use runtime_io::CoreRunCheck;
 pub(crate) use runtime_io::CoreTerminalLink;
 #[cfg(all(test, unix))]
 pub(crate) use runtime_io::FakeCore;
@@ -3200,6 +3201,19 @@ impl PaneRuntime {
     /// a pane not in herdr-core.
     pub(crate) fn core_run(&self) -> Option<CoreProgramRun> {
         self.io.core_run()
+    }
+
+    /// Whether core shows this pane's program live now as `check` names it,
+    /// read on the connection its kill would use (core-phase5 D7, fork
+    /// issue 317 M1).
+    pub(crate) fn check_core_run(&self, check: CoreRunCheck<'_>) -> Result<(), String> {
+        self.io.check_core_run(check)
+    }
+
+    /// Drops what a passed `check_core_run` kept for a close that did not
+    /// happen.
+    pub(crate) fn release_core_kill(&self) {
+        self.io.release_core_kill();
     }
 
     /// The core machine this pane's program runs on, `None` on this Mac

@@ -32,7 +32,10 @@ pub(crate) const TERMINAL_MISMATCH: &str = "terminal_mismatch";
 pub(crate) const WOULD_CLOSE_WORKSPACE: &str = "would_close_workspace";
 
 impl App {
-    /// `pane.close_if_terminal`.
+    /// `pane.close_if_terminal`. The program is read from core last of
+    /// all, before any layout change, on the connection the kill then goes
+    /// through (fork issue 317 M1): a mismatch refuses with nothing closed,
+    /// killed or swept.
     pub(super) fn handle_pane_close_if_terminal(
         &mut self,
         id: String,
@@ -52,13 +55,32 @@ impl App {
                 ),
             );
         }
-        self.handle_pane_close(
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        if let Err(response) = self.program_live(
+            &id,
+            &params.pane_id,
+            terminal_id.as_ref(),
+            &params.expect,
+            true,
+        ) {
+            return response;
+        }
+        let response = self.handle_pane_close(
             id,
             PaneCloseParams {
                 pane_id: params.pane_id,
                 force: params.force,
             },
-        )
+        );
+        // A close refused after the check (open todos, a group not ready)
+        // leaves the runtime, and its next kill is no guarded one.
+        if let Some(runtime) = terminal_id
+            .as_ref()
+            .and_then(|terminal_id| self.terminal_runtimes.get(terminal_id))
+        {
+            runtime.release_core_kill();
+        }
+        response
     }
 
     /// `pane.split_if_terminal`: the new pane starts in the target's
@@ -68,7 +90,7 @@ impl App {
         id: String,
         params: PaneSplitIfTerminalParams,
     ) -> String {
-        if let Err(response) = self.pane_showing(&id, &params.pane_id, &params.expect) {
+        if let Err(response) = self.pane_showing_live(&id, &params.pane_id, &params.expect) {
             return response;
         }
         self.handle_pane_split(
@@ -93,7 +115,7 @@ impl App {
         id: String,
         params: PaneRenameIfTerminalParams,
     ) -> String {
-        if let Err(response) = self.pane_showing(&id, &params.pane_id, &params.expect) {
+        if let Err(response) = self.pane_showing_live(&id, &params.pane_id, &params.expect) {
             return response;
         }
         self.handle_pane_rename(
@@ -153,6 +175,60 @@ impl App {
         }
         Ok((ws_idx, pane_id))
     }
+
+    /// `pane_showing`, then core's live record of the pane's terminal.
+    fn pane_showing_live(
+        &self,
+        id: &str,
+        pane_ref: &str,
+        expect: &PaneTerminalExpectation,
+    ) -> Result<(usize, PaneId), String> {
+        let (ws_idx, pane_id) = self.pane_showing(id, pane_ref, expect)?;
+        let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        self.program_live(id, pane_ref, terminal_id.as_ref(), expect, false)?;
+        Ok((ws_idx, pane_id))
+    }
+
+    /// Whether core shows the program `expect` names live at the pane's
+    /// terminal now, read on the connection the pane's kill would use: what
+    /// herdr cached at attach can be stale after core reconnected, when the
+    /// address may hold another program (fork issue 317 M1). With
+    /// `for_close`, that connection is kept for the close's kill.
+    fn program_live(
+        &self,
+        id: &str,
+        pane_ref: &str,
+        terminal_id: Option<&crate::terminal::TerminalId>,
+        expect: &PaneTerminalExpectation,
+        for_close: bool,
+    ) -> Result<(), String> {
+        let Some(runtime) =
+            terminal_id.and_then(|terminal_id| self.terminal_runtimes.get(terminal_id))
+        else {
+            return Err(encode_error(
+                id.to_string(),
+                TERMINAL_MISMATCH,
+                format!("pane {pane_ref} runs no program; nothing was done"),
+            ));
+        };
+        runtime
+            .check_core_run(crate::pane::CoreRunCheck {
+                terminal: &expect.terminal,
+                pid: expect.pid,
+                launch: &expect.launch,
+                kill_through_it: for_close,
+            })
+            .map_err(|why| {
+                encode_error(
+                    id.to_string(),
+                    TERMINAL_MISMATCH,
+                    format!(
+                        "pane {pane_ref}'s terminal {} {why}; nothing was done",
+                        expect.terminal
+                    ),
+                )
+            })
+    }
 }
 
 /// An app whose `workspaces` have each of `panes` run a shell in the fake
@@ -211,7 +287,7 @@ mod tests {
     }
 
     fn far() -> Far {
-        let core = FakeCore::start();
+        let core = FakeCore::start_with(|config| config.distinct_addresses = true);
         let mut split = crate::workspace::Workspace::test_new("far");
         let first = split.tabs[0].root_pane;
         let second = split.test_split(ratatui::layout::Direction::Horizontal);
@@ -240,7 +316,7 @@ mod tests {
                 .filter(|request| request["method"] == "terminal.run")
                 .nth(nth)
                 .expect("a run");
-            json!({"terminal": "t1", "pid": 4242,
+            json!({"terminal": format!("t{}", nth + 1), "pid": 4242,
                    "launch": run["params"]["labels"]["herdr.launch"]})
         }
 
@@ -323,6 +399,75 @@ mod tests {
         );
         assert!(closed["result"].is_object(), "{closed}");
         assert_eq!(far.panes_of(0), 2);
+    }
+
+    // Fork issue 317, M1: after Herdr Core reconnects, the pane's address
+    // can hold another program (a core that came back with its state wiped
+    // gives `t1` again), and the pane attaches to it as its own: the pid and
+    // launch label it cached at the first attach still match the request.
+    // The far herdr reads the live program on the connection its kill would
+    // use, so a guarded action is refused there, nothing renamed, split,
+    // closed or killed; a pane whose program core still shows acts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reused_address_after_a_core_reconnect_is_refused() {
+        let mut far = far();
+        let (first, second) = (far.id(0), far.id(1));
+        let aimed = far.expect(0);
+        let attaches = |core: &FakeCore| {
+            core.methods()
+                .iter()
+                .filter(|method| *method == "terminal.attach")
+                .count()
+        };
+        let before = attaches(&far.core);
+        far.core
+            .add_terminal(json!({"address": "t1", "pid": 5151, "state": "live",
+                                     "labels": {"herdr.launch": "another-run"}}));
+        far.core.hang_up();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while attaches(&far.core) < before + far.panes.len() {
+            assert!(
+                std::time::Instant::now() < until,
+                "not reattached: {:?}",
+                far.core.methods()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let run = far.app.state.workspaces[0]
+            .terminal_id(far.panes[0])
+            .and_then(|terminal| far.app.terminal_runtimes.get(terminal))
+            .and_then(crate::terminal::TerminalRuntime::core_run)
+            .expect("a core run");
+        assert_eq!(run.pid, 4242, "the pane still names the old program");
+
+        for (method, params) in [
+            ("pane.rename_if_terminal", json!({"label": "server"})),
+            ("pane.split_if_terminal", json!({"direction": "right"})),
+            ("pane.close_if_terminal", json!({"force": true})),
+        ] {
+            let mut params = params;
+            params["pane_id"] = json!(first);
+            params["expect"] = aimed.clone();
+            let refused = far.call(method, params);
+            assert_eq!(refused["error"]["code"], "terminal_mismatch", "{refused}");
+        }
+        assert!(
+            !far.core
+                .methods()
+                .iter()
+                .any(|method| method == "terminal.kill"),
+            "{:?}",
+            far.core.methods()
+        );
+        assert_eq!(far.panes_of(0), 2, "nothing split or closed");
+        assert_eq!(far.label(0), None, "not renamed");
+
+        let closed = far.call(
+            "pane.close_if_terminal",
+            json!({"pane_id": second, "expect": far.expect(1)}),
+        );
+        assert!(closed["result"].is_object(), "{closed}");
+        assert_eq!(far.panes_of(0), 1);
     }
 
     // Fork issue 316, M2: a guarded close is a close of one pane. The last

@@ -468,6 +468,10 @@ fn end_program(
     } else {
         super::pty::session_pids(child_pid, child_wait_completed)
     };
+    // A guarded close's kill refuses a program core no longer shows there
+    // (fork issue 317 M1): the sweep then runs only once core confirmed
+    // the end, never by the cached pid alone.
+    let sweep_unconfirmed = sweep_unconfirmed && !core.kill_is_pinned();
     let outcome = core.kill();
     if guarded {
         if unknown {

@@ -53,6 +53,9 @@ pub(crate) struct FakeConfig {
     /// `exec_reply`), at the moment core gets it: a test sees what the
     /// caller had written by then, and can answer each run its own way.
     pub exec_handler: Option<ExecHandler>,
+    /// Each `terminal.run` gets an address of its own (`t1`, `t2`, ...), as
+    /// core gives them, instead of every run `t1`.
+    pub distinct_addresses: bool,
 }
 
 /// What a test's `machine.exec` handler is: the call's params in, core's
@@ -80,6 +83,7 @@ impl Default for FakeConfig {
             exec_error: None,
             doc_value: Value::Null,
             exec_handler: None,
+            distinct_addresses: false,
         }
     }
 }
@@ -102,6 +106,8 @@ struct Shared {
     /// `terminal.run` calls not answered yet, and the most there were.
     runs_pending: usize,
     runs_pending_max: usize,
+    /// The runs so far, for `distinct_addresses`.
+    runs: u32,
 }
 
 pub(crate) struct FakeCore {
@@ -371,9 +377,16 @@ fn answer(
         ),
         "terminal.run" => {
             // `on` runs it on a machine: core names it `<machine>/t1`.
+            let number = if config.distinct_addresses {
+                let mut shared = lock(shared);
+                shared.runs += 1;
+                shared.runs
+            } else {
+                1
+            };
             let address = match params["on"].as_str() {
-                Some(machine) => format!("{machine}/t1"),
-                None => "t1".into(),
+                Some(machine) => format!("{machine}/t{number}"),
+                None => format!("t{number}"),
             };
             let record = json!({"address": address, "pid": config.pid, "state": "live",
                                  "labels": params["labels"], "argv": params["argv"]});

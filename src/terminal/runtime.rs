@@ -138,6 +138,21 @@ impl TerminalRuntime {
         self.0.core_run()
     }
 
+    /// Whether core shows the program live now as `check` names it, on the
+    /// connection its kill would use (fork issue 317 M1).
+    pub(crate) fn check_core_run(
+        &self,
+        check: crate::pane::CoreRunCheck<'_>,
+    ) -> Result<(), String> {
+        self.0.check_core_run(check)
+    }
+
+    /// Drops what a passed `check_core_run` kept, for a close that did not
+    /// happen.
+    pub(crate) fn release_core_kill(&self) {
+        self.0.release_core_kill();
+    }
+
     /// A view server's pane on the far terminal `address` (core-phase5 D6).
     #[cfg(unix)]
     pub(crate) fn view_core(

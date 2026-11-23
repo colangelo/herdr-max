@@ -28,7 +28,7 @@ use super::status_mirror::StatusMirror;
 use crate::core_machine::panes::MachineLink;
 use crate::core_machine::MachineName;
 use crate::layout::PaneId;
-use crate::pane::runtime_io::{CoreProgramRun, CoreStatusRecord, CoreTerminalLink};
+use crate::pane::runtime_io::{CoreProgramRun, CoreRunCheck, CoreStatusRecord, CoreTerminalLink};
 use crate::platform::{
     ChildExitReason, ProgramIdentity, ProgramLiveness, StartTokenLookup, SuspendCause,
 };
@@ -370,6 +370,18 @@ struct Shared {
     /// Set for a view server's pane (core-phase5 D6): it never becomes the
     /// terminal's active viewer, never ends its program.
     view: Option<ViewIo>,
+    /// The connection a guarded close checked the program on, and the pid
+    /// and launch label it showed: the kill goes through that connection
+    /// only, after the same check again (core-phase5 D7, fork issue 317 M1).
+    kill_pin: Mutex<Option<KillPin>>,
+}
+
+/// What a guarded close checked: the connection the program was read on
+/// and the program it showed there.
+struct KillPin {
+    client: CoreClient,
+    pid: u32,
+    launch: String,
 }
 
 /// How a view's pane talks to its far terminal (core-phase5 D6 Size): the
@@ -523,6 +535,31 @@ impl std::fmt::Display for KillOutcome {
             Self::Failed(err) => write!(f, "{err}"),
         }
     }
+}
+
+/// Why core's record of `address`, read on `client` now, is not the live
+/// program with pid `pid` and launch label `launch`, or `Ok` when it is.
+/// A pid of 0 or a missing label vouches for no program.
+fn live_run_refusal(
+    client: &CoreClient,
+    address: &str,
+    pid: u32,
+    launch: &str,
+) -> Result<(), String> {
+    let record = client
+        .call("terminal.get", json!({"terminal": address}), CALL_TIMEOUT)
+        .map_err(|err| format!("could not be read from Herdr Core ({err})"))?;
+    if record["state"] != "live" {
+        return Err(format!(
+            "is {} in Herdr Core, not live",
+            record["state"].as_str().unwrap_or("unknown")
+        ));
+    }
+    let live_pid = core_pid(&record["pid"]);
+    if pid == 0 || live_pid != pid || record["labels"][LAUNCH_LABEL].as_str() != Some(launch) {
+        return Err("runs another program in Herdr Core now than the one asked for".into());
+    }
+    Ok(())
 }
 
 fn kill_terminal(client: &CoreClient, address: &str) -> KillOutcome {
@@ -876,6 +913,7 @@ impl StartedCore {
                 ),
                 mirror_slot: Mutex::new(None),
                 view: None,
+                kill_pin: Mutex::new(None),
             }),
             events_rx,
             automatic_input,
@@ -971,6 +1009,7 @@ impl StartedCore {
                     instance,
                     replaced: AtomicBool::new(false),
                 }),
+                kill_pin: Mutex::new(None),
             }),
             events_rx,
             automatic_input: !read_only,
@@ -1255,6 +1294,12 @@ impl CorePaneIo {
         if self.is_view() {
             return KillOutcome::Live;
         }
+        // A guarded close: only through the connection its check read the
+        // program on, and only while core still shows that program there
+        // (fork issue 317 M1).
+        if let Some(pin) = lock(&self.shared.kill_pin).take() {
+            return self.kill_pinned(&pin);
+        }
         let client = self.shared.client();
         if self.shared.identity.is_some() {
             let record = match client.call(
@@ -1276,6 +1321,70 @@ impl CorePaneIo {
             }
         }
         kill_terminal(&client, &self.shared.address)
+    }
+
+    /// For a guarded pane action (core-phase5 D7, fork issue 317 M1): core's
+    /// live record of the pane's terminal, read now on the pane's current
+    /// connection, shows the program `check` names (its address, a pid that
+    /// is not 0 and its `herdr.launch` label). The pid and label herdr
+    /// cached at attach are not enough: after core reconnects, the address
+    /// can hold another program, which this pane attaches to as its own.
+    /// With `kill_through_it`, the pane's next kill goes through this same
+    /// connection only (`kill_pinned`). `Err` says why not, nothing kept.
+    pub(crate) fn check_live_run(&self, check: CoreRunCheck<'_>) -> Result<(), String> {
+        if self.is_view() || self.shared.machine.is_some() {
+            return Err("is not a program of this Mac's Herdr Core".into());
+        }
+        if self.shared.address != check.terminal {
+            return Err(format!("shows another terminal than {}", check.terminal));
+        }
+        let client = self.shared.client();
+        live_run_refusal(&client, &self.shared.address, check.pid, check.launch)?;
+        if check.kill_through_it {
+            *lock(&self.shared.kill_pin) = Some(KillPin {
+                client,
+                pid: check.pid,
+                launch: check.launch.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Forgets the connection a guarded close's check kept, when the close
+    /// did not happen.
+    pub(crate) fn release_kill(&self) {
+        lock(&self.shared.kill_pin).take();
+    }
+
+    /// Whether the next kill is a guarded close's (`check_live_run`).
+    pub(crate) fn kill_is_pinned(&self) -> bool {
+        lock(&self.shared.kill_pin).is_some()
+    }
+
+    /// A guarded close's kill: through the connection its check used, which
+    /// must still be open (a connection core closed may be followed by a
+    /// core that reused the address, fork issue 317 M1), after the check
+    /// again, just before the kill. Core has no kill bound to a pid or a
+    /// label (hc 0.1.21), so the check and the kill are two calls on one
+    /// connection: within one core server an address is never given to
+    /// another terminal, but a terminal someone set `keep` on gets a new
+    /// program at the same address (measured on hc 0.1.21), and one that
+    /// does so between these two calls would be killed.
+    fn kill_pinned(&self, pin: &KillPin) -> KillOutcome {
+        if pin.client.is_closed() {
+            return KillOutcome::Failed(CoreError::Unavailable(format!(
+                "the connection to Herdr Core that showed terminal {}'s program closed; not killed through another",
+                self.shared.address
+            )));
+        }
+        if let Err(why) = live_run_refusal(&pin.client, &self.shared.address, pin.pid, &pin.launch)
+        {
+            return KillOutcome::Failed(CoreError::Unavailable(format!(
+                "terminal {} {why}; not killed",
+                self.shared.address
+            )));
+        }
+        kill_terminal(&pin.client, &self.shared.address)
     }
 
     /// The core server's and its holders' pids, for the sweep guard (D8).
@@ -2507,6 +2616,62 @@ mod tests {
             "{:?}",
             core.methods()
         );
+    }
+
+    fn attaches(core: &FakeCore) -> usize {
+        core.methods()
+            .iter()
+            .filter(|method| *method == "terminal.attach")
+            .count()
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < until, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    // Fork issue 317, M1: a guarded close's kill goes only through the
+    // connection its check read the program on, after the same check again.
+    // Here core drops that connection after the check and the pane
+    // reconnects (a core that came back may have given the address to
+    // another program): the kill is refused, and no `terminal.kill` reaches
+    // core through the new connection. A check on the new one, and a
+    // program core still shows there, let it through.
+    #[test]
+    fn a_guarded_kill_goes_only_through_the_connection_it_checked_on() {
+        let core = FakeCore::start();
+        let (pane, _exits, _unreachable) = pane_on(reconnecting(&core), ReattachPolicy::default());
+        let launch = pane.run().launch.expect("a launch label");
+        let check = CoreRunCheck {
+            terminal: "t1",
+            pid: 4242,
+            launch: &launch,
+            kill_through_it: true,
+        };
+        pane.check_live_run(check).expect("the program core shows");
+        let before = attaches(&core);
+        core.hang_up();
+        wait_for("the pane to reattach", || attaches(&core) > before);
+        let outcome = pane.kill();
+        assert!(matches!(outcome, KillOutcome::Failed(_)), "{outcome}");
+        let killed = || {
+            core.methods()
+                .iter()
+                .any(|method| method == "terminal.kill")
+        };
+        assert!(!killed(), "{:?}", core.methods());
+
+        let wrong = CoreRunCheck { pid: 4243, ..check };
+        assert!(pane.check_live_run(wrong).is_err(), "another pid");
+        assert!(!pane.kill_is_pinned(), "a refused check keeps nothing");
+        pane.check_live_run(check)
+            .expect("checked on the new connection");
+        assert!(pane.kill().ended());
+        assert!(killed());
+        pane.shutdown();
     }
 
     // N2 (D5): a machine pane's program that exits closes its stream with

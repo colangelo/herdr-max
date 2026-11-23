@@ -27,7 +27,7 @@ impl Drop for GuardedFar {
 }
 
 fn guarded_far(tabs: usize) -> (GuardedFar, std::sync::mpsc::Receiver<Vec<u8>>) {
-    let core = FakeCore::start();
+    let core = FakeCore::start_with(|config| config.distinct_addresses = true);
     let mut workspace = crate::workspace::Workspace::test_new("w");
     let mut panes = vec![workspace.tabs[0].root_pane];
     for nth in 1..tabs {
@@ -71,7 +71,7 @@ impl GuardedFar {
             .filter(|request| request["method"] == "terminal.run")
             .nth(nth)
             .expect("a run");
-        json!({"terminal": "t1", "pid": 4242,
+        json!({"terminal": format!("t{}", nth + 1), "pid": 4242,
                "launch": run["params"]["labels"]["herdr.launch"]})
     }
 
