@@ -888,4 +888,36 @@ mod tests {
         let plan = plan(&args(&["done", "task.m4m.tk-1"]), None).unwrap();
         assert_eq!(run_plan(plan).unwrap(), 1);
     }
+
+    #[test]
+    fn a_remote_task_output_prints_escaped_and_a_local_one_raw() {
+        use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS as F};
+        let task = json!({
+            "key": F, "shown": F, "priority": F, "owner": F, "title": F,
+            "status": F, "horizon": F, "waits_on": F, "created_at": F, "updated_at": F,
+            "body": format!("{F}\n{F}"), "rev": 2
+        });
+        let show = json!({"result": {"task": task}});
+        let list = json!({"result": {"tasks": [task],
+            "store": {"state": F, "detail": F}}});
+        let plan_of = |words: &[&str]| plan(&args(words), None).unwrap();
+        let cases = [
+            (plan_of(&["show", "k"]), show.clone(), None),
+            (plan_of(&["list"]), list, None),
+            (
+                plan_of(&["add", "t"]),
+                show.clone(),
+                Some(json!({"status": F, "message": F})),
+            ),
+        ];
+        for (plan, response, outcome) in &cases {
+            let (out, err) = as_remote(|| human_text(plan, response, outcome.as_ref(), true));
+            assert_escaped(&format!("{out}{err}"));
+            let (out, err) = human_text(plan, response, outcome.as_ref(), true);
+            assert!(format!("{out}{err}").contains(F), "local stays raw");
+        }
+        assert_escaped(&as_remote(|| {
+            fallback_todo_line(&json!({"pane_id": F, "id": 1, "text": F}))
+        }));
+    }
 }

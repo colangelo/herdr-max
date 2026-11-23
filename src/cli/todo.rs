@@ -110,3 +110,29 @@ fn format_todo_line(todo: &serde_json::Value, show_pane: bool) -> String {
     }
     line
 }
+
+#[cfg(test)]
+mod far_output_tests {
+    use super::*;
+
+    use crate::cli::target::{as_remote, assert_escaped, FAR_CONTROLS};
+    use serde_json::json;
+
+    fn todo() -> serde_json::Value {
+        json!({"id": 3, "pane_id": FAR_CONTROLS, "text": FAR_CONTROLS,
+               "priority": "normal", "link_label": FAR_CONTROLS, "link_alive": true})
+    }
+
+    #[test]
+    fn a_remote_todo_list_line_prints_escaped_and_a_local_one_raw() {
+        assert_escaped(&as_remote(|| format_todo_line(&todo(), true)));
+        assert!(format_todo_line(&todo(), true).contains(FAR_CONTROLS));
+    }
+
+    #[test]
+    fn a_remote_todo_mutation_line_prints_escaped_and_a_local_one_raw() {
+        let response = json!({"result": {"todo": todo()}});
+        assert_escaped(&as_remote(|| todo_mutation_line(&response, "added")));
+        assert!(todo_mutation_line(&response, "added").contains(FAR_CONTROLS));
+    }
+}

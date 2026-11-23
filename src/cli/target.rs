@@ -543,6 +543,33 @@ fn validate_machine_command(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// A far string with an OSC 52 clipboard write, a CSI, a C1 control and a
+/// bidi override, for the tests of every human-readable output (#311).
+#[cfg(test)]
+pub(super) const FAR_CONTROLS: &str = "x\x1b]52;c;aGk=\x07\x1b[2K\u{9b}1A\u{202e}y";
+
+/// `with_test_client` around `run`, for a remote target.
+#[cfg(test)]
+pub(super) fn as_remote<T>(run: impl FnOnce() -> T) -> T {
+    let client = ApiClient::for_target(ConnectionTarget::SocketPath("/nonexistent".into()));
+    with_test_client(client, run)
+}
+
+/// The far text as it must print for a remote target, and no control left.
+#[cfg(test)]
+pub(super) fn assert_escaped(printed: &str) {
+    assert!(
+        printed.contains(crate::remote::visible_line(FAR_CONTROLS).as_ref()),
+        "far text not escaped: {printed:?}"
+    );
+    assert!(
+        !printed
+            .chars()
+            .any(|ch| (ch.is_control() && ch != '\n') || ch == '\u{202e}'),
+        "a control survived: {printed:?}"
+    );
+}
+
 #[cfg(test)]
 pub(super) fn with_test_client<T>(client: ApiClient, run: impl FnOnce() -> T) -> T {
     let _scope = TARGET.with(|target| {
