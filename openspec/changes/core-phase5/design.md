@@ -208,6 +208,11 @@ runs: a client that quit or crashed, or a CLI call killed before it removed its 
 (review H7 of PR D). A pid the system gave again to another process keeps the lease to its expiry, no later than a
 time-only lease; `manual` has no process and ends by its expiry. A **keep lease** (`<expiry> 0 keep`, PR E review)
 keeps a link that is up and admits no dial: core-link's watcher counts it, its admission does not (D7).
+As built after the security
+review of PR E (M4, tasks E.2b): a `cli-<pid>` lease names its kind (`<expiry> <act> dial` or `... keep`) and one
+with no kind is no lease; any lease whose expiry is further from now than its holder's longest life (a CLI's 60 s, a
+client's 10 min, `machine wake`'s 12 h, each with 5 s for clocks) or whose act is in the future is no lease; at most
+256 lease files of at most 128 bytes are read.
 
 | Holder | Writes | Expiry |
 |---|---|---|
@@ -438,21 +443,38 @@ Alternatives:
     turn the lease into a keep lease, then `machine.exec`. The one announced dial is the connect; a drop after it
     is not redialled on the call's account.
   This is stricter than the old remote, whose `--machine` dials silently on every call; the house rule wants
-  every dial announced, and an agent cannot pass `--dial` without deciding to. There is no environment switch for
+  every dial announced, and an agent cannot pass `--dial` without deciding to. As built (E.2b, M4, M7): before the
+  dial `--dial` prints `herdr: --dial: opening ssh to <m> now; a Touch ID or Tailscale check can prompt on this
+  Mac` on stderr, so the announcement shows at run time whoever passed the flag. Its lease is a one-dial grant: the
+  CLI writes it once and never renews it, and core-link, holding `dial.lock`, admits the dial again and turns every
+  `cli-` grant in force into a keep lease before ssh, so one `--dial` gives one ssh start whether the CLI's connect
+  or a core retry takes it, and a drop before the CLI's own switch to keep is not redialled on its account. Before
+  any lease or exec the CLI checks that core's record of the name is herdr's link (`via`, a target ending in
+  `core-link <name>`, and the session when the record names one; M5), so a machine re-added in core under the same
+  name gets nothing. There is no environment switch for
   it (PR E review: `HERDR_MACHINE_DIAL=1` let every agent of a shell dial without deciding, and was removed).
 - **The lease's life (PR E review).** The `cli-<pid>` lease lives 60 s past its last write and the CLI writes it
   every 30 s while it runs, so its life follows the process: SIGINT, SIGTERM and SIGHUP remove it (and the bridge
   folder) before the CLI ends as the signal's default does, and a SIGKILL leaves one that ends within a minute (the
   watcher ends the link 5 s later at most). This replaces "120 s, longer by its own timeout", up to 720 s after a
   killed CLI. A long call writes twice a minute, not D3's once a minute for clients: the client rule bounds writes
-  per input, and a CLI's renewals are one small file per 30 s for its own life only.
+  per input, and a CLI's renewals are one small file per 30 s for its own life only. The renewer waits on the
+  monotonic clock, which stops while the Mac sleeps, but the expiry is wall-clock time: it reads the wall clock
+  every second and renews once a renewal is due by it, so after a sleep the lease is written within a second of
+  the wake (E.2b).
 - **Cut and timed-out replies are errors (F12).** `machine.exec` cuts stdout at 8 MiB with `truncated: true` and
   exit code 0 (roundtable: 9 000 000 bytes → 8 388 608). The CLI treats `truncated: true` or `timed_out: true` as
   a failure: exit 1, `the reply from <m> was cut at 8 MiB` (or `timed out after <n> s`), and prints none of the
   partial output as a result. A request over 8 MiB raw (8 388 608 bytes: core's own input limit, measured; its
   schema says "8 MB") is refused before it is sent. Every failure after sending says the request may have run:
   no answer, `timed_out`, a far exit other than 0, and core's `unavailable`, which core also answers for a link lost
-  during the run (`lost the line to <m> during the call`, hc 0.1.21).
+  during the run (`lost the line to <m> during the call`, hc 0.1.21). As built after the second reads (E.2b): a far
+  exit 0 whose output is not one JSON reply line with the request's id (empty, cut, two lines, another id) is such
+  a failure too, and `remote-api-bridge --request` fails when its API closes with no reply line. A request is one
+  line within the far API's own line limit (1 MiB, which the API enforces; the 8 MiB above is core's input limit),
+  checked before it is sent and again by the far bridge, which refuses extra lines and reads at most 8 MiB of
+  reply (M6). The far herdr probe runs before the request is sent, so its failures say that the request was not
+  sent, never that it may have run.
 - **Timeouts.** The status probe's run is 9 s and its core call 14 s, inside the CLI's 15 s probe; a request with
   `timeout_ms` runs that long and 10 s more (at least 60 s); one with none (a wait with no `--timeout`, which the
   old remote waits out however long) runs core's longest, 600 s, then fails as timed out. A `timeout_ms` over
@@ -462,7 +484,10 @@ Alternatives:
   republishes; the view follows the document.
 - The remote herdr path and its capabilities are read once per link establishment (`machine.exec` of `<bin> status
   client --json`, the same probe `attach.rs` uses), again when the answer is 5 min old (so a far herdr upgraded in
-  place is read anew) and when the far herdr exits 2, 126 or 127 (no `remote-api-bridge`, or gone). A missing verb
+  place is read anew) and after any request through it fails there (as built, E.2b: a far herdr whose
+  `remote-api-bridge` has no `--request` answers with its usage and exit 1, not 2, so every far exit but 0, and a
+  reply that is not whole, forgets the probe; it costs one probe). The kept answer, `far_herdr.json`, is read only
+  from a 0600 regular file of this account, never through a symlink (M2). A missing verb
   disables that action with a notice; it never disconnects the view. The probe asks the far herdr for the session
   the requests go to, and `status client --json` reports `core_session`, the core session that herdr session uses:
   it must be the one the machine was added with, so a release `herdr` there is never sent a debug build's
@@ -602,6 +627,19 @@ S1 announcement.
 - The far side's `herdr-app` document is untrusted input to the view: parsed at the boundary with size, depth and
   id-format limits, unknown fields ignored, a bad document leaves the last good layout and logs once.
 - D7 sends argv vectors only. Pane, tab and workspace names from the far side never reach a shell.
+- Far text never reaches this terminal raw (security review of PR E, M1; tasks E.2b): the far stderr tail in a
+  probe's or a request's error, a far herdr's core session, every remote error, the far server's strings in
+  `herdr --machine <m> status` and core's state in `machine status --core` show C0 (but tab), DEL, C1 and the
+  bidirectional and line-separator marks as visible escapes (`remote::visible_line`). JSON output is serde's and
+  explicit ANSI pane reads are unchanged. Human list output over `--machine` (task, todo, notification lists,
+  `agent explain`) is the old remote's and is not escaped yet (E.2b limit,
+  https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/311).
+- The fleet CLI's bridge socket (M3, E1): a 0600 socket in a 0700 folder under a temporary base that no other
+  account can replace (the base and every folder above it are this account's or root's, and a shared one is
+  sticky; else `/tmp`, checked the same way); it serves only a peer of this account, with one 30 s deadline for the
+  request line and one for the reply, and ends through a wake pipe, never a connect. Its sweep of dead CLIs'
+  folders takes only the exact names it makes and removes only the socket and the empty folder; making the folder
+  or the lease and registering it for the signal cleanup is one step under that cleanup's lock.
 - Forged labels: a far-side terminal labelled `herdr.session=<label>@<our core id>` is adopted only by the pane
   whose link names its exact address and whose `herdr.pane_id` matches, as core-phase3's open question 3 already
   covers.

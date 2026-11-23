@@ -699,6 +699,58 @@ Order: A0 (alone, first), A, B, C, D, E, then rollout R. C and D are independent
   leases end); `--dial`'s keep switch comes after core answered `connected`, so a drop within that instant is still
   admitted by the dialling lease; a request refused for its timeout is reported through `remote_error` like any
   other bridge failure.
+- [x] E.2b Follow-ups of PR E (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/310): the second read's
+  items and security's two-vendor review (ac/security d9fbd4a, `docs/reviews/2026-11-23-herdr-fleet-cli.md`: no P0
+  or P1; M1 P2, M2-M7 and E1 P3). Each fixed at its root with a test that fails on the old behaviour (each checked
+  by reverting the fix):
+  - M1 far text: `remote::visible_line` (new, `src/remote/far_text.rs`) shows C0 but tab, DEL, C1 and the bidi and
+    line-separator marks as `\x1b`-style escapes. Used for the probe's and a request's stderr tail
+    (`Ran::stderr_tail`), core's messages in `exec`'s failures, a far herdr's `core_session`, a core route's refusal
+    line (`cli::target::refusal_line`), every `remote_error`, the far server's version, core state and macOS
+    services context in `status` (now built as lines, `server_status_lines`) and core's state in `machine status
+    --core`. Tests: OSC 52, OSC 0 and CSI (and C1) through each of those. Limit: the human list output over
+    `--machine` (task, todo, notification, `agent explain`), the old remote's, is
+    https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/311.
+  - Empty reply: `remote-api-bridge --request` fails when the API closes with no reply line or within one; the
+    fleet bridge takes a far exit 0 only with one whole JSON reply line carrying the request's id (M6), else a
+    failure that may have run. Probe failures: `exec` returns `ExecFailure` (not sent, may have run, ran); the
+    probe says `the request was not sent` for each. Every far exit but 0, and a reply that is not whole, forgets
+    `far_herdr.json` (a herdr whose bridge has no `--request` exits 1 with its usage; the test now fakes that).
+  - `write_atomic`: a temporary of this process's own name (`<path>.<pid>-<n>.new`) can only be a killed writer's
+    leftover: removed and the write made again. The lease renewer reads the wall clock every second (`LeaseTiming`
+    `tick` and `clock`) and renews once due by it, so a lease is written within a second after a sleep. A selector
+    herdr did not add is an unknown selector with no `machine.list` call; its error names `machine status --core`.
+    The `status client --json` `core_session` comment says when it is reported.
+  - M2: `far_herdr.json` is read only from a regular file opened with `O_NOFOLLOW`, of this account, 0600, at most
+    64 KiB. Not done: pinning the far path at `machine add` (a far binary is still found by the probe, R24's class).
+  - M3: the bridge serves only a peer of this account (`platform::core_link::peer_uid`: `getpeereid`, Linux
+    `SO_PEERCRED`); one 30 s deadline for the request line and one for the reply (`read_line_by`, `write_all_by`);
+    the accept waits on `poll` with a wake pipe that `Drop` closes, never a blocking connect; the sweep takes only
+    `herdr-fleet-<pid>-<16 hex>`, 0700 folders of this account, removing the socket and then the empty folder (the
+    CLI's own cleanups do the same); making the folder or the lease and registering it for the signal cleanup is
+    one step under its lock, and nothing is made once it ran. Not unit tested: the refusal of a peer of another
+    uid (no second account in tests) and a full listen queue.
+  - M4: `cli-` leases name their kind (`dial` or `keep`), and a `cli-` lease with none is no lease; a lease whose
+    expiry is beyond its holder's longest life (60 s, 10 min, 12 h, with 5 s) or whose act is in the future is no
+    lease; at most 256 lease files of 128 bytes are read. core-link admits again under `dial.lock`, then turns every
+    `cli-` grant in force into a keep lease (`MachineDir::consume_cli_grants`, `GRANT used` in `link.log`); the CLI
+    writes its grant once, never renewed (its minute outlasts the dialer's 40 s). The link live test writes its
+    `cli-` leases with the kind and a minute.
+  - M5: before any lease or exec, core's record of the name must be herdr's link (`command::runs_herdr_link`: `via`,
+    a target ending in `core-link <name>`, the session when the record has one), also used by `machine status`.
+    The fake core lists whole records (`set_machine_record`).
+  - M6: the far bridge forwards one request line within the API's 1 MiB limit (`api::MAX_REQUEST_LINE`) and
+    nothing after it, and reads at most 8 MiB of reply; the fleet bridge refuses, unsent, a request that is not one
+    line within that limit (was 8 MiB). Not done: a deadline for a directly invoked `remote-api-bridge --request`
+    (core's `machine.exec` has its own).
+  - M7: `--dial` prints `herdr: --dial: opening ssh to <m> now; a Touch ID or Tailscale check can prompt on this
+    Mac` on stderr before its dial.
+  - E1: the bridge folder's base must be one no other account can replace (`is_trusted_base`: it and every folder
+    above it, symlinks resolved, this account's or root's, a shared one sticky), else `/tmp`, else refused.
+  Not fixed: an older core-link watcher on a link that was up before an upgrade reads a keep lease (or a `dial`
+  kind) as no lease and ends that link when the other leases end (old binaries; until those links redial). A
+  grant that core-link turns into keep just as the CLI removes its lease can leave a keep lease of a gone CLI for
+  its minute (it admits no dial).
 - [ ] E.3 View actions (new tab, split, close pane, rename, agent start) as argv `machine.exec` calls; V20
   Waiting for PR D (the view server, `issue-300-d-view-server`): the actions belong to a view, which D builds. E.1's
   probe and `fleet.rs`'s `exec` and wrapper are what they will call.
