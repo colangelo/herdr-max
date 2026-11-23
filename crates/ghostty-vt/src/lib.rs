@@ -206,6 +206,19 @@ const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
 const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
 pub const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
+
+/// The Kitty graphics transports a terminal accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyMedia {
+    /// Inline data, and the file, temporary-file and shared-memory
+    /// transports, which name a path or an object on this host: for a
+    /// program running on this host.
+    All,
+    /// Inline data only (`t=d`): for output from another host, whose paths
+    /// and shared-memory names mean nothing here and must not open, or
+    /// remove, anything of this host's.
+    InlineOnly,
+}
 // The vendored C headers expose these placement fields, but the checked-in
 // generated bindings predate the names. Keep the explicit values aligned with
 // vendor/libghostty-vt/include/ghostty/vt/kitty_graphics.h.
@@ -1072,15 +1085,23 @@ impl Terminal {
     }
 
     pub fn enable_kitty_graphics(&mut self) -> Result<(), Error> {
+        self.enable_kitty_graphics_with(KittyMedia::All)
+    }
+
+    /// Enables Kitty graphics with the transports `media` allows. Every
+    /// screen, the alternate one included, takes the same transports.
+    pub fn enable_kitty_graphics_with(&mut self, media: KittyMedia) -> Result<(), Error> {
         install_png_decoder_once();
         let storage_limit = KITTY_IMAGE_STORAGE_LIMIT_BYTES;
-        let enable_medium = true;
+        let local_media = media == KittyMedia::All;
         let temp_dir = std::env::temp_dir();
         let temp_dir = temp_dir.to_string_lossy();
         let temp_dir = ffi::GhosttyString {
             ptr: temp_dir.as_ptr().cast(),
             len: temp_dir.len(),
         };
+        // A null directory turns the temporary-file transport off.
+        let temp_dir: *const ffi::GhosttyString = if local_media { &temp_dir } else { ptr::null() };
         unsafe {
             ffi::ghostty_terminal_set(
                 self.raw,
@@ -1091,19 +1112,19 @@ impl Terminal {
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
-                (&enable_medium as *const bool).cast(),
+                (&local_media as *const bool).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
-                (&temp_dir as *const ffi::GhosttyString).cast(),
+                temp_dir.cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
                 self.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM,
-                (&enable_medium as *const bool).cast(),
+                (&local_media as *const bool).cast(),
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
@@ -1119,7 +1140,7 @@ impl Terminal {
             )
             .into_result()?;
         }
-        self.set_kitty_source_forwarding(true)?;
+        self.set_kitty_source_forwarding(local_media)?;
         Ok(())
     }
 
@@ -4339,6 +4360,78 @@ mod tests {
         assert!(terminal
             .get_bool(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM)
             .unwrap());
+    }
+
+    // core-phase5 security review M1: output from another host gets inline
+    // graphics only. A file, a temporary file or a shared-memory name in it
+    // opens nothing of this host's and removes nothing, and inline data
+    // still draws, on both screens.
+    #[cfg(unix)]
+    #[test]
+    fn inline_only_kitty_graphics_refuse_local_media_and_still_draw_inline() {
+        use base64::Engine as _;
+
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-kitty-inline-only-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pixel.rgba");
+        std::fs::write(&file, [255, 0, 0, 255]).unwrap();
+        // The name a temporary-file upload must carry for kitty to remove it.
+        let temp = std::env::temp_dir().join(format!(
+            "tty-graphics-protocol-herdr-inline-only-{}.rgba",
+            std::process::id()
+        ));
+        std::fs::write(&temp, [255, 0, 0, 255]).unwrap();
+
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        terminal
+            .enable_kitty_graphics_with(KittyMedia::InlineOnly)
+            .unwrap();
+        terminal.resize(10, 5, 8, 16).unwrap();
+        for (flag, name) in [
+            (
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_FILE,
+                "file",
+            ),
+            (
+                ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_MEDIUM_SHARED_MEM,
+                "shared memory",
+            ),
+        ] {
+            assert!(!terminal.get_bool(flag).unwrap(), "{name} is off");
+        }
+        for screen in [b"".as_slice(), b"\x1b[?1049h"] {
+            terminal.write(screen);
+            let file_path = encode(file.as_os_str().as_encoded_bytes());
+            terminal.write(
+                format!("\x1b_Ga=T,f=32,t=f,i=9,s=1,v=1,c=1,r=1,q=2;{file_path}\x1b\\").as_bytes(),
+            );
+            let temp_path = encode(temp.as_os_str().as_encoded_bytes());
+            terminal.write(
+                format!("\x1b_Ga=T,f=32,t=t,i=10,s=1,v=1,c=1,r=1,q=2;{temp_path}\x1b\\").as_bytes(),
+            );
+            let shm = encode(b"/herdr-inline-only-shm");
+            terminal.write(
+                format!("\x1b_Ga=T,f=32,t=s,i=11,s=1,v=1,c=1,r=1,q=2;{shm}\x1b\\").as_bytes(),
+            );
+            assert!(
+                terminal.kitty_image_placements().unwrap().is_empty(),
+                "no local medium loads"
+            );
+            assert!(temp.exists(), "the temporary file is not removed");
+
+            terminal.write(b"\x1b_Ga=T,f=32,t=d,i=12,s=1,v=1,c=1,r=1,q=2;/wAA/w==\x1b\\");
+            let placements = terminal.kitty_image_placements().unwrap();
+            assert_eq!(placements.len(), 1, "inline data draws");
+            assert_eq!(placements[0].image_id, 12);
+            terminal.write(b"\x1b_Ga=d,d=A,q=2;\x1b\\");
+        }
+
+        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
