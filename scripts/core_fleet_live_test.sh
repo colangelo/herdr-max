@@ -7,8 +7,9 @@
 # exec part (the far herdr runs without the far core's HERDR_* variables),
 # E.1 (the far herdr is probed once per link), V32 (a dormant machine
 # refuses with exit 75 and writes nothing; `--dial` writes its lease before
-# the one dial, and removes it after), and `--dial` refused over a gate only
-# a login reopens.
+# the one dial, and removes it after), `--dial` refused over a gate only a
+# login reopens, a SIGTERM that removes the lease and the bridge folder, and
+# a link dropped during a call that is not redialled on its account.
 #
 # The far side is a scratch core on this Mac with its own herdr server,
 # reached through herdr's own link command and a fake `ssh` that runs the
@@ -58,9 +59,16 @@ far_fl_herdr() {
 # takes no `--session`), the fake ssh first on PATH.
 fleet_cli() {
   env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_WORKSPACE_ID \
-    -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION -u CLAUDECODE -u HERDR_MACHINE_DIAL \
+    -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION -u CLAUDECODE \
     XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
     HERDR_SESSION="$SESSION" SHELL=/bin/sh PATH="$FL_BIN:$PATH" "$HERDR_BIN" "$@"
+}
+# The same in the background, as the herdr process itself ($! is its pid).
+fleet_cli_bg() {
+  ( exec env -u HERDR_ENV -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_WORKSPACE_ID \
+    -u HERDR_TAB_ID -u HERDR_PANE_ID -u HC_SOCKET -u HC_SESSION -u CLAUDECODE \
+    XDG_CONFIG_HOME="$CONFIG_HOME" XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_STATE_HOME="$STATE_DIR" \
+    HERDR_SESSION="$SESSION" SHELL=/bin/sh PATH="$FL_BIN:$PATH" "$HERDR_BIN" "$@" ) &
 }
 
 fl_tty() {
@@ -102,6 +110,9 @@ print(next((m["state"] for m in json.load(sys.stdin)["machines"] if m["name"] ==
 fl_is() { [[ "$(fl_state)" == "$1" ]]; }
 fl_ssh_starts() { grep -c " SSH pid=.* machine=fleet-target " "$FL_SSH_LOG" 2>/dev/null || true; }
 fl_cli_leases() { find "$FL_DIR/leases" -name 'cli-*' 2>/dev/null | wc -l | tr -d ' '; }
+fl_has_lease() { [[ -s "$FL_DIR/leases/cli-$1" ]]; }
+fl_lease_is_keep() { [[ "$(awk '{print $3}' "$FL_DIR/leases/cli-$1" 2>/dev/null)" == keep ]]; }
+fl_folders_of() { ls -d "${TMPDIR:-/tmp}"/herdr-fleet-"$1"-* /tmp/herdr-fleet-"$1"-* 2>/dev/null | wc -l | tr -d ' '; }
 fl_log_count() { grep -c " $1" "$FL_DIR/link.log" 2>/dev/null || true; }
 fl_more() { [[ "$(fl_log_count "$1")" -gt "$2" ]]; }
 fl_probes() { grep -c "args=remote-api-bridge --check" "$FL_FAR_LOG" 2>/dev/null || true; }
@@ -227,6 +238,25 @@ row = json.load(sys.stdin)[0]
 assert row["far_herdr"]["path"] == sys.argv[1], row["far_herdr"]' "$F3B/herdr" \
   || fail "machine status --core does not report the far herdr"
 echo "ok: E.1 the far herdr ($F3B/herdr) was probed once for two calls over one link; status reports it"
+FL_PANE="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["panes"][0]["pane_id"])' "$BASE/fl-core.json")"
+
+# --- 2.1, 2.2: a call on a connected machine holds a keep lease of 60 s at
+# most; SIGTERM removes it and the bridge folder at once
+fleet_cli_bg --machine "$FT" pane wait-output "$FL_PANE" --match "never-printed-$$" --timeout 30000 \
+  >/dev/null 2>"$BASE/fl-term.err"
+term_pid=$!
+fl_wait "the waiting call's lease" 10 fl_has_lease "$term_pid"
+fl_lease_is_keep "$term_pid" || fail "a call on a connected machine wrote a lease that admits a dial: $(cat "$FL_DIR/leases/cli-$term_pid")"
+python3 -I -c 'import sys,time; left = float(open(sys.argv[1]).read().split()[0]) - time.time(); assert left <= 61, left' \
+  "$FL_DIR/leases/cli-$term_pid" || fail "the cli lease lasts more than a minute: $(cat "$FL_DIR/leases/cli-$term_pid")"
+[[ "$(fl_folders_of "$term_pid")" == 1 ]] || fail "no bridge folder for the waiting call"
+sleep 1
+kill -TERM "$term_pid"
+code=0; wait "$term_pid" || code=$?
+[[ "$code" == 143 ]] || fail "the waiting call ended $code on SIGTERM, not 143"
+[[ "$(fl_cli_leases)" == 0 ]] || fail "SIGTERM left the cli lease"
+[[ "$(fl_folders_of "$term_pid")" == 0 ]] || fail "SIGTERM left the bridge folder"
+echo "ok: 2.1 a connected call's lease keeps the link only and ends within 60 s; SIGTERM removed it and the folder (exit 143)"
 
 # --- V31 (exec part): the far core has the six names, the far herdr none
 hc_scratch exec --json --on "$FT" sh -c 'env | sed "s/=.*//" | grep "^HERDR_" | sort' >"$BASE/fl-control.json" \
@@ -288,6 +318,38 @@ assert float(dial[0]) <= float(start[0]) and execd, (dial, start)
 PY
 [[ "$(fl_cli_leases)" == 0 ]] || fail "the --dial lease outlived the call"
 echo "ok: V32 --dial wrote its lease before the one dial, gave the far JSON, and removed the lease"
+
+# --- 2.2: a link dropped during a --dial call is not redialled on its
+# account: once connected the call's lease only keeps the link. A keep
+# lease of the test's own holds through the window, so core's retries meet
+# it, and only it.
+fl_wait "$FT dormant before the drop" 20 fl_is unreachable
+starts="$(fl_ssh_starts)"
+fleet_cli_bg --machine "$FT" --dial pane wait-output "$FL_PANE" --match "never-printed-$$" --timeout 30000 \
+  >"$BASE/fl-drop.out" 2>"$BASE/fl-drop.err"
+drop_pid=$!
+fl_wait "the --dial call's lease to keep the link only" 25 fl_lease_is_keep "$drop_pid"
+fl_wait "$FT connected for the call" 10 fl_is connected
+bridges="$(grep -c "args=--session $FL_SESSION remote-api-bridge" "$FL_FAR_LOG")"
+fl_far_bridge_more() { [[ "$(grep -c "args=--session $FL_SESSION remote-api-bridge" "$FL_FAR_LOG")" -gt "$bridges" ]]; }
+fl_wait "the call's request on the far side" 15 fl_far_bridge_more
+python3 -I -c 'import os,sys,time
+d = sys.argv[1]; tmp = os.path.join(d, ".cli-1.tmp")
+open(tmp, "w").write(f"{time.time() + 60:.3f} 0 keep\n"); os.replace(tmp, os.path.join(d, "cli-1"))' "$FL_DIR/leases"
+refusals="$(fl_log_count "REFUSE Dormant")"
+ssh_pid="$(awk '/ SSH pid=.* machine=fleet-target /{for (i = 1; i <= NF; i++) if ($i ~ /^pid=/) p = substr($i, 5)} END {print p}' "$FL_SSH_LOG")"
+[[ -n "$ssh_pid" ]] || fail "no ssh pid for the link"
+kill -TERM "$ssh_pid"
+code=0; wait "$drop_pid" || code=$?
+[[ "$code" == 1 ]] || fail "the call over a dropped link ended $code, not 1: $(cat "$BASE/fl-drop.err")"
+grep -q "it may have run there, and it is not sent again" "$BASE/fl-drop.err" \
+  || fail "the dropped call does not say it may have run: $(cat "$BASE/fl-drop.err")"
+[[ ! -s "$BASE/fl-drop.out" ]] || fail "the dropped call printed output"
+fl_wait "core's retry refused as dormant" 40 fl_more "REFUSE Dormant" "$refusals"
+sleep 3
+[[ "$(fl_ssh_starts)" == $((starts + 1)) ]] || fail "the drop was redialled: $(( $(fl_ssh_starts) - starts )) ssh for one --dial"
+rm -f "$FL_DIR/leases/cli-1"
+echo "ok: 2.2 a link dropped during a --dial call: the call failed saying it may have run; core's retry met only keep leases and was refused; one ssh"
 
 # --- --dial over a gate only a login reopens: refused, no lease, no ssh
 fl_wait "$FT dormant again" 20 fl_is unreachable
