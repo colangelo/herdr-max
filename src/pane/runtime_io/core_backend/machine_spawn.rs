@@ -60,6 +60,14 @@ pub(crate) struct MachineSpawn {
     pub env: Vec<(String, String)>,
 }
 
+/// Herdr Core's own variables (`HC_SESSION`, `HC_SOCKET`, ...): on the far
+/// side they would point an `hc` there at a session of the request's
+/// choosing, so a request's env never carries one to a machine (security
+/// review M8). The far core sets its own for its terminals.
+fn is_core_variable(key: &str) -> bool {
+    key.starts_with("HC_")
+}
+
 /// `env -u NAME ... --`, the wrapper every argv on a machine starts with.
 pub(crate) fn machine_env_wrapper() -> Vec<String> {
     let mut argv = vec!["/usr/bin/env".to_string()];
@@ -106,7 +114,7 @@ pub(crate) fn machine_spawn_from(
         }
     }
     for (key, value) in &spawn.env {
-        if !MACHINE_UNSET_VARS.contains(&key.as_str()) {
+        if !MACHINE_UNSET_VARS.contains(&key.as_str()) && !is_core_variable(key) {
             env.insert(key.clone(), Value::String(value.clone()));
         }
     }
@@ -142,6 +150,8 @@ mod tests {
             env: vec![
                 ("HERDR_RUN_ID".into(), "r1".into()),
                 ("HERDR_PANE_ID".into(), "forged".into()),
+                ("HC_SESSION".into(), "another-session".into()),
+                ("HC_SOCKET".into(), "/tmp/another.sock".into()),
             ],
         }
     }
@@ -216,7 +226,8 @@ mod tests {
 
     // V9: no herdr integration variable and nothing of this Mac's
     // environment goes; the request's own variables and the terminal's
-    // identity do; the labels name the pane.
+    // identity do, less Herdr Core's own (security review M8); the labels
+    // name the pane.
     #[test]
     fn a_machine_spawn_passes_no_integration_variable_and_no_local_environment() {
         let spawn = machine_spawn_from(
