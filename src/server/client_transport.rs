@@ -74,10 +74,17 @@ fn client_shell_geometry_error(
 struct EndpointRequestHead {
     id: String,
     method: String,
+    /// A structural action's window facts for a view (fork issue 317 M2,
+    /// M3); one that does not read is taken as absent.
+    #[serde(default)]
+    view: Option<serde_json::Value>,
 }
 
 enum DecodedEndpointRequest {
-    Dispatch(Box<crate::api::schema::Request>),
+    Dispatch(
+        Box<crate::api::schema::Request>,
+        Option<crate::protocol::endpoint::EndpointViewAction>,
+    ),
     Error {
         request_id: String,
         code: &'static str,
@@ -103,9 +110,10 @@ fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointR
             message: format!("method {:?} is not available on this machine", head.method),
         });
     }
+    let view = head.view.and_then(|view| serde_json::from_value(view).ok());
     Ok(
         match serde_json::from_str::<crate::api::schema::Request>(request) {
-            Ok(request) => DecodedEndpointRequest::Dispatch(Box::new(request)),
+            Ok(request) => DecodedEndpointRequest::Dispatch(Box::new(request), view),
             Err(error) => DecodedEndpointRequest::Error {
                 request_id: head.id,
                 code: "invalid_request",
@@ -527,6 +535,9 @@ pub(crate) enum ServerEvent {
         client_id: u64,
         boot_id: String,
         request: Box<crate::api::schema::Request>,
+        /// What a view's structural action says of its window (fork issue
+        /// 317 M2, M3).
+        view: Option<crate::protocol::endpoint::EndpointViewAction>,
     },
     /// A well-framed endpoint request could not be dispatched by this server.
     ClientShellEndpointRequestError {
@@ -1310,7 +1321,7 @@ fn client_read_loop_with_endpoint_controls(
                     }
                 };
                 let request_id = match &decoded {
-                    DecodedEndpointRequest::Dispatch(request) => request.id.as_str(),
+                    DecodedEndpointRequest::Dispatch(request, _) => request.id.as_str(),
                     DecodedEndpointRequest::Error { request_id, .. } => request_id,
                 };
                 if request_id.len() > crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
@@ -1324,11 +1335,12 @@ fn client_read_loop_with_endpoint_controls(
                     break;
                 }
                 match decoded {
-                    DecodedEndpointRequest::Dispatch(request) => {
+                    DecodedEndpointRequest::Dispatch(request, view) => {
                         ServerEvent::ClientShellEndpointRequest {
                             client_id,
                             boot_id,
                             request,
+                            view,
                         }
                     }
                     DecodedEndpointRequest::Error {
@@ -1913,6 +1925,38 @@ mod tests {
                 ..
             } if request_id == "req-1"
         ));
+    }
+
+    // Fork issue 317 M2: a structural action's `view` member reaches the
+    // server beside the request, which reads as it would without it; one
+    // that does not read is taken as absent.
+    #[test]
+    fn an_endpoint_request_carries_its_view_member_beside_the_request() {
+        let request = crate::api::schema::Request {
+            id: "client-shell:7".into(),
+            method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneCloseParams {
+                pane_id: "w3:p2".into(),
+                force: true,
+            }),
+        };
+        let view = crate::protocol::endpoint::EndpointViewAction {
+            binding: 9,
+            confirms: Some("client-shell:6".into()),
+        };
+        let line = crate::protocol::endpoint::endpoint_request_with_view(&request, &view).unwrap();
+        let DecodedEndpointRequest::Dispatch(decoded, decoded_view) =
+            decode_endpoint_request(&line).unwrap()
+        else {
+            panic!("dispatched: {line}");
+        };
+        assert_eq!(*decoded, request);
+        assert_eq!(decoded_view, Some(view));
+        let odd = r#"{"id":"c:1","method":"pane.close","params":{"pane_id":"w3:p2"},"view":{"binding":"x"}}"#;
+        let DecodedEndpointRequest::Dispatch(_, odd_view) = decode_endpoint_request(odd).unwrap()
+        else {
+            panic!("dispatched: {odd}");
+        };
+        assert_eq!(odd_view, None);
     }
 
     #[test]

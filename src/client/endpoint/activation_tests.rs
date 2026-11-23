@@ -45,6 +45,7 @@ fn negotiation() -> super::super::EndpointNegotiation {
 fn test_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSnapshot {
     crate::protocol::ClientShellSnapshot {
         resource_facts: None,
+        view_binding: None,
         boot_id: boot_id.into(),
         revision,
         config_diagnostic: None,
@@ -413,6 +414,7 @@ fn activation_requires_an_exact_snapshot_surface_revision_pair() {
     let target = endpoint();
     let snapshot = crate::protocol::ClientShellSnapshot {
         resource_facts: None,
+        view_binding: None,
         boot_id: "remote-boot".into(),
         revision: 2,
         config_diagnostic: None,
@@ -1179,6 +1181,7 @@ fn local_selection_abandons_every_unfinished_remote_handoff_phase() {
                     },
                 ),
             }),
+            None,
         );
         let mut pending = Some(abandoned);
         let mut serial = 31;

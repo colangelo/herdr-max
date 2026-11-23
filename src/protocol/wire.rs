@@ -924,6 +924,10 @@ pub struct ClientShellSnapshot {
     /// JSON-only extension; deliberately omitted from every frozen core codec.
     #[serde(skip)]
     pub resource_facts: Option<super::ClientShellResourceFacts>,
+    /// JSON-only extension (fork issue 317 M2): a view's binding revision,
+    /// omitted from every frozen core codec.
+    #[serde(skip)]
+    pub view_binding: Option<u64>,
     /// Changes whenever the endpoint process restarts.
     pub boot_id: String,
     /// Monotonic replacement revision within one endpoint boot.
@@ -2797,6 +2801,7 @@ mod tests {
     fn client_shell_snapshot_roundtrip() {
         let msg = ServerMessage::ClientShellSnapshot(Box::new(ClientShellSnapshot {
             resource_facts: None,
+            view_binding: None,
             boot_id: "boot-1".into(),
             revision: 1,
             config_diagnostic: Some("endpoint config warning".into()),

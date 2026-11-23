@@ -309,6 +309,9 @@ pub(crate) enum ClientShellAction {
         endpoint_id: ClientEndpointId,
         boot_id: String,
         request: Box<crate::api::schema::Request>,
+        /// To a view that checks it: what the window showed when the person
+        /// acted (fork issue 317 M2, M3).
+        view: Option<crate::protocol::endpoint::EndpointViewAction>,
     },
     ClipboardWrite(Vec<u8>),
     OpenSafeWebUrl(String),
@@ -713,6 +716,9 @@ pub(super) enum ClientForceTarget {
 pub(super) struct ClientForceConfirmation {
     pub(super) target: ClientForceTarget,
     pub(super) boot_id: String,
+    /// The id of the refused request this answers: a view takes the forced
+    /// close only as the answer to it (fork issue 317 M3).
+    pub(super) confirms: String,
 }
 
 #[derive(Debug)]

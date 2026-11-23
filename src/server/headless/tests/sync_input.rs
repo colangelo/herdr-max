@@ -544,14 +544,34 @@ async fn sync_input_uses_the_origin_group_instead_of_global_focused_pane_or_othe
 // M3 (core-phase5 D6, security review): a view's pane whose far terminal
 // changed under it takes no input typed for the old one: keys and pastes
 // reach nothing until a person clicks it, and the click itself is not sent.
+// Fork issue 317 M2: held per window: a click in one window releases it
+// there only; another window connected when it changed stays held until
+// its own click.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_held_view_pane_takes_no_input_until_a_person_clicks_it() {
     let (mut server, [a, b, _], mut receivers) = fixture();
+    let location = server.clients[&41].shell_location.clone();
+    let mut other = ClientConnection::new(
+        (80, 24),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        RenderEncoding::SemanticFrame,
+        None,
+    );
+    other.shell_surface_active = true;
+    other.shell_location = location;
+    server.clients.insert(42, other);
     server.app.view = Some(crate::app::view_layout::ViewApp::new(
         crate::core_machine::MachineName::parse("loop").unwrap(),
     ));
+    server.app.note_view_client(41);
+    server.app.note_view_client(42);
     server.app.hold_view_input_for_test(a);
+    let send_as = |server: &mut HeadlessServer, client: u64, pane, events| {
+        let pane_id = server.app.public_pane_id(0, pane).unwrap();
+        server.route_synced_pane_input(client, pane_id, events);
+    };
     send(&mut server, a, vec![key(ClientKeyKind::Press, false, None)]);
     assert!(drain(&mut receivers[0]).is_empty(), "a held pane got a key");
     let click = |kind| ClientPaneInputEvent::Mouse {
@@ -569,9 +589,26 @@ async fn a_held_view_pane_takes_no_input_until_a_person_clicks_it() {
         ))],
     );
     assert!(drain(&mut receivers[0]).is_empty(), "the click is not sent");
-    assert!(!server.app.view_input_held(a));
+    assert!(!server.app.view_input_held(a, 41));
+    assert!(
+        server.app.view_input_held(a, 42),
+        "the other window's hold stays"
+    );
     send(&mut server, a, vec![key(ClientKeyKind::Press, false, None)]);
     assert_eq!(drain(&mut receivers[0]), b"x", "after the click it types");
+    send_as(
+        &mut server,
+        42,
+        a,
+        vec![key(ClientKeyKind::Press, false, None)],
+    );
+    assert!(
+        drain(&mut receivers[0]).is_empty(),
+        "still held in the other window"
+    );
     send(&mut server, b, vec![key(ClientKeyKind::Press, false, None)]);
     assert_eq!(drain(&mut receivers[1]), b"x", "an unheld pane types");
+    // A window that left holds nothing.
+    server.app.forget_view_client(42);
+    assert!(!server.app.view_input_held(a, 42));
 }

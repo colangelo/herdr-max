@@ -37,6 +37,35 @@ pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const SPAWN_ON_MACHINE_CAPABILITY: &str = "spawn_on_machine";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 
+/// What a client's structural action to a view carries of the window it
+/// came from (fork, core-phase5 D7, https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/317 M2, M3):
+/// an optional `view` member of the endpoint request's JSON, beside its `id`,
+/// `method` and `params`. A client sends it only to an endpoint whose
+/// snapshot carried a `view_binding` (a view that checks it), so a server
+/// that would ignore it is never sent it; `Request` ignores the member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointViewAction {
+    /// The `view_binding` of the snapshot the window showed when the person
+    /// acted.
+    pub binding: u64,
+    /// For a forced close: the client's request id of the unforced close
+    /// whose confirmation the person answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirms: Option<String>,
+}
+
+/// The endpoint request line `request` with `view` as its `view` member.
+pub fn endpoint_request_with_view(
+    request: &crate::api::schema::Request,
+    view: &EndpointViewAction,
+) -> serde_json::Result<String> {
+    let mut value = serde_json::to_value(request)?;
+    if let serde_json::Value::Object(members) = &mut value {
+        members.insert("view".into(), serde_json::to_value(view)?);
+    }
+    serde_json::to_string(&value)
+}
+
 /// Optional clipboard provenance; the published Clipboard payload remains unchanged.
 pub const CLIPBOARD_ORIGIN_KIND: &str = "endpoint.clipboard-origin.v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +174,10 @@ struct SnapshotJson<'a> {
     snapshot: &'a ClientShellSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_facts: &'a Option<super::ClientShellResourceFacts>,
+    /// A view's binding revision (fork issue 317 M2): a client sends it back
+    /// with each structural action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view_binding: Option<u64>,
 }
 
 pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<ServerMessage> {
@@ -153,6 +186,7 @@ pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<Se
         data: serde_json::to_string(&SnapshotJson {
             snapshot,
             resource_facts: &snapshot.resource_facts,
+            view_binding: snapshot.view_binding,
         })?,
     })
 }
@@ -164,6 +198,8 @@ pub fn decode_snapshot(data: &str) -> serde_json::Result<ClientShellSnapshot> {
     struct OptionalFacts {
         #[serde(default)]
         resource_facts: Option<serde_json::Value>,
+        #[serde(default)]
+        view_binding: Option<u64>,
     }
     let mut snapshot: ClientShellSnapshot = serde_json::from_str(data)?;
     let extension: OptionalFacts = serde_json::from_str(data)?;
@@ -171,6 +207,7 @@ pub fn decode_snapshot(data: &str) -> serde_json::Result<ClientShellSnapshot> {
         .resource_facts
         .as_ref()
         .and_then(super::ClientShellResourceFacts::decode);
+    snapshot.view_binding = extension.view_binding;
     Ok(snapshot)
 }
 
@@ -286,6 +323,7 @@ mod tests {
     fn snapshot() -> ClientShellSnapshot {
         ClientShellSnapshot {
             resource_facts: None,
+            view_binding: None,
             boot_id: "boot".into(),
             revision: 1,
             config_diagnostic: None,

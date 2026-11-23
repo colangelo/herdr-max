@@ -36,6 +36,7 @@ pub(super) fn dispatch_client_shell_actions(
                 endpoint_id,
                 boot_id,
                 request,
+                view,
             } => {
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|connection| {
                     endpoints.active_id() == &endpoint_id
@@ -65,7 +66,13 @@ pub(super) fn dispatch_client_shell_actions(
                         }
                         continue;
                     }
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                    endpoint_commands.enqueue(
+                        endpoint_id,
+                        connection.generation,
+                        boot_id,
+                        request,
+                        view,
+                    );
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }

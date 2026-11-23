@@ -6,6 +6,7 @@ impl HeadlessServer {
         client_id: u64,
         boot_id: String,
         mut request: Box<api::schema::Request>,
+        view: Option<crate::protocol::endpoint::EndpointViewAction>,
     ) -> bool {
         let Some(client) = self.clients.get(&client_id) else {
             return false;
@@ -119,7 +120,7 @@ impl HeadlessServer {
                 && !self
                     .app
                     .parse_pane_id(&params.pane_id)
-                    .is_some_and(|(_, pane)| self.app.view_input_held(pane));
+                    .is_some_and(|(_, pane)| self.app.view_input_held(pane, client_id));
             if self.handoff_in_progress || !viewed || popup_blocks {
                 self.send_to_client(client_id, crate::server::client_commands::error_message(
                     boot_id, request_id, "input_target_unavailable",
@@ -181,7 +182,7 @@ impl HeadlessServer {
             respond_to,
             response_write_complete: None,
         };
-        let Some(message) = self.take_view_action(client_id, message) else {
+        let Some(message) = self.take_view_action(client_id, &request_id, view, message) else {
             return foreground_changed;
         };
         foreground_changed | self.handle_client_shell_api_request(client_id, message)
@@ -193,10 +194,14 @@ impl HeadlessServer {
     /// is handed back for this server to do. Ids the action leaves out
     /// resolve against the sending client's own tab, never this server's
     /// focus, which another client may have moved (review L4).
+    /// `client_request_id` is the client's own id of the request, and
+    /// `view` what it says of its window (fork issue 317 M2, M3).
     #[cfg(unix)]
     fn take_view_action(
         &mut self,
         client_id: u64,
+        client_request_id: &str,
+        view: Option<crate::protocol::endpoint::EndpointViewAction>,
         message: api::ApiRequestMessage,
     ) -> Option<api::ApiRequestMessage> {
         if self.app.view.is_none()
@@ -204,11 +209,52 @@ impl HeadlessServer {
         {
             return Some(message);
         }
-        let client_tab = self.client_own_tab(client_id);
+        let (binding, confirms) = match view {
+            Some(view) => (Some(view.binding), view.confirms),
+            None => (None, None),
+        };
+        let sender = crate::app::ViewSender {
+            client: client_id,
+            tab: self.client_own_tab(client_id),
+            binding,
+            confirms,
+            request: client_request_id.to_string(),
+        };
         self.app
-            .forward_view_action(message.request, message.respond_to, client_id, client_tab);
+            .forward_view_action(message.request, message.respond_to, sender);
         None
     }
+
+    /// A client shell connected: a view holds a pane whose far binding
+    /// changes for it until it clicks or focuses the pane (fork issue 317
+    /// M2).
+    #[cfg(unix)]
+    pub(super) fn note_view_client(&mut self, client_id: u64) {
+        self.app.note_view_client(client_id);
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn note_view_client(&mut self, _client_id: u64) {}
+
+    /// A client left: a view drops its holds, its force confirmations and
+    /// the request ids it took (fork issue 317 M2, M3, M5).
+    #[cfg(unix)]
+    pub(super) fn forget_view_client(&mut self, client_id: u64) {
+        self.app.forget_view_client(client_id);
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn forget_view_client(&mut self, _client_id: u64) {}
+
+    /// The client whose API request the server does now, for a view's
+    /// focus to release that client's hold only (fork issue 317 M2).
+    #[cfg(unix)]
+    pub(super) fn set_view_acting_client(&mut self, client_id: Option<u64>) {
+        self.app.set_view_acting_client(client_id);
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn set_view_acting_client(&mut self, _client_id: Option<u64>) {}
 
     /// The (workspace, tab) a client's own window shows, `None` when it
     /// shows none this server has.
@@ -227,6 +273,8 @@ impl HeadlessServer {
     fn take_view_action(
         &mut self,
         _client_id: u64,
+        _client_request_id: &str,
+        _view: Option<crate::protocol::endpoint::EndpointViewAction>,
         message: api::ApiRequestMessage,
     ) -> Option<api::ApiRequestMessage> {
         Some(message)

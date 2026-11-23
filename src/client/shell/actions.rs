@@ -462,6 +462,32 @@ impl ClientShellState {
         kind: PendingEndpointKind,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        self.push_endpoint_request(method, kind, None, outcome)
+    }
+
+    /// A forced close or respawn the person confirmed, as the answer to the
+    /// refused request `confirms` (fork issue 317 M3).
+    pub(super) fn push_endpoint_method_confirming(
+        &mut self,
+        method: crate::api::schema::Method,
+        confirms: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.push_endpoint_request(
+            method,
+            PendingEndpointKind::Generic,
+            Some(confirms),
+            outcome,
+        );
+    }
+
+    fn push_endpoint_request(
+        &mut self,
+        method: crate::api::schema::Method,
+        kind: PendingEndpointKind,
+        confirms: Option<String>,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
         let changes_focus = match &method {
             crate::api::schema::Method::WorkspaceFocus(_)
             | crate::api::schema::Method::TabFocus(_)
@@ -521,6 +547,13 @@ impl ClientShellState {
                 kind,
             },
         );
+        // A view that checks it learns what this window showed when the
+        // person acted: the binding revision of the snapshot shown now
+        // (fork issue 317 M2), and which refused request a forced close
+        // answers (M3).
+        let view = snapshot
+            .view_binding
+            .map(|binding| crate::protocol::endpoint::EndpointViewAction { binding, confirms });
         outcome.actions.push(ClientShellAction::Endpoint {
             endpoint_id: self.active_endpoint_id.clone(),
             boot_id: snapshot.boot_id.clone(),
@@ -528,6 +561,7 @@ impl ClientShellState {
                 id: request_id,
                 method,
             }),
+            view,
         });
         true
     }
@@ -1066,7 +1100,13 @@ impl ClientShellState {
             Err(error)
                 if error.code.as_deref() == Some("confirmation_required")
                     && pending.force_target.as_ref().is_some_and(|target| {
-                        self.open_force_confirmation(target, boot_id, &error.message, &mut forced)
+                        self.open_force_confirmation(
+                            target,
+                            boot_id,
+                            request_id,
+                            &error.message,
+                            &mut forced,
+                        )
                     }) =>
             {
                 true

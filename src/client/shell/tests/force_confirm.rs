@@ -101,6 +101,52 @@ fn a_pane_close_refused_for_todos_asks_and_forces_on_enter() {
     assert!(state.overlay.is_none());
 }
 
+// Fork issue 317 M2, M3: to a view that checks it (its snapshot carries a
+// binding revision), a pane close goes with the revision of the snapshot
+// this window showed, and the forced close the person confirmed names the
+// refused close it answers. To any other endpoint neither goes.
+#[test]
+fn a_close_to_a_view_says_what_the_window_showed_and_which_close_it_confirms() {
+    let mut state = pane_state();
+    let (id, _) = only_method(&bind(&mut state, crate::input::KeybindAction::ClosePane));
+    let view_of = |outcome: &ClientShellInput| match outcome.actions.as_slice() {
+        [ClientShellAction::Endpoint { view, .. }] => view.clone(),
+        other => panic!("expected one endpoint request, got {other:?}"),
+    };
+    let mut plain = pane_state();
+    assert_eq!(
+        view_of(&bind(&mut plain, crate::input::KeybindAction::ClosePane)),
+        None,
+        "no view"
+    );
+    refuse(
+        &mut state,
+        &id,
+        "this pane still has 1 open todo (pane_1: a)",
+    );
+
+    let mut snapshot = with_second_tab(snapshot());
+    snapshot.view_binding = Some(7);
+    state.set_snapshot(Box::new(snapshot));
+    state.compose(106, 24).unwrap();
+    let forced = state.handle_input_bytes(b"\r");
+    assert_eq!(
+        view_of(&forced),
+        Some(crate::protocol::endpoint::EndpointViewAction {
+            binding: 7,
+            confirms: Some(id),
+        })
+    );
+    let close = bind(&mut state, crate::input::KeybindAction::ClosePane);
+    assert_eq!(
+        view_of(&close),
+        Some(crate::protocol::endpoint::EndpointViewAction {
+            binding: 7,
+            confirms: None,
+        })
+    );
+}
+
 /// Upstream's last-pane confirmation (#5173) comes first; the close it sends
 /// is still unforced, so a refusal for todos still asks again before forcing.
 #[test]

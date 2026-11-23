@@ -200,6 +200,7 @@ impl ClientShellState {
                 endpoint_id,
                 boot_id,
                 request: Box::new(crate::api::schema::Request { id, method }),
+                view: None,
             });
         }
         true

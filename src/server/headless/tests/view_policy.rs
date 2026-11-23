@@ -95,6 +95,7 @@ async fn a_view_refuses_every_method_outside_its_allowlist_before_dispatch() {
         let name = method.operation().name;
         assert!(
             !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+                view: None,
                 client_id,
                 boot_id: boot_id.clone(),
                 request: Box::new(Request {
@@ -114,6 +115,7 @@ async fn a_view_refuses_every_method_outside_its_allowlist_before_dispatch() {
 
     // A method the view takes goes on to dispatch.
     server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        view: None,
         client_id,
         boot_id,
         request: Box::new(Request {
@@ -144,6 +146,7 @@ async fn a_views_structural_action_is_never_done_here() {
     .expect("pane.split");
     let boot_id = server.client_shell_boot_id.clone();
     server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        view: None,
         client_id,
         boot_id,
         request: Box::new(Request {
@@ -249,6 +252,7 @@ async fn a_view_action_resolves_left_out_ids_against_the_clients_own_tab() {
     let answer = |server: &mut HeadlessServer, request: Request| {
         let boot_id = server.client_shell_boot_id.clone();
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id,
             request: Box::new(request),

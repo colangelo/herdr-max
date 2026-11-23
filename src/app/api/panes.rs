@@ -546,9 +546,10 @@ impl App {
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
         self.state.mark_active_tab_seen();
         self.state.mode = crate::app::Mode::Terminal;
-        // A person focused it: a view's held pane takes input again (M3).
+        // A person focused it: a view's held pane takes that window's input
+        // again (M3; fork issue 317 M2).
         #[cfg(unix)]
-        self.release_view_hold(pane_id);
+        self.release_view_hold_for_acting_client(pane_id);
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &target.pane_id);
@@ -746,7 +747,7 @@ impl App {
             // A person moved the focus to it: a view's held pane takes
             // input again (review M3).
             #[cfg(unix)]
-            self.release_view_hold(target_pane_id);
+            self.release_view_hold_for_acting_client(target_pane_id);
         }
         let focused_pane_id = self
             .state

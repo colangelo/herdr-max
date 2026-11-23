@@ -3,6 +3,18 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+/// A view's binding revision for the snapshot (fork issue 317 M2), `None`
+/// in a primary server.
+#[cfg(unix)]
+fn view_binding(app: &app::App) -> Option<u64> {
+    app.view_binding_revision()
+}
+
+#[cfg(not(unix))]
+fn view_binding(_app: &app::App) -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 pub(super) fn snapshot(
     app: &app::App,
@@ -241,6 +253,7 @@ pub(super) fn snapshot_with_completions(
 
     let mut shell = protocol::ClientShellSnapshot {
         resource_facts: None,
+        view_binding: view_binding(app),
         boot_id: boot_id.to_owned(),
         revision,
         config_diagnostic: config_diagnostic.map(str::to_owned),

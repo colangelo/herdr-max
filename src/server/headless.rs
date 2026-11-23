@@ -1078,6 +1078,7 @@ impl HeadlessServer {
         });
         let was_foreground = self.foreground_client_id == Some(client_id);
         let removed = self.clients.remove(&client_id);
+        self.forget_view_client(client_id);
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {
@@ -2129,6 +2130,7 @@ impl HeadlessServer {
                 connection.shell_agent_completions = Some(completion_projection);
                 connection.shell_agent_view = agent_view;
                 self.clients.insert(client_id, connection);
+                self.note_view_client(client_id);
                 self.app.request_suspended_pane_resume(Instant::now());
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
@@ -2615,7 +2617,8 @@ impl HeadlessServer {
                 client_id,
                 boot_id,
                 request,
-            } => self.handle_client_shell_endpoint_request(client_id, boot_id, request),
+                view,
+            } => self.handle_client_shell_endpoint_request(client_id, boot_id, request, view),
             ServerEvent::ClientShellEndpointResponseChunkReady {
                 client_id,
                 boot_id,

@@ -916,6 +916,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
 
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id: boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -928,6 +929,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
 
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id: boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -1997,6 +1999,7 @@ async fn client_shell_tab_focus_changes_only_the_source_connection() {
 
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id: 8,
             boot_id: server.client_shell_boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -3604,6 +3607,7 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
 
     let (entered, release) = crate::worktree::test_list_gate::block(&repo);
     server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        view: None,
         client_id: 51,
         boot_id: server.client_shell_boot_id.clone(),
         request: Box::new(api::schema::Request {

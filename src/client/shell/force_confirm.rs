@@ -103,10 +103,13 @@ impl ClientShellState {
     /// Returns false when
     /// the refusal is not one a forced resend answers, so the caller can treat
     /// it as before (a worktree-group close keeps its own confirmation).
+    /// `refused` is the id of the refused request, which a forced resend
+    /// names as the one it answers (fork issue 317 M3).
     pub(super) fn open_force_confirmation(
         &mut self,
         target: &ClientForceTarget,
         boot_id: &str,
+        refused: &str,
         message: &str,
         outcome: &mut ClientShellInput,
     ) -> bool {
@@ -144,6 +147,7 @@ impl ClientShellState {
                     ClientForceConfirmation {
                         target: target.clone(),
                         boot_id: boot_id.to_owned(),
+                        confirms: refused.to_owned(),
                     },
                     outcome,
                 );
@@ -170,6 +174,7 @@ impl ClientShellState {
                 force: Some(ClientForceConfirmation {
                     target: target.clone(),
                     boot_id: boot_id.to_owned(),
+                    confirms: refused.to_owned(),
                 }),
                 title: title.to_owned(),
                 detail,
@@ -193,6 +198,7 @@ impl ClientShellState {
             self.receive_endpoint_unavailable("Close target changed; try closing it again".into());
             return;
         }
+        let confirms = force.confirms;
         let method = match force.target {
             ClientForceTarget::PaneClose { pane_id } => Method::PaneClose(PaneCloseParams {
                 pane_id,
@@ -215,7 +221,7 @@ impl ClientShellState {
                 force: true,
             }),
         };
-        self.push_endpoint_method(method, outcome);
+        self.push_endpoint_method_confirming(method, confirms, outcome);
     }
 }
 

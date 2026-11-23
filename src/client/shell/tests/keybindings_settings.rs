@@ -708,6 +708,7 @@ fn a_far_refusal_in_a_view_is_a_notice_and_the_view_stays() {
         endpoint_id,
         boot_id,
         request,
+        ..
     }] = &outcome.actions[..]
     else {
         panic!("expected the action sent to the view");

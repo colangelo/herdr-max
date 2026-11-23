@@ -73,7 +73,8 @@ async fn application_scroll_rejects_hidden_stale_inactive_and_handoff_targets() 
                         intent: PaneApplicationScrollIntent::PageUp,
                         count: 1,
                     }),
-                })
+                }),
+                None,
             ),
             "{reason}"
         );

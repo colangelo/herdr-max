@@ -17,6 +17,7 @@ mod text_editing;
 pub(super) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {
         resource_facts: None,
+        view_binding: None,
         boot_id: "boot-1".into(),
         revision: 1,
         config_diagnostic: None,

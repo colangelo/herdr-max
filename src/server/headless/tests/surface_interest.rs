@@ -40,6 +40,7 @@ fn request_active_surface(server: &mut HeadlessServer, client_id: u64, request_i
     let boot_id = server.client_shell_boot_id.clone();
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id,
             request: Box::new(api::schema::Request {
@@ -105,6 +106,7 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
     let boot_id = server.client_shell_boot_id.clone();
     assert!(
         !server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id: boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -145,6 +147,7 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
 
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id: boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -188,6 +191,7 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
 
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id: boot_id.clone(),
             request: Box::new(api::schema::Request {
@@ -216,6 +220,7 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
 
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id,
             request: Box::new(api::schema::Request {
@@ -422,6 +427,7 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
     let boot_id = server.client_shell_boot_id.clone();
     assert!(
         server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id,
             boot_id,
             request: Box::new(api::schema::Request {
@@ -489,6 +495,7 @@ fn dispatch_lifecycle_messages(
             }
             crate::protocol::ClientMessage::ClientShellEndpointRequest { boot_id, request } => {
                 ServerEvent::ClientShellEndpointRequest {
+                    view: None,
                     client_id,
                     boot_id,
                     request: Box::new(serde_json::from_str(&request).unwrap()),
@@ -619,6 +626,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
                 }
                 assert!(source_server.handle_server_event(
                     ServerEvent::ClientShellEndpointRequest {
+                        view: None,
                         client_id: source_client_id,
                         boot_id,
                         request: Box::new(request),
@@ -725,6 +733,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         .expect("client presentation synchronization request");
     assert!(
         target_server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+            view: None,
             client_id: target_client_id,
             boot_id: sync_request.0,
             request: sync_request.1,

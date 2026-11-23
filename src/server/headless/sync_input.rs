@@ -223,8 +223,11 @@ impl HeadlessServer {
             // A view's pane whose far terminal changed under it takes no
             // input typed for the old one: nothing until a person clicks it
             // (the click itself is not sent) or focuses it (review M3).
+            // Held and released per client (fork issue 317 M2): a click in
+            // one window, on a pane that window shows, releases it there
+            // only.
             #[cfg(unix)]
-            if self.app.view_input_held(runtime_pane_id) {
+            if self.app.view_input_held(runtime_pane_id, client_id) {
                 if active
                     && matches!(
                         event,
@@ -233,8 +236,9 @@ impl HeadlessServer {
                             ..
                         }
                     )
+                    && self.shell_client_views_pane(client_id, workspace_index, runtime_pane_id)
                 {
-                    changed |= self.app.release_view_hold(runtime_pane_id);
+                    changed |= self.app.release_view_hold(runtime_pane_id, client_id);
                 }
                 continue;
             }

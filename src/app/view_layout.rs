@@ -62,8 +62,21 @@ pub(crate) struct ViewApp {
     /// clicks it or focuses it again. A pane whose public id (`w3:p4`)
     /// another pane had, or whose own public id changed (a number the view
     /// gave a far pane that has none, review M4), is held too: a client
-    /// holding that id meant another pane.
-    held: HashSet<PaneId>,
+    /// holding that id meant another pane. Held for each client connected
+    /// when the binding changed, until that client clicks or focuses the
+    /// pane (fork issue 317 M2): one window's click is no other's.
+    held: HashMap<PaneId, HashSet<u64>>,
+    /// The client shells connected to the view (fork issue 317 M2, M3).
+    clients: HashSet<u64>,
+    /// The client whose API request the server is doing now: a focus it
+    /// asks for releases a hold for that client only (fork issue 317 M2).
+    acting_client: Option<u64>,
+    /// What each pane showed at its last binding change, and the binding
+    /// revision of that change (fork issue 317 M2): a client's snapshot
+    /// carries the revision, and an action of a client that showed an older
+    /// one than its pane's change is refused.
+    bindings: HashMap<PaneId, (PaneBinding, u64)>,
+    binding_revision: u64,
     /// Each pane's public id in the last projection.
     public_ids: HashMap<PaneId, String>,
     /// The far program each attached address showed at its first attach
@@ -100,6 +113,15 @@ pub(crate) struct ViewApp {
 /// id (`hold_moved_public_ids`).
 pub(crate) const VIEW_NUMBER_BASE: usize = 1 << 16;
 
+/// What a pane shows a client: the id it is named by, the far terminal and
+/// the far program there (fork issue 317 M2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneBinding {
+    public_id: Option<String>,
+    address: Option<String>,
+    instance: Option<FarInstance>,
+}
+
 impl ViewApp {
     pub(crate) fn new(machine: MachineName) -> Self {
         Self {
@@ -114,7 +136,11 @@ impl ViewApp {
             far_sizes: HashMap::new(),
             notice: None,
             bound: HashMap::new(),
-            held: HashSet::new(),
+            held: HashMap::new(),
+            clients: HashSet::new(),
+            acting_client: None,
+            bindings: HashMap::new(),
+            binding_revision: 0,
             public_ids: HashMap::new(),
             instances: HashMap::new(),
             view_numbers: HashMap::new(),
@@ -146,10 +172,83 @@ impl ViewApp {
         self.far_tabs.get(tab_id).map(String::as_str)
     }
 
-    /// Whether `pane_id` takes no input now (review M3, M4): neither does
-    /// it take a structural action (M2).
-    pub(crate) fn is_held(&self, pane_id: PaneId) -> bool {
-        self.held.contains(&pane_id)
+    /// Whether `pane_id` takes no input from `client` now (review M3, M4):
+    /// neither does it take a structural action of that client (M2).
+    pub(crate) fn is_held_for(&self, pane_id: PaneId, client: u64) -> bool {
+        self.held
+            .get(&pane_id)
+            .is_some_and(|clients| clients.contains(&client))
+    }
+
+    /// Holds `pane_id` for every client connected now.
+    fn hold(&mut self, pane_id: PaneId) {
+        if self.clients.is_empty() {
+            self.held.remove(&pane_id);
+        } else {
+            self.held.insert(pane_id, self.clients.clone());
+        }
+    }
+
+    /// The view's binding revision now, which each snapshot carries (fork
+    /// issue 317 M2).
+    pub(crate) fn binding_revision(&self) -> u64 {
+        self.binding_revision
+    }
+
+    /// Whether `pane_id`'s binding changed after the binding revision
+    /// `seen`, which the client's shown snapshot carried: that client did
+    /// not see what the pane shows now (fork issue 317 M2). A pane with no
+    /// recorded binding counts as changed.
+    pub(crate) fn rebound_since(&self, pane_id: PaneId, seen: u64) -> bool {
+        self.bindings
+            .get(&pane_id)
+            .is_none_or(|(_, revision)| *revision > seen)
+    }
+
+    /// Records each of `panes`' binding (its public id, far address and far
+    /// program); every pane whose binding changed, or is new, takes the next
+    /// revision. Panes not listed are forgotten.
+    fn note_bindings(&mut self, panes: &HashSet<PaneId>) {
+        self.bindings.retain(|pane_id, _| panes.contains(pane_id));
+        let next = self.binding_revision + 1;
+        let mut changed = false;
+        for pane_id in panes {
+            let binding = PaneBinding {
+                public_id: self.public_ids.get(pane_id).cloned(),
+                address: self.bound.get(pane_id).cloned(),
+                instance: self.far_instance(*pane_id).cloned(),
+            };
+            if self
+                .bindings
+                .get(pane_id)
+                .is_some_and(|(before, _)| *before == binding)
+            {
+                continue;
+            }
+            self.bindings.insert(*pane_id, (binding, next));
+            changed = true;
+        }
+        if changed {
+            self.binding_revision = next;
+        }
+    }
+
+    /// A client shell connected to the view.
+    pub(crate) fn note_client(&mut self, client: u64) {
+        self.clients.insert(client);
+    }
+
+    /// A client shell left: its holds, its confirmations and the request
+    /// ids it took go with it (fork issue 317 M3, M5). A client id is never
+    /// given again in a server's life.
+    pub(crate) fn forget_client(&mut self, client: u64) {
+        self.clients.remove(&client);
+        for clients in self.held.values_mut() {
+            clients.remove(&client);
+        }
+        self.held.retain(|_, clients| !clients.is_empty());
+        self.close_asked.forget_client(client);
+        self.seen_actions.forget_client(client);
     }
 
     /// The far program `pane_id`'s terminal attached to, `None` while it
@@ -240,7 +339,7 @@ impl Build<'_> {
                 // Another far terminal under the same pane id (review M3).
                 if let Some(before) = self.view.bound.insert(pane_id, address.clone()) {
                     if before != address {
-                        self.view.held.insert(pane_id);
+                        self.view.hold(pane_id);
                     }
                 }
                 let terminal_id = match self.view.terminals.get(&address) {
@@ -503,7 +602,7 @@ impl App {
         view.pane_ids
             .retain(|_, pane_id| far_panes.contains_key(pane_id));
         view.bound.retain(|pane_id, _| live_panes.contains(pane_id));
-        view.held.retain(|pane_id| live_panes.contains(pane_id));
+        view.held.retain(|pane_id, _| live_panes.contains(pane_id));
         view.close_asked.retain(&live_panes);
         view.view_numbers
             .retain(|pane_id, _| live_panes.contains(pane_id));
@@ -535,6 +634,7 @@ impl App {
         );
         self.view = Some(view);
         self.sync_view_holds();
+        self.note_view_bindings();
         self.full_redraw_pending = true;
         self.state.mark_session_dirty();
     }
@@ -551,7 +651,7 @@ impl App {
             .iter()
             .flat_map(|ws| ws.tabs.iter())
             .flat_map(|tab| tab.panes.iter())
-            .filter(|(pane_id, _)| view.held.contains(pane_id))
+            .filter(|(pane_id, _)| view.held.contains_key(pane_id))
             .map(|(_, pane)| pane.attached_terminal_id.clone())
             .collect();
         for (terminal_id, state) in &mut self.state.terminals {
@@ -563,35 +663,104 @@ impl App {
         }
     }
 
-    /// Whether `pane_id` is a view's pane that takes no input until a
-    /// person clicks or focuses it (security review M3).
-    pub(crate) fn view_input_held(&self, pane_id: PaneId) -> bool {
+    /// Whether `pane_id` is a view's pane that takes no input from
+    /// `client` until that client's person clicks or focuses it (security
+    /// review M3; per client, fork issue 317 M2).
+    pub(crate) fn view_input_held(&self, pane_id: PaneId, client: u64) -> bool {
         self.view
             .as_ref()
-            .is_some_and(|view| view.held.contains(&pane_id))
+            .is_some_and(|view| view.is_held_for(pane_id, client))
     }
 
     /// Holds `pane_id`'s input as a changed far binding does.
     #[cfg(test)]
     pub(crate) fn hold_view_input_for_test(&mut self, pane_id: PaneId) {
         if let Some(view) = self.view.as_mut() {
-            view.held.insert(pane_id);
+            view.hold(pane_id);
         }
         self.sync_view_holds();
     }
 
-    /// A person clicked or focused `pane_id`: it takes input again. True
-    /// when it was held.
-    pub(crate) fn release_view_hold(&mut self, pane_id: PaneId) -> bool {
-        let released = self
-            .view
-            .as_mut()
-            .is_some_and(|view| view.held.remove(&pane_id));
+    /// `client`'s person clicked or focused `pane_id`: it takes that
+    /// client's input again, and only that client's (fork issue 317 M2).
+    /// True when it was held for it.
+    pub(crate) fn release_view_hold(&mut self, pane_id: PaneId, client: u64) -> bool {
+        let Some(view) = self.view.as_mut() else {
+            return false;
+        };
+        let released = view
+            .held
+            .get_mut(&pane_id)
+            .is_some_and(|clients| clients.remove(&client));
         if released {
+            view.held.retain(|_, clients| !clients.is_empty());
             self.sync_view_holds();
             self.full_redraw_pending = true;
         }
         released
+    }
+
+    /// A person moved the focus to `pane_id` through the API request of the
+    /// client the server is doing now: the pane takes that client's input
+    /// again. A request of no client (none in a view) releases nothing.
+    pub(crate) fn release_view_hold_for_acting_client(&mut self, pane_id: PaneId) {
+        if let Some(client) = self.view.as_ref().and_then(|view| view.acting_client) {
+            self.release_view_hold(pane_id, client);
+        }
+    }
+
+    /// Notes `client` as the one whose API request the server does now, or
+    /// none.
+    pub(crate) fn set_view_acting_client(&mut self, client: Option<u64>) {
+        if let Some(view) = self.view.as_mut() {
+            view.acting_client = client;
+        }
+    }
+
+    /// A client shell connected to this view.
+    pub(crate) fn note_view_client(&mut self, client: u64) {
+        if let Some(view) = self.view.as_mut() {
+            view.note_client(client);
+        }
+    }
+
+    /// A client shell left this view: its holds, confirmations and taken
+    /// request ids go (fork issue 317 M2, M3, M5).
+    pub(crate) fn forget_view_client(&mut self, client: u64) {
+        if let Some(view) = self.view.as_mut() {
+            view.forget_client(client);
+        }
+        self.sync_view_holds();
+    }
+
+    /// The view's binding revision, for each client's snapshot (fork issue
+    /// 317 M2); `None` outside a view.
+    pub(crate) fn view_binding_revision(&self) -> Option<u64> {
+        self.view.as_ref().map(ViewApp::binding_revision)
+    }
+
+    /// Records the far program `address` attached to, as an attach does,
+    /// and the bindings that changes.
+    #[cfg(test)]
+    pub(crate) fn bind_view_instance_for_test(&mut self, address: &str, instance: FarInstance) {
+        if let Some(view) = self.view.as_mut() {
+            view.bind_instance_for_test(address, instance);
+        }
+        self.note_view_bindings();
+    }
+
+    /// Records the binding each pane of the view shows now (fork issue 317
+    /// M2): a change takes the next binding revision.
+    fn note_view_bindings(&mut self) {
+        let panes: HashSet<PaneId> = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.panes.keys().copied()))
+            .collect();
+        if let Some(view) = self.view.as_mut() {
+            view.note_bindings(&panes);
+        }
     }
 
     /// A view's pane whose stream ended because its far address holds
@@ -635,13 +804,14 @@ impl App {
                 "{address} is another program now; attaching to it…"
             ));
             state.revision = state.revision.saturating_add(1);
-            view.held.insert(pane_id);
+            view.hold(pane_id);
             if !view.attaching.contains_key(&address) {
                 self.request_view_attach(&mut view, address, pane_id);
             }
         }
         self.view = Some(view);
         self.sync_view_holds();
+        self.note_view_bindings();
         self.full_redraw_pending = true;
         true
     }
@@ -757,6 +927,7 @@ impl App {
         if let Some(previous) = self.terminal_runtimes.insert(terminal_id, runtime) {
             previous.shutdown();
         }
+        self.note_view_bindings();
         self.full_redraw_pending = true;
     }
 
@@ -856,7 +1027,9 @@ fn hold_moved_public_ids(view: &mut ViewApp, workspaces: &[Workspace]) {
         })
         .map(|(pane, _)| *pane)
         .collect();
-    view.held.extend(moved);
+    for pane_id in moved {
+        view.hold(pane_id);
+    }
     view.public_ids = public.iter().map(|(pane, at)| (*pane, id_of(at))).collect();
 }
 
@@ -990,6 +1163,9 @@ fn collect_numbers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A client shell of the view, connected before the layouts below.
+    const CLIENT: u64 = 1;
 
     fn app() -> App {
         let mut app = App::new(
@@ -1167,13 +1343,14 @@ mod tests {
                 ]}}
             ])))
         };
+        app.note_view_client(CLIENT);
         app.apply_view_layout(&doc("t1", "t2", "t3"));
         let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
-        assert!(panes.iter().all(|pane| !app.view_input_held(*pane)));
+        assert!(panes.iter().all(|pane| !app.view_input_held(*pane, CLIENT)));
         app.apply_view_layout(&doc("t2", "t1", "t3"));
         let held: Vec<bool> = panes
             .iter()
-            .map(|pane| app.view_input_held(*pane))
+            .map(|pane| app.view_input_held(*pane, CLIENT))
             .collect();
         assert_eq!(held, [true, true, false], "the two swapped panes only");
         let marked = |app: &App, pane: PaneId| {
@@ -1184,10 +1361,13 @@ mod tests {
         assert!(marked(&app, panes[0]) && marked(&app, panes[1]) && !marked(&app, panes[2]));
         // A projection of the same layout keeps the hold.
         app.apply_view_layout(&doc("t2", "t1", "t3"));
-        assert!(app.view_input_held(panes[0]));
-        assert!(app.release_view_hold(panes[0]));
-        assert!(!app.view_input_held(panes[0]) && !marked(&app, panes[0]));
-        assert!(app.view_input_held(panes[1]), "only the one focused");
+        assert!(app.view_input_held(panes[0], CLIENT));
+        assert!(app.release_view_hold(panes[0], CLIENT));
+        assert!(!app.view_input_held(panes[0], CLIENT) && !marked(&app, panes[0]));
+        assert!(
+            app.view_input_held(panes[1], CLIENT),
+            "only the one focused"
+        );
     }
 
     // M4, M5: a far size over the grid budget is ignored (the pane keeps

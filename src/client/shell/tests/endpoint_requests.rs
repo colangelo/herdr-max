@@ -146,6 +146,7 @@ fn worktree_create_success_focuses_returned_tab_on_its_endpoint_after_snapshot_u
             endpoint_id: target,
             boot_id: target_boot,
             request,
+            ..
         }] = &focus[..]
         else {
             panic!("creation should request focus through normal client navigation");
@@ -349,11 +350,12 @@ fn stale_queued_request_is_cancelled_without_blocking_the_current_generation() {
                 endpoint_id,
                 boot_id,
                 request,
+                ..
             } = action
             else {
                 panic!("expected endpoint request");
             };
-            commands.enqueue(endpoint_id, generation, boot_id, request);
+            commands.enqueue(endpoint_id, generation, boot_id, request, None);
         }
     }
     let mut endpoints = EndpointRegistry::new(
