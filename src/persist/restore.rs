@@ -738,7 +738,7 @@ fn restore_tab(
         // Mac need not have (core-phase5 D5).
         #[cfg(unix)]
         let on_machine = saved_pane
-            .and_then(|pane| pane.core_terminal.as_ref())
+            .and_then(|pane| pane.core_link())
             .is_some_and(|saved| {
                 crate::pane::core_machines::machine_of_address(&saved.link().address).is_some()
             });
@@ -757,7 +757,7 @@ fn restore_tab(
             // so no save drops it and the pane attaches when it can
             // (security review M3, Sol H5).
             #[cfg(unix)]
-            if let Some(saved) = saved_pane.and_then(|pane| pane.core_terminal.as_ref()) {
+            if let Some(saved) = saved_pane.and_then(|pane| pane.core_link()) {
                 terminal.restore_error = None;
                 terminal.hold = Some(crate::terminal::state::PaneHold::CoreWaiting(
                     crate::terminal::state::CoreWaiting {
@@ -852,7 +852,7 @@ fn restore_tab(
         // to it again, decided before any restore plan or launch line, so
         // nothing is typed into the running program (core-backend D10, R6).
         #[cfg(unix)]
-        let core_restore = match saved_pane.and_then(|pane| pane.core_terminal.as_ref()) {
+        let core_restore = match saved_pane.and_then(|pane| pane.core_link()) {
             Some(saved) if !was_imported => restore_core_pane(
                 *id,
                 rows,
@@ -1645,6 +1645,7 @@ pub(crate) fn one_pane_snapshot_for_test(
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         },
     );
     let mut history = SessionHistorySnapshot {
@@ -1867,6 +1868,7 @@ mod tests {
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         };
         let target_pane = super::super::snapshot::PaneSnapshot {
             agent_resume: None,
@@ -1885,6 +1887,7 @@ mod tests {
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -3001,6 +3004,7 @@ mod tests {
                             pane_key: None,
                             run_id: None,
                             core_terminal: None,
+                            core_machine_terminal: None,
                         },
                     )]),
                     zoomed: false,
@@ -3093,6 +3097,7 @@ mod tests {
                             pane_key: None,
                             run_id: None,
                             core_terminal: None,
+                            core_machine_terminal: None,
                         },
                     )]),
                     zoomed: false,
@@ -3176,6 +3181,7 @@ mod tests {
                                 pane_key: None,
                                 run_id: None,
                                 core_terminal: None,
+                                core_machine_terminal: None,
                             },
                         ),
                         (
@@ -3197,6 +3203,7 @@ mod tests {
                                 pane_key: None,
                                 run_id: None,
                                 core_terminal: None,
+                                core_machine_terminal: None,
                             },
                         ),
                     ]),
@@ -3281,6 +3288,7 @@ mod tests {
                                 pane_key: None,
                                 run_id: None,
                                 core_terminal: None,
+                                core_machine_terminal: None,
                             },
                         ),
                         (
@@ -3302,6 +3310,7 @@ mod tests {
                                 pane_key: None,
                                 run_id: None,
                                 core_terminal: None,
+                                core_machine_terminal: None,
                             },
                         ),
                     ]),
@@ -3368,6 +3377,7 @@ mod tests {
                     pane_key: None,
                     run_id: None,
                     core_terminal: None,
+                    core_machine_terminal: None,
                 },
             )
         };
@@ -3393,6 +3403,7 @@ mod tests {
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -3558,6 +3569,7 @@ mod tests {
                             pane_key: None,
                             run_id: None,
                             core_terminal: None,
+                            core_machine_terminal: None,
                         },
                     )]),
                     zoomed: false,

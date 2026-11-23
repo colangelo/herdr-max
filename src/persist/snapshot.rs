@@ -166,14 +166,34 @@ pub struct PaneSnapshot {
     /// older build ignores it and starts the pane fresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_terminal: Option<PaneCoreTerminalSnapshot>,
+    /// The program of a pane on a core machine (core-phase5 D5): its
+    /// session, its address with the machine (`ac-mbm5/t7`) and its folder
+    /// there, never a pid. Saved here and never in `core_terminal`, so a
+    /// build from before machine panes sees no link at all: it neither
+    /// holds the pane nor searches this Mac's terminals for one labelled
+    /// with the pane's id, which it would attach. Absent for a pane on this
+    /// Mac and in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_machine_terminal: Option<PaneCoreTerminalSnapshot>,
 }
 
 impl PaneSnapshot {
+    /// The pane's saved program in herdr-core: on this Mac's core from
+    /// `core_terminal`, on a machine from `core_machine_terminal`. A machine
+    /// link whose address names no machine is no link: it is never taken for
+    /// a terminal of this Mac.
+    pub(crate) fn core_link(&self) -> Option<&PaneCoreTerminalSnapshot> {
+        self.core_terminal.as_ref().or_else(|| {
+            self.core_machine_terminal
+                .as_ref()
+                .filter(|saved| saved.link().machine().is_some())
+        })
+    }
+
     /// The folder the pane's program runs in: for a pane on a core machine
     /// the one saved with its link, else `cwd` (core-phase5 D5).
     pub(crate) fn program_cwd(&self) -> &std::path::Path {
-        self.core_terminal
-            .as_ref()
+        self.core_link()
             .and_then(|link| link.machine_cwd.as_deref())
             .unwrap_or(&self.cwd)
     }
@@ -197,11 +217,12 @@ pub struct PaneCoreTerminalSnapshot {
     pub agent_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid_started: Option<u64>,
-    /// The folder of a pane on a core machine, there (core-phase5 D5). Its
-    /// pane's `cwd` is then `MACHINE_PANE_CWD`, a folder no host has, so a
-    /// build from before machine panes, which would start the pane on this
-    /// Mac in its `cwd`, holds it as "Saved directory is unavailable"
-    /// instead. Absent for a pane on this Mac and in older files.
+    /// The folder of a pane on a core machine, there (core-phase5 D5),
+    /// saved in `core_machine_terminal`. Its pane's `cwd` is then
+    /// `MACHINE_PANE_CWD`, a folder no host has, so a build from before
+    /// machine panes, which would start the pane on this Mac in its `cwd`,
+    /// shows "Saved directory is unavailable" instead. Absent for a pane on
+    /// this Mac and in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_cwd: Option<PathBuf>,
 }
@@ -223,8 +244,20 @@ impl PaneCoreTerminalSnapshot {
         }
     }
 
-    // A restore reattaches core panes on Unix only.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// The saved link of a pane on a core machine: no pids, which are the
+    /// machine's and name nothing on this Mac, and the folder there.
+    pub(crate) fn on_machine(link: crate::pane::CoreTerminalLink, machine_cwd: PathBuf) -> Self {
+        Self {
+            session: link.session,
+            address: link.address,
+            pid: None,
+            pid_started: None,
+            agent_pid: None,
+            agent_pid_started: None,
+            machine_cwd: Some(machine_cwd),
+        }
+    }
+
     pub(crate) fn link(&self) -> crate::pane::CoreTerminalLink {
         let identity = |pid: Option<u32>, started: Option<u64>| {
             pid.zip(started)
@@ -578,16 +611,17 @@ fn capture_tab(
             .and_then(|id| terminal_runtimes.get(id))
             .and_then(|runtime| runtime.core_terminal())
             .or_else(|| terminal.and_then(crate::terminal::state::TerminalState::held_core_link));
-        let on_machine = link.as_ref().is_some_and(|link| link.machine().is_some());
-        let mut core_terminal = link.map(PaneCoreTerminalSnapshot::from_link);
-        // A pane on a core machine saves its folder with its link and a
-        // `cwd` no host has, so an older build never starts it here (D5).
-        let cwd = match core_terminal.as_mut() {
-            Some(saved) if on_machine => {
-                saved.machine_cwd = Some(cwd);
-                PathBuf::from(MACHINE_PANE_CWD)
-            }
-            _ => cwd,
+        // A pane on a core machine saves its link and folder apart from
+        // `core_terminal` and a `cwd` no host has, so a build from before
+        // machine panes neither starts it here nor attaches a terminal of
+        // this Mac to it (D5).
+        let (cwd, core_terminal, core_machine_terminal) = match link {
+            Some(link) if link.machine().is_some() => (
+                PathBuf::from(MACHINE_PANE_CWD),
+                None,
+                Some(PaneCoreTerminalSnapshot::on_machine(link, cwd)),
+            ),
+            link => (cwd, link.map(PaneCoreTerminalSnapshot::from_link), None),
         };
         // A Claude pane's footer shows the model and effort it runs now; a hook
         // record older than that must not win (fork issue 144). Read from the
@@ -636,6 +670,7 @@ fn capture_tab(
                 pane_key,
                 run_id,
                 core_terminal,
+                core_machine_terminal,
             },
         );
     }
@@ -1000,6 +1035,7 @@ mod tests {
                 pane_key: None,
                 run_id: None,
                 core_terminal: None,
+                core_machine_terminal: None,
             },
         );
         panes.insert(
@@ -1021,6 +1057,7 @@ mod tests {
                 pane_key: None,
                 run_id: None,
                 core_terminal: None,
+                core_machine_terminal: None,
             },
         );
 
@@ -1960,6 +1997,7 @@ mod tests {
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -1975,6 +2013,30 @@ mod tests {
         assert_eq!(back.todos[0].link_pane, Some(11));
         assert_eq!(back.todos[0].link_label.as_deref(), Some("infra"));
         assert_eq!(back.next_todo_id, 4);
+    }
+
+    // core-phase5 D5: a `core_machine_terminal` whose address names no
+    // machine is no link: never taken for a terminal of this Mac.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_link_without_a_machine_is_no_link() {
+        let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
+            "cwd": MACHINE_PANE_CWD,
+            "core_machine_terminal": {"session": "herdr", "address": "t3", "machine_cwd": "/tmp"}
+        }))
+        .unwrap();
+        assert_eq!(pane.core_link(), None);
+        assert_eq!(pane.program_cwd(), std::path::Path::new(MACHINE_PANE_CWD));
+        let pane: PaneSnapshot = serde_json::from_value(serde_json::json!({
+            "cwd": MACHINE_PANE_CWD,
+            "core_machine_terminal": {"session": "herdr", "address": "loop/t3", "machine_cwd": "/tmp"}
+        }))
+        .unwrap();
+        assert_eq!(
+            pane.core_link().map(|link| link.address.as_str()),
+            Some("loop/t3")
+        );
+        assert_eq!(pane.program_cwd(), std::path::Path::new("/tmp"));
     }
 
     #[test]
@@ -2078,6 +2140,7 @@ mod tests {
             pane_key: None,
             run_id: None,
             core_terminal: None,
+            core_machine_terminal: None,
         };
 
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -2171,6 +2234,7 @@ mod tests {
                 pane_key: None,
                 run_id: None,
                 core_terminal: None,
+                core_machine_terminal: None,
             },
         );
         panes.insert(
@@ -2194,6 +2258,7 @@ mod tests {
                 pane_key: None,
                 run_id: None,
                 core_terminal: None,
+                core_machine_terminal: None,
             },
         );
 

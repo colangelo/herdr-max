@@ -470,11 +470,13 @@ mod tests {
             app.state.selected,
             None,
         );
-        let core_terminal = saved.workspaces[0].tabs[0].panes[&pane.raw()]
-            .core_terminal
+        let saved_pane = &saved.workspaces[0].tabs[0].panes[&pane.raw()];
+        assert_eq!(saved_pane.core_terminal, None, "never a local link");
+        let link = saved_pane
+            .core_machine_terminal
             .as_ref()
             .map(|link| link.address.clone());
-        assert_eq!(core_terminal.as_deref(), Some("loop/t3"));
+        assert_eq!(link.as_deref(), Some("loop/t3"));
         assert_eq!(
             app.machine_waiting_panes().len(),
             0,
@@ -549,22 +551,26 @@ mod tests {
         assert_eq!(kills(&core), 0, "{:?}", core.methods());
     }
 
-    /// What the build before machine panes (origin/master 7c273562, the
-    /// previous beta) does with one saved pane, transcribed from its code:
+    /// What the build before machine panes (origin/master 7c273562, beta
+    /// 212) does with one saved pane, transcribed from its code:
     /// `restore_tab` (src/persist/restore.rs:737) holds a pane whose `cwd`
-    /// is no folder, with its link, as `DirectoryUnavailable`; its waiting
-    /// retry then gets `NotOurs` for any address with a machine
-    /// (pane_io.rs:436), searches, finds no terminal with its plain labels
-    /// and, the folder gone, only shows an error (core_terminals.rs:204):
-    /// it never starts. A pane whose `cwd` exists goes through the same
-    /// refusal and search at restore, and starts fresh on this Mac.
+    /// is no folder and that has a `core_terminal` as `DirectoryUnavailable`;
+    /// its waiting retry gets `NotOurs` for an address with a machine
+    /// (pane_io.rs:436) and then searches this Mac's terminals by the pane's
+    /// labels (core_terminals.rs:193), attaching one it finds. A pane whose
+    /// `cwd` is no folder and has no `core_terminal` only shows "Saved
+    /// directory is unavailable": no hold, no probe, no search. A pane whose
+    /// `cwd` exists starts fresh on this Mac when nothing answers for it.
     fn previous_beta_restores(pane: &serde_json::Value) -> &'static str {
         #[derive(serde::Deserialize)]
         struct OldLink {
             #[allow(dead_code)] // read as the old build reads it
+            session: String,
+            #[allow(dead_code)] // read as the old build reads it
             address: String,
         }
-        // As the old build's `PaneSnapshot`: unknown fields are ignored.
+        // The old build's `PaneSnapshot` fields that decide a restore;
+        // unknown fields, `core_machine_terminal` among them, are ignored.
         #[derive(serde::Deserialize)]
         struct OldPane {
             cwd: std::path::PathBuf,
@@ -573,16 +579,28 @@ mod tests {
         }
         let old: OldPane = serde_json::from_value(pane.clone()).expect("the old build reads it");
         match (old.cwd.is_dir(), old.core_terminal.is_some()) {
-            (false, true) => "held: directory unavailable, never started",
-            (false, false) => "error: directory unavailable, never started",
+            (false, true) => "held, then searched for by its labels here",
+            (false, false) => "unavailable: no hold, no search, never started",
             (true, _) => "started fresh on this Mac",
         }
     }
 
+    fn capture(app: &App) -> crate::persist::SessionSnapshot {
+        crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            None,
+        )
+    }
+
     // N3 (D5): a saved pane on a machine is safe for the previous beta: its
-    // `cwd` is a folder no host has, so that build holds it and never
-    // starts it here, while this build restores it with its real folder,
-    // waiting for its machine.
+    // link is saved as `core_machine_terminal`, which that build does not
+    // know, and its `cwd` is a folder no host has, so that build shows the
+    // pane unavailable without holding it, never searches for or attaches a
+    // terminal of this Mac labelled with its id, and never starts it here.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_saved_machine_pane_is_never_started_by_the_previous_beta() {
         let core = FakeCore::start();
@@ -592,27 +610,26 @@ mod tests {
         wait_for_machine(&mut app, pane, "loop/t3", false);
         let real = std::env::temp_dir();
         app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
-        let saved = crate::persist::capture(
-            &app.state.workspaces,
-            &app.state.terminals,
-            &app.terminal_runtimes,
-            app.state.active,
-            app.state.selected,
-            None,
-        );
-        let json = serde_json::to_value(&saved).expect("json");
+        let json = serde_json::to_value(capture(&app)).expect("json");
         let pane_json = &json["workspaces"][0]["tabs"][0]["panes"][pane.raw().to_string()];
         assert_eq!(
             previous_beta_restores(pane_json),
-            "held: directory unavailable, never started",
+            "unavailable: no hold, no search, never started",
             "{pane_json}"
         );
-        // What this branch saved before the fix: the real folder, which the
-        // previous beta started the pane in.
+        // What this branch saved before: the link as `core_terminal`, which
+        // the previous beta held and then attached to a terminal of this
+        // Mac labelled with the pane's id; and before that the real folder,
+        // which it started the pane in.
         let mut before = pane_json.clone();
+        before["core_terminal"] = before["core_machine_terminal"].clone();
+        assert_eq!(
+            previous_beta_restores(&before),
+            "held, then searched for by its labels here"
+        );
         before["cwd"] = serde_json::json!(real);
         assert_eq!(previous_beta_restores(&before), "started fresh on this Mac");
-        // This build keeps the folder and restores the pane waiting.
+        // This build keeps the folder.
         let back: crate::persist::SessionSnapshot =
             serde_json::from_value(json).expect("this build reads it");
         assert_eq!(
@@ -622,6 +639,140 @@ mod tests {
         assert_eq!(
             back.workspaces[0].identity_cwd, real,
             "named by its real folder"
+        );
+    }
+
+    // N3 (D5): the save of a machine pane carries its link only as
+    // `core_machine_terminal`, with its folder there and no pid, while a
+    // pane on this Mac saves exactly what it saved before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_link_is_saved_apart_from_a_local_one() {
+        let core = FakeCore::start();
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        let real = std::env::temp_dir();
+        let local_link = CoreTerminalLink {
+            program: Some(crate::platform::ProgramIdentity {
+                pid: 4242,
+                started: 7,
+            }),
+            ..link_on("t3")
+        };
+        app.state.pane_terminal_mut(pane).expect("terminal").hold =
+            Some(PaneHold::CoreWaiting(CoreWaiting {
+                link: local_link,
+                public_pane_id: app.public_pane_id(0, pane),
+                why: CoreWaitReason::Unreachable,
+            }));
+        app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
+        let json = serde_json::to_value(capture(&app)).expect("json");
+        let local = &json["workspaces"][0]["tabs"][0]["panes"][pane.raw().to_string()];
+        assert_eq!(local["cwd"], serde_json::json!(real), "{local}");
+        assert_eq!(
+            local["core_terminal"],
+            serde_json::json!({"session": crate::pane::core_session_name(),
+                "address": "t3", "pid": 4242, "pid_started": 7}),
+            "{local}"
+        );
+        assert!(local.get("core_machine_terminal").is_none(), "{local}");
+
+        let machine_link = CoreTerminalLink {
+            program: Some(crate::platform::ProgramIdentity {
+                pid: 4242,
+                started: 7,
+            }),
+            ..link_on("loop/t3")
+        };
+        app.state.pane_terminal_mut(pane).expect("terminal").hold =
+            Some(PaneHold::CoreWaiting(CoreWaiting {
+                link: machine_link,
+                public_pane_id: app.public_pane_id(0, pane),
+                why: CoreWaitReason::MachineAway {
+                    machine: "loop".into(),
+                    dormant: false,
+                },
+            }));
+        let json = serde_json::to_value(capture(&app)).expect("json");
+        let far = &json["workspaces"][0]["tabs"][0]["panes"][pane.raw().to_string()];
+        assert_eq!(
+            far["cwd"], "/dev/null/herdr-pane-on-a-core-machine",
+            "{far}"
+        );
+        assert!(far.get("core_terminal").is_none(), "{far}");
+        assert_eq!(
+            far["core_machine_terminal"],
+            serde_json::json!({"session": crate::pane::core_session_name(),
+                "address": "loop/t3", "machine_cwd": real}),
+            "{far}"
+        );
+    }
+
+    // N3 (D5): a machine pane this build saved restores on this build as a
+    // pane waiting for its machine, with its folder there: nothing starts,
+    // and a terminal of this Mac labelled with its id is not searched for.
+    // Saved again, it keeps its link apart from `core_terminal`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_machine_pane_restores_waiting_for_its_machine() {
+        let core = FakeCore::start();
+        core.forget_terminal("loop/t3");
+        core.set_machine("loop", "unreachable");
+        std::env::set_var("HC_SOCKET", &core.socket);
+        let (mut app, pane) = app_with_one_pane();
+        let public_pane_id = app.public_pane_id(0, pane).expect("public id");
+        core.add_terminal(serde_json::json!({"address": "t9", "state": "live",
+            "labels": {"herdr.session": crate::pane::herdr_session_label(),
+                "herdr.pane_id": public_pane_id}}));
+        wait_for_machine(&mut app, pane, "loop/t3", false);
+        let real = std::env::temp_dir();
+        app.state.pane_terminal_mut(pane).expect("terminal").cwd = real.clone();
+        let json = serde_json::to_string(&capture(&app)).expect("json");
+        let mut snapshot: crate::persist::SessionSnapshot =
+            serde_json::from_str(&json).expect("this build reads it");
+        for _ in 0..2 {
+            let (events, _rx) = tokio::sync::mpsc::channel(32);
+            let (workspaces, terminals, runtimes) = crate::persist::restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                0,
+                "/bin/sh",
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                std::sync::Arc::new(tokio::sync::Notify::new()),
+                std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            );
+            let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
+            let root = workspaces[0].tabs[0].root_pane;
+            let terminal = &terminals[workspaces[0].tabs[0].terminal_id(root).expect("id")];
+            assert!(runtimes.get(&terminal.id).is_none(), "nothing started");
+            let waiting = terminal.core_waiting().expect("waits");
+            assert_eq!(waiting.link.address, "loop/t3");
+            assert!(
+                matches!(waiting.why, CoreWaitReason::MachineAway { .. }),
+                "{:?}",
+                waiting.why
+            );
+            assert_eq!(terminal.cwd, real, "its folder there");
+            snapshot =
+                crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0, None);
+            let saved = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+            assert_eq!(saved.core_terminal, None);
+            assert_eq!(
+                saved
+                    .core_machine_terminal
+                    .as_ref()
+                    .map(|link| link.address.as_str()),
+                Some("loop/t3")
+            );
+        }
+        let methods = core.methods();
+        assert!(
+            !methods
+                .iter()
+                .any(|method| method == "terminal.list" || method == "terminal.run"),
+            "no search, nothing started: {methods:?}"
         );
     }
 
