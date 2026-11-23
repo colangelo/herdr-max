@@ -71,7 +71,11 @@ impl App {
                         terminal.state == crate::detect::AgentState::Idle
                             && terminal.effective_agent_label().is_some()
                     }),
-                    pinned: terminal.is_some_and(|terminal| terminal.pin_order.is_some()),
+                    pinned: shared_pin(
+                        terminal.is_some_and(|terminal| terminal.pin_order.is_some()),
+                        ws.pin_order.is_some(),
+                        terminal.is_some_and(|terminal| terminal.effective_agent_label().is_some()),
+                    ),
                 };
                 panes.insert(address, ((ws_idx, *pane_id), facts));
             }
@@ -180,6 +184,16 @@ impl App {
     }
 }
 
+/// What `herdr.pinned` shows for a pane. herdr pins spaces and agents; the
+/// Herdr apps pin only agents (herdr-app docs/labels.md), so an agent in a
+/// pinned space reads as pinned there too, and unpinning the space unpins it
+/// (fork issue 299, ac's choice A in ask t1122-07). An unpin from another
+/// client cannot unpin the space, so such an agent stays pinned while its
+/// space is. Shells in a pinned space are not agents and stay unpinned.
+fn shared_pin(agent_pinned: bool, space_pinned: bool, is_agent: bool) -> bool {
+    agent_pinned || (space_pinned && is_agent)
+}
+
 fn facts_of(
     panes: &HashMap<CoreAddress, ((usize, PaneId), PaneFacts)>,
 ) -> HashMap<CoreAddress, PaneFacts> {
@@ -217,6 +231,14 @@ mod tests {
         );
         app.core_label_write = record;
         app
+    }
+
+    #[test]
+    fn an_agent_in_a_pinned_space_shares_as_pinned_and_a_shell_does_not() {
+        assert!(shared_pin(false, true, true));
+        assert!(!shared_pin(false, true, false));
+        assert!(shared_pin(true, false, true));
+        assert!(!shared_pin(false, false, true));
     }
 
     #[test]
