@@ -48,6 +48,7 @@ use super::state::{
     MachineDir, FAR_CORE_DOWN_SECS,
 };
 use crate::pane::core_machines::{self as core, CallError};
+use crate::remote::visible_line;
 
 /// The exit code of a refusal on a machine that is not connected (D7, F7):
 /// `EX_TEMPFAIL`, as core-link's own refusals.
@@ -690,13 +691,16 @@ fn probe_far_herdr(
 fn check_far_session(name: &MachineName, far: &FarHerdr, linked: &str) -> Result<(), String> {
     match far.core_session.as_deref() {
         Some(core_session) if core_session == linked => Ok(()),
-        Some(core_session) => Err(format!(
-            "the herdr found on {name} ({}) runs session {} in Herdr Core session {core_session}, \
-             not {linked}, the one {name} was added with; --machine would reach another herdr. \
-             Put the herdr of that core first on its PATH there, or add the machine again with \
-             --remote-session {core_session}",
-            far.path, far.session
-        )),
+        Some(core_session) => {
+            let core_session = visible_line(core_session);
+            Err(format!(
+                "the herdr found on {name} ({}) runs session {} in Herdr Core session {core_session}, \
+                 not {linked}, the one {name} was added with; --machine would reach another herdr. \
+                 Put the herdr of that core first on its PATH there, or add the machine again with \
+                 --remote-session {core_session}",
+                far.path, far.session
+            ))
+        }
         None if linked.starts_with("herdrdev") => Err(format!(
             "{name} links to Herdr Core session {linked}, a debug build's, and the herdr found there ({}) \
              does not say which core session it uses; update Herdr there",
@@ -786,16 +790,19 @@ struct Ran {
 }
 
 impl Ran {
-    /// The last line it wrote to stderr, for a message.
+    /// The last line it wrote to stderr, for a message: at most 400
+    /// characters, its controls shown as escapes (far text, M1).
     fn stderr_tail(&self) -> String {
         let text = String::from_utf8_lossy(&self.stderr);
-        text.lines()
+        let tail: String = text
+            .lines()
             .rev()
             .find(|line| !line.trim().is_empty())
             .unwrap_or("no message")
             .chars()
             .take(400)
-            .collect()
+            .collect();
+        visible_line(&tail).into_owned()
     }
 }
 

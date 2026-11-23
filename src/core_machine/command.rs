@@ -563,10 +563,12 @@ pub(crate) fn status(args: &[String]) -> std::io::Result<i32> {
                 }
             })
             .collect();
+        // Core's state string is printed as it says it: shown with its
+        // controls escaped (security review 2026-11-23 M1).
         println!(
             "{}\t{}\tgate {}\tleases {}",
             row.name,
-            row.state,
+            crate::remote::visible_line(&row.state),
             row.gate.as_deref().unwrap_or("-"),
             if leases.is_empty() {
                 "-".to_string()

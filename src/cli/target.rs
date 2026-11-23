@@ -151,11 +151,18 @@ fn core_route(
     match fleet::open(selector, dial) {
         Lookup::NotCore => Err(usage_error(unknown)),
         Lookup::Refused { message, code } => {
-            eprintln!("error: {message}");
+            eprintln!("{}", refusal_line(&message));
             Err(Ok(super::CommandOutcome::Handled(code)))
         }
         Lookup::Ready(link) => Ok(Route::Core(link)),
     }
+}
+
+/// A core route's refusal as printed. It can carry far text, the probe's
+/// stderr or the far herdr's session (security review 2026-11-23 M1).
+#[cfg(unix)]
+fn refusal_line(message: &str) -> String {
+    format!("error: {}", crate::remote::visible_line(message))
 }
 
 #[cfg(not(unix))]
@@ -290,12 +297,15 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
             return error;
         };
         let error = target.reported_failure().unwrap_or(error);
+        // The far server's message and the far side's stderr are far text
+        // (security review 2026-11-23 M1).
         io::Error::new(
             error.kind(),
             format!(
-                "machine '{}' (session {}): {error}",
+                "machine '{}' (session {}): {}",
                 target.label(),
-                target.session()
+                target.session(),
+                crate::remote::visible_line(&error.to_string())
             ),
         )
     })
@@ -534,6 +544,22 @@ mod tests {
         assert!(
             std::time::Duration::from_secs(PING_EXEC_SECS + CALL_MARGIN_SECS)
                 < REMOTE_STATUS_TIMEOUT
+        );
+    }
+
+    /// security review 2026-11-23 M1: far text in a refusal or in a far
+    /// error (a server's message, a far side's stderr) prints escaped.
+    #[test]
+    fn far_errors_print_their_controls_escaped() {
+        let far = "boom\x1b]52;c;aGk=\x07\x1b]0;t\x1b\\\x1b[2K\u{9b}1A";
+        let shown = "boom\\x1b]52;c;aGk=\\x07\\x1b]0;t\\x1b\\\\x1b[2K\\u{9b}1A";
+        #[cfg(unix)]
+        assert_eq!(refusal_line(far), format!("error: {shown}"));
+        let client = ApiClient::for_target(ConnectionTarget::SocketPath("/nonexistent".into()));
+        let error = with_test_client(client, || remote_error(io::Error::other(far)));
+        assert_eq!(
+            error.to_string(),
+            format!("machine 'test-machine' (session remote-session): {shown}")
         );
     }
 

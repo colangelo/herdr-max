@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::api;
 use crate::api::client::ApiClientError;
+use crate::remote::visible_line;
 
 pub(super) fn run_status_command(args: &[String]) -> std::io::Result<i32> {
     let Some((scope, json)) = parse_status_args(args) else {
@@ -149,6 +150,15 @@ fn print_client_status(json: bool) -> std::io::Result<()> {
 }
 
 fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
+    for line in server_status_lines(server, &super::target::socket_label()) {
+        println!("{indent}{line}");
+    }
+}
+
+/// The human-readable server status, one line each. A `--machine` status
+/// shows the far server's own strings, so they are shown with their
+/// controls escaped (security review 2026-11-23 M1).
+fn server_status_lines(server: &ServerRuntimeStatus, socket: &str) -> Vec<String> {
     match server {
         ServerRuntimeStatus::Running {
             version,
@@ -157,29 +167,38 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
             macos_services,
             core,
         } => {
-            println!("{indent}status: running");
-            println!("{indent}version: {}", option_label(version.as_deref()));
-            println!(
-                "{indent}endpoint_compatible: {}",
-                endpoint_compatibility_label(capabilities.as_ref())
-            );
-            println!("{indent}private_protocol: {}", protocol_label(*protocol));
-            println!(
-                "{indent}private_protocol_compatible: {}",
-                compatibility_label(*protocol)
-            );
-            println!("{indent}socket: {}", super::target::socket_label());
+            let mut lines = vec![
+                "status: running".to_string(),
+                format!(
+                    "version: {}",
+                    visible_line(option_label(version.as_deref()))
+                ),
+                format!(
+                    "endpoint_compatible: {}",
+                    endpoint_compatibility_label(capabilities.as_ref())
+                ),
+                format!("private_protocol: {}", protocol_label(*protocol)),
+                format!(
+                    "private_protocol_compatible: {}",
+                    compatibility_label(*protocol)
+                ),
+                format!("socket: {}", visible_line(socket)),
+            ];
             if let Some(services) = macos_services {
-                println!("{indent}macos_services: {}", macos_services_label(services));
+                lines.push(format!(
+                    "macos_services: {}",
+                    macos_services_label(services)
+                ));
             }
             if let Some(core) = core {
-                println!("{indent}core: {core}");
+                lines.push(format!("core: {}", visible_line(core)));
             }
+            lines
         }
-        ServerRuntimeStatus::NotRunning => {
-            println!("{indent}status: not running");
-            println!("{indent}socket: {}", super::target::socket_label());
-        }
+        ServerRuntimeStatus::NotRunning => vec![
+            "status: not running".to_string(),
+            format!("socket: {}", visible_line(socket)),
+        ],
     }
 }
 
@@ -207,7 +226,7 @@ fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
 pub(super) fn macos_services_label(services: &crate::api::schema::MacosServicesInfo) -> String {
     format!(
         "{} context, {}",
-        services.context,
+        visible_line(&services.context),
         if services.reachable {
             "reachable"
         } else {
@@ -473,6 +492,34 @@ mod tests {
             macos_services: None,
             core: None,
         }
+    }
+
+    /// security review 2026-11-23 M1: a far server's version, core state
+    /// and macOS services context show their controls as escapes.
+    #[test]
+    fn far_status_strings_print_their_controls_escaped() {
+        let osc52 = "\x1b]52;c;aGk=\x07";
+        let mut server = running_server(Some(&format!("0.9.3{osc52}")), None);
+        if let ServerRuntimeStatus::Running {
+            macos_services,
+            core,
+            ..
+        } = &mut server
+        {
+            *macos_services = Some(crate::api::schema::MacosServicesInfo {
+                context: "user\x1b]0;title\x1b\\".into(),
+                reachable: true,
+            });
+            *core = Some("gave_up\x1b[2K\x1b[1A".into());
+        }
+        let lines = server_status_lines(&server, "machine:core:loop/default");
+        for line in &lines {
+            assert!(!line.chars().any(char::is_control), "{line:?}");
+        }
+        assert!(lines.contains(&"version: 0.9.3\\x1b]52;c;aGk=\\x07".to_string()));
+        assert!(lines
+            .contains(&"macos_services: user\\x1b]0;title\\x1b\\ context, reachable".to_string()));
+        assert!(lines.contains(&"core: gave_up\\x1b[2K\\x1b[1A".to_string()));
     }
 
     #[test]

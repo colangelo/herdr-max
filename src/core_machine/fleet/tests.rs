@@ -899,3 +899,41 @@ fn a_connected_machine_gets_a_keep_lease_and_no_connect() {
     assert!(dir.leases().is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// security review 2026-11-23 M1: far stderr reaches the message with its
+/// controls escaped, in a probe's failure and in a request's, and so does
+/// a far herdr's core session.
+#[test]
+fn far_text_in_messages_shows_its_controls_escaped() {
+    let hostile = b"\x1b]52;c;aGk=\x07\x1b]0;pwned\x1b\\\x1b[2K\x1b[1Agone\rX\n";
+    let shown = "\\x1b]52;c;aGk=\\x07\\x1b]0;pwned\\x1b\\\\x1b[2K\\x1b[1Agone\\x0dX";
+    let core = FakeCore::start_with(|config| {
+        config.exec_reply = Some(json!({"stdout": "", "stderr": b64(hostile),
+            "truncated": false, "timed_out": false, "ms": 1, "code": 2}))
+    });
+    let (root, dir) = machine_dir("fleet-far-text");
+    let probe = far_herdr(
+        &CoreAt::at(&core.socket),
+        &machine(),
+        &dir,
+        "default",
+        "default",
+    )
+    .expect_err("probe fails");
+    assert!(probe.contains(shown), "{probe}");
+    assert!(!probe.chars().any(char::is_control), "{probe:?}");
+
+    let link = link_to(&core, &dir);
+    assert!(client(&link).request_value(&ping()).is_err());
+    let failure = link.reported_failure().expect("failure").to_string();
+    assert!(failure.contains(shown), "{failure}");
+    assert!(!failure.chars().any(char::is_control), "{failure:?}");
+    drop(link);
+
+    let mut found = far();
+    found.core_session = Some("herdr-x\x1b]0;t\x07".into());
+    let refused = check_far_session(&machine(), &found, "default").expect_err("other core");
+    assert!(refused.contains("herdr-x\\x1b]0;t\\x07"), "{refused}");
+    assert!(!refused.chars().any(char::is_control), "{refused:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
