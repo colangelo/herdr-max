@@ -852,24 +852,137 @@ fn the_bridge_folder_takes_a_fresh_name_when_one_is_taken() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// 2.1: a folder a killed CLI left is removed by the next; a live one's
-/// stays.
+/// 2.1, M3: a folder a killed CLI left is removed by the next; a live
+/// one's stays, and so does anything the bridge did not make: another
+/// name, another mode, a symlink, a folder with more than its socket.
 #[test]
 fn folders_of_dead_clis_are_removed() {
+    use std::os::unix::fs::PermissionsExt as _;
     let base = scratch("fleet-dead");
-    let dead = base.join(format!("{FOLDER_PREFIX}999999-00"));
-    let mine = base.join(format!("{FOLDER_PREFIX}{}-00", std::process::id()));
-    let parent = base.join(format!(
-        "{FOLDER_PREFIX}{}-00",
-        crate::platform::core_link::parent_pid()
-    ));
-    for folder in [&dead, &mine, &parent] {
-        std::fs::create_dir(folder).expect("folder");
-    }
+    let leaf = |pid: u32| format!("{FOLDER_PREFIX}{pid}-0123456789abcdef");
+    let make = |name: &str, mode: u32| {
+        let folder = base.join(name);
+        std::fs::create_dir(&folder).expect("folder");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode)).expect("mode");
+        folder
+    };
+    let dead = make(&leaf(999_999), 0o700);
+    drop(UnixListener::bind(dead.join(SOCKET_NAME)).expect("socket"));
+    let empty = make(&leaf(999_998), 0o700);
+    let mine = make(&leaf(std::process::id()), 0o700);
+    let parent = make(&leaf(crate::platform::core_link::parent_pid()), 0o700);
+    let loose = make(&format!("{FOLDER_PREFIX}999999-00"), 0o700);
+    let upper = make(&format!("{FOLDER_PREFIX}999994-0123456789ABCDEF"), 0o700);
+    let open = make(&leaf(999_997), 0o755);
+    let fuller = make(&leaf(999_996), 0o700);
+    std::fs::write(fuller.join("notes.txt"), b"not the bridge's").expect("notes");
+    let target = make("elsewhere", 0o700);
+    let link = base.join(leaf(999_995));
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
     remove_dead_folders(&base);
-    assert!(!dead.exists());
-    assert!(mine.exists() && parent.exists());
+    assert!(!dead.exists() && !empty.exists());
+    for kept in [&mine, &parent, &loose, &upper, &open, &fuller, &target] {
+        assert!(kept.exists(), "{} was removed", kept.display());
+    }
+    assert!(fuller.join("notes.txt").exists());
+    assert!(std::fs::symlink_metadata(&link).is_ok());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// M3: the names the bridge makes are the names its sweep takes.
+#[test]
+fn the_sweep_takes_only_the_bridges_own_names() {
+    assert_eq!(
+        bridge_leaf_pid(&unguessable_leaf()),
+        Some(std::process::id())
+    );
+    for other in [
+        "herdr-fleet-12-0123456789abcde",
+        "herdr-fleet-012-0123456789abcdef",
+        "herdr-fleet--0123456789abcdef",
+        "herdr-fleet-12-0123456789abcdefa",
+        "herdr-fleet-12-0123456789abcdeg",
+        "herdr-fleet-12",
+        "herdr-flee-12-0123456789abcdef",
+    ] {
+        assert_eq!(bridge_leaf_pid(other), None, "{other}");
+    }
+}
+
+/// M3: a request that trickles in never meets the read deadline per
+/// read; the deadline is for the whole line.
+#[test]
+fn a_trickled_request_meets_one_deadline() {
+    use std::io::Write as _;
+    let (bridge_end, mut cli_end) = UnixStream::pair().expect("pair");
+    let trickle = std::thread::spawn(move || {
+        for _ in 0..40 {
+            if cli_end.write_all(b"x").is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+    let started = std::time::Instant::now();
+    let read = read_line_by(
+        &bridge_end,
+        REQUEST_LIMIT + 1,
+        started + Duration::from_millis(300),
+    );
+    assert_eq!(read.expect_err("deadline").kind(), io::ErrorKind::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(bridge_end);
+    let _ = trickle.join();
+}
+
+/// M3: a reply the CLI does not read is given up at its deadline.
+#[test]
+fn a_reply_nobody_reads_meets_its_deadline() {
+    let (bridge_end, _cli_end) = UnixStream::pair().expect("pair");
+    let started = std::time::Instant::now();
+    let written = write_all_by(
+        &bridge_end,
+        &vec![b'x'; 16 * 1024 * 1024],
+        started + Duration::from_millis(300),
+    );
+    assert_eq!(
+        written.expect_err("deadline").kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// M3: once the termination cleanup ran, no folder or lease is made, so
+/// none is left behind by a start racing it; one made before it is
+/// removed by it.
+#[test]
+fn nothing_is_made_once_termination_cleanup_ran() {
+    let base = scratch("fleet-terminating");
+    let before = private_folder_in(&base, unguessable_leaf).expect("folder");
+    clean_up_leftovers();
+    assert!(!before.exists(), "the cleanup left a folder made before it");
+    let after = private_folder_in(&base, unguessable_leaf).expect_err("refused");
+    assert_eq!(after.kind(), io::ErrorKind::Interrupted);
+    let (root, dir) = machine_dir("fleet-terminating-lease");
+    assert!(LeaseKeeper::start_with(
+        dir.clone(),
+        LeaseHolder::cli(std::process::id()),
+        LeaseUse::Keep,
+        quick()
+    )
+    .is_err());
+    assert!(dir.leases().is_empty());
+    assert_eq!(std::fs::read_dir(&base).expect("list").count(), 0);
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 2.2: a plain call on a connected machine holds a keep lease (it admits

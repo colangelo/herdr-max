@@ -30,11 +30,11 @@
 //! one request per connection as the API does, so every CLI verb that works
 //! with `--machine` today works here unchanged.
 
-use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -453,7 +453,7 @@ impl LeaseInner {
     /// nothing.
     fn write(&self, used_for: LeaseUse) -> io::Result<()> {
         let leftovers = lock(&LEFTOVERS);
-        if !leftovers.contains(&self.path()) {
+        if !leftovers.paths.contains(&self.path()) {
             return Ok(());
         }
         let expires_at = (self.timing.clock)() + self.timing.life;
@@ -500,7 +500,7 @@ impl LeaseKeeper {
         });
         // Remembered before the write, so a signal between the two still
         // removes it.
-        remember_leftover(inner.path());
+        make_leftover(&inner.path(), || Ok(()))?;
         let keeper = Self(inner);
         keeper.0.write(used_for)?;
         let renewer = Arc::clone(&keeper.0);
@@ -554,24 +554,48 @@ impl Drop for LeaseKeeper {
 
 /// The files and folders a fleet CLI leaves until it ends: its lease and
 /// its bridge folder. The termination signals remove them (D7).
-static LEFTOVERS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static LEFTOVERS: Mutex<Leftovers> = Mutex::new(Leftovers {
+    paths: Vec::new(),
+    terminating: false,
+});
 
-fn remember_leftover(path: PathBuf) {
+struct Leftovers {
+    paths: Vec<PathBuf>,
+    /// Set by the termination cleanup: nothing is made or kept after it.
+    terminating: bool,
+}
+
+/// Makes a leftover with `make` and remembers it, as one step under the
+/// leftovers' lock, so the termination cleanup runs before it or after it
+/// is remembered, never between; once that cleanup ran, nothing is made
+/// (security review 2026-11-23 M3).
+fn make_leftover<T>(path: &Path, make: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     if let Err(err) = crate::platform::core_link::clean_up_on_termination(clean_up_leftovers) {
         tracing::warn!(%err, "no cleanup on SIGINT or SIGTERM; the lease ends by its expiry");
     }
-    lock(&LEFTOVERS).push(path);
+    let mut leftovers = lock(&LEFTOVERS);
+    if leftovers.terminating {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "the fleet CLI is ending",
+        ));
+    }
+    let made = make()?;
+    leftovers.paths.push(path.to_path_buf());
+    Ok(made)
 }
 
 fn forget_leftover(path: &Path) {
-    lock(&LEFTOVERS).retain(|kept| kept != path);
+    lock(&LEFTOVERS).paths.retain(|kept| kept != path);
 }
 
 fn clean_up_leftovers() {
-    let paths = std::mem::take(&mut *lock(&LEFTOVERS));
-    for path in paths {
+    // Held while removing, so nothing new is made meanwhile.
+    let mut leftovers = lock(&LEFTOVERS);
+    leftovers.terminating = true;
+    for path in std::mem::take(&mut leftovers.paths) {
         let removed = match std::fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(meta) if meta.is_dir() => remove_bridge_folder(&path),
             Ok(_) => std::fs::remove_file(&path),
             Err(_) => Ok(()),
         };
@@ -1024,6 +1048,95 @@ fn whole_reply(request: &[u8], stdout: &[u8]) -> Result<(), &'static str> {
     }
 }
 
+/// How long the bridge waits, in all, for a request line to come in and
+/// for its reply to go out (M3: one deadline each, not one per read).
+const BRIDGE_IO_WAIT: Duration = Duration::from_secs(30);
+
+/// Reads from `stream` up to and with the first newline, or more than
+/// `limit` bytes, or to its end, by `deadline` at the latest.
+fn read_line_by(
+    mut stream: &UnixStream,
+    limit: usize,
+    deadline: std::time::Instant,
+) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    while line.len() <= limit {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "no whole line in time",
+            ));
+        }
+        stream.set_read_timeout(Some(left))?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "no whole line in time",
+                ))
+            }
+            Err(err) => return Err(err),
+        };
+        if read == 0 {
+            break;
+        }
+        match chunk[..read].iter().position(|&byte| byte == b'\n') {
+            Some(end) => {
+                line.extend_from_slice(&chunk[..=end]);
+                break;
+            }
+            None => line.extend_from_slice(&chunk[..read]),
+        }
+    }
+    Ok(line)
+}
+
+/// Writes all of `bytes` to `stream` by `deadline` at the latest.
+fn write_all_by(
+    mut stream: &UnixStream,
+    bytes: &[u8],
+    deadline: std::time::Instant,
+) -> io::Result<()> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the reply was not taken in time",
+            ));
+        }
+        stream.set_write_timeout(Some(left))?;
+        match stream.write(rest) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(written) => rest = &rest[written..],
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the reply was not taken in time",
+                ))
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 /// What the bridge thread needs for each request.
 struct Bridge {
     core: CoreAt,
@@ -1041,23 +1154,58 @@ impl Bridge {
 
     /// One API request: one line in, the far side's reply out, or nothing
     /// and a recorded failure.
+    /// Serves one connection at a time until `woken` is closed. Only a
+    /// peer of this account is served (M3).
+    fn accept_until_woken(&self, listener: &UnixListener, woken: &std::io::PipeReader) {
+        use crate::platform::core_link as sys;
+        use std::os::fd::AsRawFd as _;
+        loop {
+            match sys::wait_readable(&[listener.as_raw_fd(), woken.as_raw_fd()]) {
+                Ok(ready) if ready[1] => return,
+                Ok(ready) if !ready[0] => continue,
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::debug!(%err, "fleet bridge wait failed");
+                    return;
+                }
+            }
+            let connection = match listener.accept() {
+                Ok((connection, _)) => connection,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => {
+                    tracing::debug!(%err, "fleet bridge accept failed");
+                    return;
+                }
+            };
+            match sys::peer_uid(&connection) {
+                Ok(uid) if uid == sys::uid() => {}
+                other => {
+                    tracing::warn!(peer = ?other, "fleet bridge refused a connection of another account");
+                    continue;
+                }
+            }
+            if let Err(err) = connection.set_nonblocking(false) {
+                tracing::debug!(%err, "fleet bridge connection stays non-blocking");
+                continue;
+            }
+            self.serve(connection);
+        }
+    }
+
     fn serve(&self, connection: UnixStream) {
         // Each request's failure is its own.
         *lock(&self.failure) = None;
-        if let Err(err) = connection.set_read_timeout(Some(Duration::from_secs(30))) {
-            tracing::debug!(%err, "fleet bridge read timeout unavailable");
-        }
-        let Ok(reader) = connection.try_clone() else {
-            return;
+        let line = match read_line_by(
+            &connection,
+            REQUEST_LIMIT + 1,
+            std::time::Instant::now() + BRIDGE_IO_WAIT,
+        ) {
+            Ok(line) => line,
+            Err(err) => {
+                self.fail(format!("the request could not be read: {err}"));
+                return;
+            }
         };
-        let mut line = Vec::new();
-        let read = BufReader::new(reader)
-            .take(REQUEST_LIMIT as u64 + 2)
-            .read_until(b'\n', &mut line);
-        if let Err(err) = read {
-            self.fail(format!("the request could not be read: {err}"));
-            return;
-        }
         if line.is_empty() {
             return;
         }
@@ -1097,9 +1245,12 @@ impl Bridge {
                     ));
                     return;
                 }
-                let mut connection = connection;
-                if let Err(err) = connection.write_all(&ran.stdout) {
-                    tracing::debug!(%err, "the fleet CLI left before its reply");
+                if let Err(err) = write_all_by(
+                    &connection,
+                    &ran.stdout,
+                    std::time::Instant::now() + BRIDGE_IO_WAIT,
+                ) {
+                    tracing::debug!(%err, "the fleet CLI did not take its reply");
                 }
             }
             Ok(ran) => {
@@ -1135,7 +1286,9 @@ pub(crate) struct FleetLink {
     folder: PathBuf,
     socket: PathBuf,
     failure: Arc<Mutex<Option<String>>>,
-    stop: Arc<AtomicBool>,
+    /// Closed to end the bridge thread's wait: never blocks, unlike a
+    /// connect to a listener whose queue is full (M3).
+    wake: Option<std::io::PipeWriter>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// Disconnected when the thread ends.
     done: mpsc::Receiver<()>,
@@ -1155,7 +1308,7 @@ impl FolderGuard {
 impl Drop for FolderGuard {
     fn drop(&mut self) {
         if let Some(folder) = self.0.take() {
-            let _ = std::fs::remove_dir_all(&folder);
+            let _ = remove_bridge_folder(&folder);
             forget_leftover(&folder);
         }
     }
@@ -1172,11 +1325,12 @@ impl FleetLink {
     ) -> io::Result<Self> {
         let folder = private_folder()?;
         let guard = FolderGuard(Some(folder.clone()));
-        let socket = folder.join("api.sock");
+        let socket = folder.join(SOCKET_NAME);
         let listener = UnixListener::bind(&socket)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+        let (woken, wake) = std::io::pipe()?;
         let failure = Arc::new(Mutex::new(None));
-        let stop = Arc::new(AtomicBool::new(false));
         let bridge = Bridge {
             core,
             name: name.clone(),
@@ -1185,24 +1339,12 @@ impl FleetLink {
             far_path: far.path.clone(),
             failure: Arc::clone(&failure),
         };
-        let thread_stop = Arc::clone(&stop);
         let (done_tx, done) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
             .name(format!("herdr-fleet-{name}"))
             .spawn(move || {
                 let _done = done_tx;
-                for connection in listener.incoming() {
-                    if thread_stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                    match connection {
-                        Ok(connection) => bridge.serve(connection),
-                        Err(err) => {
-                            tracing::debug!(%err, "fleet bridge accept failed");
-                            break;
-                        }
-                    }
-                }
+                bridge.accept_until_woken(&listener, &woken);
             })?;
         let folder = guard.keep();
         Ok(Self {
@@ -1212,7 +1354,7 @@ impl FleetLink {
             folder,
             socket,
             failure,
-            stop,
+            wake: Some(wake),
             thread: Some(thread),
             done,
             lease,
@@ -1242,10 +1384,9 @@ impl Drop for FleetLink {
     fn drop(&mut self) {
         // The lease first: a CLI that is leaving holds no link up.
         self.lease.release();
-        self.stop.store(true, Ordering::Release);
-        // Wakes the accept; the thread sees the stop and ends.
-        let _ = UnixStream::connect(&self.socket);
-        let _ = std::fs::remove_dir_all(&self.folder);
+        // Closing the pipe wakes the thread's wait; it ends.
+        self.wake.take();
+        let _ = remove_bridge_folder(&self.folder);
         forget_leftover(&self.folder);
         if let Some(thread) = self.thread.take() {
             match self.done.recv_timeout(BRIDGE_JOIN_WAIT) {
@@ -1276,12 +1417,11 @@ fn private_folder() -> io::Result<PathBuf> {
         PathBuf::from("/tmp")
     };
     remove_dead_folders(&base);
-    let folder = private_folder_in(&base, unguessable_leaf)?;
-    remember_leftover(folder.clone());
-    Ok(folder)
+    private_folder_in(&base, unguessable_leaf)
 }
 
 const FOLDER_PREFIX: &str = "herdr-fleet-";
+const SOCKET_NAME: &str = "api.sock";
 
 fn unguessable_leaf() -> String {
     use std::hash::{BuildHasher as _, Hasher as _};
@@ -1302,12 +1442,32 @@ fn unguessable_leaf() -> String {
     )
 }
 
+/// The pid in a name `unguessable_leaf` makes, `herdr-fleet-<pid>-<16
+/// hex>`, and `None` for any other name.
+fn bridge_leaf_pid(name: &str) -> Option<u32> {
+    let (pid, random) = name.strip_prefix(FOLDER_PREFIX)?.split_once('-')?;
+    let plain_pid = !pid.is_empty()
+        && pid.len() <= 10
+        && !pid.starts_with('0')
+        && pid.bytes().all(|byte| byte.is_ascii_digit());
+    let random_part = random.len() == 16
+        && random
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    (plain_pid && random_part)
+        .then(|| pid.parse().ok())
+        .flatten()
+}
+
 /// Makes `base/<leaf>` with mode 0700, trying fresh leaves while the name
-/// is taken (as `platform::fallback` does for its ssh folder).
+/// is taken (as `platform::fallback` does for its ssh folder), and
+/// remembers it for the termination cleanup in the same step (M3).
 fn private_folder_in(base: &Path, mut leaf: impl FnMut() -> String) -> io::Result<PathBuf> {
     for _ in 0..100 {
         let folder = base.join(leaf());
-        match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
+        match make_leftover(&folder, || {
+            std::fs::DirBuilder::new().mode(0o700).create(&folder)
+        }) {
             Ok(()) => return Ok(folder),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
@@ -1319,31 +1479,49 @@ fn private_folder_in(base: &Path, mut leaf: impl FnMut() -> String) -> io::Resul
     ))
 }
 
+/// Removes a bridge folder: its socket, then the folder if that left it
+/// empty. Anything else in it, or a socket that is no socket, stays.
+fn remove_bridge_folder(folder: &Path) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let socket = folder.join(SOCKET_NAME);
+    match std::fs::symlink_metadata(&socket) {
+        Ok(meta) if meta.file_type().is_socket() => std::fs::remove_file(&socket)?,
+        Ok(_) => {
+            return Err(io::Error::other(format!(
+                "{} is no socket, so its folder stays",
+                socket.display()
+            )))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::fs::remove_dir(folder)
+}
+
 /// Removes this account's bridge folders whose fleet CLI is gone (killed
-/// outright, so no signal cleanup ran).
+/// outright, so no signal cleanup ran): only names the bridge makes, only
+/// 0700 folders of this account, and only their socket and then the empty
+/// folder (security review 2026-11-23 M3).
 fn remove_dead_folders(base: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
-    // SAFETY: getuid has no failure mode.
-    let uid = unsafe { libc::getuid() };
+    let uid = crate::platform::core_link::uid();
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix(FOLDER_PREFIX))
-            .and_then(|rest| rest.split('-').next())
-            .and_then(|pid| pid.parse::<u32>().ok())
-        else {
+        let Some(pid) = entry.file_name().to_str().and_then(bridge_leaf_pid) else {
             continue;
         };
         if pid == std::process::id() || crate::platform::core_link::process_alive(pid) {
             continue;
         }
         let path = entry.path();
-        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir() && meta.uid() == uid) {
-            let _ = std::fs::remove_dir_all(&path);
+        let ours = std::fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_dir() && meta.uid() == uid && meta.mode() & 0o777 == 0o700);
+        if ours {
+            if let Err(err) = remove_bridge_folder(&path) {
+                tracing::debug!(%err, path = %path.display(), "a dead fleet CLI's folder stays");
+            }
         }
     }
 }

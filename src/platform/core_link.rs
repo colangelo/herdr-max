@@ -273,9 +273,81 @@ pub(crate) fn read_within(
     Ok(Some(read as usize))
 }
 
+/// The uid this process runs as.
+pub(crate) fn uid() -> u32 {
+    // SAFETY: getuid has no failure mode.
+    unsafe { libc::getuid() }
+}
+
+/// The uid of the process at the other end of a connected Unix socket.
+#[cfg(target_os = "linux")]
+pub(crate) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: cred and len are valid for the call and sized for SO_PEERCRED.
+    let done = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if done != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+/// The uid of the process at the other end of a connected Unix socket.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: uid and gid outlive the call.
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// Waits until one of `fds` is readable or closed, and says which are.
+pub(crate) fn wait_readable(fds: &[RawFd]) -> io::Result<Vec<bool>> {
+    let mut polls: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    loop {
+        // SAFETY: the pollfds outlive the call, and their count is theirs.
+        let ready = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, -1) };
+        if ready >= 0 {
+            return Ok(polls.iter().map(|poll| poll.revents != 0).collect());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_peer_of_this_process_is_this_uid() {
+        let (one, _other) = std::os::unix::net::UnixStream::pair().expect("pair");
+        assert_eq!(peer_uid(&one).expect("peer"), uid());
+    }
 
     #[test]
     fn the_passwd_home_is_absolute_and_named() {
