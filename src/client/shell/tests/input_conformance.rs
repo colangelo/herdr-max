@@ -384,6 +384,7 @@ impl HerdrPath {
     /// Feed one host write, then let idle flushes run. Returns None when Herdr
     /// itself consumed the key (prefix, binding, mode change).
     fn feed(&mut self, host_bytes: &[u8]) -> Option<Vec<u8>> {
+        let labels_before = self.state.pane_labels_explicit;
         let mut chunks = self.framer.push(host_bytes);
         for _ in 0..3 {
             if !self.framer.has_pending_input() {
@@ -395,13 +396,14 @@ impl HerdrPath {
             .iter()
             .map(|chunk| self.state.handle_input_bytes(chunk))
             .collect();
-        self.deliver(outcomes)
+        self.deliver(outcomes, labels_before)
     }
 
     /// Feed separate host reads, each inside the framer's idle window, the way the Unix client
     /// loop does: an ESC held from one read joins the next read's first key, and that chunk's
     /// Alt key is marked (fork issue 331). Returns None when Herdr kept the input.
     fn feed_reads(&mut self, reads: &[&[u8]]) -> Option<Vec<u8>> {
+        let labels_before = self.state.pane_labels_explicit;
         let mut outcomes = Vec::new();
         for read in reads {
             let (chunks, held_escape_alt) = self.framer.push_noting_held_escape(read);
@@ -421,21 +423,23 @@ impl HerdrPath {
                     .map(|chunk| self.state.handle_input_bytes(chunk)),
             );
         }
-        self.deliver(outcomes)
+        self.deliver(outcomes, labels_before)
     }
 
     /// Route client outcomes through server pane input and collect the bytes the
-    /// pane receives. None when Herdr kept the input for itself.
-    fn deliver(&mut self, outcomes: Vec<ClientShellInput>) -> Option<Vec<u8>> {
+    /// pane receives. None when Herdr kept the input for itself. `labels_before`: whether the
+    /// numbered pane labels were up before this input.
+    fn deliver(&mut self, outcomes: Vec<ClientShellInput>, labels_before: bool) -> Option<Vec<u8>> {
         let mut events = Vec::new();
         let mut herdr_owned = false;
         for outcome in outcomes {
             herdr_owned |= self.absorb(outcome, &mut events);
         }
-        // The info labels (alt+i, fork issue 331) own the next key too: they close on it.
+        // A key that opened the numbered labels (alt+i, fork issue 331) was herdr's; labels
+        // already up before it do not make it so.
         herdr_owned |= self.state.mode != ClientShellMode::Terminal
             || self.state.overlay.is_some()
-            || self.state.pane_labels_explicit;
+            || (!labels_before && self.state.pane_labels_explicit);
         if herdr_owned {
             return None;
         }
@@ -682,6 +686,18 @@ fn print_report(report: &Report) {
 // also start host replies, so they are never forwarded and the reply-tail
 // discard can swallow the next keystroke (#344).
 const KEYBOARD_FAILURES_BASELINE: usize = 60;
+/// Every keystroke herdr keeps for itself under the default config, on any host and pane mode:
+/// the prefix, the direct (no-prefix) default bindings, and the page keys a pane without host
+/// scrollback leaves to herdr. A new default direct binding fails the keyboard check until it is
+/// listed here, so taking a key from every pane program is a deliberate choice.
+const HERDR_OWNED_DEFAULT_KEYS: &[&str] = &[
+    // keys.info_mode (fork issue 331).
+    "alt+i",
+    // keys.prefix.
+    "ctrl+b",
+    "plain+pagedown",
+    "plain+pageup",
+];
 const MOUSE_FAILURES_BASELINE: usize = 96;
 // Remaining: legacy hosts split right after ESC[, which is also Alt+[.
 const SPLIT_IDLE_MISMATCH_BASELINE: usize = 207;
@@ -1274,7 +1290,8 @@ async fn ime_committed_text_reaches_every_pane_mode_exactly_once() {
                             .iter()
                             .map(|chunk| herdr.state.handle_input_bytes(chunk))
                             .collect();
-                        herdr.deliver(outcomes)
+                        // A fresh path: no labels were up.
+                        herdr.deliver(outcomes, false)
                     }
                 }
                 .expect("text reaches the pane");
@@ -1807,7 +1824,10 @@ async fn wezterm_escape_tap_reaches_the_pane_with_doubled_escape_preserved() {
                 .iter()
                 .map(|chunk| herdr.state.handle_input_bytes(chunk))
                 .collect();
-            let got = herdr.deliver(outcomes).expect("escape reaches the pane");
+            // A fresh path: no labels were up.
+            let got = herdr
+                .deliver(outcomes, false)
+                .expect("escape reaches the pane");
             assert_eq!(show(&got), show(want), "{label}, pane {}", show(pane_mode));
         }
     }
@@ -1834,6 +1854,16 @@ async fn keyboard_transparency_conformance() {
         report.failures.len() <= KEYBOARD_FAILURES_BASELINE,
         "keyboard transparency regressed: {} failures > {KEYBOARD_FAILURES_BASELINE}",
         report.failures.len()
+    );
+    let owned: std::collections::BTreeSet<&str> = report
+        .owned
+        .iter()
+        .filter_map(|line| line.rsplit('\t').next())
+        .collect();
+    assert_eq!(
+        owned.into_iter().collect::<Vec<_>>(),
+        HERDR_OWNED_DEFAULT_KEYS,
+        "the keys herdr keeps from the pane changed; list a new default binding in HERDR_OWNED_DEFAULT_KEYS"
     );
 }
 
@@ -2086,12 +2116,13 @@ mod windows_records {
         record: crate::input::WindowsKeyRecord,
         layout: HKL,
     ) -> Option<Vec<u8>> {
+        let labels_before = herdr.state.pane_labels_explicit;
         // The generated record belongs to this layout, independently of the
         // foreground window's layout while the test runs.
         let mut events = input.key_in_layout(record, layout);
         events.extend(input.idle());
         let outcome = herdr.state.handle_client_events(&events);
-        herdr.deliver(vec![outcome])
+        herdr.deliver(vec![outcome], labels_before)
     }
 
     fn run() -> Report {
