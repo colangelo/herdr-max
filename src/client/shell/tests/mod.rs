@@ -282,6 +282,7 @@ mod force_confirm;
 mod fork_modals;
 mod graphics;
 mod indicator_clicks;
+mod info_resize;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
@@ -321,12 +322,14 @@ fn resize_summary_survives_composition_with_connected_version() {
     assert!(text.contains(" RESIZE   window  180x30 "), "{text}");
     // A dim `version` label, then the version as a green chip (fork issues 174, 264).
     assert!(
-        text.contains("  version  connected-build     h/l width  j/k height  esc done"),
+        text.contains(
+            "  version  connected-build     h/l width  j/k height  1 focus  i info  esc done"
+        ),
         "the hints come after the version (fork issue 268): {text}"
     );
     assert!(!text.contains("VERSION"), "{text}");
     // RESIZE keeps its own colour for everything it paints: the chip, the keys and the size badges.
-    let mauve = crate::protocol::color_to_u32(state.config.palette.mauve);
+    let mauve = crate::protocol::color_to_u32(state.config.palette.resize_violet());
     let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), "h/l width");
     assert_eq!(frame.cells[usize::from(y) * 180 + usize::from(x)].fg, mauve);
     let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), " RESIZE ");

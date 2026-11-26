@@ -406,7 +406,10 @@ impl HerdrPath {
         for outcome in outcomes {
             herdr_owned |= self.absorb(outcome, &mut events);
         }
-        herdr_owned |= self.state.mode != ClientShellMode::Terminal || self.state.overlay.is_some();
+        // The info labels (alt+i, fork issue 331) own the next key too: they close on it.
+        herdr_owned |= self.state.mode != ClientShellMode::Terminal
+            || self.state.overlay.is_some()
+            || self.state.pane_labels_explicit;
         if herdr_owned {
             return None;
         }

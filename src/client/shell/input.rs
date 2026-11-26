@@ -1166,8 +1166,12 @@ impl ClientShellState {
             || resize_bindings.matches_direct_key(key)
         {
             self.close_pane_labels();
+            self.resize_focus = None;
             self.mode = self.copy_or_terminal_mode();
             outcome.repaint = true;
+            return;
+        }
+        if self.resize_label_key(key, outcome) {
             return;
         }
 

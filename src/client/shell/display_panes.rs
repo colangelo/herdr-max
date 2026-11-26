@@ -10,6 +10,56 @@ impl ClientShellState {
         self.pane_labels_explicit = explicit;
         self.pane_labels_until = Some(now + self.config.display_panes_duration);
     }
+    /// Info mode (fork issue 331): the numbered labels for `ui.display_panes_ms`, keys closing
+    /// them. Resize mode is its sibling: the same labels, kept until it is left.
+    pub(super) fn enter_info_mode(&mut self, now: std::time::Instant) {
+        self.arm_pane_labels(true, now);
+        self.mode = ClientShellMode::Terminal;
+        self.resize_focus = None;
+    }
+    /// Resize mode: the same labels as info mode with no deadline; `i` goes back to info mode.
+    pub(super) fn enter_resize_mode(&mut self) {
+        self.close_pane_labels();
+        self.mode = ClientShellMode::Resize;
+        self.resize_focus = None;
+    }
+    /// The pane the digit `digit` names in the numbered labels.
+    fn numbered_pane(&self, digit: char) -> Option<crate::api::schema::PaneTarget> {
+        let index = (digit as usize).checked_sub('1' as usize)?;
+        self.hits
+            .panes
+            .get(index)
+            .map(|pane| crate::api::schema::PaneTarget {
+                pane_id: pane.pane_id.clone(),
+            })
+    }
+    /// A key in resize mode that belongs to the labels: a digit focuses that pane and stays in
+    /// resize mode, `i` goes to info mode. Returns whether the key was taken.
+    pub(super) fn resize_label_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        match key.code {
+            KeyCode::Char(digit @ '1'..='9') => {
+                if let Some(target) = self.numbered_pane(digit) {
+                    self.resize_focus = Some(target.pane_id.clone());
+                    self.push_endpoint_method(
+                        crate::api::schema::Method::PaneFocus(target),
+                        outcome,
+                    );
+                }
+                outcome.repaint = true;
+                true
+            }
+            KeyCode::Char('i') => {
+                self.enter_info_mode(std::time::Instant::now());
+                outcome.repaint = true;
+                true
+            }
+            _ => false,
+        }
+    }
     pub(super) fn pane_labels_visible(&self) -> bool {
         self.pane_labels_until.is_some()
             || self.mode == ClientShellMode::Resize
@@ -46,14 +96,14 @@ impl ClientShellState {
         if !self.pane_labels_explicit {
             return false;
         }
+        if key.code == KeyCode::Char('r') {
+            self.enter_resize_mode();
+            outcome.repaint = true;
+            return true;
+        }
         if let KeyCode::Char(digit @ '1'..='9') = key.code {
-            if let Some(pane) = self.hits.panes.get((digit as usize) - ('1' as usize)) {
-                self.push_endpoint_method(
-                    crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
-                        pane_id: pane.pane_id.clone(),
-                    }),
-                    outcome,
-                );
+            if let Some(target) = self.numbered_pane(digit) {
+                self.push_endpoint_method(crate::api::schema::Method::PaneFocus(target), outcome);
             }
         }
         self.close_pane_labels();
@@ -73,17 +123,20 @@ enum LabelPart {
     Size,
     /// The pane id, plain grey.
     Id,
+    /// The herdr-max version, plain green like the bar's version chip (fork issue 331).
+    Version,
 }
 
 const LABEL_GAP: &str = "  ";
 
-/// A pane label's parts in order: [digit] name, size, id. When they do not fit
-/// `maximum` cells the name is shortened first, then the id is dropped, then
-/// the name; the size always stays.
+/// A pane label's parts in order: [digit] name, size, version, id. When they do not fit
+/// `maximum` cells the name is shortened first, then the id is dropped, then the name, then the
+/// version; the size always stays.
 fn label_parts(
     index: usize,
     address: &str,
     name: &str,
+    version: &str,
     inner: Rect,
     maximum: usize,
     numbered: bool,
@@ -103,7 +156,7 @@ fn label_parts(
             .sum::<usize>()
             + LABEL_GAP.len() * parts.len().saturating_sub(1)
     };
-    let build = |name: Option<String>, id: bool| {
+    let build = |name: Option<String>, id: bool, with_version: bool| {
         let mut parts = Vec::new();
         if let Some(digit) = &digit {
             parts.push((LabelPart::Digit, digit.clone()));
@@ -112,23 +165,35 @@ fn label_parts(
             parts.push((LabelPart::Name, name));
         }
         parts.push((LabelPart::Size, size.clone()));
+        if with_version {
+            parts.push((LabelPart::Version, version.to_owned()));
+        }
         if id {
             parts.push((LabelPart::Id, address.to_owned()));
         }
         parts
     };
-    let full = build(Some(name.to_owned()), true);
+    let full = build(Some(name.to_owned()), true, true);
     if width(&full) <= maximum {
         return full;
     }
     for id in [true, false] {
-        let without_name = width(&build(None, id)) + LABEL_GAP.len();
+        let without_name = width(&build(None, id, true)) + LABEL_GAP.len();
         let budget = maximum.saturating_sub(without_name);
         if budget >= 4 {
-            return build(Some(crate::ui::truncate_end(name, budget).to_string()), id);
+            return build(
+                Some(crate::ui::truncate_end(name, budget).to_string()),
+                id,
+                true,
+            );
         }
     }
-    build(None, false)
+    let bare = build(None, false, true);
+    if width(&bare) <= maximum {
+        bare
+    } else {
+        build(None, false, false)
+    }
 }
 
 /// The label's spans: the name bold in the toast's green, the size reversed in
@@ -153,6 +218,7 @@ fn label_spans(parts: Vec<(LabelPart, String)>, mode_colour: Color, p: &Palette)
                 .bg(mode_colour)
                 .add_modifier(Modifier::BOLD),
             LabelPart::Id => Style::default().fg(p.overlay1).bg(p.panel_bg),
+            LabelPart::Version => Style::default().fg(p.green).bg(p.panel_bg),
         };
         spans.push(Span::styled(text, style));
     }
@@ -164,11 +230,12 @@ fn label_text(
     index: usize,
     address: &str,
     name: &str,
+    version: &str,
     inner: Rect,
     maximum: usize,
     numbered: bool,
 ) -> String {
-    label_parts(index, address, name, inner, maximum, numbered)
+    label_parts(index, address, name, version, inner, maximum, numbered)
         .into_iter()
         .map(|(_, text)| text)
         .collect::<Vec<_>>()
@@ -192,6 +259,19 @@ fn connected_version<'a>(
                 .map(String::as_str)
         })
         .unwrap_or("unknown")
+}
+
+/// `colour` mixed halfway to its own grey, like [`Palette::muted_red`]; `fallback` when the
+/// terminal names the colour rather than gives it as RGB.
+fn muted(colour: Color, fallback: Color) -> Color {
+    match colour {
+        Color::Rgb(r, g, b) => {
+            let grey = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round();
+            let mix = |channel: u8| ((f32::from(channel) + grey) / 2.0).round() as u8;
+            Color::Rgb(mix(r), mix(g), mix(b))
+        }
+        _ => fallback,
+    }
 }
 
 fn pane_name<'a>(snapshot: &'a ClientShellSnapshot, pane_id: &str) -> &'a str {
@@ -234,9 +314,18 @@ pub(super) fn paint(
     let mut covered = Vec::new();
     let p = &state.config.palette;
     let resize = state.mode == ClientShellMode::Resize;
-    // PANES is red and RESIZE mauve: each mode paints its chip, its keys and its size badges in its
-    // own colour (docs/ui-style.md, Mode colour).
-    let mode_colour = if resize { p.mauve } else { p.red };
+    // Info mode and resize mode are one overlay (fork issue 331): the same number, size and
+    // version labels, and only the colour tells them apart. PANES is red and RESIZE violet:
+    // each mode paints its chip, its keys, its size badges and its borders in its own colour
+    // (docs/ui-style.md, Mode colour).
+    let numbered = state.pane_labels_explicit || resize;
+    let mode_colour = if resize { p.resize_violet() } else { p.red };
+    let muted_colour = if resize {
+        muted(mode_colour, p.overlay1)
+    } else {
+        p.muted_red()
+    };
+    let version = connected_version(state, snapshot);
     // The surface preserves the server tile traversal used by the fork's
     // pane_infos. Geometric sorting changes numbering for mixed column splits.
     let panes = &state.hits.panes;
@@ -255,20 +344,21 @@ pub(super) fn paint(
             index,
             &pane.pane_id,
             name,
+            version,
             inner,
             usize::from(if boxed {
                 inner.width - chrome
             } else {
                 inner.width
             }),
-            state.pane_labels_explicit,
+            numbered,
         );
         let line = label_spans(parts, mode_colour, p);
         let width = u16::try_from(line.width())
             .unwrap_or(u16::MAX)
             .min(inner.width);
         let active = snapshot.focused_pane_id.as_deref() == Some(pane.pane_id.as_str());
-        let border = if active { p.red } else { p.muted_red() };
+        let border = if active { mode_colour } else { muted_colour };
         let rect = if boxed {
             let box_width = (width + 4).min(inner.width);
             Rect::new(
@@ -299,7 +389,7 @@ pub(super) fn paint(
         } else {
             Paragraph::new(line).render(rect, buffer);
         }
-        if state.pane_labels_explicit {
+        if numbered {
             for y in pane.rect.y..pane.rect.bottom() {
                 for x in pane.rect.x..pane.rect.right() {
                     if !super::contains(pane.inner_rect, (x, y))
@@ -338,7 +428,6 @@ pub(super) fn paint(
             })
             .bg(mode_colour)
             .add_modifier(Modifier::BOLD);
-        let version = connected_version(state, snapshot);
         let spans = summary_spans(
             buffer.area,
             layout.pane_surface,
@@ -419,6 +508,24 @@ fn summary_spans<'a>(
             Span::styled(" width  ", dim),
             Span::styled("j/k", key),
             Span::styled(" height  ", dim),
+        ]);
+        if count > 0 {
+            let last = count.min(9);
+            hints.extend([
+                Span::styled(
+                    if last == 1 {
+                        "1".to_owned()
+                    } else {
+                        format!("1-{last}")
+                    },
+                    key,
+                ),
+                Span::styled(" focus  ", dim),
+            ]);
+        }
+        hints.extend([
+            Span::styled("i", key),
+            Span::styled(" info  ", dim),
             Span::styled("esc", key),
             Span::styled(" done", dim),
         ]);
@@ -437,7 +544,12 @@ fn summary_spans<'a>(
                 Span::styled(" focus  ", dim),
             ]);
         }
-        hints.extend([Span::styled("any key", key), Span::styled(" close", dim)]);
+        hints.extend([
+            Span::styled("r", key),
+            Span::styled(" resize  ", dim),
+            Span::styled("any key", key),
+            Span::styled(" close", dim),
+        ]);
     }
     let version_spans = [
         Span::raw("  "),
@@ -529,7 +641,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("  version  server-build     1-2 focus  any key close"),
+            text.ends_with("  version  server-build     1-2 focus  r resize  any key close"),
             "{text}"
         );
         let filled: Vec<&str> = spans
@@ -564,18 +676,21 @@ mod tests {
             true,
             "server-build",
             p,
-            chip(p.mauve),
+            chip(p.resize_violet()),
             140,
         );
-        assert_eq!(find(&resize, "h/l").fg, Some(p.mauve));
-        assert_eq!(find(&resize, "esc").fg, Some(p.mauve));
+        assert_eq!(find(&resize, "h/l").fg, Some(p.resize_violet()));
+        assert_eq!(find(&resize, "esc").fg, Some(p.resize_violet()));
         let text: String = resize.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with(" RESIZE   window "), "{text}");
-        assert!(text.ends_with("esc done"), "the hints come last: {text}");
+        assert!(
+            text.ends_with("1-2 focus  i info  esc done"),
+            "the hints come last: {text}"
+        );
         assert_eq!(
             resize
                 .iter()
-                .filter(|s| s.style.bg == Some(p.mauve))
+                .filter(|s| s.style.bg == Some(p.resize_violet()))
                 .count(),
             3,
             "the RESIZE chip and the two sizes"
@@ -612,34 +727,44 @@ mod tests {
     fn label_reads_name_size_id_and_shortens_the_name_then_drops_the_id() {
         // Fork issue 263: title first, then the size chip, then the pane id.
         let inner = Rect::new(0, 0, 80, 20);
-        let parts = label_parts(0, "w5:p16", "herdr", inner, 80, false);
+        let parts = label_parts(0, "w5:p16", "herdr", "0.11.0", inner, 80, false);
         assert_eq!(
             parts,
             vec![
                 (LabelPart::Name, "herdr".to_owned()),
                 (LabelPart::Size, " 80x20 ".to_owned()),
+                (LabelPart::Version, "0.11.0".to_owned()),
                 (LabelPart::Id, "w5:p16".to_owned()),
             ]
         );
         assert_eq!(
-            label_text(0, "w5:p16", "herdr", inner, 80, true),
-            "1  herdr   80x20   w5:p16"
+            label_text(0, "w5:p16", "herdr", "0.11.0", inner, 80, true),
+            "1  herdr   80x20   0.11.0  w5:p16"
         );
 
-        let text = label_text(0, "w5:p16", "very long name", inner, 20, true);
+        let text = label_text(0, "w5:p16", "very long name", "0.11.0", inner, 30, true);
         assert!(text.contains(" 80x20 "), "the size always stays: {text}");
+        assert!(text.contains("0.11.0"), "the version stays: {text}");
         assert!(
             !text.contains("w5:p16"),
             "the id goes before the name: {text}"
         );
-        assert!(super::super::render::display_width(&text) <= 20);
+        assert!(super::super::render::display_width(&text) <= 30);
     }
 
     #[test]
     fn label_styles_name_green_size_reversed_id_plain_grey() {
         let p = Palette::catppuccin();
         let line = label_spans(
-            label_parts(0, "w5:pV", "herdr", Rect::new(0, 0, 138, 52), 80, false),
+            label_parts(
+                0,
+                "w5:pV",
+                "herdr",
+                "0.11.0",
+                Rect::new(0, 0, 138, 52),
+                80,
+                false,
+            ),
             p.red,
             &p,
         );

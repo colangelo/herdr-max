@@ -414,6 +414,7 @@ pub struct Keybinds {
     pub open_work_panel: ActionKeybinds,
     pub command_palette: ActionKeybinds,
     pub display_panes: ActionKeybinds,
+    pub info_mode: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -643,6 +644,7 @@ impl Config {
             open_work_panel: empty_action!(),
             command_palette: empty_action!(),
             display_panes: empty_action!(),
+            info_mode: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -805,6 +807,7 @@ impl Config {
             apply_action!(keybinds.open_work_panel, open_work_panel, source);
             apply_action!(keybinds.command_palette, command_palette, source);
             apply_action!(keybinds.display_panes, display_panes, source);
+            apply_action!(keybinds.info_mode, info_mode, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);

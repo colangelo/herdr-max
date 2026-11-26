@@ -39,7 +39,11 @@ fn each_mode_bar_paints_its_chip_and_its_keys_in_the_modes_colour() {
         (ClientShellMode::Resize, " RESIZE ", "h/l", "mauve"),
     ] {
         let (buffer, p) = mode_bar(mode);
-        let colour = if colour == "mauve" { p.mauve } else { p.accent };
+        let colour = if colour == "mauve" {
+            p.resize_violet()
+        } else {
+            p.accent
+        };
         let chip_x = at(&buffer, chip);
         assert_eq!(buffer[(chip_x, 2)].bg, colour, "{chip} chip");
         assert!(buffer[(chip_x, 2)].modifier.contains(Modifier::BOLD));
@@ -118,7 +122,7 @@ pub(super) fn capture(name: &str, frame: &FrameData, rows: std::ops::Range<u16>,
                 'A'
             } else if cell.bg == c(p.red) {
                 'P'
-            } else if cell.bg == c(p.mauve) {
+            } else if cell.bg == c(p.resize_violet()) {
                 'M'
             } else if cell.bg == c(crate::app::state::SYNC_YELLOW) {
                 'Y'
@@ -130,7 +134,7 @@ pub(super) fn capture(name: &str, frame: &FrameData, rows: std::ops::Range<u16>,
                 'k'
             } else if cell.fg == c(p.red) {
                 'p'
-            } else if cell.fg == c(p.mauve) {
+            } else if cell.fg == c(p.resize_violet()) {
                 'm'
             } else if cell.fg == c(p.overlay0) {
                 'd'

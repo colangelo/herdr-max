@@ -107,6 +107,25 @@ impl Palette {
         }
     }
 
+    /// The RESIZE mode colour (fork issue 331): the theme's `mauve` pushed away from its own grey
+    /// by 40%, so a violet that reads a bit more saturated than the mauve it came from while a
+    /// custom theme's mauve still carries through. A mauve the terminal names rather than gives
+    /// as RGB cannot be mixed and stays as it is.
+    pub fn resize_violet(&self) -> Color {
+        match self.mauve {
+            Color::Rgb(r, g, b) => {
+                let grey = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+                let push = |channel: u8| {
+                    (grey + (f32::from(channel) - grey) * 1.4)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                Color::Rgb(push(r), push(g), push(b))
+            }
+            other => other,
+        }
+    }
+
     pub(crate) fn accent_foreground(&self) -> Color {
         self.accent_fg.unwrap_or(match self.panel_bg {
             Color::Reset => self.surface_dim,

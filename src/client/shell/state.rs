@@ -1086,6 +1086,9 @@ pub(crate) struct ClientShellState {
     pub(super) endpoint_versions: HashMap<ClientEndpointId, String>,
     pub(super) pane_labels_until: Option<std::time::Instant>,
     pub(super) pane_labels_explicit: bool,
+    /// The pane a digit just focused in resize mode, until the server's snapshot shows the
+    /// focus moved: the next resize key must act on it, not on the focus the snapshot still has.
+    pub(super) resize_focus: Option<String>,
     pub(super) machine_diagnostics: super::machine_diagnostics::MachineDiagnostics,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
@@ -1326,6 +1329,7 @@ impl ClientShellState {
             endpoint_versions: HashMap::new(),
             pane_labels_until: None,
             pane_labels_explicit: false,
+            resize_focus: None,
             activity_deadline: None,
             selection_repaint_deadline: None,
             hits: ShellHitMap::default(),
@@ -1605,6 +1609,14 @@ impl ClientShellState {
         // content comparisons, but retire speculative frames from the old connection.
         if generation_changed {
             self.pending_pane_surface = None;
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .map(|current| &current.focused_pane_id)
+            != Some(&snapshot.focused_pane_id)
+        {
+            self.resize_focus = None;
         }
         self.active_snapshot_generation = generation;
         self.graphics.set_scope(&graphics_scope);

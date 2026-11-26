@@ -59,7 +59,7 @@ pub(super) fn render_mode_bar(
     // A mode keeps its own colour for its chip and its keys; the accent is the colour of the
     // modes without one (docs/ui-style.md, Mode colour).
     let mode_colour = if mode == ClientShellMode::Resize {
-        palette.mauve
+        palette.resize_violet()
     } else {
         palette.accent
     };

@@ -329,6 +329,11 @@ pub(crate) fn command_table(
                     "display pane labels",
                 ),
                 act(
+                    KeybindAction::InfoMode,
+                    binding_label(&keybinds.info_mode),
+                    "info mode (no prefix)",
+                ),
+                act(
                     KeybindAction::SplitVertical,
                     binding_label(&keybinds.split_vertical),
                     "split vertical",

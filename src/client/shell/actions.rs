@@ -67,9 +67,12 @@ impl ClientShellState {
                     }
                     return;
                 }
-                if action == crate::input::KeybindAction::DisplayPanes {
-                    self.arm_pane_labels(true, std::time::Instant::now());
-                    self.mode = ClientShellMode::Terminal;
+                if matches!(
+                    action,
+                    crate::input::KeybindAction::DisplayPanes
+                        | crate::input::KeybindAction::InfoMode
+                ) {
+                    self.enter_info_mode(std::time::Instant::now());
                     outcome.repaint = true;
                     return;
                 }
@@ -253,7 +256,7 @@ impl ClientShellState {
                     return;
                 }
                 if action == crate::input::KeybindAction::EnterResizeMode {
-                    self.mode = ClientShellMode::Resize;
+                    self.enter_resize_mode();
                     outcome.repaint = true;
                     return;
                 }
@@ -1140,7 +1143,12 @@ impl ClientShellState {
         let snapshot = self.snapshot.as_deref()?;
         let focused_workspace = snapshot.focused_workspace_id.clone()?;
         let focused_tab = snapshot.focused_tab_id.clone();
-        let focused_pane = snapshot.focused_pane_id.clone();
+        // In resize mode a digit may have moved the focus the snapshot has not shown yet.
+        let focused_pane = self
+            .resize_focus
+            .clone()
+            .filter(|_| self.mode == ClientShellMode::Resize)
+            .or_else(|| snapshot.focused_pane_id.clone());
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft
             | KeybindAction::SwapPaneLeft

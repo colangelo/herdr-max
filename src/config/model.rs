@@ -756,6 +756,9 @@ pub struct KeysConfig {
     /// Show every pane's number, address, name and size in characters, and the
     /// window size, until the next key or for 3 seconds. Default: "prefix+i".
     pub display_panes: BindingConfig,
+    /// Open the same pane numbers, sizes and version view directly, without the prefix; `r` in
+    /// it enters resize mode. Default: "alt+i".
+    pub info_mode: BindingConfig,
     /// Select the previous workspace. Unset by default.
     pub previous_workspace: BindingConfig,
     /// Select the next workspace. Unset by default.
@@ -946,6 +949,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     display_panes: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    info_mode: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     previous_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_workspace: Option<BindingConfig>,
@@ -1134,6 +1139,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_work_panel);
         apply_field!(command_palette);
         apply_field!(display_panes);
+        apply_field!(info_mode);
         apply_field!(previous_workspace);
         apply_field!(next_workspace);
         apply_field!(previous_agent);
@@ -1264,6 +1270,7 @@ impl KeysConfig {
         copy_effective_action_field!(open_work_panel, keybinds.open_work_panel);
         copy_effective_action_field!(command_palette, keybinds.command_palette);
         copy_effective_action_field!(display_panes, keybinds.display_panes);
+        copy_effective_action_field!(info_mode, keybinds.info_mode);
         copy_effective_action_field!(previous_workspace, keybinds.previous_workspace);
         copy_effective_action_field!(next_workspace, keybinds.next_workspace);
         copy_effective_action_field!(previous_agent, keybinds.previous_agent);
@@ -2024,6 +2031,7 @@ impl Default for KeysConfig {
             open_work_panel: BindingConfig::empty(),
             command_palette: BindingConfig::one("prefix+:"),
             display_panes: BindingConfig::one("prefix+i"),
+            info_mode: BindingConfig::one("alt+i"),
             previous_workspace: BindingConfig::empty(),
             next_workspace: BindingConfig::empty(),
             previous_agent: BindingConfig::empty(),

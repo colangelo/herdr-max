@@ -674,6 +674,12 @@
           "description": "Show every pane's number, address, name and size in characters, and the window size, until the next key or for 3 seconds."
         },
         {
+          "key": "keys.info_mode",
+          "type": "keybinding",
+          "default": "\"alt+i\"",
+          "description": "Open the pane labels (number, size and version of every pane) directly, without the prefix. r in it enters resize mode."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",

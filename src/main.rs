@@ -171,6 +171,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # open_todo_board = ""    # optional, unset by default; every pane's todos in one board
 # open_work_panel = ""    # optional, unset by default; forge issues, decisions, work in flight and agents' tasks
 # command_palette = "prefix+:"  # one bar for every command and its shortcut; also sends a message to a session
+# info_mode = "alt+i"  # the same view without the prefix; r in it enters resize mode
 # display_panes = "prefix+i"  # every pane's number, address, name and size, like tmux's prefix+q
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
