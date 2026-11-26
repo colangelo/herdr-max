@@ -1722,6 +1722,12 @@ mod tests {
             // herdr-max (fork issue 330): 0.10 is above 0.9.1, not below it.
             (Some("herdr 0.10.0\n"), true),
             (Some("herdr 0.10.0 (build 20261126-ab12cd3)\n"), true),
+            // fork issue 331: the max build names itself herdr-max; the version is still read.
+            (Some("herdr-max 0.11.0 (build 20261126-9d5a725)\n"), true),
+            // The build id's digits are never the version: 20261126 would pass every floor, a
+            // 0.9.0 build must still not batch.
+            (Some("herdr-max 0.9.0 (build 20261126-9d5a725)\n"), false),
+            (Some("herdr-max 0.9.0 (build 20261126)\n"), false),
             // Unknown counts as batching, the behaviour since v0.9.1.
             (Some("not a version\n"), true),
             (None, true),

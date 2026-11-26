@@ -99,7 +99,7 @@ if [ -n "$ALIAS" ]; then
   end
 
   test do
-    assert_match "herdr #{version}", shell_output("#{bin}/herdr-beta --version")
+    assert_match "herdr-max #{version}", shell_output("#{bin}/herdr-beta --version")
   end
 end
 FORMULA
@@ -126,7 +126,7 @@ else
   end
 
   test do
-    assert_match "herdr #{version}", shell_output("#{bin}/herdr-max --version")
+    assert_match "herdr-max #{version}", shell_output("#{bin}/herdr-max --version")
   end
 end
 FORMULA

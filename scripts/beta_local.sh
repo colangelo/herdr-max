@@ -96,7 +96,7 @@ case "$requirement" in
   *) die "unexpected signature: ${requirement}" ;;
 esac
 got=$("$BIN" --version)
-want="herdr ${VERSION} (build ${BUILD_ID})"
+want="herdr-max ${VERSION} (build ${BUILD_ID})"
 [ "$got" = "$want" ] || die "the binary says '${got}', expected '${want}'"
 SHA256=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 echo "$got  sha256 ${SHA256}"

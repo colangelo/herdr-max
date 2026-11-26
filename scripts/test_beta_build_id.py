@@ -138,7 +138,7 @@ class BetaBuildIdTests(unittest.TestCase):
 
     def test_the_binary_and_the_title_carry_the_build_id(self) -> None:
         local = LOCAL.read_text()
-        self.assertIn('want="herdr ${VERSION} (build ${BUILD_ID})"', local)
+        self.assertIn('want="herdr-max ${VERSION} (build ${BUILD_ID})"', local)
         self.assertIn("BUILD_ID=$BUILD_ID", local)
         publish = (ROOT / "scripts" / "beta_publish.sh").read_text()
         self.assertIn('TITLE="Max ${BETA_VERSION}${BUILD_ID:+ (build ${BUILD_ID})}"', publish)
@@ -182,7 +182,7 @@ class BetaFormulaTests(unittest.TestCase):
             self.assertNotIn("install_symlink", out)
             self.assertNotIn("depends_on \"herdr-max\"", out)
             self.assertIn('herdr-max server live-handoff --import-exe "#{opt_bin}/herdr-max"', out)
-            self.assertIn('assert_match "herdr #{version}"', out)
+            self.assertIn('assert_match "herdr-max #{version}"', out)
             self.assertTrue(out.endswith("end\n"))
 
     def test_the_alias_formula_owns_the_old_command_and_nothing_else(self) -> None:

@@ -18,11 +18,19 @@ pub fn version() -> String {
     format_version(BASE_VERSION, channel(), build_id())
 }
 
-/// What `--version` prints after `herdr `: the version, and for a herdr-max
-/// build its build id (commit date and short sha), which is for tracing only
-/// and never part of [`version`].
-pub fn version_line() -> String {
-    format_version_line(BASE_VERSION, channel(), build_id())
+/// What `--version` prints: `herdr-max 0.11.0 (build ...)` for a herdr-max build (fork issue
+/// 331), `herdr <version>` for every other channel. The version is always the second word.
+pub fn version_output() -> String {
+    format_version_output(BASE_VERSION, channel(), build_id())
+}
+
+fn format_version_output(base: &str, channel: &str, build_id: Option<&str>) -> String {
+    let name = if channel == MAX_CHANNEL {
+        "herdr-max"
+    } else {
+        "herdr"
+    };
+    format!("{name} {}", format_version_line(base, channel, build_id))
 }
 
 fn format_version(base: &str, channel: &str, build_id: Option<&str>) -> String {
@@ -85,6 +93,26 @@ mod tests {
         assert_eq!(
             super::format_version_line("0.9.5", "ac-beta", Some("222-bonucci")),
             "0.9.5-ac-beta.222-bonucci"
+        );
+    }
+
+    #[test]
+    fn the_herdr_max_build_names_itself_herdr_max_and_the_other_channels_keep_herdr() {
+        assert_eq!(
+            super::format_version_output("0.11.0", "max", Some("20261126-9d5a725")),
+            "herdr-max 0.11.0 (build 20261126-9d5a725)"
+        );
+        assert_eq!(
+            super::format_version_output("0.9.5", "ac-beta", Some("222-bonucci")),
+            "herdr 0.9.5-ac-beta.222-bonucci"
+        );
+        assert_eq!(
+            super::format_version_output("0.9.5", "stable", None),
+            "herdr 0.9.5"
+        );
+        assert_eq!(
+            super::format_version_output("0.9.5", "preview", Some("x")),
+            "herdr 0.9.5-preview.x"
         );
     }
 }
