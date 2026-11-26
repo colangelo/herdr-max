@@ -1,9 +1,9 @@
 name: Beta
 
-# Fork: rolling -ac-beta channel. Manual dispatch builds macOS binaries from the
+# Fork: the rolling herdr-max build (the `beta` release). Manual dispatch builds macOS binaries from the
 # chosen ref, publishes a single rolling `beta` prerelease, and updates the
-# separate colangelo/homebrew-tap `herdr-beta` formula so it can be installed
-# alongside stable herdr. See .claude/skills/herdr-release/SKILL.md.
+# separate colangelo/homebrew-tap `herdr-max` formula (plus the transitional
+# `herdr-beta` alias formula) so it can be installed alongside stable herdr. See .claude/skills/herdr-release/SKILL.md.
 
 on:
   workflow_dispatch:
@@ -12,11 +12,6 @@ on:
         description: "Branch or commit to build (default: master)"
         required: false
         default: "master"
-        type: string
-      codename:
-        description: "Pin the build codename (default: derived from the run number)"
-        required: false
-        default: ""
         type: string
 
 permissions:
@@ -47,13 +42,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RUN_NUMBER: ${{ github.run_number }}
-          CODENAME: ${{ inputs.codename }}
-        # The number is the larger of this run's number and the published
-        # beta's plus one, so a beta built on our own Mac (`just beta-local`)
-        # never shares a number with a later run here. Scheme and codename
-        # pool: scripts/beta_version.sh.
-        run: scripts/beta_version.sh "${RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        # The version is Cargo.toml's and must be higher than the published
+        # one; the build id is the commit date and short sha. Scheme:
+        # scripts/beta_version.sh.
+        run: scripts/beta_version.sh >> "$GITHUB_OUTPUT"
 
   build:
     needs: prep
@@ -71,7 +63,7 @@ jobs:
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
       LIBGHOSTTY_VT_SIMD: "true"
-      HERDR_BUILD_CHANNEL: ac-beta
+      HERDR_BUILD_CHANNEL: max
       HERDR_BUILD_ID: ${{ needs.prep.outputs.build_id }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -136,10 +128,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BETA_VERSION: ${{ needs.prep.outputs.version }}
+          BUILD_ID: ${{ needs.prep.outputs.build_id }}
           SOURCE_REF: ${{ inputs.ref || 'master' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          BETA_NOTES="Rolling \`-ac-beta\` build (\`${BETA_VERSION}\`) from \`${SOURCE_REF}\`."$'\n\n'"Install: \`brew install colangelo/tap/herdr-beta\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-beta\`"
+          BETA_NOTES="herdr-max \`${BETA_VERSION}\` (build \`${BUILD_ID}\`) from \`${SOURCE_REF}\`."$'\n\n'"Install: \`brew install colangelo/tap/herdr-max\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-max\`"
           export BETA_NOTES
           TARGET_SHA=$(git rev-parse HEAD) scripts/beta_publish.sh \
             herdr-macos-aarch64/herdr-macos-aarch64 \
@@ -177,10 +170,11 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/colangelo/homebrew-tap.git"
           cd homebrew-tap
 
-          ../scripts/beta_formula.sh "${BETA_VERSION}" "${DARWIN_ARM64}" "${DARWIN_AMD64}" > Formula/herdr-beta.rb
+          ../scripts/beta_formula.sh "${BETA_VERSION}" "${DARWIN_ARM64}" "${DARWIN_AMD64}" > Formula/herdr-max.rb
+          ../scripts/beta_formula.sh --alias "${BETA_VERSION}" "${DARWIN_ARM64}" "${DARWIN_AMD64}" > Formula/herdr-beta.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/herdr-beta.rb
-          git diff --staged --quiet || git commit -m "Update herdr-beta to ${BETA_VERSION}"
+          git add Formula/herdr-max.rb Formula/herdr-beta.rb
+          git diff --staged --quiet || git commit -m "Update herdr-max and herdr-beta to ${BETA_VERSION}"
           git push

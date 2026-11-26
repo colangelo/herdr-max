@@ -355,26 +355,27 @@ latest-json-check tag="":
         --endpoint-generation "$ENDPOINT" \
         --live-url https://raw.githubusercontent.com/colangelo/herdr-max/master/distribution/latest.json
 
-# Fork: trigger a rolling -ac-beta build from a branch (default master).
+# Fork: trigger the rolling herdr-max build from a branch (default master).
 # Runs .github/workflows/beta.yml: builds macOS binaries, replaces the rolling
-# `beta` prerelease, and updates the colangelo/homebrew-tap herdr-beta formula.
-# Install/upgrade the result with `brew install colangelo/tap/herdr-beta`.
-# Pass a codename to pin the build's suffix, e.g. `just beta master pirlo`;
-# it must be one of the names in scripts/beta_version.sh's pool. Empty derives
-# it from the build number. The only beta that also builds the Intel binary.
-# GitHub build of the rolling beta (~8-9 min); the backup for `just beta-local`.
-beta ref="master" codename="":
-    command gh workflow run beta.yml --repo colangelo/herdr-max --ref {{ref}} -f ref={{ref}} -f codename={{codename}}
+# `beta` prerelease, and updates the colangelo/homebrew-tap herdr-max formula (and the herdr-beta alias formula).
+# Install/upgrade the result with `brew install colangelo/tap/herdr-max`.
+# The version is Cargo.toml's (bump it for every build); no codename since
+# herdr-max (fork issue 330). The only build that also builds the Intel binary.
+# GitHub build of the rolling beta (~8-9 min); the backup for `just release-local`.
+beta ref="master":
+    command gh workflow run beta.yml --repo colangelo/herdr-max --ref {{ref}} -f ref={{ref}}
     @echo "beta build dispatched from {{ref}} — watch: gh run watch --repo colangelo/herdr-max"
 
-# Fork: build the Apple-silicon beta on this Mac (~1-2 min on m4m, under the
+# Fork: build the Apple-silicon herdr-max on this Mac (~1-2 min on m4m, under the
 # shared heavy-build lock) and publish it like `just beta` does: the rolling
-# `beta` prerelease and the herdr-beta formula. REF must be pushed to GitHub.
-# `BETA_LOCAL_DRY_RUN=1 just beta-local` builds and checks without publishing.
+# `beta` prerelease and the herdr-max formula (plus the herdr-beta alias formula). REF must be pushed to GitHub.
+# `BETA_LOCAL_DRY_RUN=1 just release-local` builds and checks without publishing.
 # (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/235)
-# Build and publish the rolling beta on this Mac, Apple silicon only (~2 min)
-beta-local ref="master" codename="":
-    CODENAME={{codename}} scripts/beta_local.sh {{ref}}
+# Build and publish herdr-max on this Mac, Apple silicon only (~2 min); `beta-local` is the old name
+release-local ref="master":
+    scripts/beta_local.sh {{ref}}
+
+alias beta-local := release-local
 
 # Fork: add static Linux binaries (x86_64, aarch64) of the published beta to its
 # release, built on GitHub from the beta's commit with its version string, with
@@ -386,7 +387,8 @@ beta-linux:
     #!/usr/bin/env bash
     set -euo pipefail
     title=$(command gh release view beta --repo colangelo/herdr-max --json name --jq .name)
-    build_id=${title##*-ac-beta.}
+    build_id=$(sed -n 's/.*(build \(.*\))$/\1/p' <<<"$title")
+    [ -n "$build_id" ] || { echo "the release title '$title' has no build id" >&2; exit 1; }
     sha=$(command gh api repos/colangelo/herdr-max/git/ref/tags/beta --jq .object.sha)
     command gh workflow run beta-linux.yml --repo colangelo/herdr-max --ref master -f ref="$sha" -f build_id="$build_id"
     echo "Linux build of ${title#Beta } (${sha:0:8}) dispatched — watch: gh run list --repo colangelo/herdr-max --workflow beta-linux.yml"
@@ -395,7 +397,9 @@ beta-linux:
 # new binary so panes survive — replicates `herdr update --handoff` for brew installs
 # (self-update is disabled for brew, but `server live-handoff` is source-agnostic).
 # Usage: just brew-upgrade            # stable formula/binary `herdr`
-#        just brew-upgrade herdr-beta # beta formula/binary `herdr-beta`
+#        just brew-upgrade herdr-max  # beta formula/binary `herdr-max`
+# (`just brew-upgrade herdr-beta` still works while the alias formula lives: it is the
+# one-time switch from herdr-beta to herdr-max, see fork issue 330.)
 # The handoff names the version it expects, so a different build is refused, and
 # keeps the server in the user's macOS context (logout-proof) when the binary
 # supports --user-context
@@ -423,19 +427,19 @@ brew-upgrade formula="herdr":
     # (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/261).
     HERDR_DOGFOOD_BIN={{formula}} scripts/dogfood_verify.sh verify "$snap"
 
-# Hands the current (stable) server off to the herdr-beta binary via live handoff
+# Hands the current (stable) server off to the herdr-max binary via live handoff
 # (source-agnostic); they share one session socket, so it takes over in place.
-# Live-switch the running server to the BETA channel, panes preserved (reattach: herdr-beta)
+# Live-switch the running server to the BETA channel, panes preserved (reattach: herdr-max)
 switch-beta:
-    @command -v herdr-beta >/dev/null || { echo "herdr-beta not installed — run: brew install colangelo/tap/herdr-beta"; exit 1; }
-    @echo "handing off onto $(command -v herdr-beta)"
-    herdr server live-handoff --import-exe "$(command -v herdr-beta)"
-    @echo "server is now herdr-beta — reattach with: herdr-beta"
+    @command -v herdr-max >/dev/null || { echo "herdr-max not installed — run: brew install colangelo/tap/herdr-max"; exit 1; }
+    @echo "handing off onto $(command -v herdr-max)"
+    herdr server live-handoff --import-exe "$(command -v herdr-max)"
+    @echo "server is now herdr-max — reattach with: herdr-max"
 
 # Hands the current (beta) server off to the herdr binary via live handoff.
 # Live-switch the running server to the STABLE channel, panes preserved (reattach: herdr)
 switch-stable:
     @command -v herdr >/dev/null || { echo "herdr not installed — run: brew install colangelo/tap/herdr"; exit 1; }
     @echo "handing off onto $(command -v herdr)"
-    herdr-beta server live-handoff --import-exe "$(command -v herdr)"
+    herdr-max server live-handoff --import-exe "$(command -v herdr)"
     @echo "server is now herdr — reattach with: herdr"

@@ -5,7 +5,7 @@
 #   scripts/beta_publish.sh ASSET...
 #
 # Environment: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_RUN_ID, BETA_VERSION,
-# TARGET_SHA (the commit being published), SOURCE_REF (what was dispatched),
+# BUILD_ID (optional, shown in the title), TARGET_SHA (the commit being published), SOURCE_REF (what was dispatched),
 # DEFAULT_BRANCH (default: master), BETA_NOTES.
 #
 # Order, and what a failure at each step leaves behind:
@@ -32,7 +32,9 @@ SOURCE_REF=${SOURCE_REF:-$DEFAULT_BRANCH}
 BETA_NOTES=${BETA_NOTES:-}
 REPO=$GITHUB_REPOSITORY
 STAGING="beta-staging-${GITHUB_RUN_ID}"
-TITLE="Beta ${BETA_VERSION}"
+# "Max 0.10.0 (build 20261126-ab12cd3)": beta-linux.yml and `just beta-linux` read
+# the version and the build id back from it.
+TITLE="Max ${BETA_VERSION}${BUILD_ID:+ (build ${BUILD_ID})}"
 
 if [ "$#" -eq 0 ]; then
   echo "usage: $0 ASSET..." >&2

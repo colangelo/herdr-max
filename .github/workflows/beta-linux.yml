@@ -1,7 +1,7 @@
 name: Beta Linux
 
 # Fork: Linux binaries for the rolling beta. A beta built on our own Mac
-# (`just beta-local`) carries only the macOS binary; this adds static
+# (`just release-local`) carries only the macOS binary; this adds static
 # herdr-linux-x86_64 and herdr-linux-aarch64 of the same commit and version
 # string to the `beta` release, with .sha256 files, so a Linux herdr machine
 # can run the beta (install by hand, or upload with HERDR_REMOTE_BINARY).
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       build_id:
-        description: "The published beta's build id, e.g. 169-chiesa"
+        description: "The published beta's build id, e.g. 20261126-ab12cd3"
         required: true
         type: string
 
@@ -45,13 +45,13 @@ jobs:
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
       LIBGHOSTTY_VT_SIMD: "true"
-      HERDR_BUILD_CHANNEL: ac-beta
+      HERDR_BUILD_CHANNEL: max
       HERDR_BUILD_ID: ${{ inputs.build_id }}
     steps:
       - name: Check the build id
         run: |
-          if ! [[ "$HERDR_BUILD_ID" =~ ^[0-9]+-[a-z]+$ ]]; then
-            echo "build id '$HERDR_BUILD_ID' is not <number>-<codename>" >&2
+          if ! [[ "$HERDR_BUILD_ID" =~ ^[0-9]{8}-[0-9a-f]{7}$ ]]; then
+            echo "build id '$HERDR_BUILD_ID' is not <yyyymmdd>-<short sha>" >&2
             exit 1
           fi
 
@@ -103,8 +103,8 @@ jobs:
         run: |
           BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           got=$(target/${{ matrix.target }}/release/herdr --version)
-          if [ "$got" != "herdr ${BASE}-ac-beta.${HERDR_BUILD_ID}" ]; then
-            echo "the binary says '$got', expected 'herdr ${BASE}-ac-beta.${HERDR_BUILD_ID}'" >&2
+          if [ "$got" != "herdr ${BASE} (build ${HERDR_BUILD_ID})" ]; then
+            echo "the binary says '$got', expected 'herdr ${BASE} (build ${HERDR_BUILD_ID})'" >&2
             exit 1
           fi
 
@@ -141,7 +141,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          WANT="Beta ${BASE}-ac-beta.${BUILD_ID}"
+          WANT="Max ${BASE} (build ${BUILD_ID})"
           title=$(gh release view beta --repo "$REPO" --json name --jq .name)
           if [ "$title" != "$WANT" ]; then
             echo "the beta release is '$title', not '$WANT': nothing uploaded" >&2

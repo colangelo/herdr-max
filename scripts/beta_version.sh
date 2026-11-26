@@ -1,74 +1,66 @@
 #!/usr/bin/env bash
-# Print the next beta's build id and version as `key=value` lines, for both
-# beta builders: .github/workflows/beta.yml (GitHub) and scripts/beta_local.sh
-# (`just beta-local`, a Mac of ours).
+# Print the next herdr-max build's version and build id as `key=value` lines,
+# for both builders: .github/workflows/beta.yml (GitHub) and
+# scripts/beta_local.sh (`just release-local`, a Mac of ours).
 #
-#   scripts/beta_version.sh [RUN_NUMBER]
+#   scripts/beta_version.sh
 #
-# Environment: GH_REPO (default colangelo/herdr-max), CODENAME (optional pin).
-# Run from the repository root (reads Cargo.toml).
+# Environment: GH_REPO (default colangelo/herdr-max), BETA_ALLOW_SAME_VERSION
+# (rebuild the published version, e.g. to finish a half-published build).
+# Run from the repository root (reads Cargo.toml and HEAD).
 #
-# The build number leads the id so `brew upgrade herdr-beta` stays monotonic
-# (Homebrew compares the number first). It is the larger of the GitHub run
-# number and the published beta's number plus one: a local beta takes the next
-# number, and a later GitHub run never reuses it
-# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/235). The
-# codename is the surname of a Juventus player from 2012 to today, picked from
-# the number, so a build reads "0.7.5-ac-beta.7-pirlo", never a timestamp.
+# The version is plain semver and is Cargo.toml's: herdr-max has its own
+# (0.10.0 first, then patch for a fix and minor for a feature), with no
+# -beta.N and no codename since the herdr-beta builds ended at 222
+# (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/330). The build id
+# is the commit date and short sha, e.g. 20261126-ab12cd3; it only shows in
+# `herdr --version` and the release title, for tracing.
+#
+# `brew upgrade` upgrades on a higher version only, so a published version is
+# never built again: bump Cargo.toml for every build.
 set -euo pipefail
 
-NAMES=(pirlo vidal pogba marchisio tevez llorente chiellini bonucci barzagli lichtsteiner asamoah giovinco vucinic buffon evra dybala higuain mandzukic khedira pjanic cuadrado benatia rugani sturaro alves douglascosta bernardeschi matuidi szczesny ronaldo ramsey rabiot deligt demiral danilo alexsandro kulusevski mckennie morata chiesa bentancur arthur vlahovic locatelli kean zakaria gatti bremer paredes kostic milik fagioli miretti perin thuram koopmeiners cambiaso yildiz weah conceicao kalulu kelly digregorio douglasluiz mbangula)
-
-RUN_NUMBER=${1:-0}
 REPO=${GH_REPO:-colangelo/herdr-max}
-CODENAME=${CODENAME:-}
 
-case "$RUN_NUMBER" in
-  '' | *[!0-9]*)
-    echo "run number '${RUN_NUMBER}' is not a number" >&2
-    exit 2
+BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+case "$BASE" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *)
+    echo "Cargo.toml version '${BASE}' is not major.minor.patch" >&2
+    exit 1
     ;;
 esac
 
-BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-
-# The published beta's number, 0 when there is none yet. Any other gh failure
-# stops here: reading a network error as "no beta" would reuse a number.
+# The published release's version, none when there is no release yet. Any other
+# gh failure stops here: reading a network error as "no release" would let an
+# old or repeated version through.
 if title=$(gh release view beta --repo "$REPO" --json name --jq .name 2>&1); then
-  LAST=$(sed -n 's/.*-ac-beta\.\([0-9][0-9]*\).*/\1/p' <<<"$title")
+  # "Max 0.10.0 (build ...)" now, "Beta 0.9.5-ac-beta.222-bonucci" before.
+  LAST=$(sed -n 's/^[A-Za-z]* \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"$title")
   if [ -z "$LAST" ]; then
-    echo "the beta release title '${title}' has no -ac-beta.N number" >&2
+    echo "the published release title '${title}' has no version" >&2
     exit 1
   fi
 else
   case "$title" in
-    *"release not found"*) LAST=0 ;;
+    *"release not found"*) LAST= ;;
     *)
-      echo "could not read the published beta: ${title}" >&2
+      echo "could not read the published release: ${title}" >&2
       exit 1
       ;;
   esac
 fi
 
-NUMBER=$((LAST + 1))
-if [ "$RUN_NUMBER" -gt "$NUMBER" ]; then
-  NUMBER=$RUN_NUMBER
+if [ -n "$LAST" ] && [ -z "${BETA_ALLOW_SAME_VERSION:-}" ]; then
+  FIRST=$(printf '%s\n%s\n' "$LAST" "$BASE" | sort -V | head -1)
+  # Equal to the published base, or lower: brew would not move to it. The old
+  # beta's base (0.9.5) is below 0.10.0, so the first herdr-max passes.
+  if [ "$BASE" = "$LAST" ] || [ "$FIRST" != "$LAST" ]; then
+    echo "Cargo.toml says ${BASE}, but ${LAST} is already published: bump the version (brew upgrades on a higher one only)" >&2
+    exit 1
+  fi
 fi
 
-NAME=${NAMES[$((NUMBER % ${#NAMES[@]}))]}
-# A pinned codename keeps a run of builds reading the same while the number
-# still increments. Checked against the pool: a typo would otherwise mint a
-# version token nothing else in the channel shares.
-if [ -n "$CODENAME" ]; then
-  case " ${NAMES[*]} " in
-    *" ${CODENAME} "*) NAME=$CODENAME ;;
-    *)
-      echo "codename '${CODENAME}' is not in the pool" >&2
-      exit 1
-      ;;
-  esac
-fi
-
-BUILD_ID="${NUMBER}-${NAME}"
+BUILD_ID="$(git show -s --format=%cd --date=format:%Y%m%d HEAD)-$(git rev-parse --short=7 HEAD)"
 echo "build_id=${BUILD_ID}"
-echo "version=${BASE}-ac-beta.${BUILD_ID}"
+echo "version=${BASE}"

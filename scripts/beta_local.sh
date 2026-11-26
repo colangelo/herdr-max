@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Build the Apple-silicon beta on this Mac and publish it as the rolling
-# `beta`: the GitHub prerelease (scripts/beta_publish.sh) and the herdr-beta
-# formula in colangelo/homebrew-tap. Run by `just beta-local`; `just beta`
-# (GitHub, both macOS targets) stays the backup.
+# Build the Apple-silicon herdr-max on this Mac and publish it as the rolling
+# `beta` release: the GitHub prerelease (scripts/beta_publish.sh) and the
+# herdr-max formula plus the herdr-beta alias formula in colangelo/homebrew-tap.
+# Run by `just release-local` (alias `beta-local`); `just beta` (GitHub, both
+# macOS targets) stays the backup. The version is Cargo.toml's: bump it for
+# every build (scripts/beta_version.sh).
 # https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/235
 #
 #   scripts/beta_local.sh [REF]     # REF on origin, default master
@@ -14,7 +16,6 @@
 #                         so a rebuild only compiles what changed
 #   BETA_LOCAL_LOCK       the shared heavy-build lock (default /tmp/m4m-heavy.lock)
 #   BETA_LOCAL_JOBS       cargo jobs (default 6)
-#   CODENAME              pin the codename, as in `just beta`
 #   BETA_SIGN_IDENTITY    codesign identity (default the keychain's first
 #                         "Apple Development" one)
 #   ZIG                   zig 0.16 (default the brew zig@0.16 keg when present)
@@ -69,11 +70,11 @@ BUILD_ID=$(sed -n 's/^build_id=//p' <<<"$ids")
 VERSION=$(sed -n 's/^version=//p' <<<"$ids")
 step "2/6 build ${VERSION} at ${SHA:0:8} (${TARGET}, ${JOBS} jobs, waits for ${LOCK})"
 started=$(date +%s)
-# Betas carry the kv task store the work panel reads (fork issue 265).
+# Builds carry the kv task store the work panel reads (fork issue 265).
 lockf -k "$LOCK" nice -n 15 env \
   CARGO_BUILD_JOBS="$JOBS" CARGO_INCREMENTAL=0 ZIG="$ZIG" \
   LIBGHOSTTY_VT_OPTIMIZE=ReleaseFast LIBGHOSTTY_VT_SIMD=true \
-  HERDR_BUILD_CHANNEL=ac-beta HERDR_BUILD_ID="$BUILD_ID" \
+  HERDR_BUILD_CHANNEL=max HERDR_BUILD_ID="$BUILD_ID" \
   timeout 2400 rustup run "$TOOLCHAIN" cargo build --release --locked --features tasks-kv --target "$TARGET"
 step "built in $(($(date +%s) - started)) s"
 
@@ -82,7 +83,7 @@ mkdir -p "$STATE/out"
 BIN=$STATE/out/$ASSET
 cp "target/${TARGET}/release/herdr" "$BIN"
 # One identifier and a real certificate keep the code identity the same from
-# build to build, so a macOS privacy (TCC) answer for herdr-beta survives an
+# build to build, so a macOS privacy (TCC) answer for the beta survives (the identifier stays dev.herdr.beta through the herdr-max rename) an
 # upgrade; an ad-hoc binary is a new app to TCC every build
 # (https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/236).
 IDENTITY=${BETA_SIGN_IDENTITY:-$(security find-identity -v -p codesigning |
@@ -95,7 +96,8 @@ case "$requirement" in
   *) die "unexpected signature: ${requirement}" ;;
 esac
 got=$("$BIN" --version)
-[ "$got" = "herdr ${VERSION}" ] || die "the binary says '${got}', expected 'herdr ${VERSION}'"
+want="herdr ${VERSION} (build ${BUILD_ID})"
+[ "$got" = "$want" ] || die "the binary says '${got}', expected '${want}'"
 SHA256=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 echo "$got  sha256 ${SHA256}"
 
@@ -108,24 +110,25 @@ fi
 PREV_SHA=$(git ls-remote "https://github.com/${REPO}.git" refs/tags/beta 2>/dev/null | cut -f1)
 
 step "4/6 publish the beta prerelease"
-BETA_NOTES="Rolling \`-ac-beta\` build (\`${VERSION}\`) from \`${REF}\`, built on $(hostname -s) (Apple silicon only)."$'\n\n'"Install: \`brew install colangelo/tap/herdr-beta\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-beta\`"
+BETA_NOTES="herdr-max \`${VERSION}\` (build \`${BUILD_ID}\`) from \`${REF}\`, built on $(hostname -s) (Apple silicon only)."$'\n\n'"Install: \`brew install colangelo/tap/herdr-max\`"$'\n'"Upgrade: \`brew update && brew upgrade herdr-max\`"
 GH_TOKEN=$(gh auth token) GITHUB_REPOSITORY=$REPO GITHUB_RUN_ID="local-$(date +%s)" \
-  BETA_VERSION=$VERSION TARGET_SHA=$SHA SOURCE_REF=$REF BETA_NOTES=$BETA_NOTES \
+  BETA_VERSION=$VERSION BUILD_ID=$BUILD_ID TARGET_SHA=$SHA SOURCE_REF=$REF BETA_NOTES=$BETA_NOTES \
   "$SCRIPTS/beta_publish.sh" "$BIN"
 
-step "5/6 update Formula/herdr-beta.rb in ${TAP}"
+step "5/6 update Formula/herdr-max.rb and the herdr-beta alias formula in ${TAP}"
 TAPDIR=$STATE/tap
 if [ ! -d "$TAPDIR/.git" ]; then
   git clone --quiet "https://github.com/${TAP}.git" "$TAPDIR"
 fi
 git -C "$TAPDIR" fetch --quiet origin
 git -C "$TAPDIR" checkout --quiet --force -B main origin/main
-"$SCRIPTS/beta_formula.sh" "$VERSION" "$SHA256" >"$TAPDIR/Formula/herdr-beta.rb"
-git -C "$TAPDIR" add Formula/herdr-beta.rb
+"$SCRIPTS/beta_formula.sh" "$VERSION" "$SHA256" >"$TAPDIR/Formula/herdr-max.rb"
+"$SCRIPTS/beta_formula.sh" --alias "$VERSION" "$SHA256" >"$TAPDIR/Formula/herdr-beta.rb"
+git -C "$TAPDIR" add Formula/herdr-max.rb Formula/herdr-beta.rb
 if git -C "$TAPDIR" diff --staged --quiet; then
   echo "formula already at ${VERSION}"
 else
-  git -C "$TAPDIR" commit --quiet -m "Update herdr-beta to ${VERSION}"
+  git -C "$TAPDIR" commit --quiet -m "Update herdr-max and herdr-beta to ${VERSION}"
   git -C "$TAPDIR" push --quiet origin main
 fi
 
@@ -138,5 +141,5 @@ if [ -n "$PREV_SHA" ] && [ "$PREV_SHA" != "$SHA" ] && [ -d "$TELEMETRY" ]; then
     --repo AC-forks/herdr-max --from "$PREV_SHA" --to "$SHA" --stage live --path "$SRC" \
     || echo "telemetry: proof-from-range failed (the beta is published)" >&2
 fi
-echo "install: brew update && just brew-upgrade herdr-beta (m4m and mbm5 together)"
+echo "install: brew update && just brew-upgrade herdr-max (m4m and mbm5 together)"
 echo "Linux binaries for herdr machines: just beta-linux"

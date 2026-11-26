@@ -15,7 +15,7 @@
 # Exit: 0 seamless, 2 a pane or session was lost, 3 a client runs another build, 1 usage/error.
 set -euo pipefail
 
-bin="${HERDR_DOGFOOD_BIN:-herdr-beta}"
+bin="${HERDR_DOGFOOD_BIN:-herdr-max}"
 
 panes_json() {
     "$bin" pane list | jq -c '[.result.panes[] | {pane_id, session: (.agent_session.value // null)}] | sort_by(.pane_id)'
@@ -32,15 +32,16 @@ build_of() {
     fi
 }
 
-# Attached TUI clients: a herdr-beta process on a terminal that is not the `--remote` launcher
+# Attached TUI clients: a herdr-max (or, while the alias lives, herdr-beta) process on a terminal that is not the `--remote` launcher
 # (its `client` child draws that tab) and not a one-shot CLI call.
 clients() {
     ps -axo pid=,ppid=,tty=,command= | awk -v b="$bin" '
+        BEGIN { alt = (b == "herdr-max") ? "herdr-beta" : (b == "herdr-beta") ? "herdr-max" : b }
         $3 == "??" { next }
         {
             cmd = ""; for (i = 4; i <= NF; i++) cmd = cmd (i > 4 ? " " : "") $i
             n = split($4, path, "/"); exe = path[n]
-            if (exe != b) next
+            if (exe != b && exe != alt) next
             rest = substr(cmd, length($4) + 2)
             if (rest == "" || rest == "client" || rest ~ /^--session /) print $1, $2, rest
         }'
