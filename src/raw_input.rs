@@ -121,7 +121,15 @@ impl RawInputFramer {
     }
 
     pub(crate) fn push(&mut self, data: &[u8]) -> Vec<RawInputEvent> {
-        events_from_framed_chunks(self.byte_framer.push(data))
+        let (chunks, held_escape_alt) = self.byte_framer.push_noting_held_escape(data);
+        let mut chunks = chunks.into_iter();
+        let mut events = Vec::new();
+        if held_escape_alt {
+            events = events_from_framed_chunks(chunks.next().into_iter().collect());
+            mark_alt_from_held_escape(&mut events);
+        }
+        events.extend(events_from_framed_chunks(chunks.collect()));
+        events
     }
 
     #[cfg(windows)]
@@ -168,6 +176,17 @@ impl RawInputFramer {
         self.byte_framer.timed_out_mouse_prefix = None;
         chunks.extend(self.byte_framer.drain_available_chunks());
         events_from_framed_chunks(chunks)
+    }
+}
+
+/// Mark the Alt keys decoded from a chunk that
+/// [`RawInputByteFramer::push_noting_held_escape`] reported as a held ESC joined with a later
+/// read (fork issue 331), so direct bindings leave them to the pane.
+pub(crate) fn mark_alt_from_held_escape(events: &mut [RawInputEvent]) {
+    for event in events {
+        if let RawInputEvent::Key(key) = event {
+            key.mark_alt_from_held_escape();
+        }
     }
 }
 
@@ -269,6 +288,20 @@ impl RawInputByteFramer {
         self.partial_host_color_reply_read_at =
             starts_with_incomplete_default_color_response(&self.buffer).then(Instant::now);
         chunks
+    }
+
+    /// [`Self::push`], and whether the first chunk is a legacy Alt key made of a lone ESC held
+    /// from an earlier read and the first key of `data` (fork issue 331). A real Alt chord from a
+    /// legacy host comes in one write, ESC and key together; an ESC held for the idle window
+    /// and joined with the next read is as likely Esc then the key, typed fast.
+    pub(crate) fn push_noting_held_escape(&mut self, data: &[u8]) -> (Vec<Vec<u8>>, bool) {
+        let escape_held = !data.is_empty() && self.buffer.as_slice() == [ESC];
+        let chunks = self.push(data);
+        let joined = escape_held
+            && chunks.first().is_some_and(|chunk| {
+                chunk.len() > 1 && chunk[0] == ESC && data.starts_with(&chunk[1..])
+            });
+        (chunks, joined)
     }
 
     fn push_extended(&mut self) -> Vec<Vec<u8>> {
@@ -3818,5 +3851,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Fork issue 331: only an ESC the framer held from an earlier read and joined with the next
+    /// read's key is marked; an Alt chord written whole and a kitty-encoded Alt key are not.
+    #[test]
+    fn only_an_escape_held_from_an_earlier_read_marks_the_joined_alt_key() {
+        let alt_i = |events: &[RawInputEvent]| match events {
+            [RawInputEvent::Key(key)] => {
+                assert_eq!(key.code, KeyCode::Char('i'));
+                assert_eq!(key.modifiers, KeyModifiers::ALT);
+                key.alt_from_held_escape()
+            }
+            other => panic!("expected one alt+i key: {other:?}"),
+        };
+
+        // Esc, then i in a later read inside the idle window: joined, and marked.
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(b"\x1b").is_empty(), "the lone ESC is held");
+        let joined = framer.push(b"i");
+        assert!(alt_i(&joined));
+        let RawInputEvent::Key(key) = &joined[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            key.vt_bytes(),
+            Some(b"\x1bi".as_slice()),
+            "the bytes are unchanged"
+        );
+
+        // A legacy Alt chord: ESC and the key in one write.
+        let mut framer = RawInputFramer::default();
+        assert!(!alt_i(&framer.push(b"\x1bi")));
+
+        // A kitty-encoded Alt key is unambiguous.
+        let mut framer = RawInputFramer::default();
+        assert!(!alt_i(&framer.push(b"\x1b[105;3u")));
+
+        // Only the joined chunk is marked, not what follows it in the same read.
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        let (chunks, joined) = framer.push_noting_held_escape(b"i\x1bj");
+        assert!(joined);
+        assert_eq!(chunks, vec![b"\x1bi".to_vec(), b"\x1bj".to_vec()]);
+        // A held ESC that times out first is its own key; the next read joins nothing.
+        let mut framer = RawInputByteFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        assert_eq!(framer.flush_timeout(), vec![b"\x1b".to_vec()]);
+        assert_eq!(
+            framer.push_noting_held_escape(b"i"),
+            (vec![b"i".to_vec()], false)
+        );
+        // A held ESC joined into a non-Alt sequence (a split arrow key) is not an Alt key.
+        let mut framer = RawInputFramer::default();
+        assert!(framer.push(b"\x1b").is_empty());
+        let arrow = framer.push(b"[A");
+        let [RawInputEvent::Key(key)] = arrow.as_slice() else {
+            panic!("expected the up arrow: {arrow:?}");
+        };
+        assert_eq!(key.code, KeyCode::Up);
+        assert!(!key.alt_from_held_escape());
     }
 }

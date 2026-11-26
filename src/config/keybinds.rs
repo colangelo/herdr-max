@@ -258,7 +258,12 @@ impl ActionKeybinds {
             .any(|binding| binding.trigger.is_prefix() && binding.matches_terminal_key(key))
     }
 
+    /// A direct binding never takes an Alt key the reader joined from a held ESC (fork issue
+    /// 331): on a legacy host that is as likely Esc then the key, typed fast, so the pane gets it.
     pub fn matches_direct_key(&self, key: &TerminalKey) -> bool {
+        if key.alt_from_held_escape() {
+            return false;
+        }
         self.bindings
             .iter()
             .any(|binding| binding.trigger.is_direct() && binding.matches_terminal_key(key))

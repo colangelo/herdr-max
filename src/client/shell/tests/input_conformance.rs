@@ -398,6 +398,32 @@ impl HerdrPath {
         self.deliver(outcomes)
     }
 
+    /// Feed separate host reads, each inside the framer's idle window, the way the Unix client
+    /// loop does: an ESC held from one read joins the next read's first key, and that chunk's
+    /// Alt key is marked (fork issue 331). Returns None when Herdr kept the input.
+    fn feed_reads(&mut self, reads: &[&[u8]]) -> Option<Vec<u8>> {
+        let mut outcomes = Vec::new();
+        for read in reads {
+            let (chunks, held_escape_alt) = self.framer.push_noting_held_escape(read);
+            for (index, chunk) in chunks.iter().enumerate() {
+                let mut events = crate::raw_input::parse_framed_input(chunk);
+                if held_escape_alt && index == 0 {
+                    crate::raw_input::mark_alt_from_held_escape(&mut events);
+                }
+                outcomes.push(self.state.handle_raw_events(events));
+            }
+        }
+        while self.framer.has_pending_input() {
+            let chunks = self.framer.flush_timeout();
+            outcomes.extend(
+                chunks
+                    .iter()
+                    .map(|chunk| self.state.handle_input_bytes(chunk)),
+            );
+        }
+        self.deliver(outcomes)
+    }
+
     /// Route client outcomes through server pane input and collect the bytes the
     /// pane receives. None when Herdr kept the input for itself.
     fn deliver(&mut self, outcomes: Vec<ClientShellInput>) -> Option<Vec<u8>> {
@@ -1808,6 +1834,38 @@ async fn keyboard_transparency_conformance() {
         report.failures.len() <= KEYBOARD_FAILURES_BASELINE,
         "keyboard transparency regressed: {} failures > {KEYBOARD_FAILURES_BASELINE}",
         report.failures.len()
+    );
+}
+
+/// Fork issue 331: the default alt+i (info mode) must not steal Esc then i from a vi user on a
+/// legacy host. The reader holds a lone ESC for its idle window, so an i typed inside it decodes
+/// as alt+i; that joined key goes to the pane. An Alt chord the host writes whole (ESC and i in
+/// one read) and a kitty-encoded alt+i still open info mode.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn esc_then_i_from_separate_reads_reaches_the_pane_and_a_real_alt_i_opens_info_mode() {
+    // (a) Esc, then i in a later read: the pane gets both bytes, info mode stays shut.
+    let mut herdr = HerdrPath::new(HostProfile::Legacy, b"");
+    assert_eq!(
+        herdr.feed_reads(&[b"\x1b", b"i"]).as_deref(),
+        Some(b"\x1bi".as_slice()),
+        "Esc then i reaches the pane"
+    );
+    assert!(!herdr.state.pane_labels_visible(), "info mode did not open");
+    // The next key is the pane's too, not eaten by a close.
+    assert_eq!(herdr.feed(b"x").as_deref(), Some(b"x".as_slice()));
+
+    // (b) ESC and i in one read is the host's Alt chord: info mode.
+    let mut herdr = HerdrPath::new(HostProfile::Legacy, b"");
+    assert_eq!(herdr.feed_reads(&[b"\x1bi"]), None);
+    assert!(herdr.state.pane_labels_explicit, "alt+i opened info mode");
+
+    // (c) A kitty-encoded alt+i is unambiguous: info mode.
+    let mut herdr = HerdrPath::new(HostProfile::Kitty, b"");
+    assert_eq!(herdr.feed_reads(&[b"\x1b[105;3u"]), None);
+    assert!(
+        herdr.state.pane_labels_explicit,
+        "kitty alt+i opened info mode"
     );
 }
 

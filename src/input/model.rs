@@ -84,6 +84,11 @@ pub struct TerminalKey {
     /// identity, so a press and its release pair exactly even when a modifier
     /// let go first changes which of the two the host report resolves to.
     layout_key: Option<char>,
+    /// A legacy Alt key the reader made of an ESC it held from an earlier read and the next
+    /// read's first key (fork issue 331). A real Alt chord arrives as one write, so this is as
+    /// likely Esc then the key typed fast: direct (no-prefix) bindings never take it, and the
+    /// pane still gets both bytes. Client side only.
+    alt_from_held_escape: bool,
     source: KeySource,
 }
 
@@ -99,6 +104,7 @@ impl TerminalKey {
             physical_identity_hint: false,
             windows_dead_key: false,
             layout_key: None,
+            alt_from_held_escape: false,
             source: KeySource::Synthesized,
         }
     }
@@ -110,6 +116,15 @@ impl TerminalKey {
 
     pub(crate) fn layout_key(&self) -> Option<char> {
         self.layout_key
+    }
+
+    /// Mark the key as an Alt key joined from a held ESC; a key without Alt stays unmarked.
+    pub(crate) fn mark_alt_from_held_escape(&mut self) {
+        self.alt_from_held_escape = self.modifiers.contains(KeyModifiers::ALT);
+    }
+
+    pub(crate) fn alt_from_held_escape(&self) -> bool {
+        self.alt_from_held_escape
     }
 
     pub fn with_kind(mut self, kind: crossterm::event::KeyEventKind) -> Self {

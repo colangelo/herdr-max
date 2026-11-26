@@ -2,8 +2,13 @@ use super::*;
 
 /// Internal events for the client event loop.
 pub(super) enum ClientLoopEvent {
+    /// Host input bytes, one framed chunk. `alt_from_held_escape`: the chunk is a legacy Alt key
+    /// the reader made of an ESC held from its previous read (fork issue 331).
     #[cfg(unix)]
-    StdinInput(Vec<u8>),
+    StdinInput {
+        data: Vec<u8>,
+        alt_from_held_escape: bool,
+    },
     #[cfg(unix)]
     PixelMouse(Vec<u8>, crate::input::mouse::HostGeometry),
     #[cfg(unix)]

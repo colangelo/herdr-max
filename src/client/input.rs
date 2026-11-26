@@ -116,6 +116,7 @@ fn unix_stdin_reader_loop(
         let chunks = framer.push(&initial_host_input);
         if !send_unix_input_chunks(
             chunks,
+            false,
             &event_tx,
             &mut pending_palette,
             sgr_pixels,
@@ -134,6 +135,7 @@ fn unix_stdin_reader_loop(
             let held_escape = had_pending && chunks.is_empty();
             if !send_unix_input_chunks(
                 chunks,
+                false,
                 &event_tx,
                 &mut pending_palette,
                 sgr_pixels,
@@ -146,6 +148,7 @@ fn unix_stdin_reader_loop(
                 && stdin_read_ready(&reader, framer.held_input_flush_timeout_ms()) == Some(false)
                 && !send_unix_input_chunks(
                     framer.flush_timeout(),
+                    false,
                     &event_tx,
                     &mut pending_palette,
                     sgr_pixels,
@@ -177,7 +180,10 @@ fn unix_stdin_reader_loop(
                 .and_then(|mut matcher| direct_filter.flush_if_inactive(&mut matcher));
             if let Some(data) = released {
                 if event_tx
-                    .blocking_send(ClientLoopEvent::StdinInput(data))
+                    .blocking_send(ClientLoopEvent::StdinInput {
+                        data,
+                        alt_from_held_escape: false,
+                    })
                     .is_err()
                 {
                     return;
@@ -208,7 +214,8 @@ fn unix_stdin_reader_loop(
                     &direct_response,
                     &direct_response_active,
                 );
-                let chunks = if let Some((raw_chunks, responses)) = filtered {
+                // Only this read's first push can join an ESC held from the previous read.
+                let (chunks, held_escape_alt) = if let Some((raw_chunks, responses)) = filtered {
                     for response in responses {
                         if event_tx
                             .blocking_send(ClientLoopEvent::DirectGraphicsResponse(response))
@@ -217,18 +224,23 @@ fn unix_stdin_reader_loop(
                             return;
                         }
                     }
-                    raw_chunks
-                        .into_iter()
-                        .flat_map(|chunk| framer.push(&chunk))
-                        .collect()
+                    let mut chunks = Vec::new();
+                    let mut held_escape_alt = false;
+                    for (index, chunk) in raw_chunks.into_iter().enumerate() {
+                        let (pushed, joined) = framer.push_noting_held_escape(&chunk);
+                        held_escape_alt |= index == 0 && joined;
+                        chunks.extend(pushed);
+                    }
+                    (chunks, held_escape_alt)
                 } else {
-                    framer.push(&scratch[..n])
+                    framer.push_noting_held_escape(&scratch[..n])
                 };
                 if !framer.has_pending_input() {
                     pending_mode = None;
                 }
                 if !send_unix_input_chunks(
                     chunks,
+                    held_escape_alt,
                     &event_tx,
                     &mut pending_palette,
                     sgr_pixels,
@@ -250,6 +262,7 @@ fn unix_stdin_reader_loop(
                     }
                     if !send_unix_input_chunks(
                         chunks,
+                        false,
                         &event_tx,
                         &mut pending_palette,
                         sgr_pixels,
@@ -268,6 +281,7 @@ fn unix_stdin_reader_loop(
                         }
                         if !send_unix_input_chunks(
                             chunks,
+                            false,
                             &event_tx,
                             &mut pending_palette,
                             sgr_pixels,
@@ -307,14 +321,18 @@ fn filter_direct_input(
 }
 
 #[cfg(unix)]
+/// Send framed chunks to the client loop. `held_escape_alt`: the first chunk is a legacy Alt key
+/// joined from an ESC held from the previous read
+/// ([`crate::raw_input::RawInputByteFramer::push_noting_held_escape`]).
 fn send_unix_input_chunks(
     chunks: Vec<Vec<u8>>,
+    held_escape_alt: bool,
     event_tx: &mpsc::Sender<ClientLoopEvent>,
     pending_palette: &mut Vec<Vec<u8>>,
     sgr_pixels: bool,
     geometry: Option<crate::input::mouse::HostGeometry>,
 ) -> bool {
-    for data in chunks {
+    for (index, data) in chunks.into_iter().enumerate() {
         let palette_response = std::str::from_utf8(&data)
             .ok()
             .and_then(crate::terminal_theme::parse_palette_color_response)
@@ -334,9 +352,16 @@ fn send_unix_input_chunks(
         if !default_color_response && !flush_unix_palette_input(event_tx, pending_palette) {
             return false;
         }
-        let Some(event) = classify_unix_input(data, sgr_pixels, geometry) else {
+        let Some(mut event) = classify_unix_input(data, sgr_pixels, geometry) else {
             continue;
         };
+        if let ClientLoopEvent::StdinInput {
+            alt_from_held_escape,
+            ..
+        } = &mut event
+        {
+            *alt_from_held_escape = held_escape_alt && index == 0;
+        }
         if event_tx.blocking_send(event).is_err() {
             return false;
         }
@@ -361,7 +386,10 @@ fn classify_unix_input(
     if sgr_pixels && crate::raw_input::parse_sgr_mouse_report(&data).is_some() {
         return geometry.map(|geometry| ClientLoopEvent::PixelMouse(data, geometry));
     }
-    Some(ClientLoopEvent::StdinInput(data))
+    Some(ClientLoopEvent::StdinInput {
+        data,
+        alt_from_held_escape: false,
+    })
 }
 
 #[cfg(unix)]
@@ -374,7 +402,10 @@ fn flush_unix_palette_input(
     }
     let data = std::mem::take(pending_palette).concat();
     event_tx
-        .blocking_send(ClientLoopEvent::StdinInput(data))
+        .blocking_send(ClientLoopEvent::StdinInput {
+            data,
+            alt_from_held_escape: false,
+        })
         .is_ok()
 }
 
@@ -497,9 +528,12 @@ mod tests {
     #[test]
     fn stdin_input_event_carries_raw_bytes() {
         let data = vec![0x1b, b'[', b'A']; // Up arrow escape sequence
-        let event = ClientLoopEvent::StdinInput(data.clone());
+        let event = ClientLoopEvent::StdinInput {
+            data: data.clone(),
+            alt_from_held_escape: false,
+        };
         match event {
-            ClientLoopEvent::StdinInput(d) => assert_eq!(d, data),
+            ClientLoopEvent::StdinInput { data: d, .. } => assert_eq!(d, data),
             _ => panic!("expected StdinInput event"),
         }
     }
@@ -525,8 +559,9 @@ mod tests {
         };
         assert_eq!(data, report);
         assert_eq!(captured, geometry);
-        let Some(ClientLoopEvent::StdinInput(cell_report)) =
-            classify_unix_input(report.clone(), false, Some(geometry))
+        let Some(ClientLoopEvent::StdinInput {
+            data: cell_report, ..
+        }) = classify_unix_input(report.clone(), false, Some(geometry))
         else {
             panic!("unconfirmed host pixel mode must keep cell reports on the raw path");
         };
@@ -539,7 +574,7 @@ mod tests {
             b"\x1b_Gi=7;unrelated\x1b\\".as_slice(),
             b"\x1b[<35;2;3Mtail".as_slice(),
         ] {
-            let Some(ClientLoopEvent::StdinInput(data)) =
+            let Some(ClientLoopEvent::StdinInput { data, .. }) =
                 classify_unix_input(raw.to_vec(), true, Some(geometry))
             else {
                 panic!("unrelated input must remain raw");
@@ -563,6 +598,7 @@ mod tests {
                 b"\x1b]4;0;rgb:1111/2222/3333\x1b\\".to_vec(),
                 b"\x1b]4;1;rgb:4444/5555/6666\x1b\\".to_vec(),
             ],
+            false,
             &tx,
             &mut pending,
             false,
@@ -571,7 +607,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         assert!(flush_unix_palette_input(&tx, &mut pending));
-        let ClientLoopEvent::StdinInput(data) = rx.try_recv().unwrap() else {
+        let ClientLoopEvent::StdinInput { data, .. } = rx.try_recv().unwrap() else {
             panic!("expected palette input batch");
         };
         assert_eq!(
@@ -581,6 +617,34 @@ mod tests {
             2
         );
         assert!(pending.is_empty());
+    }
+
+    /// Fork issue 331: the reader's held-escape mark rides on the first chunk only.
+    #[test]
+    fn held_escape_alt_marks_only_the_first_chunk_sent() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut pending = Vec::new();
+        assert!(send_unix_input_chunks(
+            vec![b"\x1bi".to_vec(), b"j".to_vec()],
+            true,
+            &tx,
+            &mut pending,
+            false,
+            None,
+        ));
+        let marks: Vec<(Vec<u8>, bool)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| match event {
+                ClientLoopEvent::StdinInput {
+                    data,
+                    alt_from_held_escape,
+                } => (data, alt_from_held_escape),
+                _ => panic!("expected StdinInput"),
+            })
+            .collect();
+        assert_eq!(
+            marks,
+            vec![(b"\x1bi".to_vec(), true), (b"j".to_vec(), false)]
+        );
     }
 
     #[test]

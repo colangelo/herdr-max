@@ -147,6 +147,17 @@ fn alt_i_opens_info_mode_without_the_prefix_and_the_help_panel_lists_it() {
 }
 
 #[test]
+fn an_empty_info_mode_binding_gives_alt_i_back_to_the_pane() {
+    // The documented way to unbind it (keyboard.mdx): info_mode = "".
+    let config: Config = toml::from_str("[keys]\ninfo_mode = \"\"").unwrap();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.handle_raw_events(vec![key(KeyCode::Char('i'), KeyModifiers::ALT)]);
+    assert!(!state.pane_labels_visible(), "alt+i is the pane's again");
+}
+
+#[test]
 fn r_in_info_mode_enters_resize_mode_and_resizes_the_focused_pane() {
     let mut state = three_panes();
     state.enter_info_mode(std::time::Instant::now());

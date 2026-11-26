@@ -146,9 +146,13 @@ impl ClientShellState {
             _ => return key,
         };
         let bytes = key.vt_bytes().map(<[u8]>::to_vec).unwrap_or_default();
-        crate::input::TerminalKey::new(KeyCode::Backspace, alt)
+        let mut erase = crate::input::TerminalKey::new(KeyCode::Backspace, alt)
             .with_kind(key.kind)
-            .with_vt_bytes(bytes)
+            .with_vt_bytes(bytes);
+        if key.alt_from_held_escape() {
+            erase.mark_alt_from_held_escape();
+        }
+        erase
     }
 
     #[cfg(test)]

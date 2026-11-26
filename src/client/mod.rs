@@ -1057,7 +1057,10 @@ async fn run_client_loop(
                 }
             }
             #[cfg(unix)]
-            ClientLoopEvent::StdinInput(data) => {
+            ClientLoopEvent::StdinInput {
+                data,
+                alt_from_held_escape,
+            } => {
                 let image_bridge_active = endpoint_accepts_local_images(
                     is_remote_client,
                     write_stream.active_id(),
@@ -1106,7 +1109,10 @@ async fn run_client_loop(
                             continue;
                         }
                     }
-                    let events = crate::raw_input::parse_framed_input(&data);
+                    let mut events = crate::raw_input::parse_framed_input(&data);
+                    if alt_from_held_escape {
+                        crate::raw_input::mark_alt_from_held_escape(&mut events);
+                    }
                     if events_are_user_input(&events) {
                         supervisors.user_activity(now);
                         wake_remotes_on_input(
