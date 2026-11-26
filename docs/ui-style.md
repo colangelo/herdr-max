@@ -85,8 +85,14 @@ a separate set from state colours: on a mode bar, red means "PANES mode", not "f
 |---|---|---|---|
 | PREFIX, SCROLL, COPY, NAVIGATE | `accent` | `#89b4fa` | 111 |
 | PANES (display panes) | soft red (`red`) | `#f38ba8` | 211 |
-| RESIZE | `mauve` | `#cba6f7` | 183 |
+| RESIZE | violet (`Palette::resize_violet`) | `#d29eff` | 183 |
 | SYNC (`SYNC N panes`) | `SYNC_YELLOW` | `#ffd60a` | 220 |
+
+RESIZE's violet is the theme's `mauve` pushed 40% further from its own grey, so it reads a bit more
+saturated than the mauve it came from (`#cba6f7` in catppuccin) and a custom theme's mauve still
+carries through. Info mode (PANES, red) and resize mode share one overlay: the same number, size
+and version on every pane, and only the colour tells them apart. Info mode hides after
+`ui.display_panes_ms`; resize mode stays until esc, enter, its own key or `i`.
 
 SYNC's yellow is a fixed colour (`SYNC_YELLOW`), not the palette's soft `yellow` (`#f9e2af`). Keep it yellow.
 
