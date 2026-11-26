@@ -90,13 +90,12 @@ impl Palette {
         self.surface1
     }
 
-    /// A less saturated red: the theme's red pulled halfway toward its own
-    /// grey, a rose on dark themes. The one place the display-panes mode's
-    /// inactive borders get their colour, so a custom theme's red carries
-    /// through. A red the terminal names rather than gives as RGB cannot be
-    /// mixed, so it falls back to the dimmer theme grey.
-    pub fn muted_red(&self) -> Color {
-        match self.red {
+    /// A mode colour pulled halfway toward its own grey: the inactive borders of info mode
+    /// (from `red`, a rose on dark themes) and resize mode (from [`Self::resize_violet`]), so a
+    /// custom theme's colour carries through. A colour the terminal names rather than gives as
+    /// RGB cannot be mixed, so it falls back to the dimmer theme grey.
+    pub fn muted(&self, colour: Color) -> Color {
+        match colour {
             Color::Rgb(r, g, b) => {
                 let grey =
                     (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round();

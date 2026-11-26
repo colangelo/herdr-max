@@ -329,17 +329,23 @@ fn resize_summary_survives_composition_with_connected_version() {
     );
     assert!(!text.contains("VERSION"), "{text}");
     // RESIZE keeps its own colour for everything it paints: the chip, the keys and the size badges.
-    let mauve = crate::protocol::color_to_u32(state.config.palette.resize_violet());
+    let violet = crate::protocol::color_to_u32(state.config.palette.resize_violet());
     let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), "h/l width");
-    assert_eq!(frame.cells[usize::from(y) * 180 + usize::from(x)].fg, mauve);
+    assert_eq!(
+        frame.cells[usize::from(y) * 180 + usize::from(x)].fg,
+        violet
+    );
     let (x, y) = cell_symbol_position(&frame, Rect::new(0, 0, 180, 30), " RESIZE ");
-    assert_eq!(frame.cells[usize::from(y) * 180 + usize::from(x)].bg, mauve);
+    assert_eq!(
+        frame.cells[usize::from(y) * 180 + usize::from(x)].bg,
+        violet
+    );
     let (spaces, _) =
         crate::ui::expanded_sidebar_sections(layout.sidebar, state.sidebar_section_split);
     assert!(spaces.height > 0, "the test layout shows the sidebar");
     let badge =
         &frame.cells[usize::from(spaces.bottom() - 1) * 180 + usize::from(spaces.right() - 2)];
-    assert_eq!(badge.bg, mauve, "sidebar size badge in RESIZE");
+    assert_eq!(badge.bg, violet, "sidebar size badge in RESIZE");
 }
 
 #[test]

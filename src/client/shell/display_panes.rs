@@ -266,19 +266,6 @@ fn connected_version<'a>(
         .unwrap_or("unknown")
 }
 
-/// `colour` mixed halfway to its own grey, like [`Palette::muted_red`]; `fallback` when the
-/// terminal names the colour rather than gives it as RGB.
-fn muted(colour: Color, fallback: Color) -> Color {
-    match colour {
-        Color::Rgb(r, g, b) => {
-            let grey = (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round();
-            let mix = |channel: u8| ((f32::from(channel) + grey) / 2.0).round() as u8;
-            Color::Rgb(mix(r), mix(g), mix(b))
-        }
-        _ => fallback,
-    }
-}
-
 fn pane_name<'a>(snapshot: &'a ClientShellSnapshot, pane_id: &str) -> &'a str {
     if let Some(name) = snapshot
         .resource_facts
@@ -325,11 +312,7 @@ pub(super) fn paint(
     // (docs/ui-style.md, Mode colour).
     let numbered = state.pane_labels_explicit || resize;
     let mode_colour = if resize { p.resize_violet() } else { p.red };
-    let muted_colour = if resize {
-        muted(mode_colour, p.overlay1)
-    } else {
-        p.muted_red()
-    };
+    let muted_colour = p.muted(mode_colour);
     let version = connected_version(state, snapshot);
     // The surface preserves the server tile traversal used by the fork's
     // pane_infos. Geometric sorting changes numbering for mixed column splits.
