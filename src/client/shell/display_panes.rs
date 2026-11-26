@@ -555,10 +555,7 @@ mod tests {
             );
         }
         assert_eq!(find(&spans, " server-build ").bg, Some(p.green));
-        assert_eq!(
-            find(&spans, " server-build ").fg,
-            Some(p.fill_foreground())
-        );
+        assert_eq!(find(&spans, " server-build ").fg, Some(p.fill_foreground()));
         let resize = summary_spans(
             Rect::new(0, 0, 140, 30),
             Rect::new(26, 0, 114, 29),
