@@ -244,7 +244,7 @@ class BetaLinuxWorkflowTests(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.ref }}", self.text)
 
     def test_checks_the_version_string(self) -> None:
-        self.assertIn("expected 'herdr ${BASE} (build ${HERDR_BUILD_ID})'", self.text)
+        self.assertIn("expected 'herdr-max ${BASE} (build ${HERDR_BUILD_ID})'", self.text)
 
     def test_uploads_only_onto_its_own_beta_with_checksums(self) -> None:
         self.assertIn('WANT="Max ${BASE} (build ${BUILD_ID})"', self.text)

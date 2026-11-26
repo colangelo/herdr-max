@@ -103,8 +103,8 @@ jobs:
         run: |
           BASE=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           got=$(target/${{ matrix.target }}/release/herdr --version)
-          if [ "$got" != "herdr ${BASE} (build ${HERDR_BUILD_ID})" ]; then
-            echo "the binary says '$got', expected 'herdr ${BASE} (build ${HERDR_BUILD_ID})'" >&2
+          if [ "$got" != "herdr-max ${BASE} (build ${HERDR_BUILD_ID})" ]; then
+            echo "the binary says '$got', expected 'herdr-max ${BASE} (build ${HERDR_BUILD_ID})'" >&2
             exit 1
           fi
 
