@@ -112,13 +112,17 @@ herdr --remote workbox --session agents
 
 ## Resume after a terminal restart (Rex)
 
-A terminal that speaks the [Program Resume Protocol](https://www.superlogical.com/rex/docs/build/program-resume) (OSC 7577), such as Rex, can reopen Herdr after the terminal itself restarts. When the terminal sets `OSC7577_TOKEN`, the Herdr client reports how to reattach: `herdr-beta session attach <name>` (the program name as you ran it). The session is always named, also for the default session. The client reports again after a reattach or when it is continued from a stop.
+A terminal that speaks the [Program Resume Protocol](https://www.superlogical.com/rex/docs/build/program-resume) (OSC 7577), such as Rex, can reopen Herdr after the terminal itself restarts. When the terminal sets `OSC7577_TOKEN`, the Herdr client reports how to reattach: `herdr-max session attach <name>` (the program name as you ran it, so `herdr-beta` while the old command is used). The session is always named, also for the default session. The client reports again after a reattach or when it is continued from a stop.
 
 The client sends `clear=1` only when you detach on purpose. SIGHUP, SIGTERM and a lost terminal, which is what a terminal restart looks like, leave the record in place. The token is removed from the environment of everything the client starts and is never sent over `--remote`.
 
-Rex only resumes commands you trust. Add one rule to its `init.lua`. The match accepts session names of letters, digits and `_`:
+Rex only resumes commands you trust. Add one rule per name you run to its `init.lua`: `herdr-max`, and `herdr-beta` for as long as that alias is installed. The match accepts session names of letters, digits and `_`:
 
 ```lua
+rex.set("resume.trust.herdr-max", {
+  command = { "herdr-max", "session", "attach", rex.match.id },
+})
+
 rex.set("resume.trust.herdr-beta", {
   command = { "herdr-beta", "session", "attach", rex.match.id },
 })
