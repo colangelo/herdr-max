@@ -331,7 +331,7 @@ pub(crate) fn command_table(
                 act(
                     KeybindAction::InfoMode,
                     binding_label(&keybinds.info_mode),
-                    "info mode (no prefix)",
+                    "info mode",
                 ),
                 act(
                     KeybindAction::SplitVertical,
