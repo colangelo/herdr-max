@@ -15,14 +15,14 @@ Version::parse` panics on suffixes. The `-ac` suffix reaches the binary via
 workflow, so `herdr --version` prints `X.Y.Z-ac` with zero Rust patches.
 Upstream's own preview builds use the same mechanism.
 
-## Beta channel (-ac-beta), for pre-release testing
+## herdr-max channel (the rolling `beta` release), for pre-release testing
 
 A rolling, opt-in beta that ships from `master` **without** a version tag or a
 stable release, distributed as a **separate** tap formula so it coexists with
 stable herdr. Use it to dogfood work (e.g. a freshly synced/featured `master`)
 before cutting the stable `X.Y.Z-ac`.
 
-Two builders publish the same rolling beta. **`just beta-local` is the default
+Two builders publish the same rolling build. **`just release-local` is the default
 on m4m** (#235): it builds the Apple-silicon binary there under
 `/tmp/m4m-heavy.lock` (~2 min cold, ~1 min warm, against ~8–9 min on GitHub)
 and publishes it through the same `scripts/beta_publish.sh` and
@@ -31,14 +31,14 @@ and publishes it through the same `scripts/beta_publish.sh` and
 clone, tap clone and cargo target live in `~/.local/state/herdr-beta-local`.
 
 ```bash
-just beta-local                          # build on this Mac + publish, from origin/master
-BETA_LOCAL_DRY_RUN=1 just beta-local my-branch   # build + check only
+just release-local                          # build on this Mac + publish, from origin/master
+BETA_LOCAL_DRY_RUN=1 just release-local my-branch   # build + check only
 ```
 
 `just beta-linux` adds static herdr-linux-x86_64 and -aarch64 of the published
 beta (same commit and version string, with .sha256 files) to its release, built
 on GitHub in ~10 min, for Linux herdr machines (#239). A later beta drops them,
-so run it again after the next `just beta-local` when a Linux machine needs it.
+so run it again after the next `just release-local` when a Linux machine needs it.
 
 `just beta` (GitHub) is the backup, and the only beta that also builds the
 Intel binary. Trigger (dispatches `.github/workflows/beta.yml`; default ref
@@ -47,47 +47,44 @@ Intel binary. Trigger (dispatches `.github/workflows/beta.yml`; default ref
 ```bash
 just beta                  # build + publish beta from master
 just beta my-branch        # or from another branch/commit
-just beta my-branch pirlo  # pin the codename instead of deriving it
 gh run watch --repo colangelo/herdr-max
 ```
 
 What it does: builds the **two macOS targets only** (fast; no Linux beta), then
-replaces the single rolling **`beta` GitHub prerelease** (tag `beta`, deleted +
-recreated each run) and rewrites `Formula/herdr-beta.rb` in
-colangelo/homebrew-tap. Both builders stamp **one** shared
-`HERDR_BUILD_ID=<number>-<codename>` from `scripts/beta_version.sh`: the number
-is the larger of the GitHub run number and the published beta's number plus
-one (so a local beta and a later GitHub run never share a number), plus the
-surname of a Juventus player (2012→today), picked deterministically from the
-number by indexing the `NAMES=(...)` array in that script. So the binary's
-`herdr --version` and the formula `version` are both exactly
-`X.Y.Z-ac-beta.<number>-<codename>` (e.g. `0.7.5-ac-beta.45-zakaria`; channel
-`HERDR_BUILD_CHANNEL=ac-beta`; Cargo.toml still plain `X.Y.Z`). The number
-keeps `brew upgrade` monotonic — Homebrew compares the leading number first, so
-the codename is purely cosmetic. **Do not revert this to a timestamp**; the
-surname scheme is intentional. Rotate the pool by editing `NAMES` in
-`scripts/beta_version.sh`.
-
-The `codename` dispatch input pins the suffix so a run of builds reads the same
-(`0.8.0-ac-beta.66-pirlo`, `…67-pirlo`); the run number still increments, so
-`brew upgrade` ordering is untouched. It must be a name already in `NAMES` —
-the workflow fails on anything else rather than minting a one-off token.
+replaces the single rolling **`beta` GitHub release** (tag `beta`, deleted +
+recreated each run, titled `Max X.Y.Z (build <date>-<sha>)`) and rewrites two
+formulae in colangelo/homebrew-tap in one commit: `Formula/herdr-max.rb` (the real
+one, `bin/herdr-max`) and `Formula/herdr-beta.rb` (the transitional alias: it
+depends on herdr-max and installs only a `bin/herdr-beta` link, so the old command
+keeps working; delete it from the tap, and `brew uninstall herdr-beta`, when
+nothing calls `herdr-beta` any more). herdr-max has its own plain semver, **the
+version in `Cargo.toml`**: `0.10.0` first, then a patch for a fix and a minor for a
+feature; no `-beta.N`, no codename, no build number (the `herdr-beta` builds
+`0.9.5-ac-beta.N-<codename>` ended at 222; 0.10.0 sorts above all of them).
+`scripts/beta_version.sh` prints it with the build id (commit date + short sha,
+shown in `herdr --version` as `herdr 0.10.0 (build 20261126-ab12cd3)` and in the
+release title only; channel `HERDR_BUILD_CHANNEL=max`). `brew upgrade` moves on a
+higher version only, so **bump `Cargo.toml` for every build**: the script refuses a
+version that is already the published one (`BETA_ALLOW_SAME_VERSION=1` finishes a
+half-published build). Each upstream sync keeps its own Gitea issue, whose closing
+comment names the upstream range merged; no version tie to upstream.
 
 Install / upgrade / verify:
 
 ```bash
-brew install colangelo/tap/herdr-beta      # coexists with stable `herdr`
-brew update && brew upgrade herdr-beta
-herdr-beta --version                        # herdr X.Y.Z-ac-beta.<run>-<codename>
+brew install colangelo/tap/herdr-max      # coexists with stable `herdr`
+brew update && brew upgrade herdr-max
+herdr-max --version                        # herdr X.Y.Z (build <date>-<sha>)
 ```
 
 Notes:
 - Needs the same `HOMEBREW_TAP_TOKEN` secret on colangelo/herdr-max as stable.
-- Build ids are `<run>-<codename>` (above), monotonic via the run number.
-  Changing the scheme breaks that ordering once — the 2026-07 timestamp→run-
-  number switch made the first new build sort *below* the installed one, so
-  `brew upgrade` skipped it. Cross a scheme change with one `brew reinstall
-  herdr-beta` per machine; `brew upgrade` resumes after.
+- A scheme change can sort the first new build *below* the installed one, and
+  `brew upgrade` then skips it (the 2026-07 timestamp-to-run-number switch did).
+  The herdr-beta to herdr-max switch avoids it: 0.10.0 is above every
+  `0.9.5-ac-beta.N`. The per-Mac switch (install herdr-max, upgrade the alias
+  formula, one live handoff) is in the PR of
+  https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/330.
 - No docs promotion, no tag, no `just check` gate — beta trusts the pushed
   `master` (run `just check` before pushing). CI on `master` should be green
   first.
@@ -103,7 +100,7 @@ those fds to it over a Unix socket (`SCM_RIGHTS`), with a two-phase commit, so
 installs get this via `herdr update --handoff`; **self-update is disabled for
 brew/mise/nix installs** (path-shape gate in `src/update.rs`), so those upgrade
 via the package manager and then trigger the handoff themselves. `herdr` and
-`herdr-beta` are separate binaries but share the **same default session/socket**
+`herdr-max` are separate binaries but share the **same default session/socket**
 (`config_dir/herdr.sock`), so migrating one onto the other takes over the same
 session in place.
 
@@ -113,7 +110,7 @@ session in place.
   ```bash
   herdr status server --json | jq '.capabilities.live_handoff'   # want: true
   ```
-- **Target binary exists + executable:** `command -v herdr-beta` (or `herdr`).
+- **Target binary exists + executable:** `command -v herdr-max` (or `herdr`).
 - **Same session:** both use the default session, or pass the same
   `--session <name>` to each. Different sessions = different sockets = no shared
   server to hand off.
@@ -135,21 +132,21 @@ session in place.
 
 ```bash
 just brew-upgrade              # brew: brew upgrade herdr + live handoff onto it
-just brew-upgrade herdr-beta   # brew: same for the beta formula/binary
+just brew-upgrade herdr-max   # brew: same for the beta formula/binary
 herdr update --handoff         # direct (curl) install only
 ```
 
 ### Stable -> beta
 
 ```bash
-herdr server live-handoff --import-exe "$(command -v herdr-beta)"
-herdr-beta                     # reattach with the beta client
+herdr server live-handoff --import-exe "$(command -v herdr-max)"
+herdr-max                     # reattach with the beta client
 ```
 
 ### Beta -> stable
 
 ```bash
-herdr-beta server live-handoff --import-exe "$(command -v herdr)"
+herdr-max server live-handoff --import-exe "$(command -v herdr)"
 herdr                          # reattach with the stable client
 ```
 
@@ -158,7 +155,7 @@ herdr                          # reattach with the stable client
 - **Reattach with the matching client.** After handoff the server runs the new
   binary's protocol; a client at a different protocol refuses to attach (e.g.
   after stable→beta, the old `herdr` (protocol 15) can't attach to the 0.7.3
-  (17) server — use `herdr-beta`).
+  (17) server — use `herdr-max`).
 - **Run the handoff from a plain terminal, not inside a herdr pane.** Clients
   briefly disconnect/reconnect during the swap; there is no inside-herdr guard,
   so it works from within too, just visually confusing.

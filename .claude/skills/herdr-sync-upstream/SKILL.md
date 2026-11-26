@@ -64,7 +64,7 @@ endpoint contract" decides what may change on the wire.
   line or use the manual command above. Check `df -h /System/Volumes/Data` first; it stops
   at 97 %.
 - **Docs-only syncs and the measurement run no cargo at all.**
-- `herdr-beta`, never bare `herdr`. Worktrees through `wt`. `trash`, not `rm`. Never push
+- `herdr-max`, never bare `herdr`. Worktrees through `wt`. `trash`, not `rm`. Never push
   to `master` before the coordinator says go. Gate every push of code on a passing
   `just check` exit code, chained: `... just check && git push ...`.
 
@@ -215,7 +215,7 @@ never on a working one (memory recipe "herdr throwaway proof recipe"):
 1. Start a throwaway server on the old beta (sized tmux, `unset HERDR_ENV`, compiled
    stand-in `claude`, `SHELL=/opt/homebrew/bin/zsh`). Make workspaces, tabs, panes, an
    agent pane, todos, pins, labels.
-2. `herdr-beta server live-handoff --import-exe <new release-path build>` (a debug build
+2. `herdr-max server live-handoff --import-exe <new release-path build>` (a debug build
    answers on the `herdr-dev` socket and an old client hangs "reconnecting", an artifact).
 3. Compare before and after: workspaces/tabs/panes, pane pids and start times, sizes,
    agent state/session id/restore argv, pins, todos, labels. A new client must render and
@@ -303,9 +303,9 @@ The lead hands the master SHA to `herdr` (the coordinator pane), which builds th
 Mechanics: skills `herdr-release` (Beta channel, live handoff) and `herdr-dogfood`.
 
 1. Beta build from pushed master (`just beta`), wait for the run, note
-   `herdr-beta --version` (`X.Y.Z-ac-beta.<run>-<codename>`).
+   `herdr-max --version` (`X.Y.Z (build <date>-<sha>)`).
 2. **Seamless install = live handoff**, panes and sessions kept
-   (`herdr-beta server live-handoff`, or `just brew-upgrade herdr-beta`), **mac-m4
+   (`herdr-max server live-handoff`, or `just brew-upgrade herdr-max`), **mac-m4
    first**. Report the before/after diff (workspaces, panes, pids, agents).
 3. Then **mbm5**, through manager-aruba (herdr only asks; it does not touch that Mac).
 4. Close the sync issue with the beta version, the two install results and the diff.

@@ -40,7 +40,7 @@ exits 0 were kept too) to `~/.local/state/herdr-sandbox/violations.jsonl`. The l
 - `/tmp`, `/private/tmp`: the integration tests' folders and the shared `/tmp/m4m-heavy.lock`.
 - `~/.config/herdr-dev`: state of a debug server started with `cargo run`.
 - `~/.local/state/agent-handover/herdr-helper`: the session's keep and handover notes.
-- `~/.local/state/herdr-beta-local`: `just beta-local` builds and signs the beta there.
+- `~/.local/state/herdr-beta-local`: `just release-local` (alias `beta-local`) builds and signs the build there.
 - `~/.local/state/herdr-sync`: the upstream sync runner's state.
 - `~/.local/state/model-routing`, `~/.local/state/agent-bell`: the route and bell tools write their state there.
 - `~/_sync/dev/.agent-state/reconcile`: reconcile records.

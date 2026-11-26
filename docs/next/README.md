@@ -103,7 +103,7 @@ herdr
 | channel | install | updates |
 | --- | --- | --- |
 | stable | `brew install colangelo/tap/herdr` | `-ac` tags, e.g. `v0.7.4-ac` |
-| beta | `brew install colangelo/tap/herdr-beta` | rolling `-ac-beta` prerelease, rebuilt on demand from `master` |
+| max | `brew install colangelo/tap/herdr-max` | rolling herdr-max build (the `herdr-beta` command stays as an alias while the `herdr-beta` formula is installed), rebuilt on demand from `master` |
 
 `herdr update` checks the fork's manifests; `herdr update --handoff` upgrades a running server without dropping panes.
 

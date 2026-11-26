@@ -7,10 +7,10 @@ description: Use when a change to the herdr fork should end up visible in the us
 
 The loop (since the 0.9.3 cutover, October 2026): branch off `sync/merge` →
 implement → every cargo run through the lead's runner → commit → draft-PR CI →
-fast-forward `master` → `just beta-local` on m4m (~2 min; `just beta` on GitHub is
+fast-forward `master` → `just release-local` on m4m (~2 min; `just beta` on GitHub is
 the backup) → install on mbm5 by mac-m5 via manager-aruba, then on m4m by
-mac-m4 (`just brew-upgrade herdr-beta`,
-live handoff, panes preserved) → enable in config → `herdr-beta server
+mac-m4 (`just brew-upgrade herdr-max`,
+live handoff, panes preserved) → enable in config → `herdr-max server
 reload-config` → user verifies. Never `git push origin master` new work directly.
 
 **REQUIRED BACKGROUND:** `.claude/skills/herdr-release/SKILL.md` (Beta channel
@@ -39,7 +39,7 @@ runtime facts go through the server's `AppState`. A `[ui]` option touches SIX pl
    `apply_live_config` in `src/app/mod.rs`. Missing the live-reload one means the
    feature stays invisible after `reload-config`; only a restart would show it.
 5. `src/main.rs` — commented entry in the generated config template
-   (verify later with `herdr-beta --default-config`).
+   (verify later with `herdr-max --default-config`).
 6. Docs: `docs/next/website/src/content/docs/configuration.mdx` +
    `docs/next/CHANGELOG.md` (amend the unreleased entry if the same feature
    family already has one). Never stable docs / root README / root CHANGELOG.
@@ -74,13 +74,13 @@ command gh pr checks --repo colangelo/herdr-max --watch
 git merge --ff-only <branch> && git push internal master && git push origin master
 
 # 4. Beta from master, then the installs.
-just beta-local                   # m4m builds origin/master and publishes (~2 min)
+just release-local                   # m4m builds origin/master and publishes (~2 min)
 # backup: just beta, then command gh run watch <run-id> --repo colangelo/herdr-max --exit-status
 ```
 
 5. Install, seamless (live handoff, panes and sessions kept): **both Macs at
    once**, in the same step. Bell mac-m4 (m4m) and mac-m5 (mbm5) directly and
-   together; each runs `just brew-upgrade herdr-beta` (mac-m5 cc's manager-aruba,
+   together; each runs `just brew-upgrade herdr-max` (mac-m5 cc's manager-aruba,
    which no longer gives a go first: manager-aruba, 2026-11-01). House rule
    `herdr-beta-installs-both-macs`. Never hold m4m back
    for mbm5's report: ac works on m4m and asks there (ac, 2026-11-01: "this is
@@ -110,10 +110,10 @@ never dismiss as "pre-existing".
 ## Show the feature
 
 1. Edit `~/.config/herdr/config.toml` (usually under `[ui]`).
-2. `herdr-beta server reload-config` — expect `"status":"applied"` with empty
+2. `herdr-max server reload-config` — expect `"status":"applied"` with empty
    diagnostics. Always run it; it is idempotent — don't burn time inferring
    whether it's needed. Use the binary matching the running channel
-   (`herdr-beta` vs `herdr`).
+   (`herdr-max` vs `herdr`).
 3. Tell the user exactly what to look at. Stale visuals repaint on the next
    focus change.
 
@@ -123,7 +123,7 @@ never dismiss as "pre-existing".
 |---|---|
 | Option set in config but nothing changes after reload | wiring point 4 incomplete (`apply_live_config` missing) |
 | `--default-config` doesn't list the option | `src/main.rs` template entry missing (point 5) |
-| Beta built without the change | master not fast-forwarded and pushed to `origin` before `just beta-local` / `just beta` |
+| Beta built without the change | master not fast-forwarded and pushed to `origin` before `just release-local` / `just beta` |
 | `cargo` fights other agents for CPU / a load alert | ran cargo directly instead of through the runner |
 | `brew upgrade` says already up to date | `brew update` missing or the formula job hasn't finished |
 | Unrelated files swept into the commit | `git add -A` with sibling-agent WIP present |
