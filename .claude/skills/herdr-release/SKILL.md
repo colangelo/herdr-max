@@ -62,7 +62,7 @@ version in `Cargo.toml`**: `0.10.0` first, then a patch for a fix and a minor fo
 feature; no `-beta.N`, no codename, no build number (the `herdr-beta` builds
 `0.9.5-ac-beta.N-<codename>` ended at 222; 0.10.0 sorts above all of them).
 `scripts/beta_version.sh` prints it with the build id (commit date + short sha,
-shown in `herdr --version` as `herdr 0.10.0 (build 20261126-ab12cd3)` and in the
+shown in `herdr-max --version` as `herdr-max 0.11.0 (build 20261126-ab12cd3)` and in the
 release title only; channel `HERDR_BUILD_CHANNEL=max`). `brew upgrade` moves on a
 higher version only, so **bump `Cargo.toml` for every build**: the script refuses a
 version that is already the published one (`BETA_ALLOW_SAME_VERSION=1` finishes a
@@ -74,7 +74,7 @@ Install / upgrade / verify:
 ```bash
 brew install colangelo/tap/herdr-max      # coexists with stable `herdr`
 brew update && brew upgrade herdr-max
-herdr-max --version                        # herdr X.Y.Z (build <date>-<sha>)
+herdr-max --version                        # herdr-max X.Y.Z (build <date>-<sha>)
 ```
 
 Notes:
