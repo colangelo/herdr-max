@@ -857,6 +857,35 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }
 }
 
+/// Raised by the SIGCONT handler, consumed by the client.
+#[cfg(unix)]
+static TERMINAL_CONTINUE_SIGNALLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn record_terminal_continue_signal(_signal: libc::c_int) {
+    TERMINAL_CONTINUE_SIGNALLED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Records SIGCONT, which says the process runs again after a stop.
+#[cfg(unix)]
+pub(crate) fn watch_terminal_continue_signal() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction =
+        record_terminal_continue_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGCONT, &action, std::ptr::null_mut());
+    }
+}
+
+/// Returns whether SIGCONT arrived since the last call.
+#[cfg(unix)]
+pub(crate) fn take_terminal_continue_signal() -> bool {
+    TERMINAL_CONTINUE_SIGNALLED.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
 /// Raised by the SIGWINCH handler, consumed by the host resize watcher.
 #[cfg(unix)]
 static TERMINAL_RESIZE_SIGNALLED: std::sync::atomic::AtomicBool =

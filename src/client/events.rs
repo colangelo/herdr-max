@@ -12,6 +12,9 @@ pub(super) enum ClientLoopEvent {
     StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     #[cfg(windows)]
     NotificationActivated(shell::ClientSystemNotificationTarget),
+    /// SIGCONT: this client has the terminal back after a stop.
+    #[cfg(unix)]
+    TerminalRegained,
     Resize(u16, u16, u32, u32, bool),
     TerminalUnavailable(io::Error),
     ServerMessage {

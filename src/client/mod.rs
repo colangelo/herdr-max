@@ -35,6 +35,7 @@ mod input;
 mod loop_config;
 mod notifications;
 mod reexec;
+mod rex_resume;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -59,6 +60,7 @@ use state::ClientState;
 use state::RetiredDirectGraphicsMatch;
 use transport::*;
 
+pub use rex_resume::capture_token_from_env as capture_rex_resume_token;
 #[cfg(test)]
 pub(crate) use shell::{ClientShellConfig, ClientShellState};
 pub use startup::{run_client, run_terminal_attach};
@@ -434,6 +436,11 @@ fn run_client_with_mode(
         original_hook(info);
     }));
 
+    // Tell a terminal that can resume programs how to reattach this client.
+    if client_rendered_shell && !is_remote_client_process() {
+        rex_resume::report_attach(&mut io::stdout());
+    }
+
     // Create the tokio runtime.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -466,6 +473,7 @@ fn run_client_with_mode(
 
     // Restore the terminal before printing any final status message.
     let terminal_restore_failed = terminal_guard.restore().is_err();
+    rex_resume::finish(&mut io::stdout());
 
     if let Err(err) = result {
         // An app client follows its session to the server that took over. A
@@ -739,6 +747,13 @@ async fn run_client_loop(
             &resize_quit,
         );
     });
+
+    #[cfg(unix)]
+    if rex_resume::active() && state.attach_escape.is_none() {
+        let continue_tx = event_tx.clone();
+        let continue_quit = should_quit.clone();
+        std::thread::spawn(move || rex_resume::watch_continue(continue_tx, continue_quit));
+    }
 
     let mut write_stream = if let Some((stream, handshake)) = initial {
         let max_frame_size = if state.kitty_graphics_enabled {
@@ -1483,6 +1498,10 @@ async fn run_client_loop(
                         return Ok(());
                     }
                 }
+            }
+            #[cfg(unix)]
+            ClientLoopEvent::TerminalRegained => {
+                rex_resume::report_attach(&mut io::stdout());
             }
             ClientLoopEvent::TerminalUnavailable(err) => {
                 info!(err = %err, "client terminal unavailable; detaching");

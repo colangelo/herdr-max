@@ -800,6 +800,7 @@ pub(super) fn finish_client_shell_input(
 ) -> Result<bool, ClientError> {
     apply_client_shell_input_source_changes(state, prefix_input_source);
     if outcome.detach {
+        super::rex_resume::note_user_detach();
         let _ = write_to_server(endpoints, &ClientMessage::Detach);
         return Ok(true);
     }

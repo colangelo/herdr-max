@@ -150,6 +150,10 @@ impl ReexecPlan {
                 pids,
             );
         }
+        // The same client goes on reporting to its terminal after the exec.
+        if let Some(token) = super::rex_resume::token_for_reexec() {
+            command.env("OSC7577_TOKEN", token);
+        }
         {
             use std::os::unix::process::CommandExt as _;
             command.arg0(&self.argv0);
