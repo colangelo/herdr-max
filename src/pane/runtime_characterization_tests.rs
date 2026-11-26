@@ -552,7 +552,12 @@ async fn v2_on_exit_runs_after_the_wait_is_marked_complete() {
     )
     .expect("spawn");
 
-    let seen = seen_rx.recv_timeout(WAIT).expect("on_exit ran");
+    // The child wait is a task on this runtime (upstream #6107), so the
+    // blocking receive must not hold the test's only runtime thread.
+    let seen = tokio::task::spawn_blocking(move || seen_rx.recv_timeout(WAIT))
+        .await
+        .unwrap()
+        .expect("on_exit ran");
     io.shutdown();
 
     assert_eq!(seen, (true, crate::platform::ChildExitReason::Exited));
