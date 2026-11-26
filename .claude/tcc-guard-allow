@@ -5,3 +5,9 @@
 # or read of one prompted. Only the screenshots folder is opted out; the rest of Pictures,
 # Desktop/Documents/Downloads and ~/Library stay guarded. The $HOME-wide walk deny stays on.
 Pictures/Screenshots
+# Added 2026-11-26 for https://gitea.cat-bluegill.ts.net/AC-forks/herdr-max/issues/329: herdr-core runs the
+# Rex CLI from Rex's app folder for the OSC 7577 proof on a throwaway Rex server. ac ~12:27Z via
+# manager-lab: 'they should be approved to let it work' / 'cant we fix the settings?', then in the
+# herdr session, asked for exactly this line: "yes ofc". Only Rex's own folder; the rest of ~/Library
+# stays guarded and the $HOME-wide walk deny stays on.
+Library/Application Support/com.superlogical.rex
