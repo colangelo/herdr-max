@@ -105,13 +105,16 @@ pub(super) async fn next_pane_died(
     .flatten()
 }
 
-pub(super) fn wait_until_gone(pid: u32) -> bool {
+/// Awaits between looks: on Linux the pane's child wait is a pidfd task on
+/// the test's runtime (upstream #6107), and an ended program stays a zombie
+/// until that task runs and reaps it.
+pub(super) async fn wait_until_gone(pid: u32) -> bool {
     let deadline = Instant::now() + WAIT;
     while crate::platform::process_exists(pid) {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     true
 }
@@ -310,7 +313,10 @@ async fn v3_drop_escalates_hangup_terminate_kill_in_order() {
     drop(runtime);
     eprintln!("v3: drop returned after {:?}", started.elapsed());
 
-    assert!(wait_until_gone(pid), "the program is gone after the drop");
+    assert!(
+        wait_until_gone(pid).await,
+        "the program is gone after the drop"
+    );
     let log = std::fs::read_to_string(scratch.path("sig.log")).unwrap_or_default();
     assert_eq!(log, "HUP\nTERM\n");
 }
@@ -340,7 +346,10 @@ async fn v3_a_program_that_exits_on_hangup_gets_only_hangup() {
 
     drop(runtime);
 
-    assert!(wait_until_gone(pid), "the program is gone after the drop");
+    assert!(
+        wait_until_gone(pid).await,
+        "the program is gone after the drop"
+    );
     let log = std::fs::read_to_string(scratch.path("sig.log")).unwrap_or_default();
     assert_eq!(log, "HUP\n");
 }

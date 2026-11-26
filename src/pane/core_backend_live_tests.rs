@@ -354,7 +354,7 @@ async fn core_v7_close_ends_detached_jobs_and_spares_core() {
 
     drop(runtime);
 
-    assert!(wait_until_gone(detached), "the detached job ended");
+    assert!(wait_until_gone(detached).await, "the detached job ended");
     assert!(
         crate::platform::process_exists(core_pid),
         "core server alive"
@@ -822,7 +822,10 @@ async fn core_v10_a_kept_pane_is_reattached_by_the_next_server() {
 
     // A pane close ends it (D8).
     drop(reattached);
-    assert!(wait_until_gone(pid), "closing the reattached pane ends it");
+    assert!(
+        wait_until_gone(pid).await,
+        "closing the reattached pane ends it"
+    );
 }
 
 /// Restores `snapshot` as a herdr restart does and returns its one runtime.
@@ -897,7 +900,10 @@ async fn core_v10_a_restored_pane_starts_on_core_with_its_history() {
         "the history survives the program's first output"
     );
     restored.shutdown();
-    assert!(wait_until_gone(pid), "closing the restored pane ends it");
+    assert!(
+        wait_until_gone(pid).await,
+        "closing the restored pane ends it"
+    );
 
     crate::pane::set_preferred_runtime(false);
     let (on_pty, _events) = restore_one(&snapshot, &history);
