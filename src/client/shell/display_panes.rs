@@ -11,10 +11,15 @@ impl ClientShellState {
         self.pane_labels_until = Some(now + self.config.display_panes_duration);
     }
     /// Info mode (fork issue 331): the numbered labels for `ui.display_panes_ms`, keys closing
-    /// them. Resize mode is its sibling: the same labels, kept until it is left.
+    /// them. Resize mode is its sibling: the same labels, kept until it is left. Leaving resize
+    /// for it goes back to the mode `esc` would, copy mode included.
     pub(super) fn enter_info_mode(&mut self, now: std::time::Instant) {
         self.arm_pane_labels(true, now);
-        self.mode = ClientShellMode::Terminal;
+        self.mode = if self.mode == ClientShellMode::Resize {
+            self.copy_or_terminal_mode()
+        } else {
+            ClientShellMode::Terminal
+        };
         self.resize_focus = None;
     }
     /// Resize mode: the same labels as info mode with no deadline; `i` goes back to info mode.

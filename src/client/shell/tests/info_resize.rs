@@ -256,6 +256,39 @@ fn i_in_resize_mode_goes_to_info_mode_which_expires_while_resize_never_does() {
 }
 
 #[test]
+fn i_from_resize_returns_to_copy_mode_like_esc_would() {
+    let mut state = three_panes();
+    state.copy_mode = Some(ClientCopyModeState {
+        pane_id: "pane_2".into(),
+        content_revision: 0,
+        geometry: (PANE_WIDTH, 24),
+        alternate_screen_active: false,
+        cursor: crate::api::schema::PaneTextPoint { row: 0, col: 0 },
+        offset_from_bottom: 0,
+        max_offset_from_bottom: 0,
+        entry_offset_from_bottom: 0,
+        selection: None,
+        search_prompt: None,
+        search_query: String::new(),
+        search_direction: None,
+        search_matches: Vec::new(),
+        search_total: 0,
+        search_current: None,
+        search_current_global: None,
+        search_generation: 0,
+        copy_after_search: false,
+    });
+    state.enter_resize_mode();
+    press(&mut state, 'i');
+    assert_eq!(
+        state.mode,
+        ClientShellMode::Copy,
+        "esc would have gone here"
+    );
+    assert!(state.pane_labels_explicit, "info mode is on");
+}
+
+#[test]
 fn the_resize_overlay_uses_the_violet_token_and_info_keeps_red() {
     let mut state = three_panes();
     let p = state.config.palette.clone();
