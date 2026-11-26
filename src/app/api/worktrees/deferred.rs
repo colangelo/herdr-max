@@ -341,8 +341,7 @@ impl App {
             return;
         }
 
-        // After the in-flight check: a removal already running deletes files,
-        // which reads as a dirty checkout to a duplicate request.
+        // After the in-flight check: a running removal makes the checkout look dirty.
         #[cfg(windows)]
         {
             if !params.force

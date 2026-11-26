@@ -206,13 +206,6 @@ fn priority_name(priority: TodoPriority) -> &'static str {
     }
 }
 
-fn contrast(p: &Palette) -> Color {
-    match p.panel_bg {
-        Color::Reset => p.surface_dim,
-        c => c,
-    }
-}
-
 fn put_field(
     b: &mut Buffer,
     row: Rect,
@@ -335,7 +328,7 @@ pub(super) fn render_todo_edit(
             rows.save,
             SAVE_TEXT,
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD),
         ),

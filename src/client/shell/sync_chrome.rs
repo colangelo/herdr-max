@@ -38,7 +38,7 @@ pub(super) fn paint(
         usize::from(rect.width),
         // SYNC keeps its own yellow; its text is the dark chip text of every mode chip.
         Style::default()
-            .fg(panel_contrast_fg(palette))
+            .fg(palette.fill_foreground())
             .bg(crate::app::state::SYNC_YELLOW)
             .add_modifier(Modifier::BOLD),
     );
@@ -124,7 +124,7 @@ mod tests {
             let rect = paint(&mut buffer, area, &snapshot, &palette).unwrap();
             let cell = &buffer[(rect.x + 1, rect.y)];
             assert_eq!(cell.bg, crate::app::state::SYNC_YELLOW);
-            assert_eq!(cell.fg, panel_contrast_fg(&palette));
+            assert_eq!(cell.fg, palette.fill_foreground());
             assert_ne!(cell.fg, ratatui::style::Color::Reset);
             assert!(cell.modifier.contains(Modifier::BOLD));
         }

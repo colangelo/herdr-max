@@ -16,7 +16,6 @@ use crate::api::schema::{
     SplitDirection,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::style::Color;
 use std::collections::HashSet;
 
 const MIN_WIDTH: u16 = 48;
@@ -690,10 +689,6 @@ pub(super) fn move_picker_layout(
 
 // -- render ---------------------------------------------------------------------
 
-fn contrast(p: &Palette) -> Color {
-    super::panel_contrast_fg(p)
-}
-
 /// Every name if they fit; else as many as fit with "+N" for the rest; else
 /// the whole list cut short.
 pub(super) fn fit_pane_names(names: &[String], budget: usize) -> String {
@@ -769,7 +764,7 @@ fn render_row(
 ) {
     let p = &config.palette;
     let bar = Style::default()
-        .fg(contrast(p))
+        .fg(p.accent_foreground())
         .bg(p.accent)
         .add_modifier(Modifier::BOLD);
     let pick = |style: Style| {
@@ -1120,7 +1115,7 @@ pub(super) fn render_move_picker(
     for (rect, button) in &layout.buttons {
         let style = match button {
             MoveButton::Move => Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD),
             MoveButton::Cancel => Style::default()

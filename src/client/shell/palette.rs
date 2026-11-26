@@ -18,7 +18,6 @@ use crate::api::schema::{
 };
 use crate::input::{command_table, CommandAction};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::style::Color;
 
 const WIDTH: u16 = 82;
 const MAX_LIST_ROWS: usize = 16;
@@ -454,10 +453,6 @@ pub(super) fn palette_layout(
     })
 }
 
-fn contrast(p: &Palette) -> Color {
-    super::panel_contrast_fg(p)
-}
-
 fn render_title(b: &mut Buffer, row: Rect, palette: &ClientPaletteOverlay, p: &Palette) {
     let (title, noun) = match &palette.stage {
         PaletteStage::Commands => ("commands".to_owned(), "commands"),
@@ -571,7 +566,7 @@ fn render_item(
     let text_width = row.width.saturating_sub(gutter);
     let selected = index == palette.selected;
     let bar = Style::default()
-        .fg(contrast(p))
+        .fg(p.accent_foreground())
         .bg(p.accent)
         .add_modifier(Modifier::BOLD);
     let plain = Style::default().fg(p.text).bg(p.panel_bg);

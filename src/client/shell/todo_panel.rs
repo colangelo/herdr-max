@@ -137,13 +137,6 @@ pub(super) fn todo_priority_color(
     })
 }
 
-pub(super) fn contrast(p: &Palette) -> Color {
-    match p.panel_bg {
-        Color::Reset => p.surface_dim,
-        c => c,
-    }
-}
-
 pub(super) fn width_of(text: &str) -> usize {
     usize::from(display_width(text))
 }
@@ -283,7 +276,7 @@ pub(super) fn render_row(
     todo_color: Option<Color>,
     p: &Palette,
 ) {
-    let band = Style::default().fg(contrast(p)).bg(p.accent);
+    let band = Style::default().fg(p.accent_foreground()).bg(p.accent);
     let (glyph_style, text_style) = if selected {
         b.set_style(row, band);
         (band, band)
@@ -627,7 +620,7 @@ pub(super) fn render_todo_panel(
     for (rect, button) in &layout.buttons {
         let style = if panel.hovered_button == Some(*button) {
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {

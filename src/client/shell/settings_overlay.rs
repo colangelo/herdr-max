@@ -160,7 +160,7 @@ pub(super) fn render_settings_overlay(
             buffer.set_style(
                 title_rect,
                 Style::default()
-                    .fg(contrast(palette))
+                    .fg(palette.accent_foreground())
                     .bg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             );

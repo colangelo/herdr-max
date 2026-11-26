@@ -32,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::move_picker::{list_chord, render_rule, render_scrollbar, reveal_scroll, Chord};
 use super::render::put_text;
-use super::todo_panel::{contrast, render_panel_shell};
+use super::todo_panel::render_panel_shell;
 use super::*;
 use crate::api::schema::{
     AskInfo, AskListParams, IssueInfo, IssueListParams, IssueProjectInfo, IssueRepoInfo, Method,
@@ -1239,7 +1239,7 @@ fn render_row(
     p: &Palette,
 ) {
     let bar = Style::default()
-        .fg(contrast(p))
+        .fg(p.accent_foreground())
         .bg(p.accent)
         .add_modifier(Modifier::BOLD);
     let plain = |fg: Color| Style::default().fg(fg).bg(p.panel_bg);
@@ -1389,7 +1389,7 @@ pub(super) fn render_work_panel(
         let text = chip_text(*view, panel.counts[view.index()]);
         let style = if *view == panel.view {
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else if *view == WorkView::NeedsMe && panel.counts[view.index()] > 0 {

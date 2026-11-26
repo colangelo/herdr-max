@@ -149,7 +149,7 @@ fn label_spans(parts: Vec<(LabelPart, String)>, mode_colour: Color, p: &Palette)
                 .bg(p.panel_bg)
                 .add_modifier(Modifier::BOLD),
             LabelPart::Size => Style::default()
-                .fg(panel_contrast_fg(p))
+                .fg(p.fill_foreground())
                 .bg(mode_colour)
                 .add_modifier(Modifier::BOLD),
             LabelPart::Id => Style::default().fg(p.overlay1).bg(p.panel_bg),
@@ -369,7 +369,7 @@ pub(super) fn paint(
                     text,
                     usize::from(width),
                     Style::default()
-                        .fg(panel_contrast_fg(p))
+                        .fg(p.fill_foreground())
                         .bg(mode_colour)
                         .add_modifier(Modifier::BOLD),
                 );
@@ -399,7 +399,7 @@ fn summary_spans<'a>(
     let label = Style::default().fg(mode);
     let version_label = Style::default().fg(p.green);
     let version_chip = Style::default()
-        .fg(panel_contrast_fg(p))
+        .fg(p.fill_foreground())
         .bg(p.green)
         .add_modifier(Modifier::BOLD);
     let mut spans = vec![
@@ -507,7 +507,7 @@ mod tests {
         let p = &config.palette;
         let chip = |colour| {
             Style::default()
-                .fg(panel_contrast_fg(p))
+                .fg(p.fill_foreground())
                 .bg(colour)
                 .add_modifier(Modifier::BOLD)
         };
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(find(&spans, " server-build ").bg, Some(p.green));
         assert_eq!(
             find(&spans, " server-build ").fg,
-            Some(panel_contrast_fg(p))
+            Some(p.fill_foreground())
         );
         let resize = summary_spans(
             Rect::new(0, 0, 140, 30),

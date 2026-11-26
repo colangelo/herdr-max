@@ -156,7 +156,7 @@ pub(crate) fn render_global_menu(
         let highlighted = index == menu.highlighted;
         let style = if highlighted {
             Style::default()
-                .fg(panel_contrast_fg(palette))
+                .fg(palette.accent_foreground())
                 .bg(palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -226,7 +226,7 @@ pub(crate) fn render_context_menu(
         let highlighted = index == menu.highlighted;
         let style = if highlighted {
             Style::default()
-                .fg(panel_contrast_fg(palette))
+                .fg(palette.accent_foreground())
                 .bg(palette.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -427,8 +427,14 @@ fn render_button_row(
         let rect = Rect::new(x, y, widths[index].min(area.right().saturating_sub(x)), 1);
         x = x.saturating_add(widths[index] + gap);
         let style = match button_spec.fill {
+            // Upstream's light-terminal theme: text on the accent takes the
+            // theme's accent foreground, any other fill the panel contrast.
             Some(fill) => Style::default()
-                .fg(contrast(p))
+                .fg(if fill == p.accent {
+                    p.accent_foreground()
+                } else {
+                    p.fill_foreground()
+                })
                 .bg(fill)
                 .add_modifier(Modifier::BOLD),
             None => Style::default()
@@ -442,12 +448,6 @@ fn render_button_row(
     rects
 }
 
-fn contrast(p: &Palette) -> ratatui::style::Color {
-    match p.panel_bg {
-        ratatui::style::Color::Reset => p.surface_dim,
-        c => c,
-    }
-}
 fn render_release_notes_overlay(
     b: &mut Buffer,
     notes: &crate::app::state::ReleaseNotesState,
@@ -514,7 +514,7 @@ fn render_release_notes_overlay(
         close,
         " esc close ",
         Style::default()
-            .fg(contrast(p))
+            .fg(p.accent_foreground())
             .bg(p.accent)
             .add_modifier(Modifier::BOLD)
             .remove_modifier(Modifier::DIM),
@@ -627,7 +627,7 @@ fn render_product_announcement_overlay(
         close,
         " esc close ",
         Style::default()
-            .fg(contrast(p))
+            .fg(p.accent_foreground())
             .bg(p.accent)
             .add_modifier(Modifier::BOLD)
             .remove_modifier(Modifier::DIM),
@@ -766,7 +766,7 @@ fn render_onboarding_overlay(
         primary,
         " ↵ continue ",
         Style::default()
-            .fg(contrast(p))
+            .fg(p.accent_foreground())
             .bg(p.accent)
             .add_modifier(Modifier::BOLD)
             .remove_modifier(Modifier::DIM),
@@ -1107,7 +1107,7 @@ fn render_navigator_overlay(
                 .add_modifier(Modifier::DIM)
         } else if ix == selected {
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -1437,7 +1437,7 @@ fn render_help_overlay(
             " esc close "
         },
         Style::default()
-            .fg(contrast(p))
+            .fg(p.accent_foreground())
             .bg(p.accent)
             .add_modifier(Modifier::BOLD),
     );

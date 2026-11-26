@@ -17,7 +17,6 @@ use crate::api::schema::{
 };
 use crate::config::NotificationCenterPositionConfig;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::style::Color;
 
 /// Rows the list shows before it scrolls; also how many entries size its width.
 const MAX_ROWS: usize = 12;
@@ -206,13 +205,6 @@ pub(super) fn notification_center_layout(
     })
 }
 
-fn contrast(p: &Palette) -> Color {
-    match p.panel_bg {
-        Color::Reset => p.surface_dim,
-        c => c,
-    }
-}
-
 fn render_entry(
     b: &mut Buffer,
     row: Rect,
@@ -231,7 +223,7 @@ fn render_entry(
     } else {
         crate::ui::text::truncate_end(&format!(" · {}", entry.context), context_budget)
     };
-    let band = Style::default().fg(contrast(p)).bg(p.accent);
+    let band = Style::default().fg(p.accent_foreground()).bg(p.accent);
     let bold_if_unread = |style: Style| {
         if entry.read {
             style
@@ -316,7 +308,7 @@ pub(super) fn render_notification_center(
     for (rect, button) in &layout.buttons {
         let style = if center.hovered_button == Some(*button) {
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {

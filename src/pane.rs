@@ -3542,13 +3542,21 @@ impl PaneRuntime {
             let events = events.clone();
             let rt = tokio::runtime::Handle::current();
             Box::new(move |exit_reason| {
-                // Use blocking send — PaneDied is critical, must not be dropped
-                if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied {
-                    pane_id,
-                    exit_reason,
-                })) {
-                    error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
-                }
+                // PaneDied is critical and must not be dropped. A task awaits
+                // the send, so a caller on a runtime worker (the PTY child
+                // wait, upstream #6107) never blocks it and a caller on its
+                // own thread needs no blocking-pool slot.
+                rt.spawn(async move {
+                    if let Err(e) = events
+                        .send(AppEvent::PaneDied {
+                            pane_id,
+                            exit_reason,
+                        })
+                        .await
+                    {
+                        error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
+                    }
+                });
             })
         };
 

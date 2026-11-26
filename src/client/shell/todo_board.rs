@@ -28,7 +28,7 @@ use super::move_picker::{
 use super::render::{display_width, put_text};
 use super::todo_edit::SuspendedTodoSurface;
 use super::todo_panel::{
-    contrast, detail_rows, has_link, link_chip, link_chip_text, live_link_id, pane_set_fingerprint,
+    detail_rows, has_link, link_chip, link_chip_text, live_link_id, pane_set_fingerprint,
     render_detail_text, render_panel_shell, render_row, row_chip_area, row_hides_text, row_id_text,
     width_of, BUTTON_GAP, DETAIL_MIN_ROWS, FOOTER_ROWS,
 };
@@ -839,7 +839,7 @@ pub(super) fn render_todo_board(
         // `↵ open pane` is what enter does: the primary chip, always accent.
         let style = if *button == TodoBoardButton::Open || board.hovered_button == Some(*button) {
             Style::default()
-                .fg(contrast(p))
+                .fg(p.accent_foreground())
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else {

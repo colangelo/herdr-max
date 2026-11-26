@@ -1,5 +1,5 @@
-//! The PTY backend behind `PaneIo`: today's `portable_pty` spawn, child wait
-//! and I/O actor, unchanged.
+//! The PTY backend behind `PaneIo`: the `portable_pty` spawn, child wait
+//! and I/O actor.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -40,13 +40,15 @@ impl PaneIo {
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, command)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
 
-        let mut child = spawned.child;
+        let child = spawned.child;
         if let Some(pid) = child.process_id() {
             child_pid.store(pid, Ordering::Release);
             crate::logging::pane_spawned(pane_id.raw(), pid);
         }
-        tokio::task::spawn_blocking(move || {
-            let exit_reason = match child.wait() {
+        // An async wait (a pidfd on Linux), so a session with 500+ panes does
+        // not hold one blocking-pool thread per shell (upstream #6107).
+        tokio::spawn(async move {
+            let exit_reason = match crate::pty::backend::wait_for_child(child).await {
                 Ok(status) => {
                     let exit_reason = crate::platform::classify_child_exit(&status);
                     let status_text = format!("{status:?}");
