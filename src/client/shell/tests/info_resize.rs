@@ -240,7 +240,7 @@ fn the_resize_overlay_uses_the_violet_token_and_info_keeps_red() {
         _ => 0.0,
     };
     assert!(saturation(p.resize_violet()) > saturation(p.mauve));
-    let code = |colour| crate::protocol::color_to_u32(colour);
+    let code = crate::protocol::color_to_u32;
 
     state.enter_resize_mode();
     let (frame, _) = label_rows(&mut state);
