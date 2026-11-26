@@ -663,10 +663,21 @@ mod tests {
     /// Runs a resume round and installs the resume worker's answers. Other
     /// events are dropped: the exit the old runtime reports when the test's
     /// made-up suspension shuts it down would close the pane.
+    ///
+    /// It first waits until each suspended pane's old program is gone. On
+    /// Linux the child wait is a pidfd task on this test's one runtime
+    /// thread (upstream #6107), so the old program is reaped only while the
+    /// test awaits; a resume before that finds it still running.
     #[cfg(unix)]
     async fn resume_and_wait(app: &mut App, now: Instant) -> bool {
-        let changed = app.resume_suspended_panes_if_due(now);
         let deadline = Instant::now() + Duration::from_secs(20);
+        for pane_id in app.state.suspended_panes() {
+            while app.check_old_program_gone(pane_id).is_some() {
+                assert!(Instant::now() < deadline, "the old program never ended");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        let changed = app.resume_suspended_panes_if_due(now);
         while app.resume_queue.busy() {
             assert!(Instant::now() < deadline, "the resume never landed");
             while let Ok(ev) = app.event_rx.try_recv() {
