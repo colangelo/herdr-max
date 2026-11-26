@@ -110,6 +110,22 @@ Use `--session` with `--remote` to attach to a named session on the remote host:
 herdr --remote workbox --session agents
 ```
 
+## Resume after a terminal restart (Rex)
+
+A terminal that speaks the [Program Resume Protocol](https://www.superlogical.com/rex/docs/build/program-resume) (OSC 7577), such as Rex, can reopen Herdr after the terminal itself restarts. When the terminal sets `OSC7577_TOKEN`, the Herdr client reports how to reattach: `herdr-beta session attach <name>` (the program name as you ran it). The session is always named, also for the default session. The client reports again after a reattach or when it is continued from a stop.
+
+The client sends `clear=1` only when you detach on purpose. SIGHUP, SIGTERM and a lost terminal, which is what a terminal restart looks like, leave the record in place. The token is removed from the environment of everything the client starts and is never sent over `--remote`.
+
+Rex only resumes commands you trust. Add one rule to its `init.lua`. The match accepts session names of letters, digits and `_`:
+
+```lua
+rex.set("resume.trust.herdr-beta", {
+  command = { "herdr-beta", "session", "attach", rex.match.id },
+})
+```
+
+Check it with `rex config check` and `rex block call -b "$REX_BLOCK" program_resume_records`. The Herdr server keeps running through a Rex restart, so the reopened block reconnects to the same panes.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
