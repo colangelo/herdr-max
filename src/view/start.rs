@@ -241,6 +241,11 @@ mod tests {
     // an older build uses it, so two builds never restart a view in turn.
     #[test]
     fn a_newer_client_build_replaces_the_running_view() {
+        // herdr-max 0.10.0 replaces every herdr-beta build, never the reverse
+        // (fork issue 330).
+        assert!(replaces("0.10.0", "0.9.5-ac-beta.222-bonucci"));
+        assert!(!replaces("0.9.5-ac-beta.222-bonucci", "0.10.0"));
+        assert!(replaces("0.10.1", "0.10.0"));
         assert!(!replaces("0.9.5", "0.9.5"));
         assert!(replaces("0.9.6", "0.9.5"));
         assert!(!replaces("0.9.5", "0.9.6"));

@@ -5775,6 +5775,30 @@ function Get-Process {
     }
 
     #[test]
+    fn a_herdr_max_client_probes_and_installs_under_its_own_name() {
+        // Fork issue 330: the command is `herdr-max`; the remote path follows
+        // the invoked name like it did for `herdr-beta`.
+        let platform = || RemotePlatform {
+            os: "macos",
+            arch: "aarch64",
+        };
+        let script = known_remote_binary_candidate_script(
+            &platform(),
+            &["herdr-max".to_string(), "herdr".to_string()],
+        );
+        assert!(script.contains("emit \"/opt/homebrew/bin/herdr-max\""));
+        assert!(script.contains("emit \"$home/.local/bin/herdr-max\""));
+        assert_eq!(
+            sanitized_binary_name("herdr-max"),
+            Some("herdr-max".to_string())
+        );
+        assert_eq!(
+            RemoteHerdr::for_platform_named(platform(), "herdr-max").install_suffix,
+            ".local/bin/herdr-max"
+        );
+    }
+
+    #[test]
     fn remote_binary_names_always_include_canonical_herdr() {
         let names = remote_binary_names();
         assert!(

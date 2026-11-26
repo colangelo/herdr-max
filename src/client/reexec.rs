@@ -35,8 +35,9 @@ pub(crate) enum ClientBuild {
     Unknown,
 }
 
-/// How the client's build relates to the server's. The `-beta.N` build number
-/// orders two builds of one base version; anything else that differs is
+/// How the client's build relates to the server's. The base version (semver:
+/// herdr-max `0.10.0` sorts above every `0.9.5-ac-beta.N`) orders two builds,
+/// then the `-beta.N` build number of one base; anything else that differs is
 /// treated as older, since the server is the one that was just updated.
 pub(crate) fn compare_builds(client: &str, server: Option<&str>) -> ClientBuild {
     let Some(server) = server else {
@@ -45,17 +46,28 @@ pub(crate) fn compare_builds(client: &str, server: Option<&str>) -> ClientBuild 
     if client == server {
         return ClientBuild::Same;
     }
-    match (build_number(client), build_number(server)) {
+    match (order_key(client), order_key(server)) {
         (Some(client), Some(server)) if client > server => ClientBuild::Newer,
         _ => ClientBuild::Older,
     }
 }
 
-/// The `N` of `...-beta.N...`, when the version has one.
-fn build_number(version: &str) -> Option<u64> {
-    let rest = version.split("-beta.").nth(1)?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+/// What orders a version: its `major.minor.patch`, then the `N` of
+/// `...-beta.N...`. A version without a build number is the release of its
+/// base and sorts above that base's betas, as semver says.
+fn order_key(version: &str) -> Option<(u64, u64, u64, u64)> {
+    let (major, minor, patch) = crate::integration::version::extract_version_triple(version)?;
+    let build = version
+        .split("-beta.")
+        .nth(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(u64::MAX);
+    Some((major, minor, patch, build))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +360,43 @@ mod tests {
     }
 
     #[test]
+    fn herdr_max_0_10_0_sorts_above_every_herdr_beta_build() {
+        for beta in [
+            "0.9.5-ac-beta.222-bonucci",
+            "0.9.5-ac-beta.1-pirlo",
+            "0.9.5-ac-beta.1000-x",
+            "0.9.5",
+            "0.8.2-ac-beta.137-bonucci",
+        ] {
+            // A herdr-max client on a herdr-beta server is the newer one, and a
+            // herdr-beta client on a herdr-max server the older one.
+            assert_eq!(
+                compare_builds("0.10.0", Some(beta)),
+                ClientBuild::Newer,
+                "{beta}"
+            );
+            assert_eq!(
+                compare_builds(beta, Some("0.10.0")),
+                ClientBuild::Older,
+                "{beta}"
+            );
+            // Either way the client follows the server, once.
+            assert_eq!(
+                decide("0.10.0", Some(beta), None),
+                ReexecDecision::Reexec(ClientBuild::Newer)
+            );
+            assert_eq!(
+                decide(beta, Some("0.10.0"), None),
+                ReexecDecision::Reexec(ClientBuild::Older)
+            );
+        }
+        assert_eq!(compare_builds("0.10.1", Some("0.10.0")), ClientBuild::Newer);
+        assert_eq!(compare_builds("0.11.0", Some("0.10.9")), ClientBuild::Newer);
+        assert_eq!(compare_builds("0.10.0", Some("0.10.0")), ClientBuild::Same);
+        assert_eq!(decide("0.10.0", Some("0.10.0"), None), ReexecDecision::Stay);
+    }
+
+    #[test]
     fn the_decision_covers_same_older_newer_and_unknown() {
         assert_eq!(compare_builds(NEW, Some(NEW)), ClientBuild::Same);
         assert_eq!(compare_builds(OLD, Some(NEW)), ClientBuild::Older);
@@ -416,6 +465,33 @@ mod tests {
         assert_eq!(
             target_binary(None, Path::new("/usr/local/bin/herdr"), |_| true),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_herdr_max_formula_and_the_herdr_beta_alias_both_resolve_through_opt() {
+        let max_own =
+            Path::new("/opt/homebrew/Cellar/herdr-max/0.9.3-ac-beta.223-baresi/bin/herdr-max");
+        let max_opt = Path::new("/opt/homebrew/opt/herdr-max/bin/herdr-max");
+        assert_eq!(
+            target_binary(Some("/gone/herdr-max"), max_own, |path| path == max_opt),
+            Some(max_opt.to_path_buf())
+        );
+        // The transitional `herdr-beta` keg holds only the alias link: a client
+        // that runs through it still finds a live opt path, and a server that
+        // moved to the `herdr-max` keg is followed by its own (existing) path.
+        let alias_own =
+            Path::new("/opt/homebrew/Cellar/herdr-beta/0.9.3-ac-beta.223-baresi/bin/herdr-beta");
+        let alias_opt = Path::new("/opt/homebrew/opt/herdr-beta/bin/herdr-beta");
+        assert_eq!(
+            target_binary(None, alias_own, |path| path == alias_opt),
+            Some(alias_opt.to_path_buf())
+        );
+        let server = "/opt/homebrew/Cellar/herdr-max/0.9.3-ac-beta.223-baresi/bin/herdr-max";
+        assert_eq!(
+            target_binary(Some(server), alias_own, |path| path == Path::new(server)),
+            Some(PathBuf::from(server))
         );
     }
 

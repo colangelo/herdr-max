@@ -870,7 +870,8 @@ pub(super) fn helper_executable() -> io::Result<PathBuf> {
 /// the processes that start a new executable while it also starts through a
 /// hard link of it, as the anchor did (fork issue 253; cargo copies for the
 /// same reason, rust-lang/cargo#10196). `exe` may be a symlink, as Homebrew's
-/// `/opt/homebrew/bin/herdr-beta` is: the real file is cloned, under the name
+/// `/opt/homebrew/bin/herdr-max` is (and its `herdr-beta` alias, a link to a
+/// link): the real file is cloned, under the name
 /// the process was started with.
 fn clone_executable(exe: &Path, root: &Path) -> io::Result<PathBuf> {
     let name = exe
@@ -1142,16 +1143,21 @@ mod tests {
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
         .unwrap();
-        std::os::unix::fs::symlink("Cellar/bin/herdr-real", root.join("herdr-beta")).unwrap();
+        // Homebrew's layout since fork issue 330: `herdr-max` is a link to the
+        // keg file, and the `herdr-beta` alias a link to that link.
+        std::os::unix::fs::symlink("Cellar/bin/herdr-real", root.join("herdr-max")).unwrap();
+        std::os::unix::fs::symlink("herdr-max", root.join("herdr-beta")).unwrap();
 
-        let link = clone_executable(&root.join("herdr-beta"), &root.join("pane-anchor")).unwrap();
-        let meta = std::fs::symlink_metadata(&link).unwrap();
-        let body = std::fs::read(&link).unwrap();
+        for name in ["herdr-max", "herdr-beta"] {
+            let link = clone_executable(&root.join(name), &root.join("pane-anchor")).unwrap();
+            let meta = std::fs::symlink_metadata(&link).unwrap();
+            let body = std::fs::read(&link).unwrap();
+            assert_eq!(link.file_name().unwrap(), name);
+            assert!(meta.file_type().is_file(), "cloned a symlink: {link:?}");
+            assert_eq!(body, b"#!/bin/sh\n");
+            assert_eq!(meta.mode() & 0o777, 0o755);
+        }
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(link.file_name().unwrap(), "herdr-beta");
-        assert!(meta.file_type().is_file(), "cloned a symlink: {link:?}");
-        assert_eq!(body, b"#!/bin/sh\n");
-        assert_eq!(meta.mode() & 0o777, 0o755);
     }
 
     /// Fork issue 253: starting a new executable through a hard link while it

@@ -1719,6 +1719,9 @@ mod tests {
             (Some("herdr 0.9.1\n"), true),
             (Some("herdr 0.9.3-ac-beta.150-cuadrado\n"), true),
             (Some("herdr 1.0.0\n"), true),
+            // herdr-max (fork issue 330): 0.10 is above 0.9.1, not below it.
+            (Some("herdr 0.10.0\n"), true),
+            (Some("herdr 0.10.0 (build 20261126-ab12cd3)\n"), true),
             // Unknown counts as batching, the behaviour since v0.9.1.
             (Some("not a version\n"), true),
             (None, true),

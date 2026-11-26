@@ -1000,7 +1000,7 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("herdr {}", crate::build_info::version());
+        println!("herdr {}", crate::build_info::version_line());
         #[cfg(unix)]
         if std::env::var_os(server::handoff::HANDOFF_FEATURES_ENV).is_some() {
             println!("{}", server::handoff::HANDOFF_FEATURES);

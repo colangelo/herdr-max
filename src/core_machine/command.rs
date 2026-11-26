@@ -843,7 +843,11 @@ mod tests {
             ssh_auth_sock: None,
             via: via.map(String::from),
         };
-        let own = "/opt/homebrew/bin/herdr-beta core-link loop";
+        // The binary is `herdr-max` since fork issue 330; a link a `herdr-beta`
+        // wrote (the alias, or a machine added before the rename) stays its own
+        // by its exact text and is told apart from the new one.
+        let old_name = "/opt/homebrew/bin/herdr-beta core-link loop";
+        let own = "/opt/homebrew/bin/herdr-max core-link loop";
         let record =
             |via: &str, session: Value| json!({"via": true, "target": via, "session": session});
         let mine = target(Some(own), "default");
@@ -857,6 +861,16 @@ mod tests {
             &record("/tmp/evil/herdr core-link loop", Value::Null),
             &name,
             &mine
+        ));
+        assert!(!runs_herdr_link(
+            &record(old_name, Value::Null),
+            &name,
+            &mine
+        ));
+        assert!(runs_herdr_link(
+            &record(old_name, Value::Null),
+            &name,
+            &target(Some(old_name), "default")
         ));
         assert!(!runs_herdr_link(&record(own, json!("other")), &name, &mine));
         assert!(!runs_herdr_link(
@@ -943,10 +957,12 @@ mod tests {
 
     #[test]
     fn the_via_quotes_the_herdr_path() {
-        assert_eq!(
-            sh_quote("/opt/homebrew/bin/herdr-beta"),
-            "/opt/homebrew/bin/herdr-beta"
-        );
+        for path in [
+            "/opt/homebrew/bin/herdr-max",
+            "/opt/homebrew/bin/herdr-beta",
+        ] {
+            assert_eq!(sh_quote(path), path);
+        }
         assert_eq!(sh_quote("/Apps/My herdr/herdr"), "'/Apps/My herdr/herdr'");
         assert_eq!(sh_quote("/a'b"), r"'/a'\''b'");
     }

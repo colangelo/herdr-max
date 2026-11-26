@@ -3916,6 +3916,16 @@ mod tests {
     }
 
     #[test]
+    fn herdr_max_0_10_0_is_newer_than_the_last_herdr_beta_base() {
+        // Numeric, not textual: 10 is above 9 (fork issue 330).
+        let first_max = Version::parse("0.10.0").unwrap();
+        assert!(first_max > Version::parse("0.9.5").unwrap());
+        assert!(first_max > Version::parse("0.9.99").unwrap());
+        assert!(Version::parse("0.10.1").unwrap() > first_max);
+        assert!(Version::parse("0.11.0").unwrap() > Version::parse("0.10.9").unwrap());
+    }
+
+    #[test]
     fn current_version_parses() {
         let v = Version::current();
         assert!(v.major < 100);
