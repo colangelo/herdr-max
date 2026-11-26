@@ -1610,12 +1610,12 @@ impl ClientShellState {
         if generation_changed {
             self.pending_pane_surface = None;
         }
-        if self
-            .snapshot
-            .as_ref()
-            .map(|current| &current.focused_pane_id)
-            != Some(&snapshot.focused_pane_id)
-        {
+        // A digit's focus holds until the server shows it, or its pane is gone. An older focus
+        // change arriving first (2 then 3, fast) must not drop the newer pick.
+        if self.resize_focus.as_ref().is_some_and(|pane_id| {
+            snapshot.focused_pane_id.as_ref() == Some(pane_id)
+                || !snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id)
+        }) {
             self.resize_focus = None;
         }
         self.active_snapshot_generation = generation;

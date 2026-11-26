@@ -201,6 +201,35 @@ fn a_digit_in_resize_mode_focuses_that_pane_and_the_next_resize_acts_on_it() {
 }
 
 #[test]
+fn two_digits_fast_keep_the_last_pick_while_the_first_focus_arrives() {
+    let mut state = three_panes();
+    let focused = |state: &ClientShellState, pane: &str| {
+        let current = state.snapshot.as_ref().unwrap();
+        let mut moved = snapshot();
+        moved.panes = current.panes.clone();
+        moved.focused_pane_id = Some(pane.into());
+        moved.revision = current.revision + 1;
+        moved
+    };
+    // pane_2 has the focus; 1 then 3, typed faster than the server answers.
+    state.enter_resize_mode();
+    assert_eq!(focus_target(&press(&mut state, '1')), Some("pane_1"));
+    assert_eq!(focus_target(&press(&mut state, '3')), Some("pane_3"));
+    // The server's answer to 1 comes first; the pick is still 3.
+    state.set_snapshot(Box::new(focused(&state, "pane_1")));
+    assert_eq!(state.resize_focus.as_deref(), Some("pane_3"));
+    assert_eq!(
+        resize_target(&press(&mut state, 'l')),
+        Some(("pane_3", crate::api::schema::PaneDirection::Right))
+    );
+    // A pick whose pane is gone is dropped.
+    let mut gone = focused(&state, "pane_1");
+    gone.panes.retain(|pane| pane.pane_id != "pane_3");
+    state.set_snapshot(Box::new(gone));
+    assert!(state.resize_focus.is_none());
+}
+
+#[test]
 fn i_in_resize_mode_goes_to_info_mode_which_expires_while_resize_never_does() {
     let mut state = three_panes();
     let now = std::time::Instant::now();
