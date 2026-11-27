@@ -188,7 +188,9 @@ fn attach_argv() -> Option<Vec<String>> {
 ///
 /// `None` without a target, or when the session came only from
 /// `HERDR_SESSION`: Rex carries no environment, so the replay would open
-/// another session.
+/// another session. A launch line that does not start with `--remote`
+/// (`--session x --remote host`) is still reported, but Rex's rule cannot
+/// match it, so that tab stays untrusted and is never reopened.
 fn remote_launch_argv(
     program: String,
     args: &[String],
@@ -229,7 +231,10 @@ fn remote_launch_argv(
     if !session_typed && session_from_env {
         return None;
     }
-    let mut argv = vec![program, "--remote".to_owned(), target?];
+    // `--remote --session x host` parses as target `host` (the session pair is
+    // stripped first); this scan would read `--session`. Report nothing then.
+    let target = target.filter(|target| !target.starts_with('-'))?;
+    let mut argv = vec![program, "--remote".to_owned(), target];
     argv.extend(kept);
     Some(argv)
 }
@@ -459,6 +464,8 @@ mod tests {
         assert!(
             remote_launch_argv("herdr-max".to_owned(), &words("--session work"), false).is_none()
         );
+        let flag_as_target = words("--remote --session work m4m.local");
+        assert!(remote_launch_argv("herdr-max".to_owned(), &flag_as_target, false).is_none());
     }
 
     #[test]
