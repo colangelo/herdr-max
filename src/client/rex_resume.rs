@@ -209,7 +209,7 @@ pub(super) fn report_attach(out: &mut impl Write) {
 }
 
 /// Reports a `--remote` launcher to the terminal, with the launcher's pid.
-/// Call it once the far side is ready and before the launcher starts the
+/// Call it after any install or restart question and before the launcher starts the
 /// client that draws the screen, so the report is the only output on the
 /// terminal at that moment. Silent without a token.
 ///
