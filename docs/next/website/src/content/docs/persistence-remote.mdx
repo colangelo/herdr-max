@@ -130,6 +130,29 @@ rex.set("resume.trust.herdr-beta", {
 
 Check it with `rex config check` and `rex block call -b "$REX_BLOCK" program_resume_records`. The Herdr server keeps running through a Rex restart, so the reopened block reconnects to the same panes.
 
+### Remote tabs
+
+A `--remote` tab reports too. The local launcher reports itself once the far server is ready, after any install or restart question, and before the screen starts: `herdr-max --remote <target> [--remote-keybindings=server] --session <name>`. The target is kept as you typed it and the far session is always named. `--handoff` is never part of it, so a resume does not hand off the far server. The client that draws the screen stays silent, so the tab has one record. The token stays on this machine: it is not in the ssh command, the far command or any environment the launcher passes on.
+
+The launcher reports once. It does not report again after a stop, because the client it starts owns the terminal output by then. It never sends `clear=1`, because it cannot tell a detach from a lost connection; the terminal drops the record when the launcher exits.
+
+A resumed tab runs the same checks as a fresh one: if the far Herdr needs an install or a restart, it asks first. If the far host cannot be reached at that moment, the launcher exits and the tab does not come back.
+
+Trust the hosts you use by name. `rex.match.id` does not accept dots or dashes, so list the targets. `--remote` is listed as a dropped flag because the rule's command already restores it, the same shape Rex's own Claude rule uses for `--resume`:
+
+```lua
+rex.set("resume.trust.herdr-max-remote", {
+  command = { "herdr-max", "--remote", { "workbox", "devbox.local" } },
+  flags = {
+    ["--remote"] = { "drop", values = 1 },
+    ["--remote-keybindings"] = { "keep", values = 1 },
+    ["--session"] = { "keep", values = 1 },
+  },
+})
+```
+
+Add a matching `herdr-beta-remote` rule with `"herdr-beta"` as the first word for as long as that alias is installed. A target that is not listed stays untrusted (`no_rule`).
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.
