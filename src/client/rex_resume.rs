@@ -177,22 +177,61 @@ fn attach_argv() -> Option<Vec<String>> {
     ])
 }
 
-/// What a resumed `--remote` launcher runs: the same target as given, the
-/// keybinding source when it is not the default, and the far session named
-/// explicitly. Never `--handoff`: a resume must not hand off the far server.
+/// What a resumed `--remote` launcher runs: its own launch line as typed, in
+/// the order Rex's trust rule reads it. Rex compares the report with the
+/// program's real command line, so a kept flag that was not typed makes the
+/// record untrusted (`flags_differ`). So:
+/// - `--remote <target>` comes first, split even when typed as `--remote=`;
+/// - `--remote-keybindings` and `--session` follow only as typed;
+/// - `--handoff` is left out: the rule drops it, and a resume must not hand
+///   off the far server.
+///
+/// `None` without a target, or when the session came only from
+/// `HERDR_SESSION`: Rex carries no environment, so the replay would open
+/// another session.
 fn remote_launch_argv(
     program: String,
-    target: &str,
-    keybindings: crate::remote::RemoteKeybindings,
-    session: &str,
-) -> Vec<String> {
-    let mut argv = vec![program, "--remote".to_owned(), target.to_owned()];
-    if keybindings != crate::remote::RemoteKeybindings::Local {
-        argv.push(format!("--remote-keybindings={}", keybindings.as_str()));
+    args: &[String],
+    session_from_env: bool,
+) -> Option<Vec<String>> {
+    let mut target = None;
+    let mut kept = Vec::new();
+    let mut session_typed = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            break;
+        }
+        if arg == "--remote" {
+            target = args.get(index + 1).cloned();
+            index += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--remote=") {
+            target = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if arg == "--remote-keybindings" || arg == "--session" {
+            session_typed |= arg == "--session";
+            kept.push(arg.clone());
+            kept.extend(args.get(index + 1).cloned());
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--remote-keybindings=") || arg.starts_with("--session=") {
+            session_typed |= arg.starts_with("--session=");
+            kept.push(arg.clone());
+        }
+        index += 1;
     }
-    argv.push("--session".to_owned());
-    argv.push(session.to_owned());
-    argv
+    if !session_typed && session_from_env {
+        return None;
+    }
+    let mut argv = vec![program, "--remote".to_owned(), target?];
+    argv.extend(kept);
+    Some(argv)
 }
 
 /// Reports this client to the terminal. Silent without a token.
@@ -215,19 +254,19 @@ pub(super) fn report_attach(out: &mut impl Write) {
 ///
 /// The launcher never sends `clear=1`: it cannot tell a detach from a lost
 /// connection, and the terminal drops the record when the launcher exits.
-pub(crate) fn report_remote_launch(
-    out: &mut impl Write,
-    target: &str,
-    keybindings: crate::remote::RemoteKeybindings,
-    session: &str,
-) {
+pub(crate) fn report_remote_launch(out: &mut impl Write) {
     let Some(reporter) = REPORTER.get().filter(|reporter| reporter.token.is_some()) else {
         return;
     };
     let Some(program) = program_name() else {
         return;
     };
-    let argv = remote_launch_argv(program, target, keybindings, session);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let session_from_env = std::env::var_os(crate::session::SESSION_ENV_VAR)
+        .is_some_and(|session| !session.is_empty());
+    let Some(argv) = remote_launch_argv(program, &args, session_from_env) else {
+        return;
+    };
     if let Err(error) = reporter.report(out, std::process::id(), unix_time(), &argv) {
         tracing::debug!(%error, "could not write the remote resume report");
     }
@@ -367,30 +406,58 @@ mod tests {
     const REMOTE_REPORT: &str = "\x1b]7577;pid=4242:time=1795543200:argv=aGVyZHItbWF4,LS1yZW1vdGU=,YWMtbWJtNS5sb2NhbA==,LS1yZW1vdGUta2V5YmluZGluZ3M9c2VydmVy,LS1zZXNzaW9u,ZGVmYXVsdA==:mac=afccdb88934eb832edd986d30d4c0d0b348efcb6528f6724f7a6958d7319718a\x1b\\";
 
     #[test]
-    fn the_remote_launcher_reports_its_target_keybindings_and_session() {
+    fn the_remote_launcher_reports_its_launch_line_as_typed() {
         let reporter = Reporter::new(Some(TOKEN.to_owned()));
         let argv = remote_launch_argv(
             "herdr-max".to_owned(),
-            "ac-mbm5.local",
-            crate::remote::RemoteKeybindings::Server,
-            "default",
-        );
+            &words("--remote ac-mbm5.local --remote-keybindings=server --session default"),
+            false,
+        )
+        .unwrap();
         let mut out = Vec::new();
         reporter.report(&mut out, 4242, 1795543200, &argv).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), REMOTE_REPORT);
     }
 
+    fn words(line: &str) -> Vec<String> {
+        line.split(' ').map(String::from).collect()
+    }
+
+    /// ac's hm4 shape: no `--session` typed, so none is reported, or Rex
+    /// reads the record as `flags_differ` and never reopens the tab.
     #[test]
-    fn the_remote_launcher_leaves_out_default_keybindings_and_never_hands_off() {
+    fn the_reported_argv_equals_the_typed_one_for_the_hm4_shape() {
+        let typed = "--remote m4m.local --remote-keybindings=server";
+        let argv = remote_launch_argv("herdr-max".to_owned(), &words(typed), false).unwrap();
+        assert_eq!(argv[0], "herdr-max");
+        assert_eq!(argv[1..], words(typed)[..]);
+        let spaced = "--remote m4m.local --remote-keybindings server --session work";
+        let argv = remote_launch_argv("herdr-max".to_owned(), &words(spaced), false).unwrap();
+        assert_eq!(argv[1..], words(spaced)[..]);
+    }
+
+    #[test]
+    fn the_remote_launcher_splits_the_target_and_never_reports_handoff() {
         let argv = remote_launch_argv(
             "herdr-beta".to_owned(),
-            "m4m.local",
-            crate::remote::RemoteKeybindings::Local,
-            "agents",
-        );
+            &words("--session=agents --handoff --remote=m4m.local"),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             argv,
-            ["herdr-beta", "--remote", "m4m.local", "--session", "agents"].map(String::from)
+            words("herdr-beta --remote m4m.local --session=agents")
+        );
+    }
+
+    #[test]
+    fn a_session_only_from_the_environment_is_not_reported() {
+        let typed = words("--remote m4m.local");
+        assert!(remote_launch_argv("herdr-max".to_owned(), &typed, true).is_none());
+        let named = words("--remote m4m.local --session work");
+        assert!(remote_launch_argv("herdr-max".to_owned(), &named, true).is_some());
+        assert!(
+            remote_launch_argv("herdr-max".to_owned(), &words("--session work"), false).is_none()
         );
     }
 

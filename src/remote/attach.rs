@@ -104,12 +104,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     // Any install or restart question is behind us. A stopped far server
     // starts when the bridge connects, after this report.
     // The client below owns the terminal from here on.
-    crate::client::report_remote_resume(
-        &mut io::stdout(),
-        &remote.target,
-        remote.keybindings,
-        &session_name,
-    );
+    crate::client::report_remote_resume(&mut io::stdout());
 
     run_client_process(
         &local_socket,
