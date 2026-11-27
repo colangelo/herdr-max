@@ -101,6 +101,15 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         Arc::new(AtomicBool::new(false)),
     )?;
 
+    // Any install or restart prompt is behind us and the far server is ready.
+    // The client below owns the terminal from here on.
+    crate::client::report_remote_resume(
+        &mut io::stdout(),
+        &remote.target,
+        remote.keybindings,
+        &session_name,
+    );
+
     run_client_process(
         &local_socket,
         &reattach_command,
@@ -3341,6 +3350,16 @@ fn bridge_connection(
     noninteractive: bool,
     bridge_stop: &Arc<AtomicBool>,
 ) -> io::Result<()> {
+    let command = bridge_ssh_command(target, remote_command, ssh_options, noninteractive);
+    bridge_child(stream, command, bridge_stop)
+}
+
+fn bridge_ssh_command(
+    target: &str,
+    remote_command: &str,
+    ssh_options: Option<&ManagedSshOptions>,
+    noninteractive: bool,
+) -> Command {
     let mut command = Command::new("ssh");
     apply_managed_ssh_options(&mut command, ssh_options);
     if noninteractive {
@@ -3357,8 +3376,7 @@ fn bridge_connection(
         } else {
             Stdio::inherit()
         });
-
-    bridge_child(stream, command, bridge_stop)
+    command
 }
 
 fn bridge_child(
@@ -6392,5 +6410,82 @@ function Get-Process {
         InstallSource::temporary(path, dir.clone()).cleanup();
 
         assert!(!dir.exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod rex_resume_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const TOKEN: &str = "test-token-0123456789abcd";
+
+    /// A stand-in `ssh` that prints its arguments, then `token-set` when it
+    /// inherited `OSC7577_TOKEN`.
+    fn fake_ssh_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-rex-ssh-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ssh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\"\nif [ -n \"${OSC7577_TOKEN+set}\" ]; then echo token-set; fi\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    fn run_with_fake_ssh(mut command: Command, dir: &Path) -> String {
+        command
+            .env("PATH", dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn the_token_never_reaches_the_ssh_command_or_the_far_env() {
+        std::env::set_var("OSC7577_TOKEN", TOKEN);
+        crate::client::capture_rex_resume_token();
+        assert!(std::env::var_os("OSC7577_TOKEN").is_none());
+
+        let dir = fake_ssh_dir();
+        let ssh = RemoteSsh::new("ac-mbm5.local".into(), false, "default".into());
+        let far = RemoteHerdr::for_platform(RemotePlatform::local());
+        let commands = [
+            ssh.command(),
+            bridge_ssh_command(
+                "ac-mbm5.local",
+                &far.executable.bridge_command("default"),
+                None,
+                false,
+            ),
+        ];
+        for command in commands {
+            let seen = run_with_fake_ssh(command, &dir);
+            assert!(!seen.contains("token-set"), "ssh inherited the token");
+            assert!(!seen.contains(TOKEN), "the token is in the ssh command");
+            assert!(!seen.contains("OSC7577"), "the far command names the token");
+        }
+
+        let mut client = Command::new("sh");
+        configure_remote_client_environment(
+            &mut client,
+            &dir.join("bridge.sock"),
+            "herdr --remote ac-mbm5.local",
+            RemoteKeybindings::Server,
+            "ac-mbm5.local",
+            "default",
+        )
+        .unwrap();
+        client.args(["-c", "test -z \"${OSC7577_TOKEN+set}\""]);
+        assert!(
+            client.status().unwrap().success(),
+            "the client saw the token"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 }

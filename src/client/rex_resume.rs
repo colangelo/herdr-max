@@ -9,6 +9,10 @@
 //!   the process environment, so nothing the client spawns (a server, ssh, a
 //!   pane helper) inherits it.
 //! - [`report_attach`] writes one report: `<program> session attach <name>`.
+//! - [`report_remote_launch`] writes the report of a `--remote` launcher:
+//!   `<program> --remote <target> [--remote-keybindings=server] --session <name>`.
+//!   The client that launcher starts for the screen never reports, so a remote
+//!   tab has one record, owned by the launcher.
 //! - [`note_user_detach`] marks a deliberate detach. Only then does [`finish`]
 //!   send `clear=1`. SIGHUP, SIGTERM and a lost terminal are what a terminal
 //!   restart looks like to the client, and the record must survive them.
@@ -140,29 +144,55 @@ fn unix_time() -> u64 {
         .unwrap_or(0)
 }
 
+/// The program's bare name as it was run, so `herdr-beta` stays `herdr-beta`.
+fn program_name() -> Option<String> {
+    let program = std::env::args_os().next()?;
+    Some(
+        std::path::Path::new(&program)
+            .file_name()?
+            .to_str()?
+            .to_owned(),
+    )
+}
+
 /// What a resumed client runs: the program's bare name, then the session named
 /// explicitly (the protocol carries no environment). `None` when this client
-/// does not attach by name: a socket path override, or an odd program name.
+/// does not attach by name: a socket path override, an odd program name, or
+/// the client a `--remote` launcher starts, whose launcher reports instead.
 fn attach_argv() -> Option<Vec<String>> {
     if crate::config::path_env(crate::api::SOCKET_PATH_ENV_VAR).is_some()
         || crate::config::path_env(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR)
             .is_some()
+        || std::env::var_os(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_some()
     {
         return None;
     }
-    let program = std::env::args_os().next()?;
-    let program = std::path::Path::new(&program)
-        .file_name()?
-        .to_str()?
-        .to_owned();
     let session = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_owned());
     Some(vec![
-        program,
+        program_name()?,
         "session".to_owned(),
         "attach".to_owned(),
         session,
     ])
+}
+
+/// What a resumed `--remote` launcher runs: the same target as given, the
+/// keybinding source when it is not the default, and the far session named
+/// explicitly. Never `--handoff`: a resume must not hand off the far server.
+fn remote_launch_argv(
+    program: String,
+    target: &str,
+    keybindings: crate::remote::RemoteKeybindings,
+    session: &str,
+) -> Vec<String> {
+    let mut argv = vec![program, "--remote".to_owned(), target.to_owned()];
+    if keybindings != crate::remote::RemoteKeybindings::Local {
+        argv.push(format!("--remote-keybindings={}", keybindings.as_str()));
+    }
+    argv.push("--session".to_owned());
+    argv.push(session.to_owned());
+    argv
 }
 
 /// Reports this client to the terminal. Silent without a token.
@@ -175,6 +205,31 @@ pub(super) fn report_attach(out: &mut impl Write) {
     };
     if let Err(error) = reporter.report(out, std::process::id(), unix_time(), &argv) {
         tracing::debug!(%error, "could not write the resume report");
+    }
+}
+
+/// Reports a `--remote` launcher to the terminal, with the launcher's pid.
+/// Call it once the far side is ready and before the launcher starts the
+/// client that draws the screen, so the report is the only output on the
+/// terminal at that moment. Silent without a token.
+///
+/// The launcher never sends `clear=1`: it cannot tell a detach from a lost
+/// connection, and the terminal drops the record when the launcher exits.
+pub(crate) fn report_remote_launch(
+    out: &mut impl Write,
+    target: &str,
+    keybindings: crate::remote::RemoteKeybindings,
+    session: &str,
+) {
+    let Some(reporter) = REPORTER.get().filter(|reporter| reporter.token.is_some()) else {
+        return;
+    };
+    let Some(program) = program_name() else {
+        return;
+    };
+    let argv = remote_launch_argv(program, target, keybindings, session);
+    if let Err(error) = reporter.report(out, std::process::id(), unix_time(), &argv) {
+        tracing::debug!(%error, "could not write the remote resume report");
     }
 }
 
@@ -308,6 +363,37 @@ mod tests {
         assert_ne!(reports[0], reports[1]);
     }
 
+    // Computed by hand with python hashlib and base64, not by this code.
+    const REMOTE_REPORT: &str = "\x1b]7577;pid=4242:time=1795543200:argv=aGVyZHItbWF4,LS1yZW1vdGU=,YWMtbWJtNS5sb2NhbA==,LS1yZW1vdGUta2V5YmluZGluZ3M9c2VydmVy,LS1zZXNzaW9u,ZGVmYXVsdA==:mac=afccdb88934eb832edd986d30d4c0d0b348efcb6528f6724f7a6958d7319718a\x1b\\";
+
+    #[test]
+    fn the_remote_launcher_reports_its_target_keybindings_and_session() {
+        let reporter = Reporter::new(Some(TOKEN.to_owned()));
+        let argv = remote_launch_argv(
+            "herdr-max".to_owned(),
+            "ac-mbm5.local",
+            crate::remote::RemoteKeybindings::Server,
+            "default",
+        );
+        let mut out = Vec::new();
+        reporter.report(&mut out, 4242, 1795543200, &argv).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), REMOTE_REPORT);
+    }
+
+    #[test]
+    fn the_remote_launcher_leaves_out_default_keybindings_and_never_hands_off() {
+        let argv = remote_launch_argv(
+            "herdr-beta".to_owned(),
+            "m4m.local",
+            crate::remote::RemoteKeybindings::Local,
+            "agents",
+        );
+        assert_eq!(
+            argv,
+            ["herdr-beta", "--remote", "m4m.local", "--session", "agents"].map(String::from)
+        );
+    }
+
     #[test]
     fn a_command_that_cannot_be_reported_is_not() {
         assert!(report_bytes(TOKEN, 1, 1, &[]).is_none());
@@ -319,6 +405,21 @@ mod tests {
 #[cfg(all(test, unix))]
 mod unix_tests {
     use super::*;
+
+    #[test]
+    fn the_client_a_remote_launcher_starts_never_reports() {
+        for name in [
+            crate::api::SOCKET_PATH_ENV_VAR,
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            crate::remote::REMOTE_KEYBINDINGS_ENV_VAR,
+        ] {
+            std::env::remove_var(name);
+        }
+        assert!(attach_argv().is_some(), "a local client reports");
+        // What the launcher sets for its client (configure_remote_client_environment).
+        std::env::set_var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR, "server");
+        assert!(attach_argv().is_none(), "the launcher's client reported");
+    }
 
     #[test]
     fn a_spawned_child_does_not_inherit_the_token() {

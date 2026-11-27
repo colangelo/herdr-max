@@ -61,6 +61,7 @@ use state::RetiredDirectGraphicsMatch;
 use transport::*;
 
 pub use rex_resume::capture_token_from_env as capture_rex_resume_token;
+pub(crate) use rex_resume::report_remote_launch as report_remote_resume;
 #[cfg(test)]
 pub(crate) use shell::{ClientShellConfig, ClientShellState};
 pub use startup::{run_client, run_terminal_attach};
@@ -437,7 +438,8 @@ fn run_client_with_mode(
     }));
 
     // Tell a terminal that can resume programs how to reattach this client.
-    if client_rendered_shell && !is_remote_client_process() {
+    // The client a `--remote` launcher starts stays silent; the launcher reports.
+    if client_rendered_shell {
         rex_resume::report_attach(&mut io::stdout());
     }
 
